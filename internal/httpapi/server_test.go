@@ -495,3 +495,80 @@ func (n *noopProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
 func (n *noopProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
 func (n *noopProcessor) ForceFlush(context.Context) error                { return nil }
 func (n *noopProcessor) Shutdown(context.Context) error                  { return nil }
+
+func TestHTTPLatencyHistogramExposed(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	// 两次普通请求：metrics 请求自身的延迟在其 body 写出后才记录，
+	// 因此断言值基于此前已完成的请求。
+	for i := 0; i < 2; i++ {
+		response, err := http.Get(server.URL + "/healthz")
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("healthz %d status=%d err=%v", i, response.StatusCode, err)
+		}
+		response.Body.Close()
+	}
+	response, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	text := string(data)
+	for _, want := range []string{
+		`audit_http_request_duration_seconds_bucket{le="0.001"}`,
+		`audit_http_request_duration_seconds_bucket{le="5"}`,
+		`audit_http_request_duration_seconds_bucket{le="+Inf"}`,
+		"audit_http_request_duration_seconds_sum",
+		"audit_http_request_duration_seconds_count 2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("metrics missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func TestHTTPNegativeCases(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	fromTo := "?from=2026-08-01T00:00:00Z&to=2026-09-01T00:00:00Z"
+
+	// 401：缺少 Authorization 头。
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events"+fromTo, nil)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing token status=%d err=%v, want 401", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 400：非法 wait_for。
+	body := `{"event_id":"neg-1","source_system":"crm","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T10:00:00Z","actor":{"id":"u1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"neg-1","payload":{"value":1}}`
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=bogus", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad wait_for status=%d err=%v, want 400", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 400：payload 超限（> 256KB 规范编码）。
+	huge := `{"event_id":"neg-2","source_system":"crm","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T10:00:00Z","actor":{"id":"u1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"neg-2","payload":{"data":"` + strings.Repeat("a", 300*1024) + `"}}`
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/events", strings.NewReader(huge))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized payload status=%d err=%v, want 400", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 400：无效 cursor。
+	request, _ = http.NewRequest(http.MethodGet, server.URL+"/api/v1/events"+fromTo+"&cursor=not-a-cursor", nil)
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad cursor status=%d err=%v, want 400", response.StatusCode, err)
+	}
+	response.Body.Close()
+}

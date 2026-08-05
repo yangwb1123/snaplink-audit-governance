@@ -42,6 +42,13 @@ type Server struct {
 	ingestQuotaCount      atomic.Uint64
 	integrityValidCount   atomic.Uint64
 	integrityInvalidCount atomic.Uint64
+
+	// Request latency histogram (seconds). Bucket boundaries are fixed at
+	// construction; counts are cumulative per bucket.
+	latencyBuckets  []float64
+	latencyCounts   []atomic.Uint64
+	latencySumNanos atomic.Uint64
+	latencyTotal    atomic.Uint64
 }
 
 type contextKey string
@@ -55,7 +62,9 @@ func NewServer(svc *service.Service, authenticator auth.Authenticator, logger *l
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Server{Service: svc, Auth: authenticator, Logger: logger}
+	server := &Server{Service: svc, Auth: authenticator, Logger: logger, latencyBuckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5}}
+	server.latencyCounts = make([]atomic.Uint64, len(server.latencyBuckets))
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -138,7 +147,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
 			}
 			s.requestCount.Add(1)
-			_ = started
+			s.recordLatency(time.Since(started))
 		}()
 		next.ServeHTTP(w, r)
 	})
@@ -178,6 +187,26 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"valid\"} %d\n", s.integrityValidCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"invalid\"} %d\n", s.integrityInvalidCount.Load())
+	for i, upper := range s.latencyBuckets {
+		label := fmt.Sprintf("%g", upper)
+		fmt.Fprintf(w, "audit_http_request_duration_seconds_bucket{le=\"%s\"} %d\n", label, s.latencyCounts[i].Load())
+	}
+	fmt.Fprintf(w, "audit_http_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", s.latencyTotal.Load())
+	fmt.Fprintf(w, "audit_http_request_duration_seconds_sum %g\n", float64(s.latencySumNanos.Load())/1e9)
+	fmt.Fprintf(w, "audit_http_request_duration_seconds_count %d\n", s.latencyTotal.Load())
+}
+
+// recordLatency updates the request duration histogram. Called from the
+// middleware after each request (including panics).
+func (s *Server) recordLatency(elapsed time.Duration) {
+	seconds := float64(elapsed) / float64(time.Second)
+	s.latencyTotal.Add(1)
+	s.latencySumNanos.Add(uint64(elapsed))
+	for i, upper := range s.latencyBuckets {
+		if seconds <= upper {
+			s.latencyCounts[i].Add(1)
+		}
+	}
 }
 
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {

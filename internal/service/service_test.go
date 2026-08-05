@@ -579,3 +579,30 @@ func TestSourceAccessFailClosedSameError(t *testing.T) {
 		t.Fatalf("source errors must be identical to prevent enumeration: %q vs %q vs %q", errUnknown, errDisabled, errForbidden)
 	}
 }
+
+func TestQueryStreamIDFilter(t *testing.T) {
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	first := testEvent("stream-1", "op-stream", at)
+	first.AggregateType = ""
+	first.AggregateID = ""
+	first.OperationID = ""
+	first.SourceSystem = "crm" // stream: tenant-a:source:crm
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	second := testEvent("stream-2", "op-other", at.Add(time.Second))
+	second.AggregateType = "invoice"
+	second.AggregateID = "inv-9" // stream: tenant-a:aggregate:invoice:inv-9
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
+	filtered, err := svc.QueryEvents("tenant-a", domain.Query{From: base.From, To: base.To, StreamID: "tenant-a:aggregate:invoice:inv-9", PageSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Count != 1 || filtered.Items[0].EventID != "stream-2" {
+		t.Fatalf("stream filter result=%+v", filtered)
+	}
+}
