@@ -1,0 +1,244 @@
+openapi: 3.1.0
+info:
+  title: Snaplink Audit Governance API
+  version: 0.1.0
+  description: Multi-tenant audit ingestion, immutable ledger and governance API.
+servers:
+  - url: http://localhost:8089
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/events:
+    post:
+      operationId: writeEvent
+      description: The server derives OAuth client identity from signed client_id (or compatible azp). A signed tenant claim narrows access; when absent, tenant_id is uniquely resolved from server-side (client_id, source_system) registration. Body tenant_id is ignored, and sub is never used as client identity.
+      parameters:
+        - { name: wait_for, in: query, schema: { type: string, enum: [accepted, ledgered, indexed, archived] } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      operationId: queryEvents
+      parameters:
+        - { $ref: '#/components/parameters/from' }
+        - { $ref: '#/components/parameters/to' }
+        - { name: event_type, in: query, schema: { type: string } }
+        - { name: source_system, in: query, schema: { type: string } }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: target_id, in: query, schema: { type: string } }
+        - { name: operation_id, in: query, schema: { type: string } }
+        - { name: causation_id, in: query, schema: { type: string } }
+        - { name: correlation_id, in: query, schema: { type: string } }
+        - { name: aggregate_type, in: query, schema: { type: string } }
+        - { name: aggregate_id, in: query, schema: { type: string } }
+        - { name: trace_id, in: query, schema: { type: string } }
+        - { name: outcome, in: query, schema: { type: string } }
+        - { name: payload_field, in: query, schema: { type: string } }
+        - { name: payload_digest, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
+      responses:
+        '200': { description: Event page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
+  /api/v1/events/{eventId}:
+    get:
+      operationId: getEvent
+      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      responses: { '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }, '404': { $ref: '#/components/responses/Error' } }
+  /api/v1/events/{eventId}/receipt:
+    get:
+      operationId: getReceipt
+      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      responses: { '200': { description: Receipt, content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } } }
+  /api/v1/events:batch:
+    post:
+      operationId: writeBatch
+      description: Every event source_system is checked against the authenticated OAuth client identity.
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [events], properties: { events: { type: array, items: { $ref: '#/components/schemas/Event' } }, wait_for: { type: string } } } } } }
+      responses: { '202': { description: Accepted batch }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' } }
+  /api/v1/operations/{operationId}:
+    get:
+      operationId: getOperation
+      parameters: [{ $ref: '#/components/parameters/operationId' }]
+      responses: { '200': { description: Operation summary } }
+  /api/v1/operations/{operationId}/timeline:
+    get:
+      operationId: getOperationTimeline
+      parameters: [{ $ref: '#/components/parameters/operationId' }]
+      responses: { '200': { description: Operation timeline } }
+  /api/v1/operations/{operationId}/replay:
+    get:
+      operationId: replayOperation
+      parameters: [{ $ref: '#/components/parameters/operationId' }]
+      responses: { '200': { description: Side-effect-free replay } }
+  /api/v1/aggregates/{aggregateType}/{aggregateId}/timeline:
+    get:
+      operationId: getAggregateTimeline
+      parameters:
+        - { name: aggregateType, in: path, required: true, schema: { type: string } }
+        - { name: aggregateId, in: path, required: true, schema: { type: string } }
+      responses: { '200': { description: Aggregate history } }
+  /api/v1/exports:
+    post:
+      operationId: createExport
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Query' } } } }
+      responses: { '202': { description: Export job } }
+  /api/v1/exports/{jobId}:
+    get:
+      operationId: getExport
+      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: Export status } }
+  /api/v1/exports/{jobId}/download:
+    get:
+      operationId: downloadExport
+      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Export JSON Lines download, content: { application/x-ndjson: { schema: { type: string, format: binary } } } }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/integrity/verify:
+    post:
+      operationId: verifyIntegrity
+      requestBody: { content: { application/json: { schema: { type: object, properties: { stream_id: { type: string } } } } } }
+      responses: { '200': { description: Integrity result } }
+  /api/v1/legal-holds:
+    post:
+      operationId: createLegalHold
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
+      responses: { '201': { description: Legal hold } }
+    get:
+      operationId: listLegalHolds
+      responses: { '200': { description: Legal holds } }
+  /api/v1/legal-holds/{holdId}/release:
+    post:
+      operationId: releaseLegalHold
+      parameters: [{ name: holdId, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: Released legal hold } }
+  /api/v1/restores/preview:
+    post:
+      operationId: previewRestore
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
+      responses: { '200': { description: Restore preview } }
+  /api/v1/restores:
+    post:
+      operationId: createRestore
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
+      responses: { '202': { description: Pending approval restore run } }
+  /api/v1/restores/{runId}:
+    get:
+      operationId: getRestore
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: Restore run } }
+  /api/v1/restores/{runId}/approve:
+    post:
+      operationId: approveRestore
+      description: Records the human approval decision; executing compensating business calls is a separate later stage.
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Approved restore run }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/restores/{runId}/reject:
+    post:
+      operationId: rejectRestore
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Rejected restore run }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/admin/actions:
+    get:
+      operationId: listAdminActions
+      description: Append-only self-audit trail of control-plane management actions (tenants, sources, schemas, retention policies, exports, legal holds, restore approvals). A tenant-scoped token sees its own tenant; a platform token may filter with tenant_id.
+      parameters:
+        - { name: tenant_id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100, default: 100 } }
+      responses: { '200': { description: Admin actions } }
+  /api/v1/tenants:
+    post:
+      operationId: createTenant
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+      responses: { '201': { description: Tenant } }
+    get:
+      operationId: listTenants
+      responses: { '200': { description: Tenants } }
+  /api/v1/sources:
+    post:
+      operationId: createSource
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+      responses: { '201': { description: Source system } }
+    get:
+      operationId: listSources
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Required for a platform cross-tenant token; a tenant-scoped token derives and enforces its signed tenant.
+          schema: { type: string }
+      responses: { '200': { description: Source systems } }
+  /api/v1/sources/{sourceId}:
+    put:
+      operationId: updateSource
+      description: Replaces source metadata and its exact OAuth client allow-list. Empty allowed_client_ids permits only client_id equal to sourceId.
+      parameters:
+        - { name: sourceId, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceUpdate' } } } }
+      responses: { '200': { description: Updated source system }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' } }
+  /api/v1/schemas:
+    post:
+      operationId: createSchema
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventSchema' } } } }
+      responses: { '201': { description: Event schema } }
+    get:
+      operationId: listSchemas
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Required for a platform cross-tenant token; a tenant-scoped token derives and enforces its signed tenant.
+          schema: { type: string }
+      responses: { '200': { description: Event schemas } }
+  /api/v1/policies/retention:
+    put:
+      operationId: setRetentionPolicy
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
+      responses: { '200': { description: Retention policy } }
+    get:
+      operationId: getRetentionPolicy
+      responses: { '200': { description: Retention policy } }
+  /api/v1/retention/evaluate:
+    post:
+      operationId: evaluateRetention
+      responses: { '200': { description: Retention evaluation; immutable ledger is never deleted by this endpoint } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Asymmetric production JWT using EdDSA/Ed25519, ES256/384/512, RS256 or PS256. Remote JWKS metadata is strictly matched before signature verification. }
+  parameters:
+    from: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+    to: { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+    eventId: { name: eventId, in: path, required: true, schema: { type: string } }
+    operationId: { name: operationId, in: path, required: true, schema: { type: string } }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Actor: { type: object, required: [id], properties: { id: { type: string }, type: { type: string }, name: { type: string }, department: { type: string }, roles: { type: array, items: { type: string } } } }
+    Event: { type: object, required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key], properties: { event_id: { type: string }, tenant_id: { type: string, description: Server-derived and ignored from public body }, source_system: { type: string }, event_type: { type: string }, schema_id: { type: string }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time }, operation_id: { type: string }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, items: { type: object } }, aggregate_type: { type: string }, aggregate_id: { type: string }, aggregate_version: { type: integer }, action: { type: string }, outcome: { type: string }, reason: { type: string }, changed_fields: { type: object }, payload: { type: object }, payload_ref: { type: string }, data_classification: { type: string }, retention_class: { type: string }, idempotency_key: { type: string } } }
+    Receipt: { type: object, required: [event_id, tenant_id, status, accepted_at], properties: { event_id: { type: string }, tenant_id: { type: string }, status: { type: string }, accepted_at: { type: string, format: date-time }, ledgered_at: { type: string, format: date-time }, indexed_at: { type: string, format: date-time }, archived_at: { type: string, format: date-time }, stream_id: { type: string }, sequence: { type: integer }, hash: { type: string }, duplicate: { type: boolean }, conflict: { type: boolean } } }
+    ReceiptResponse: { type: object, properties: { receipt: { $ref: '#/components/schemas/Receipt' }, receipt_url: { type: string } } }
+    Query: { type: object, required: [from, to], properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
+    QueryResult: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
+    LegalHold: { type: object, required: [name, reason], properties: { id: { type: string }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
+    RestoreRequest: { type: object, required: [operation_id, reason], properties: { operation_id: { type: string }, reason: { type: string } } }
+    Tenant: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }
+    Source: { type: object, required: [id, name], properties: { id: { type: string }, tenant_id: { type: string }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    SourceUpdate: { type: object, required: [name, active], properties: { name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to the path sourceId., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    EventSchema: { type: object, required: [schema_id, version, event_type], properties: { tenant_id: { type: string }, schema_id: { type: string }, version: { type: integer }, event_type: { type: string }, required_fields: { type: array, items: { type: string } }, allowed_fields: { type: array, items: { type: string } }, encrypted_fields: { type: array, items: { type: string } }, searchable_fields: { type: array, items: { type: string } }, classification: { type: string }, active: { type: boolean } } }
+    RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], properties: { tenant_id: { type: string }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: Exact event retention class evaluated by this policy; other compliance classes are unaffected. } } }
+    Error: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } } }
+    AdminAction: { type: object, required: [id, actor, action, created_at], properties: { id: { type: string }, tenant_id: { type: string }, actor: { type: string }, action: { type: string }, target_type: { type: string }, target_id: { type: string }, detail: { type: string }, created_at: { type: string, format: date-time } } }

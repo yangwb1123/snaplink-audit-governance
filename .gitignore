@@ -1,0 +1,7 @@
+/data/
+/bin/
+/coverage.out
+*.test
+*.log
+.trends/
+__pycache__/

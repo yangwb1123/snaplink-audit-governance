@@ -1,0 +1,22 @@
+# Declarative quality-gate thresholds, following the sibling Snaplink
+# engineering harness convention. The CLI intentionally uses only this small
+# dependency-free subset so checks work in a clean Go checkout.
+project:
+  name: snaplink-audit-governance
+  module: github.com/snaplink/audit-governance
+  language: go
+
+quality:
+  max_go_lines: 1500
+  max_function_lines: 260
+  max_decisions: 45
+
+build:
+  output_dir: bin
+  binaries:
+    - name: audit-api
+      path: ./cmd/audit-api
+    - name: audit-governance-worker
+      path: ./cmd/audit-governance-worker
+    - name: audit-outbox-relay
+      path: ./cmd/audit-outbox-relay

@@ -1,0 +1,102 @@
+asyncapi: 3.0.0
+info:
+  title: Snaplink Audit Governance Events
+  version: 1.0.0
+  description: Normalized audit event lifecycle topics.
+defaultContentType: application/json
+channels:
+  accepted:
+    address: audit.events.accepted.v1
+    messages:
+      auditEvent:
+        $ref: '#/components/messages/AuditEvent'
+  ledgered:
+    address: audit.events.ledgered.v1
+    messages:
+      auditEvent:
+        $ref: '#/components/messages/AuditEvent'
+  projection:
+    address: audit.events.projection.v1
+    messages:
+      auditEvent:
+        $ref: '#/components/messages/AuditEvent'
+  archive:
+    address: audit.events.archive.v1
+    messages:
+      auditEvent:
+        $ref: '#/components/messages/AuditEvent'
+  dlq:
+    address: audit.events.dlq.v1
+    messages:
+      failure:
+        $ref: '#/components/messages/Failure'
+operations:
+  publishAccepted:
+    action: send
+    channel:
+      $ref: '#/channels/accepted'
+  publishLedgered:
+    action: send
+    channel:
+      $ref: '#/channels/ledgered'
+  publishProjection:
+    action: send
+    channel:
+      $ref: '#/channels/projection'
+  publishArchive:
+    action: send
+    channel:
+      $ref: '#/channels/archive'
+  publishFailure:
+    action: send
+    channel:
+      $ref: '#/channels/dlq'
+components:
+  messages:
+    AuditEvent:
+      payload:
+        $ref: '#/components/schemas/EventEnvelope'
+    Failure:
+      payload:
+        type: object
+        required: [event_id, error_code, error_message]
+        properties:
+          event_id: { type: string }
+          error_code: { type: string }
+          error_message: { type: string }
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [event_id, tenant_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key]
+      properties:
+        event_id: { type: string }
+        tenant_id: { type: string }
+        source_system: { type: string }
+        event_type: { type: string }
+        schema_id: { type: string }
+        schema_version: { type: integer, minimum: 1 }
+        occurred_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        operation_id: { type: string }
+        causation_id: { type: string }
+        correlation_id: { type: string }
+        trace_id: { type: string }
+        span_id: { type: string }
+        actor: { type: object }
+        targets: { type: array, items: { type: object } }
+        aggregate_type: { type: string }
+        aggregate_id: { type: string }
+        aggregate_version: { type: integer }
+        action: { type: string }
+        outcome: { type: string }
+        reason: { type: string }
+        changed_fields: { type: object }
+        payload: { type: object, additionalProperties: true }
+        payload_ref: { type: string }
+        data_classification: { type: string }
+        retention_class: { type: string }
+        idempotency_key: { type: string }
+        stream_id: { type: string }
+        sequence: { type: integer }
+        prev_hash: { type: string }
+        hash: { type: string }

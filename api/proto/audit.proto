@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package snaplink.audit.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/snaplink/audit-governance/api/proto;auditv1";
+
+message Actor {
+  string id = 1;
+  string type = 2;
+  string name = 3;
+  string department = 4;
+  repeated string roles = 5;
+}
+
+message Target {
+  string type = 1;
+  string id = 2;
+  string name = 3;
+}
+
+message FieldChange {
+  string field = 1;
+  string before_json = 2;
+  string after_json = 3;
+}
+
+message EventEnvelope {
+  string event_id = 1;
+  // The server authorizes this value against the signed OAuth client_id (or
+  // compatible azp). The subject claim is never treated as client identity.
+  string source_system = 2;
+  string event_type = 3;
+  string schema_id = 4;
+  int32 schema_version = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+  string operation_id = 7;
+  string causation_id = 8;
+  string correlation_id = 9;
+  string trace_id = 10;
+  string span_id = 11;
+  Actor actor = 12;
+  repeated Target targets = 13;
+  string aggregate_type = 14;
+  string aggregate_id = 15;
+  int64 aggregate_version = 16;
+  string action = 17;
+  string outcome = 18;
+  string reason = 19;
+  repeated FieldChange changed_fields = 20;
+  bytes payload_json = 21;
+  string payload_ref = 22;
+  string data_classification = 23;
+  string retention_class = 24;
+  string idempotency_key = 25;
+}
+
+message WriteRequest {
+  EventEnvelope event = 1;
+  string wait_for = 2;
+}
+
+message WriteResponse {
+  string event_id = 1;
+  string tenant_id = 2;
+  string status = 3;
+  string stream_id = 4;
+  int64 sequence = 5;
+  string hash = 6;
+  bool duplicate = 7;
+}
+
+message WriteBatchRequest {
+  repeated EventEnvelope events = 1;
+  string wait_for = 2;
+}
+
+message WriteBatchResponse {
+  repeated WriteResponse receipts = 1;
+}
+
+service Ingest {
+  // Tenant identity is resolved from signed token claims or the unique
+  // server-side (client_id, source_system) registration, never request data.
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  rpc WriteStream(stream WriteRequest) returns (stream WriteResponse);
+}

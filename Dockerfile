@@ -1,0 +1,16 @@
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY go.sum ./
+COPY api ./api
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/audit-api ./cmd/audit-api
+
+FROM alpine:3.22
+RUN addgroup -S audit && adduser -S -G audit audit && mkdir -p /var/lib/audit && chown -R audit:audit /var/lib/audit
+COPY --from=build /out/audit-api /audit-api
+USER audit:audit
+WORKDIR /var/lib/audit
+EXPOSE 8089
+ENTRYPOINT ["/audit-api"]
