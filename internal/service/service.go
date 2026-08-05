@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,13 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
@@ -28,7 +28,43 @@ type Config struct {
 	SegmentSize   int
 	MaxEventBytes int
 	Now           func() time.Time
+	// Signer produces checkpoint signatures. Defaults to HMAC-SHA256 over
+	// SigningSecret; a Vault Transit signer can be injected for KMS-backed
+	// signatures where the private key never leaves Vault.
+	Signer Signer
+	// Archive persists WORM-compatible compliance objects. Defaults to the
+	// local read-only directory; an S3 Object Lock store can be injected.
+	Archive archive.Store
 }
+
+// Signer creates and verifies checkpoint signatures. Implementations must be
+// deterministic per input so Verify can re-check archived manifests.
+type Signer interface {
+	Sign(data []byte) (string, error)
+	Verify(data []byte, signature string) (bool, error)
+	Algorithm() string
+}
+
+// hmacSigner is the local development signature scheme.
+type hmacSigner struct {
+	secret string
+}
+
+func (h hmacSigner) Sign(data []byte) (string, error) {
+	mac := hmac.New(sha256.New, []byte(h.secret))
+	_, _ = mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (h hmacSigner) Verify(data []byte, signature string) (bool, error) {
+	expected, err := h.Sign(data)
+	if err != nil {
+		return false, err
+	}
+	return hmac.Equal([]byte(expected), []byte(signature)), nil
+}
+
+func (h hmacSigner) Algorithm() string { return "HMAC-SHA256(dev-compatible)" }
 
 type Service struct {
 	Store   *store.Store
@@ -67,6 +103,12 @@ func New(st *store.Store, cfg Config) *Service {
 	}
 	if cfg.EncryptionKey == "" {
 		cfg.EncryptionKey = cfg.SigningSecret
+	}
+	if cfg.Signer == nil {
+		cfg.Signer = hmacSigner{secret: cfg.SigningSecret}
+	}
+	if cfg.Archive == nil {
+		cfg.Archive = &archive.FileStore{Dir: cfg.ArchiveDir}
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -368,7 +410,10 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 		receipt.Hash = event.Hash
 		data.Receipts[key] = receipt
 		if len(stream.PendingHashes) >= s.Config.SegmentSize {
-			segment, checkpoint := s.sealSegment(stream, now)
+			segment, checkpoint, sealErr := s.sealSegment(stream, now)
+			if sealErr != nil {
+				return sealErr
+			}
 			sealedSegments = append(sealedSegments, segment)
 			data.Segments[streamKey] = append(data.Segments[streamKey], segment)
 			data.Checkpoints[streamKey] = append(data.Checkpoints[streamKey], checkpoint)
@@ -781,7 +826,8 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 		}
 		manifest := fmt.Sprintf("%s:%d:%d:%s:%s", segment.TenantID, segment.FirstSequence, segment.LastSequence, segment.LastHash, segment.MerkleRoot)
 		manifestHash := domain.HashBytes([]byte(manifest))
-		if manifestHash != segment.ManifestHash || !hmac.Equal([]byte(segment.Signature), []byte(s.sign([]byte(manifestHash)))) {
+		valid, verifyErr := s.Config.Signer.Verify([]byte(manifestHash), segment.Signature)
+		if verifyErr != nil || manifestHash != segment.ManifestHash || !valid {
 			result.Valid = false
 			result.Errors = append(result.Errors, fmt.Sprintf("stream %s segment %d-%d signature mismatch", segment.StreamID, segment.FirstSequence, segment.LastSequence))
 		}
@@ -799,7 +845,10 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 			if stream.TenantID != tenantID || len(stream.PendingHashes) == 0 {
 				continue
 			}
-			segment, checkpoint := s.sealSegment(stream, now)
+			segment, checkpoint, err := s.sealSegment(stream, now)
+			if err != nil {
+				return err
+			}
 			data.Segments[key] = append(data.Segments[key], segment)
 			data.Checkpoints[key] = append(data.Checkpoints[key], checkpoint)
 			stream.PendingHashes = nil
@@ -1102,69 +1151,36 @@ func (s *Service) eventHash(event domain.Event) (string, error) {
 	return domain.HashBytes(data), nil
 }
 
-func (s *Service) sealSegment(stream store.StreamState, now time.Time) (domain.Segment, domain.Checkpoint) {
+func (s *Service) sealSegment(stream store.StreamState, now time.Time) (domain.Segment, domain.Checkpoint, error) {
 	hashes := append([]string(nil), stream.PendingHashes...)
 	root := merkleRoot(hashes)
 	manifest := fmt.Sprintf("%s:%d:%d:%s:%s", stream.TenantID, stream.NextSequence-int64(len(hashes)), stream.NextSequence-1, stream.HeadHash, root)
 	manifestHash := domain.HashBytes([]byte(manifest))
-	signature := s.sign([]byte(manifestHash))
+	signature, err := s.Config.Signer.Sign([]byte(manifestHash))
+	if err != nil {
+		return domain.Segment{}, domain.Checkpoint{}, fmt.Errorf("sign segment: %w", err)
+	}
 	segment := domain.Segment{TenantID: stream.TenantID, StreamID: stream.StreamID, FirstSequence: stream.NextSequence - int64(len(hashes)), LastSequence: stream.NextSequence - 1, FirstPrevHash: stream.PendingPrevHash, LastHash: stream.HeadHash, EventCount: len(hashes), MerkleRoot: root, ManifestHash: manifestHash, Signature: signature, CreatedAt: now}
-	checkpoint := domain.Checkpoint{ID: newID("checkpoint"), TenantID: stream.TenantID, StreamID: stream.StreamID, Sequence: stream.NextSequence - 1, MerkleRoot: root, Signature: signature, Algorithm: "HMAC-SHA256(dev-compatible)", CreatedAt: now}
-	return segment, checkpoint
-}
-
-func (s *Service) sign(data []byte) string {
-	mac := hmac.New(sha256.New, []byte(s.Config.SigningSecret))
-	_, _ = mac.Write(data)
-	return hex.EncodeToString(mac.Sum(nil))
+	checkpoint := domain.Checkpoint{ID: newID("checkpoint"), TenantID: stream.TenantID, StreamID: stream.StreamID, Sequence: stream.NextSequence - 1, MerkleRoot: root, Signature: signature, Algorithm: s.Config.Signer.Algorithm(), CreatedAt: now}
+	return segment, checkpoint, nil
 }
 
 func (s *Service) archiveEvent(event domain.Event) error {
-	dir := filepath.Join(s.Config.ArchiveDir, "events", safeName(event.TenantID), safeName(event.StreamID))
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
-	}
 	data, err := domain.CanonicalJSON(event)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("%020d-%s.json", event.Sequence, safeName(event.EventID)))
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o440)
-	if err != nil {
-		if os.IsExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer file.Close()
-	if _, err = file.Write(data); err != nil {
-		return err
-	}
-	return file.Sync()
+	key := fmt.Sprintf("events/%s/%s/%020d-%s.json", safeName(event.TenantID), safeName(event.StreamID), event.Sequence, safeName(event.EventID))
+	return s.Config.Archive.Put(context.Background(), key, data)
 }
 
 func (s *Service) archiveSegment(segment domain.Segment) error {
-	dir := filepath.Join(s.Config.ArchiveDir, "segments", safeName(segment.TenantID), safeName(segment.StreamID))
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
-	}
 	data, err := domain.CanonicalJSON(segment)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("%020d-%020d.manifest.json", segment.FirstSequence, segment.LastSequence))
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o440)
-	if err != nil {
-		if os.IsExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer file.Close()
-	if _, err = file.Write(data); err != nil {
-		return err
-	}
-	return file.Sync()
+	key := fmt.Sprintf("segments/%s/%s/%020d-%020d.manifest.json", safeName(segment.TenantID), safeName(segment.StreamID), segment.FirstSequence, segment.LastSequence)
+	return s.Config.Archive.Put(context.Background(), key, data)
 }
 
 func (s *Service) runExport(jobID string) {
@@ -1191,47 +1207,22 @@ func (s *Service) runExport(jobID string) {
 		return
 	}
 	sortEvents(events)
-	dir := filepath.Join(s.Config.ArchiveDir, "exports")
-	if s.Config.ArchiveDir == "" {
-		dir = filepath.Join(os.TempDir(), "snaplink-audit-governance", "exports")
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		s.finishExport(jobID, "failed", "", "", 0, err.Error())
-		return
-	}
-	path := filepath.Join(dir, safeName(jobID)+".jsonl")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o440)
-	if err != nil && os.IsExist(err) {
-		_ = os.Remove(path)
-		file, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o440)
-	}
-	if err != nil {
-		s.finishExport(jobID, "failed", "", "", 0, err.Error())
-		return
-	}
 	var bytesWritten []byte
 	for _, event := range events {
 		line, marshalErr := domain.CanonicalJSON(event)
 		if marshalErr != nil {
-			_ = file.Close()
 			s.finishExport(jobID, "failed", "", "", 0, marshalErr.Error())
 			return
 		}
 		bytesWritten = append(bytesWritten, line...)
 		bytesWritten = append(bytesWritten, '\n')
 	}
-	if _, err := file.Write(bytesWritten); err != nil {
-		_ = file.Close()
+	key := fmt.Sprintf("exports/%s.jsonl", safeName(jobID))
+	if err := s.Config.Archive.Put(context.Background(), key, bytesWritten); err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())
 		return
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		s.finishExport(jobID, "failed", "", "", 0, err.Error())
-		return
-	}
-	_ = file.Close()
-	s.finishExport(jobID, "completed", path, domain.HashBytes(bytesWritten), len(events), "")
+	s.finishExport(jobID, "completed", key, domain.HashBytes(bytesWritten), len(events), "")
 }
 
 func (s *Service) finishExport(jobID, status, path, digest string, count int, failure string) {

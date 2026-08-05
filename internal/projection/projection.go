@@ -1,0 +1,96 @@
+// Package projection maintains the online query projection in ClickHouse
+// (architecture plan section 11.2, ADR-0004). The projection is derived
+// from the ledger events on the accepted topic, is eventually consistent
+// and can be rebuilt from scratch; it is never the source of truth.
+package projection
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	_ "github.com/ClickHouse/clickhouse-go/v2"
+
+	"github.com/snaplink/audit-governance/internal/domain"
+)
+
+// Store writes the query projection table. tenant_id leads the sort key so
+// tenant-scoped time-range scans stay efficient; ReplacingMergeTree keeps
+// one row per (tenant_id, event_id) under at-least-once redelivery.
+type Store struct {
+	db *sql.DB
+}
+
+// Open connects to ClickHouse over the native protocol (default port 9000).
+func Open(dsn string) (*Store, error) {
+	db, err := sql.Open("clickhouse", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open clickhouse: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping clickhouse: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+const schemaDDL = `CREATE TABLE IF NOT EXISTS audit_events (
+	tenant_id String,
+	occurred_at DateTime64(3, 'UTC'),
+	event_id String,
+	stream_id String,
+	sequence UInt64,
+	event_type String,
+	source_system String,
+	operation_id String,
+	actor_id String,
+	outcome String,
+	payload String,
+	event_hash String
+) ENGINE = ReplacingMergeTree(occurred_at)
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (tenant_id, occurred_at, event_id)`
+
+// EnsureSchema creates the projection table when missing.
+func (s *Store) EnsureSchema(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, schemaDDL); err != nil {
+		return fmt.Errorf("ensure clickhouse schema: %w", err)
+	}
+	return nil
+}
+
+// Insert writes one canonical event into the projection. ClickHouse applies
+// the ReplacingMergeTree dedup asynchronously; queries must not assume
+// immediate uniqueness.
+func (s *Store) Insert(ctx context.Context, event domain.Event) error {
+	payload, err := domain.CanonicalJSON(event.Payload)
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events (tenant_id, occurred_at, event_id, stream_id, sequence, event_type, source_system, operation_id, actor_id, outcome, payload, event_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.TenantID, event.OccurredAt.UTC(), event.EventID, event.StreamID, event.Sequence,
+		event.EventType, event.SourceSystem, event.OperationID, event.Actor.ID, event.Outcome,
+		string(payload), event.Hash)
+	if err != nil {
+		return fmt.Errorf("insert projection: %w", err)
+	}
+	return nil
+}
+
+// CountTenant returns the projected row count for a tenant (after
+// ReplacingMergeTree finalization is not guaranteed without FINAL).
+func (s *Store) CountTenant(ctx context.Context, tenantID string) (uint64, error) {
+	var count uint64
+	if err := s.db.QueryRowContext(ctx, `SELECT count() FROM audit_events WHERE tenant_id = ?`, tenantID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count projection: %w", err)
+	}
+	return count, nil
+}
+
+// RebuildFrom scratch is supported by re-consuming the topic; no manual
+// truncation is needed because ReplacingMergeTree converges on event_id.
+
+func (s *Store) Close() error { return s.db.Close() }

@@ -22,3 +22,5 @@ build:
       path: ./cmd/audit-outbox-relay
     - name: audit-kafka-consumer
       path: ./cmd/audit-kafka-consumer
+    - name: audit-projector
+      path: ./cmd/audit-projector

@@ -17,10 +17,12 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/grpcapi"
 	"github.com/snaplink/audit-governance/internal/httpapi"
+	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
 	"github.com/snaplink/audit-governance/internal/telemetry"
@@ -45,6 +47,13 @@ func main() {
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("AUDIT_OTLP_ENDPOINT"), "OTLP/HTTP trace endpoint such as http://jaeger:4318; empty disables tracing")
+	vaultAddr := flag.String("vault-addr", os.Getenv("AUDIT_VAULT_ADDR"), "HashiCorp Vault address; with token+transit key, checkpoint signatures go through the Transit engine")
+	vaultToken := flag.String("vault-token", os.Getenv("AUDIT_VAULT_TOKEN"), "Vault token for the Transit signer")
+	vaultTransitKey := flag.String("vault-transit-key", os.Getenv("AUDIT_VAULT_TRANSIT_KEY"), "Vault Transit key name for checkpoint signatures")
+	s3Endpoint := flag.String("s3-endpoint", os.Getenv("AUDIT_S3_ENDPOINT"), "S3-compatible endpoint (e.g. localhost:19010); with bucket+keys the compliance archive goes to an Object Lock bucket")
+	s3Bucket := flag.String("s3-bucket", os.Getenv("AUDIT_S3_BUCKET"), "S3 bucket for the compliance archive")
+	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
+	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "audit-api ", log.LstdFlags|log.Lmicroseconds)
@@ -57,6 +66,23 @@ func main() {
 	}
 	defer st.Close()
 	svc := service.New(st, service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: envOr("AUDIT_SIGNING_SECRET", "development-signing-key-change-me"), EncryptionKey: envOr("AUDIT_ENCRYPTION_KEY", "development-encryption-key-change-me")})
+	if *vaultAddr != "" && *vaultToken != "" && *vaultTransitKey != "" {
+		svc.Config.Signer = security.NewVaultTransitSigner(*vaultAddr, *vaultToken, *vaultTransitKey)
+		logger.Printf("signer=vault-transit key=%s addr=%s", *vaultTransitKey, *vaultAddr)
+	} else if *vaultAddr != "" || *vaultToken != "" || *vaultTransitKey != "" {
+		logger.Fatalf("vault signing requires vault-addr, vault-token and vault-transit-key together")
+	}
+	if *s3Endpoint != "" || *s3Bucket != "" || *s3AccessKey != "" || *s3SecretKey != "" {
+		if *s3Endpoint == "" || *s3Bucket == "" || *s3AccessKey == "" || *s3SecretKey == "" {
+			logger.Fatalf("s3 archive requires endpoint, bucket, access key and secret key together")
+		}
+		archiveStore, err := archive.NewS3Store(*s3Endpoint, *s3AccessKey, *s3SecretKey, *s3Bucket, false)
+		if err != nil {
+			logger.Fatalf("s3 archive: %v", err)
+		}
+		svc.Config.Archive = archiveStore
+		logger.Printf("archive=s3 bucket=%s endpoint=%s", *s3Bucket, *s3Endpoint)
+	}
 	if err := bootstrap(svc, *bootstrapTenant); err != nil {
 		logger.Fatalf("bootstrap: %v", err)
 	}

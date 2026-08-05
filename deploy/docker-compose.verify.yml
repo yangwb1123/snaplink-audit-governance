@@ -83,6 +83,10 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: audit
+      CLICKHOUSE_PASSWORD: audit-local-only
+      CLICKHOUSE_DB: audit
     ports:
       - "19123:8123"
       - "19000:9000"

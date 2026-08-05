@@ -409,7 +409,7 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
 		return
 	}
-	file, err := os.Open(job.ObjectPath)
+	data, err := s.Service.Config.Archive.Get(r.Context(), job.ObjectPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, r, http.StatusNotFound, domain.ErrNotFound)
@@ -418,15 +418,11 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, err)
-		return
-	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+safeDownloadName(job.ID)+`.jsonl"`)
-	http.ServeContent(w, r, job.ID+".jsonl", info.ModTime(), file)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
