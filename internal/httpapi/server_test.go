@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -427,4 +428,35 @@ func TestHTTPMetricsCounters(t *testing.T) {
 			t.Fatalf("metrics missing %q in:\n%s", want, text)
 		}
 	}
+}
+
+func TestHTTPReadyzArchiveProbe(t *testing.T) {
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, service.Config{ArchiveDir: archiveDir, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	// 归档目录可写 → ready。
+	response, err := http.Get(server.URL + "/readyz")
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("readyz status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 归档路径被普通文件占用 → MkdirAll 失败 → not ready。
+	if err := os.RemoveAll(archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archiveDir, []byte("occupied"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	response, err = http.Get(server.URL + "/readyz")
+	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("readyz with broken archive status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
 }

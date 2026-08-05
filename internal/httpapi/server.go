@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -128,6 +129,17 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	if s.Service == nil || s.Service.Store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
 		return
+	}
+	// Readiness reflects the configured archive dependency: an unavailable
+	// WORM destination must surface here instead of silently degrading the
+	// archived status of new events.
+	if dir := s.Service.Config.ArchiveDir; dir != "" {
+		probe := filepath.Join(dir, ".readyz-probe")
+		if err := os.MkdirAll(dir, 0o750); err != nil || os.WriteFile(probe, []byte("ok"), 0o640) != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "archive_unavailable"})
+			return
+		}
+		_ = os.Remove(probe)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
