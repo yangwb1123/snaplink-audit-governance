@@ -13,6 +13,9 @@ services:
       AUDIT_BOOTSTRAP_TENANT: demo
       AUDIT_SIGNING_SECRET: local-only-change-me
       AUDIT_ENCRYPTION_KEY: local-only-encryption-key
+      AUDIT_OTLP_ENDPOINT: http://jaeger:4318
+    depends_on:
+      - jaeger
     ports:
       - "19089:8089"
     volumes:

@@ -23,6 +23,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/httpapi"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
+	"github.com/snaplink/audit-governance/internal/telemetry"
 	"google.golang.org/grpc"
 )
 
@@ -43,6 +44,7 @@ func main() {
 	bootstrapTenant := flag.String("bootstrap-tenant", envOr("AUDIT_BOOTSTRAP_TENANT", "demo"), "create a local bootstrap tenant when missing")
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
+	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("AUDIT_OTLP_ENDPOINT"), "OTLP/HTTP trace endpoint such as http://jaeger:4318; empty disables tracing")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "audit-api ", log.LstdFlags|log.Lmicroseconds)
@@ -64,6 +66,13 @@ func main() {
 		logger.Fatalf("invalid authentication configuration: %v", err)
 	}
 	api := httpapi.NewServer(svc, authenticator, logger)
+	tracer, err := telemetry.Init(context.Background(), *otlpEndpoint, "audit-api")
+	if err != nil {
+		logger.Fatalf("init telemetry: %v", err)
+	}
+	if tracer != nil {
+		logger.Printf("tracing=otlp endpoint=%s", *otlpEndpoint)
+	}
 	server := &http.Server{Addr: *listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	var grpcServer *grpc.Server
 	var grpcListener net.Listener
@@ -93,10 +102,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+	if tracer != nil {
+		_ = tracer.Shutdown(ctx)
+	}
 	if grpcServer != nil {
 		grpcServer.GracefulStop()
 	}
-	_ = st.Flush()
+	_ = st.Close()
 }
 
 func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store, error) {

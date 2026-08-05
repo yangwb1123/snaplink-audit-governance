@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -12,6 +13,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -460,3 +465,33 @@ func TestHTTPReadyzArchiveProbe(t *testing.T) {
 	}
 	response.Body.Close()
 }
+
+func TestHTTPTraceparentInjected(t *testing.T) {
+	// 启用内存 tracer：响应头必须携带 W3C traceparent，且传入的
+	// traceparent 会被延续（同 trace id）。
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(&noopProcessor{}))
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}))
+	defer otel.SetTracerProvider(otel.GetTracerProvider())
+
+	server := testHTTPServer(t)
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/healthz", nil)
+	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status=%d err=%v", response.StatusCode, err)
+	}
+	defer response.Body.Close()
+	traceparent := response.Header.Get("traceparent")
+	if !strings.HasPrefix(traceparent, "00-4bf92f3577b34da6a3ce929d0e0e4736-") {
+		t.Fatalf("traceparent=%q, want same incoming trace id", traceparent)
+	}
+}
+
+type noopProcessor struct{}
+
+func (n *noopProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (n *noopProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (n *noopProcessor) ForceFlush(context.Context) error                { return nil }
+func (n *noopProcessor) Shutdown(context.Context) error                  { return nil }

@@ -15,6 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/service"
@@ -100,17 +105,35 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		if requestID == "" {
 			requestID = newRequestID()
 		}
-		traceID := r.Header.Get("traceparent")
-		if traceID == "" {
-			traceID = requestID
+		// W3C trace context: extract an incoming traceparent, create a server
+		// span for the route and inject the new context back into the
+		// response headers. Falls back to the no-op tracer when tracing is
+		// disabled (AUDIT_OTLP_ENDPOINT unset).
+		propagator := otel.GetTextMapPropagator()
+		ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		route := r.URL.Path
+		spanName := r.Method + " " + route
+		ctx, span := otel.Tracer("audit-api").Start(ctx, spanName,
+			trace.WithAttributes(
+				attribute.String("http.method", r.Method),
+				attribute.String("http.route", route),
+				attribute.String("request_id", requestID),
+			))
+		defer span.End()
+		propagator.Inject(ctx, propagation.HeaderCarrier(w.Header()))
+		traceID := requestID
+		if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+			traceID = spanContext.TraceID().String()
 		}
-		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+
+		ctx = context.WithValue(ctx, requestIDKey, requestID)
 		r = r.WithContext(ctx)
 		w.Header().Set("X-Request-ID", requestID)
 		w.Header().Set("X-Trace-ID", traceID)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				s.errorCount.Add(1)
+				span.RecordError(fmt.Errorf("panic: %v", recovered))
 				s.Logger.Printf("request_id=%s panic=%v", requestID, recovered)
 				writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
 			}
