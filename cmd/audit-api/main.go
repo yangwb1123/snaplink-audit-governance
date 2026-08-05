@@ -17,12 +17,11 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/grpcapi"
 	"github.com/snaplink/audit-governance/internal/httpapi"
-	"github.com/snaplink/audit-governance/internal/security"
+	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
 	"github.com/snaplink/audit-governance/internal/telemetry"
@@ -66,22 +65,20 @@ func main() {
 	}
 	defer st.Close()
 	svc := service.New(st, service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: envOr("AUDIT_SIGNING_SECRET", "development-signing-key-change-me"), EncryptionKey: envOr("AUDIT_ENCRYPTION_KEY", "development-encryption-key-change-me")})
-	if *vaultAddr != "" && *vaultToken != "" && *vaultTransitKey != "" {
-		svc.Config.Signer = security.NewVaultTransitSigner(*vaultAddr, *vaultToken, *vaultTransitKey)
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, SigningSecret: svc.Config.SigningSecret, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	if signer, signErr := external.Signer(); signErr != nil {
+		logger.Fatalf("signer: %v", signErr)
+	} else if signer != nil {
+		svc.Config.Signer = signer
 		logger.Printf("signer=vault-transit key=%s addr=%s", *vaultTransitKey, *vaultAddr)
-	} else if *vaultAddr != "" || *vaultToken != "" || *vaultTransitKey != "" {
-		logger.Fatalf("vault signing requires vault-addr, vault-token and vault-transit-key together")
 	}
-	if *s3Endpoint != "" || *s3Bucket != "" || *s3AccessKey != "" || *s3SecretKey != "" {
-		if *s3Endpoint == "" || *s3Bucket == "" || *s3AccessKey == "" || *s3SecretKey == "" {
-			logger.Fatalf("s3 archive requires endpoint, bucket, access key and secret key together")
-		}
-		archiveStore, err := archive.NewS3Store(*s3Endpoint, *s3AccessKey, *s3SecretKey, *s3Bucket, false)
-		if err != nil {
-			logger.Fatalf("s3 archive: %v", err)
-		}
+	if archiveStore, archiveErr := external.Archive(); archiveErr != nil {
+		logger.Fatalf("archive: %v", archiveErr)
+	} else {
 		svc.Config.Archive = archiveStore
-		logger.Printf("archive=s3 bucket=%s endpoint=%s", *s3Bucket, *s3Endpoint)
+		if *s3Endpoint != "" {
+			logger.Printf("archive=s3 bucket=%s endpoint=%s", *s3Bucket, *s3Endpoint)
+		}
 	}
 	if err := bootstrap(svc, *bootstrapTenant); err != nil {
 		logger.Fatalf("bootstrap: %v", err)

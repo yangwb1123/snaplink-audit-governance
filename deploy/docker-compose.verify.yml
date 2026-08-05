@@ -39,6 +39,35 @@ services:
     restart: unless-stopped
     networks: [audit_verify]
 
+  audit-kafka-consumer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/audit-kafka-consumer"]
+    environment:
+      AUDIT_KAFKA_BROKERS: redpanda:9092
+      AUDIT_OUTBOX_API_URL: http://audit-api:8089
+      AUDIT_OUTBOX_TOKEN: dev:demo:service
+    depends_on:
+      - redpanda
+      - audit-api
+    restart: unless-stopped
+    networks: [audit_verify]
+
+  audit-projector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/audit-projector"]
+    environment:
+      AUDIT_KAFKA_BROKERS: redpanda:9092
+      AUDIT_CLICKHOUSE_DSN: clickhouse://audit:audit-local-only@clickhouse:9000/audit
+    depends_on:
+      - redpanda
+      - clickhouse
+    restart: unless-stopped
+    networks: [audit_verify]
+
   postgres:
     image: postgres:17-alpine
     environment:

@@ -64,6 +64,24 @@ Compose 使用 `19000+` 端口和独立网络/数据卷，不应复用本机已�
 6. Jaeger/Prometheus 接入、敏感字段日志扫描和 API 负向测试。
 7. 单节点逐级压测，并单独记录本机上限。
 
+## 外部基础设施验证状态（2026-08-05 更新）
+
+以下基础设施已在本机容器完成真实链路验证：
+
+- **PostgreSQL**：控制面快照后端（乐观锁）、outbox 表（relay 台账）。
+- **Redpanda（Kafka 兼容）**：outbox → relay(Kafka) → topic → consumer/audit-api
+  全链路；手动 offset 提交、失败背压、不可解析消息死信。
+- **ClickHouse**：`audit-projector` 消费 accepted topic 写入查询投影表
+  （ReplacingMergeTree、tenant 前缀排序键、按月分区），投影可 SQL 查询。
+- **MinIO（Object Lock）**：事件/段清单/导出写入 `--with-lock` 桶；
+  retention（governance 365d）下删除仅产生版本删除标记，对象不可物理删除。
+- **Vault（Transit）**：checkpoint 签名改走 Transit 引擎（`AUDIT_VAULT_*`），
+  私钥不出 Vault；协议层由单测覆盖，真实 Vault 容器可另行启动。
+- **Jaeger/Prometheus**：OTLP 导出已验证；指标端点接 Prometheus。
+
+门控集成测试：`AUDIT_TEST_POSTGRES_DSN`、`AUDIT_TEST_CLICKHOUSE_DSN` 设置后
+运行 `go test ./internal/store/ ./internal/outbox/ ./internal/projection/`。
+
 ## 不在本机宣称通过的项目
 
 - Kafka 三物理节点和跨可用区副本故障。

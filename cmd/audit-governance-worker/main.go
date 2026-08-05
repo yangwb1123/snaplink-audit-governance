@@ -12,6 +12,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
 )
@@ -20,6 +21,13 @@ func main() {
 	statePath := flag.String("state", envOr("AUDIT_STATE_PATH", "./data/state.json"), "state snapshot path")
 	postgresDSN := flag.String("postgres-dsn", os.Getenv("AUDIT_POSTGRES_DSN"), "PostgreSQL DSN for the control-plane state snapshot; overrides -state")
 	archiveDir := flag.String("archive", envOr("AUDIT_ARCHIVE_DIR", "./data/archive"), "archive directory")
+	vaultAddr := flag.String("vault-addr", os.Getenv("AUDIT_VAULT_ADDR"), "HashiCorp Vault address for Transit checkpoint signatures (must match audit-api)")
+	vaultToken := flag.String("vault-token", os.Getenv("AUDIT_VAULT_TOKEN"), "Vault token for the Transit signer")
+	vaultTransitKey := flag.String("vault-transit-key", os.Getenv("AUDIT_VAULT_TRANSIT_KEY"), "Vault Transit key name")
+	s3Endpoint := flag.String("s3-endpoint", os.Getenv("AUDIT_S3_ENDPOINT"), "S3-compatible endpoint for the compliance archive (must match audit-api)")
+	s3Bucket := flag.String("s3-bucket", os.Getenv("AUDIT_S3_BUCKET"), "S3 bucket for the compliance archive")
+	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
+	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
 	interval := flag.Duration("interval", durationEnv("AUDIT_GOVERNANCE_INTERVAL", 5*time.Minute), "retention evaluation interval")
 	once := flag.Bool("once", false, "evaluate once and exit")
 	flag.Parse()
@@ -33,6 +41,21 @@ func main() {
 	}
 	defer st.Close()
 	svc := service.New(st, service.Config{ArchiveDir: *archiveDir, SigningSecret: envOr("AUDIT_SIGNING_SECRET", "development-signing-key-change-me"), EncryptionKey: envOr("AUDIT_ENCRYPTION_KEY", "development-encryption-key-change-me")})
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, SigningSecret: svc.Config.SigningSecret, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	if signer, signErr := external.Signer(); signErr != nil {
+		logger.Fatalf("signer: %v", signErr)
+	} else if signer != nil {
+		svc.Config.Signer = signer
+		logger.Printf("signer=vault-transit key=%s", *vaultTransitKey)
+	}
+	if archiveStore, archiveErr := external.Archive(); archiveErr != nil {
+		logger.Fatalf("archive: %v", archiveErr)
+	} else {
+		svc.Config.Archive = archiveStore
+		if *s3Endpoint != "" {
+			logger.Printf("archive=s3 bucket=%s", *s3Bucket)
+		}
+	}
 	evaluate := func() {
 		tenants, listErr := svc.ListTenants()
 		if listErr != nil {
