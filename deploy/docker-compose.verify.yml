@@ -14,8 +14,13 @@ services:
       AUDIT_SIGNING_SECRET: local-only-change-me
       AUDIT_ENCRYPTION_KEY: local-only-encryption-key
       AUDIT_OTLP_ENDPOINT: http://jaeger:4318
+      AUDIT_S3_ENDPOINT: minio:9000
+      AUDIT_S3_BUCKET: worm-audit
+      AUDIT_S3_ACCESS_KEY: audit-local
+      AUDIT_S3_SECRET_KEY: audit-local-change-me
     depends_on:
       - jaeger
+      - minio
     ports:
       - "19089:8089"
     volumes:
@@ -30,12 +35,12 @@ services:
     command: ["-interval", "5s"]
     environment:
       AUDIT_OUTBOX_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
-      AUDIT_OUTBOX_API_URL: http://audit-api:8089
+      AUDIT_OUTBOX_KAFKA_BROKERS: redpanda:9092
       AUDIT_OUTBOX_TOKEN: dev:demo:service
       AUDIT_OUTBOX_INTERVAL: 5s
     depends_on:
       - postgres
-      - audit-api
+      - redpanda
     restart: unless-stopped
     networks: [audit_verify]
 
