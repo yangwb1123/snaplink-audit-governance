@@ -42,6 +42,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - 控制面管理操作全部自审计：租户/来源/Schema/留存策略变更、导出、Legal Hold、恢复申请与审批与对应变更原子写入 append-only 审计轨迹，可通过 `GET /api/v1/admin/actions` 查询（租户 token 仅见本租户，平台 token 可跨租户）。
 - 恢复申请支持审批流程：`POST /api/v1/restores/{runId}/approve` 与 `reject` 记录审批事实（approval 与业务执行分离），状态机 `pending_approval → approved/rejected`。
 - 业务系统可使用 `internal/outbox` SDK 在事务内写入 `audit_outbox`，再由 relay 投递（迁移 `003_outbox_relay.sql` 增加投递台账列）。
+- relay 投递支持两种传输：HTTP（默认）与 Kafka（设置 `AUDIT_OUTBOX_KAFKA_BROKERS` 后写入 `audit.events.accepted.v1`，acks=all 同步生产）；`audit-kafka-consumer` 以手动 offset 提交消费该 topic 并接入审计 API，失败背压重试、不可解析消息记死信——验证了 AsyncAPI topic 契约与 Kafka 真实容器链路（compose `redpanda`）。
 - 导出任务支持状态轮询和租户鉴权的 JSONL 下载。
 - API 契约位于 `api/openapi`、`api/asyncapi` 和 `api/proto`。
 - 本机隔离依赖配置位于 `deploy/docker-compose.verify.yml`。

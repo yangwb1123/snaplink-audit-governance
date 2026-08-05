@@ -20,3 +20,5 @@ build:
       path: ./cmd/audit-governance-worker
     - name: audit-outbox-relay
       path: ./cmd/audit-outbox-relay
+    - name: audit-kafka-consumer
+      path: ./cmd/audit-kafka-consumer

@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/snaplink/audit-governance/internal/kafka"
 	"github.com/snaplink/audit-governance/internal/outbox"
 )
 
@@ -26,6 +28,7 @@ func main() {
 	batch := flag.Int("batch", intEnv("AUDIT_OUTBOX_BATCH", 100), "records per poll")
 	maxAttempts := flag.Int("max-attempts", intEnv("AUDIT_OUTBOX_MAX_ATTEMPTS", 8), "delivery attempts before dead-lettering")
 	timeout := flag.Duration("timeout", durationEnv("AUDIT_OUTBOX_TIMEOUT", 30*time.Second), "per-record delivery timeout")
+	kafkaBrokers := flag.String("kafka-brokers", os.Getenv("AUDIT_OUTBOX_KAFKA_BROKERS"), "comma-separated Kafka brokers; when set, delivery uses Kafka instead of HTTP")
 	flag.Parse()
 	if *dsn == "" {
 		log.Fatalf("dsn is required: pass -dsn or set AUDIT_OUTBOX_DSN")
@@ -51,7 +54,16 @@ func main() {
 		MaxAttempts: *maxAttempts,
 		Logger:      logger,
 	}
-	logger.Printf("api_url=%s interval=%s batch=%d max_attempts=%d", *apiURL, *interval, *batch, *maxAttempts)
+	var kafkaProducer *kafka.Producer
+	if *kafkaBrokers != "" {
+		kafkaProducer = kafka.NewProducer(strings.Split(*kafkaBrokers, ","), kafka.TopicAccepted)
+		defer kafkaProducer.Close()
+		relay.Deliver = kafkaProducer.Deliver
+		logger.Printf("delivery=kafka brokers=%s topic=%s", *kafkaBrokers, kafka.TopicAccepted)
+	} else {
+		logger.Printf("delivery=http api_url=%s", *apiURL)
+	}
+	logger.Printf("interval=%s batch=%d max_attempts=%d", *interval, *batch, *maxAttempts)
 	runOnce := func() {
 		handled, runErr := relay.RunOnce(ctx)
 		if runErr != nil {

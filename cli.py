@@ -78,7 +78,8 @@ def cmd_build() -> int:
     bin_dir.mkdir(exist_ok=True)
     targets = (("audit-api", "./cmd/audit-api"),
                ("audit-governance-worker", "./cmd/audit-governance-worker"),
-               ("audit-outbox-relay", "./cmd/audit-outbox-relay"))
+               ("audit-outbox-relay", "./cmd/audit-outbox-relay"),
+               ("audit-kafka-consumer", "./cmd/audit-kafka-consumer"))
     for name, package in targets:
         target = bin_dir / name
         if run("go", "build", "-o", str(target), package) != 0:
