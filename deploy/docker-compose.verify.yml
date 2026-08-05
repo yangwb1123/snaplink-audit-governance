@@ -19,6 +19,23 @@ services:
       - audit_state:/var/lib/audit
     networks: [audit_verify]
 
+  audit-outbox-relay:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/audit-outbox-relay"]
+    command: ["-interval", "5s"]
+    environment:
+      AUDIT_OUTBOX_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      AUDIT_OUTBOX_API_URL: http://audit-api:8089
+      AUDIT_OUTBOX_TOKEN: dev:demo:service
+      AUDIT_OUTBOX_INTERVAL: 5s
+    depends_on:
+      - postgres
+      - audit-api
+    restart: unless-stopped
+    networks: [audit_verify]
+
   postgres:
     image: postgres:17-alpine
     environment:

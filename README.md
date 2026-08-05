@@ -18,6 +18,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 
 - [架构设计计划](docs/ARCHITECTURE_PLAN.md)
 - [本机验证计划](docs/VALIDATION_PLAN.md)
+- [本机性能基线](docs/BENCHMARKS.md)
 - [威胁模型](docs/THREAT_MODEL.md)
 - [术语表](docs/GLOSSARY.md)
 - [ADR-0001 消息传输与接入](docs/adr/ADR-0001.md)
@@ -66,6 +67,7 @@ go test ./...
 python3 cli.py check       # gofmt、文件大小、go vet、单元测试
 python3 cli.py quality     # 完整质量门禁：复杂度、架构、竞态、构建等
 python3 cli.py race        # race detector
+python3 cli.py bench       # 本机基准（基准结果见 docs/BENCHMARKS.md）
 python3 cli.py accept      # 完整验收：check、race、构建、路由契约
 python3 cli.py help
 ```

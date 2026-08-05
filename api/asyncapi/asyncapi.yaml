@@ -87,6 +87,8 @@ components:
         aggregate_type: { type: string }
         aggregate_id: { type: string }
         aggregate_version: { type: integer }
+        workflow_instance_id: { type: string }
+        execution_run_id: { type: string }
         action: { type: string }
         outcome: { type: string }
         reason: { type: string }
