@@ -30,36 +30,38 @@ type StreamState struct {
 }
 
 type Snapshot struct {
-	Tenants      map[string]domain.Tenant          `json:"tenants"`
-	Sources      map[string]domain.SourceSystem    `json:"sources"`
-	Schemas      map[string]domain.EventSchema     `json:"schemas"`
-	Policies     map[string]domain.RetentionPolicy `json:"policies"`
-	Events       map[string]domain.Event           `json:"events"`
-	Receipts     map[string]domain.EventReceipt    `json:"receipts"`
-	Streams      map[string]StreamState            `json:"streams"`
-	Segments     map[string][]domain.Segment       `json:"segments"`
-	Checkpoints  map[string][]domain.Checkpoint    `json:"checkpoints"`
-	LegalHolds   map[string]domain.LegalHold       `json:"legal_holds"`
-	Exports      map[string]domain.ExportJob       `json:"exports"`
-	RestoreRuns  map[string]domain.RestoreRun      `json:"restore_runs"`
-	AdminActions []domain.AdminAction              `json:"admin_actions"`
+	Tenants              map[string]domain.Tenant          `json:"tenants"`
+	Sources              map[string]domain.SourceSystem    `json:"sources"`
+	Schemas              map[string]domain.EventSchema     `json:"schemas"`
+	Policies             map[string]domain.RetentionPolicy `json:"policies"`
+	Events               map[string]domain.Event           `json:"events"`
+	Receipts             map[string]domain.EventReceipt    `json:"receipts"`
+	Streams              map[string]StreamState            `json:"streams"`
+	Segments             map[string][]domain.Segment       `json:"segments"`
+	Checkpoints          map[string][]domain.Checkpoint    `json:"checkpoints"`
+	LegalHolds           map[string]domain.LegalHold       `json:"legal_holds"`
+	Exports              map[string]domain.ExportJob       `json:"exports"`
+	RestoreRuns          map[string]domain.RestoreRun      `json:"restore_runs"`
+	AdminActions         []domain.AdminAction              `json:"admin_actions"`
+	AggregateCheckpoints []domain.AggregateCheckpoint      `json:"aggregate_checkpoints"`
 }
 
 func NewSnapshot() *Snapshot {
 	return &Snapshot{
-		Tenants:      map[string]domain.Tenant{},
-		Sources:      map[string]domain.SourceSystem{},
-		Schemas:      map[string]domain.EventSchema{},
-		Policies:     map[string]domain.RetentionPolicy{},
-		Events:       map[string]domain.Event{},
-		Receipts:     map[string]domain.EventReceipt{},
-		Streams:      map[string]StreamState{},
-		Segments:     map[string][]domain.Segment{},
-		Checkpoints:  map[string][]domain.Checkpoint{},
-		LegalHolds:   map[string]domain.LegalHold{},
-		Exports:      map[string]domain.ExportJob{},
-		RestoreRuns:  map[string]domain.RestoreRun{},
-		AdminActions: []domain.AdminAction{},
+		Tenants:              map[string]domain.Tenant{},
+		Sources:              map[string]domain.SourceSystem{},
+		Schemas:              map[string]domain.EventSchema{},
+		Policies:             map[string]domain.RetentionPolicy{},
+		Events:               map[string]domain.Event{},
+		Receipts:             map[string]domain.EventReceipt{},
+		Streams:              map[string]StreamState{},
+		Segments:             map[string][]domain.Segment{},
+		Checkpoints:          map[string][]domain.Checkpoint{},
+		LegalHolds:           map[string]domain.LegalHold{},
+		Exports:              map[string]domain.ExportJob{},
+		RestoreRuns:          map[string]domain.RestoreRun{},
+		AdminActions:         []domain.AdminAction{},
+		AggregateCheckpoints: []domain.AggregateCheckpoint{},
 	}
 }
 
@@ -102,6 +104,9 @@ func (s *Snapshot) normalize() {
 	}
 	if s.AdminActions == nil {
 		s.AdminActions = []domain.AdminAction{}
+	}
+	if s.AggregateCheckpoints == nil {
+		s.AggregateCheckpoints = []domain.AggregateCheckpoint{}
 	}
 }
 

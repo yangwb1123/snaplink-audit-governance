@@ -26,3 +26,31 @@ func TestFieldEncryptionAndSearchDigest(t *testing.T) {
 		t.Fatalf("search digest is not stable")
 	}
 }
+
+func TestExportBytesRoundTrip(t *testing.T) {
+	plain := []byte("line1\nline2\n")
+	sealed, err := EncryptBytes(plain, "export-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(sealed[:len(exportPrefix)]) != exportPrefix {
+		t.Fatalf("sealed output missing prefix: %q", sealed[:16])
+	}
+	if len(sealed) <= len(plain) {
+		t.Fatalf("sealed length %d not larger than plain %d", len(sealed), len(plain))
+	}
+	decrypted, err := DecryptBytes(sealed, "export-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decrypted) != string(plain) {
+		t.Fatalf("round trip mismatch: %q", decrypted)
+	}
+	// 错误密钥或错误前缀必须失败。
+	if _, err := DecryptBytes(sealed, "wrong-key"); err == nil {
+		t.Fatal("wrong key must fail")
+	}
+	if _, err := DecryptBytes([]byte("plaintext"), "export-key"); err == nil {
+		t.Fatal("missing prefix must fail")
+	}
+}

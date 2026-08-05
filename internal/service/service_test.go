@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -604,5 +606,108 @@ func TestQueryStreamIDFilter(t *testing.T) {
 	}
 	if filtered.Count != 1 || filtered.Items[0].EventID != "stream-2" {
 		t.Fatalf("stream filter result=%+v", filtered)
+	}
+}
+
+func TestExportEncryptedAndDecryptable(t *testing.T) {
+	svc := testService(t, true)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("exp-enc-1", "op-enc", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
+	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 等待异步导出完成。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, getErr := svc.GetExport("tenant-a", job.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if current.Status == "completed" || current.Status == "failed" {
+			job = current
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("export stuck in %s", current.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if job.Status != "completed" {
+		t.Fatalf("export failed: %+v", job)
+	}
+	sealed, err := svc.Config.Archive.Get(context.Background(), job.ObjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 归档内容必须是密封的（明文 JSONL 不会出现）。
+	if contains(sealed, []byte("exp-enc-1")) {
+		t.Fatal("archive object must not contain plaintext event data")
+	}
+	plain, err := security.DecryptBytes(sealed, svc.Config.EncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(plain, []byte("exp-enc-1")) {
+		t.Fatal("decrypted export missing event")
+	}
+	if job.Digest != domain.HashBytes(plain) {
+		t.Fatal("job digest must cover the decrypted content")
+	}
+}
+
+func contains(haystack, needle []byte) bool {
+	return strings.Contains(string(haystack), string(needle))
+}
+
+func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	// 三条流各写一个事件，封出段（SegmentSize=2 需要两个事件……直接塞满）。
+	first := testEvent("agg-a1", "", at)
+	first.AggregateType = "invoice"
+	first.AggregateID = "inv-a"
+	first.OperationID = ""
+	first.IdempotencyKey = "agg-a1"
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	second := testEvent("agg-a2", "", at.Add(time.Second))
+	second.AggregateType = "invoice"
+	second.AggregateID = "inv-b"
+	second.OperationID = ""
+	second.IdempotencyKey = "agg-a2"
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity("tenant-a", "")
+	if err != nil || !result.Valid {
+		t.Fatalf("aggregate verify failed: %+v %v", result, err)
+	}
+
+	// 篡改聚合记录（换一个 root）必须导致验证失败。
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		items := data.AggregateCheckpoints
+		items[len(items)-1].Root = "0000000000000000000000000000000000000000000000000000000000000000"
+		data.AggregateCheckpoints = items
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = svc.VerifyIntegrity("tenant-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid {
+		t.Fatal("tampered aggregate checkpoint must fail verification")
 	}
 }

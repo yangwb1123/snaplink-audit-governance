@@ -22,6 +22,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/service"
 )
 
@@ -447,11 +448,17 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	// 导出文件独立加密：下载时用平台加密密钥解开密封。
+	decrypted, err := security.DecryptBytes(data, s.Service.Config.EncryptionKey)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+safeDownloadName(job.ID)+`.jsonl"`)
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(decrypted)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	_, _ = w.Write(decrypted)
 }
 
 func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {

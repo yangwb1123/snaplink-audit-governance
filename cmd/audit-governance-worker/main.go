@@ -66,6 +66,9 @@ func main() {
 			if err := svc.SealPendingSegments(tenant.ID); err != nil {
 				logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
 			}
+			if err := svc.CreateAggregateCheckpoint(tenant.ID); err != nil {
+				logger.Printf("tenant=%s aggregate_checkpoint_error=%v", tenant.ID, err)
+			}
 			archived, archiveErr := svc.ArchivePending(tenant.ID)
 			if archiveErr != nil {
 				logger.Printf("tenant=%s archive_error=%v archived=%d", tenant.ID, archiveErr, archived)

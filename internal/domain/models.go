@@ -263,6 +263,20 @@ type Checkpoint struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// AggregateCheckpoint is a periodic signed Merkle root over the latest
+// checkpoint of every stream in a tenant (architecture plan section 10:
+// periodically build a Merkle root over multiple segment roots).
+type AggregateCheckpoint struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	StreamCount int       `json:"stream_count"`
+	Root        string    `json:"root"`
+	Signature   string    `json:"signature"`
+	Algorithm   string    `json:"algorithm"`
+	CreatedAt   time.Time `json:"created_at"`
+	StreamRoots []string  `json:"stream_roots,omitempty"`
+}
+
 type ExportJob struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenant_id"`
