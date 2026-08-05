@@ -108,9 +108,13 @@ func (s *Snapshot) normalize() {
 // Backend persists the control-plane state snapshot. Save must be atomic:
 // on error the previously persisted snapshot stays authoritative.
 type Backend interface {
-	// Load returns the current persisted snapshot. The returned snapshot is
-	// owned by the backend and must not be retained across calls.
+	// Load returns the current snapshot for read-only access. The returned
+	// snapshot is owned by the backend and must not be retained.
 	Load() (*Snapshot, error)
+	// LoadForUpdate returns a private copy for a read-modify-write cycle so
+	// a failing closure can never corrupt the shared state; the copy is only
+	// committed through Save.
+	LoadForUpdate() (*Snapshot, error)
 	// Save atomically persists data.
 	Save(data *Snapshot) error
 }
@@ -148,10 +152,13 @@ func (s *Store) Read(fn func(*Snapshot) error) error {
 	return fn(data)
 }
 
+// snapshotRestorer is no longer needed: LoadForUpdate hands every Update
+// closure a private copy, so failures cannot leak into shared state.
+
 func (s *Store) Update(fn func(*Snapshot) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := s.backend.Load()
+	data, err := s.backend.LoadForUpdate()
 	if err != nil {
 		return err
 	}
@@ -213,6 +220,12 @@ func (f *fileBackend) Load() (*Snapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.data, nil
+}
+
+func (f *fileBackend) LoadForUpdate() (*Snapshot, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return cloneSnapshot(f.data)
 }
 
 func (f *fileBackend) Save(data *Snapshot) error {

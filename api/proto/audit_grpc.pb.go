@@ -28,6 +28,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type IngestClient interface {
+	// Tenant identity is resolved from signed token claims or the unique
+	// server-side (client_id, source_system) registration, never request data.
 	Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
 	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
 	WriteStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WriteRequest, WriteResponse], error)
@@ -78,6 +80,8 @@ type Ingest_WriteStreamClient = grpc.BidiStreamingClient[WriteRequest, WriteResp
 // All implementations must embed UnimplementedIngestServer
 // for forward compatibility.
 type IngestServer interface {
+	// Tenant identity is resolved from signed token claims or the unique
+	// server-side (client_id, source_system) registration, never request data.
 	Write(context.Context, *WriteRequest) (*WriteResponse, error)
 	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
 	WriteStream(grpc.BidiStreamingServer[WriteRequest, WriteResponse]) error

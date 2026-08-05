@@ -372,12 +372,14 @@ def cmd_quality() -> int:
     from checks.make_help import run as make_help
     from checks.root_business_code import run as root_business_code
     from checks.root_files import run as root_files
+    from checks.contract_fields import run as contract_fields
     from checks.route_contract import run as route_contract
     from checks.sensitive_logging import run as sensitive_logging
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
-                    adr_compliance, make_help, route_contract, sensitive_logging,
-                    cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):
+                    adr_compliance, make_help, route_contract, contract_fields,
+                    sensitive_logging, cmd_vet, cmd_python_checks, cmd_test,
+                    cmd_race, build):
         if command() != 0:
             return 1
     print("QUALITY PASS")

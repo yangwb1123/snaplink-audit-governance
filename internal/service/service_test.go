@@ -544,3 +544,38 @@ func TestAdminActionSelfAudit(t *testing.T) {
 		t.Fatalf("platform actions=%d < tenant actions=%d", len(platform), len(actions))
 	}
 }
+
+func TestSourceAccessFailClosedSameError(t *testing.T) {
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	withSource := func(source string) domain.Event {
+		event := testEvent("enum-"+source, "op-enum", at)
+		event.SourceSystem = source
+		event.IdempotencyKey = "idem-" + source
+		return event
+	}
+	// 停用来源：先创建再禁用（AddSource 强制启用，UpdateSource 可停用）。
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 未知来源、停用来源、越权来源（client_id 不在白名单）必须返回完全相同的
+	// 拒绝结果，防止来源枚举。
+	_, errUnknown := svc.Ingest("tenant-a", crmPrincipal, withSource("ghost"), "")
+	_, errDisabled := svc.Ingest("tenant-a", crmPrincipal, withSource("disabled"), "")
+	_, errForbidden := svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, withSource("crm"), "")
+	for name, err := range map[string]error{"unknown": errUnknown, "disabled": errDisabled, "forbidden": errForbidden} {
+		if err == nil {
+			t.Fatalf("%s source accepted", name)
+		}
+		if !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("%s source error=%v, want forbidden", name, err)
+		}
+	}
+	if errUnknown.Error() != errDisabled.Error() || errUnknown.Error() != errForbidden.Error() {
+		t.Fatalf("source errors must be identical to prevent enumeration: %q vs %q vs %q", errUnknown, errDisabled, errForbidden)
+	}
+}

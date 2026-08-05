@@ -3,30 +3,33 @@
 状态：参考实现基线，不是生产 SLO 承诺  
 日期：2026-08-04  
 机器：Zorin OS 18.1，AMD Ryzen AI Max+ 395（16 核 32 线程），124GiB 内存  
-方法：`go test -run=^$ -bench=Benchmark -benchmem -benchtime=2s ./internal/service/`
+方法：`go test -run=^$ -bench=Benchmark -benchmem -benchtime=1s ./internal/service/`
 
 ## 结果
 
-| Benchmark | 单次耗时 | 单核等价吞吐 | 分配 | 说明 |
-|---|---:|---:|---:|---|
-| `BenchmarkIngest` | 15.9 µs/op | ≈ 62,800 events/s | 10.8 KB / 240 allocs | 单事件全链路：Schema 校验、规范化编码、敏感字段扫描、哈希、流链接；内存 store（无磁盘/网络） |
-| `BenchmarkQuery` | 490 µs/op | ≈ 2,040 queries/s | 1.98 MB / 26 allocs | 1,000 事件账本上的时间范围 + 类型过滤查询，100 条页 |
-| `BenchmarkEventDigest` | 10.2 µs/op | ≈ 98,000/s | 8.2 KB / 186 allocs | Canonical JSON 编码 + SHA-256 摘要 |
+| Benchmark | 单次耗时 | 分配 | 说明 |
+|---|---:|---:|---|
+| `BenchmarkIngest` | 2.2 ms/op | 1.25 MB / 9.5k allocs | 单事件全链路（Schema 校验、规范化、敏感字段扫描、哈希、流链接）。快照式存储每次 Update 读-改-写整个控制面快照，成本随累计事件数线性增长（O(n²) 总体），见下 |
+| `BenchmarkQuery` | 448 µs/op | 1.98 MB / 26 allocs | 1,000 事件账本上的时间范围 + 类型过滤查询，100 条页（Read 路径零拷贝） |
+| `BenchmarkEventDigest` | 10.0 µs/op | 8.2 KB / 186 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
 
 运行方式：
 
 ```sh
 python3 cli.py bench        # 全仓库
-go test -bench=Benchmark -benchmem -benchtime=2s ./internal/service/
+go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 ```
 
-## 与生产 SLO 的关系
+## 已知特征（如实记录）
 
-- 架构基线（50,000 events/s 稳态）必须经过多节点 Kafka + PostgreSQL + ClickHouse
-  真实容器压测验证；本机数字只证明参考实现路径无明显的单点算法瓶颈。
-- 本机 Ingest 为同步直写（accepted 即 ledgered），生产链路由 accepted→ledgered
-  是 Kafka 异步路径，延迟特征不同，不可直接对比。
-- Query 基准未包含 ClickHouse 投影；参考实现直接扫描内存快照。
+- **快照式控制面存储是 O(n²) 累计写入**：每个 Update（含每次事件落账）都对
+  全量快照做一次克隆 + 原子持久化。该语义保证任何失败闭包（冲突、幂等键
+  冲突）都不可能污染已提交状态（`LoadForUpdate` 私有副本）。事件量在
+  数千级时毫秒内完成；这是单节点参考实现的固有上限，**不是生产形态**。
+- 生产形态（ADR-0001/0003/0004）中，事件写入走 Kafka → 关系表/账本流，
+  控制面快照只承载元数据，不存在该 O(n²) 路径。
+- 本机数字只验证功能正确性与算法正确性；50,000 events/s 稳态必须经过
+  多节点 Kafka + PostgreSQL + ClickHouse 真实容器压测。
 
 ## 后续基准点
 

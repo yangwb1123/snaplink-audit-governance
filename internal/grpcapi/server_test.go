@@ -51,13 +51,20 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	defer connection.Close()
 	client := auditv1.NewIngestClient(connection)
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:tenant-a:service:crm"))
-	request := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "grpc-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_010, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-1", PayloadJson: []byte(`{"value":1}`)}}
+	request := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "grpc-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_010, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-1", WorkflowInstanceId: "wf-1", ExecutionRunId: "run-1", PayloadJson: []byte(`{"value":1}`)}}
 	receipt, err := client.Write(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if receipt.GetTenantId() != "tenant-a" || receipt.GetSequence() != 1 {
 		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	ledgered, err := svc.GetEvent("tenant-a", "grpc-evt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ledgered.WorkflowInstanceID != "wf-1" || ledgered.ExecutionRunID != "run-1" {
+		t.Fatalf("governance fields lost over gRPC: %+v", ledgered)
 	}
 	batch, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{{EventId: "grpc-evt-2", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_011, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-2", PayloadJson: []byte(`{"value":2}`)}}})
 	if err != nil {

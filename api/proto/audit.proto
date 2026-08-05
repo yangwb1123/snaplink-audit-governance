@@ -54,6 +54,8 @@ message EventEnvelope {
   string data_classification = 23;
   string retention_class = 24;
   string idempotency_key = 25;
+  string workflow_instance_id = 26;
+  string execution_run_id = 27;
 }
 
 message WriteRequest {

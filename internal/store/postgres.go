@@ -28,6 +28,8 @@ SET snapshot = $1::jsonb, version = version + 1, updated_at = now()
 WHERE id = 1 AND version = $2`
 )
 
+func (p *postgresBackend) LoadForUpdate() (*Snapshot, error) { return p.Load() }
+
 func (p *postgresBackend) Load() (*Snapshot, error) {
 	data := NewSnapshot()
 	var encoded []byte
