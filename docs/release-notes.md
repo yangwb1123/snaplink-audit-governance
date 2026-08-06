@@ -5,9 +5,16 @@
 **Behavior change (availability):** `audit-kafka-consumer` no longer retries
 poison events forever. Ingest failures classified as permanent
 (`outbox.DeliveryError{Permanent}` — the audit API's 4xx except 429) are
-dead-lettered immediately; transient failures retry per (partition, offset)
-up to `-max-attempts` (default 8, env `AUDIT_KAFKA_MAX_ATTEMPTS`) and are
-then dead-lettered. A dead-letter publishes a `Failure` record
+dead-lettered immediately; transient failures are retried **in place** — the
+message is held in-process and re-delivered to the ingest callback up to
+`-max-attempts` (default 8, env `AUDIT_KAFKA_MAX_ATTEMPTS`), and the next
+message is fetched only after the held one is resolved (success, permanent
+dead-letter, or cap exhaustion). This is load-bearing: kafka-go's reader
+advances its fetch position past every message it returns, committed or not
+(`reader.go`: `r.offset = msg.Offset + 1`), so re-fetching after a failure
+would silently skip the failed message once a later message commits. The
+pre-change loop had exactly that defect for transient failures; retrying the
+held message closes it. A dead-letter publishes a `Failure` record
 (`event_id`, `error_code`, `error_message` — the AsyncAPI
 `audit.events.dlq.v1` contract, keyed by the failing event ID) via
 `-dlq-topic` (default `audit.events.dlq.v1`, env `AUDIT_KAFKA_DLQ_TOPIC`),
@@ -16,10 +23,24 @@ without a publisher degrades to commit + log and never blocks partition
 progress. New `error_code` values: `permanent_error`, `attempts_exhausted`.
 
 - Wire-compatible: `audit-projector` keeps its existing flags and inherits
-  the capped-retry behavior with commit+log degradation (no DLQ publisher).
-- Ops: pre-create `audit.events.dlq.v1` with ≥30d retention before deploy;
-  poison events are expected to clear consumer lag within one backoff cycle
-  instead of stalling the partition.
+  the capped-retry behavior with commit+log degradation (no DLQ publisher);
+  projection gaps after 8 failed inserts are rebuildable via `RebuildFrom`.
+- Ops: pre-create `audit.events.dlq.v1` with ≥30d retention before deploy
+  and verify the created topic's retention — broker auto-create (if
+  enabled) would create it with default retention instead. Poison events
+  are expected to clear consumer lag within one backoff cycle instead of
+  stalling the partition.
+- Known limits (accepted, tracked as follow-ups): (1) the cap also applies
+  to outage-class errors — at defaults (30s HTTP timeout + 2s backoff × 8
+  attempts) a dependency outage longer than ~4.3 min drains the partition
+  into the DLQ as `attempts_exhausted`; the DLQ has no replay consumer yet,
+  so recovery is manual (DLQ consumer + traffic alert are the follow-up).
+  (2) Sustained 429 quota throttling beyond the same window dead-letters
+  valid events. (3) There is no per-message ingest deadline (spec
+  non-goal): a hung ingest (e.g. ClickHouse) can still stall a partition;
+  the ledger path is bounded by the HTTP client `-timeout`. (4) A static
+  `AUDIT_OUTBOX_TOKEN` that expires mid-run turns every event into a
+  `permanent_error` DLQ record — rotate tokens before expiry.
 
 ## 2026-08-06 — Separation of duties enforced in restore approval
 

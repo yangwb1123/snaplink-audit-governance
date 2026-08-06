@@ -45,7 +45,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - 控制面管理操作全部自审计：租户/来源/Schema/留存策略变更、导出、Legal Hold、恢复申请与审批与对应变更原子写入 append-only 审计轨迹，可通过 `GET /api/v1/admin/actions` 查询（租户 token 仅见本租户，平台 token 可跨租户）。
 - 恢复申请支持审批流程：`POST /api/v1/restores/{runId}/approve` 与 `reject` 记录审批事实（approval 与业务执行分离），状态机 `pending_approval → approved/rejected`。
 - 业务系统可使用 `internal/outbox` SDK 在事务内写入 `audit_outbox`，再由 relay 投递（迁移 `003_outbox_relay.sql` 增加投递台账列）。
-- relay 投递支持两种传输：HTTP（默认）与 Kafka（设置 `AUDIT_OUTBOX_KAFKA_BROKERS` 后写入 `audit.events.accepted.v1`，acks=all 同步生产）；`audit-kafka-consumer` 以手动 offset 提交消费该 topic 并接入审计 API，失败背压重试（单消息上限 8 次，可调 `AUDIT_KAFKA_MAX_ATTEMPTS`）、永久失败（4xx 除 429）立即死信并发布 `Failure` 到 `audit.events.dlq.v1`（`AUDIT_KAFKA_DLQ_TOPIC`），不可解析消息记日志死信——验证了 AsyncAPI topic 契约与 Kafka 真实容器链路（compose `redpanda`）。
+- relay 投递支持两种传输：HTTP（默认）与 Kafka（设置 `AUDIT_OUTBOX_KAFKA_BROKERS` 后写入 `audit.events.accepted.v1`，acks=all 同步生产）；`audit-kafka-consumer` 以手动 offset 提交消费该 topic 并接入审计 API，失败背压重试——同一条消息原地重试、不重新拉取（kafka-go 的 fetch 位置会越过已取出的消息，重新拉取会导致失败消息被静默跳过），单消息上限 8 次（可调 `AUDIT_KAFKA_MAX_ATTEMPTS`）——永久失败（4xx 除 429）立即死信并发布 `Failure` 到 `audit.events.dlq.v1`（`AUDIT_KAFKA_DLQ_TOPIC`），不可解析消息记日志死信——验证了 AsyncAPI topic 契约与 Kafka 真实容器链路（compose `redpanda`）。
 - 外部基础设施接入（全部可选、本机容器可验证）：
   - `AUDIT_VAULT_ADDR` + `AUDIT_VAULT_TOKEN` + `AUDIT_VAULT_TRANSIT_KEY`：checkpoint 签名改用 Vault Transit 引擎（私钥不出 Vault，算法标记 `vault-transit:<key>`），未配置时默认 HMAC-SHA256；
   - `AUDIT_S3_ENDPOINT`/`AUDIT_S3_BUCKET`/`AUDIT_S3_ACCESS_KEY`/`AUDIT_S3_SECRET_KEY`：合规归档（事件/段清单/导出）写入 S3 兼容 Object Lock 桶（MinIO 验证：删除仅产生版本删除标记），默认本地只读目录；

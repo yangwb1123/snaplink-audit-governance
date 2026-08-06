@@ -117,9 +117,13 @@ type messageReader interface {
 // given, mirroring outbox.Relay.maxAttempts.
 const defaultMaxAttempts = 8
 
-// Consumer reads the accepted topic with manual offset commits. A message is
+// Consumer reads the accepted topic with manual offset commits. The kafka-go
+// reader advances its fetch position past every message FetchMessage returns,
+// committed or not, so a message that fails ingest can never be re-fetched
+// within the session. Run therefore holds each message in-process and calls
+// FetchMessage again only after the message is resolved. A message is
 // committed only after ingest succeeds; transient failures back off and
-// retry the same message up to the per-(partition, offset) attempt cap, then
+// retry the held message up to the per-(partition, offset) attempt cap, then
 // dead-letter it. Permanent failures (outbox.DeliveryError with Permanent
 // set) are dead-lettered immediately. Unparsable messages are committed and
 // logged as dead-letter evidence. Dead-lettering publishes a Failure record
@@ -214,6 +218,9 @@ func (c *Consumer) attemptCap() int {
 }
 
 // Run consumes until ctx is cancelled or a fatal reader error occurs.
+// FetchMessage is called once per message: a message is held in-process and
+// resolved (committed or dead-lettered) before the next fetch, because the
+// kafka-go reader never returns a fetched-but-uncommitted message again.
 func (c *Consumer) Run(ctx context.Context) error {
 	for {
 		message, err := c.reader.FetchMessage(ctx)
@@ -234,39 +241,48 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		key := messageKey{partition: message.Partition, offset: message.Offset}
-		if err := c.ingest(ctx, event); err != nil {
-			// 永久错误（4xx 语义拒绝）没有重试价值：立即死信。
-			var deliveryErr *outbox.DeliveryError
-			if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
-				if deadErr := c.deadLetter(ctx, message, event, ErrorCodePermanentError, err); deadErr != nil {
-					return deadErr
-				}
-				continue
-			}
-			// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；
-			// 否则退避重试同一条消息（背压，幂等消费保证重试不会
-			// 产生重复事实）。
-			c.attempts[key]++
-			if c.attempts[key] >= c.attemptCap() {
-				if deadErr := c.deadLetter(ctx, message, event, ErrorCodeAttemptsExhausted, err); deadErr != nil {
-					return deadErr
-				}
-				continue
-			}
-			c.logf("ingest failed topic=%s offset=%d event_id=%s error=%v (backoff=%s attempt=%d/%d)", c.reader.Config().Topic, message.Offset, event.EventID, err, c.backoff, c.attempts[key], c.attemptCap())
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(c.backoff):
-			}
-			continue
-		}
-		delete(c.attempts, key)
-		if err := c.reader.CommitMessages(ctx, message); err != nil {
+		if err := c.consume(ctx, message, event); err != nil {
 			return err
 		}
-		c.logf("ingested topic=%s offset=%d event_id=%s", c.reader.Config().Topic, message.Offset, event.EventID)
+	}
+}
+
+// consume resolves one fetched message in place. Ingest is retried on the
+// held message — FetchMessage is not called again, because the reader has
+// already advanced past it — until the ingest succeeds (commit), the error
+// is permanent (immediate dead-letter), or the per-message attempt cap is
+// reached (attempts-exhausted dead-letter). The attempt-map entry is removed
+// on every resolution path, bounding the map by in-flight messages.
+func (c *Consumer) consume(ctx context.Context, message kafka.Message, event domain.Event) error {
+	key := messageKey{partition: message.Partition, offset: message.Offset}
+	defer delete(c.attempts, key)
+	for {
+		err := c.ingest(ctx, event)
+		if err == nil {
+			if commitErr := c.reader.CommitMessages(ctx, message); commitErr != nil {
+				return commitErr
+			}
+			c.logf("ingested topic=%s offset=%d event_id=%s", c.reader.Config().Topic, message.Offset, event.EventID)
+			return nil
+		}
+		// 永久错误（4xx 语义拒绝）没有重试价值：立即死信。
+		var deliveryErr *outbox.DeliveryError
+		if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
+			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
+		}
+		// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；否则
+		// 退避并重试同一条消息（背压；API 按 event_id 幂等，重试不会
+		// 产生重复事实）。
+		c.attempts[key]++
+		if c.attempts[key] >= c.attemptCap() {
+			return c.deadLetter(ctx, message, event, ErrorCodeAttemptsExhausted, err)
+		}
+		c.logf("ingest failed topic=%s offset=%d event_id=%s error=%v (backoff=%s attempt=%d/%d)", c.reader.Config().Topic, message.Offset, event.EventID, err, c.backoff, c.attempts[key], c.attemptCap())
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.backoff):
+		}
 	}
 }
 
@@ -274,8 +290,6 @@ func (c *Consumer) Run(ctx context.Context) error {
 // commits the message so the partition advances. A publish failure degrades
 // to commit + log: the DLQ must never block ledger progress.
 func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event domain.Event, code string, cause error) error {
-	key := messageKey{partition: message.Partition, offset: message.Offset}
-	delete(c.attempts, key)
 	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error()}
 	if c.dlq != nil {
 		if err := c.dlq.PublishFailure(ctx, failure); err != nil {

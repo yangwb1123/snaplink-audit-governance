@@ -17,18 +17,21 @@ type fakeReader struct {
 	messages        []kafka.Message
 	commits         []kafka.Message
 	committedOffset int64
+	fetchIndex      int
 	publishCalls    int
 	published       []Failure
 	publishFunc     func(Failure) error
 }
 
+// FetchMessage 模拟真实 kafka-go reader 的语义（reader.go:846）：fetch 位置
+// 在每次返回消息后单调前进（r.offset = msg.Offset + 1），与是否提交无关；
+// 因此已取出但未提交的消息在本次会话内不会再次返回。消费端必须先把手中
+// 的消息解析完毕（提交或死信）才能取到下一条。队列耗尽后阻塞到上下文取消。
 func (f *fakeReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
-	// 模拟真实 reader：只返回已提交 offset 之后的消息；失败且未提交的
-	// 消息会再次返回（背压重试）；无可消费消息时阻塞到上下文取消。
-	for _, message := range f.messages {
-		if message.Offset > f.committedOffset {
-			return message, nil
-		}
+	if f.fetchIndex < len(f.messages) {
+		message := f.messages[f.fetchIndex]
+		f.fetchIndex++
+		return message, nil
 	}
 	<-ctx.Done()
 	return kafka.Message{}, ctx.Err()
@@ -36,6 +39,8 @@ func (f *fakeReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
 
 func (f *fakeReader) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
 	for _, message := range msgs {
+		// kafka-go 提交的是 msg.Offset+1（下一条待消费位置，commit.go:17）；
+		// fake 记录已提交的最高消息 offset 供断言使用。
 		if message.Offset > f.committedOffset {
 			f.committedOffset = message.Offset
 		}
@@ -269,6 +274,40 @@ func TestConsumerDefaultMaxAttempts(t *testing.T) {
 	}
 	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodeAttemptsExhausted {
 		t.Fatalf("want one attempts_exhausted dead-letter, published=%v", reader.published)
+	}
+}
+
+// F-1 回归：真实 kafka-go reader 的 fetch 位置在每次 FetchMessage 后都会
+// 越过该消息（无论是否提交）。瞬态失败后若重新 FetchMessage，会取到下一
+// 条消息；下一条成功提交后，失败消息被静默跳过且无任何死信证据。消费端
+// 必须原地重试手中的消息。此测试在“失败后重新拉取”的循环上失败（evt-1
+// 只会被 ingest 一次、分区在无证据的情况下越过它），修复后通过。
+func TestConsumerRetriesFailedMessageInPlaceWithoutRefetch(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	attempts := map[string]int{}
+	var order []string
+	runConsumer(t, reader, func(_ context.Context, event domain.Event) error {
+		attempts[event.EventID]++
+		order = append(order, event.EventID)
+		if event.EventID == "evt-1" && attempts["evt-1"] == 1 {
+			return errors.New("api unavailable")
+		}
+		return nil
+	}, WithDLQ(reader), WithMaxAttempts(3))
+	// evt-1 必须被原地重试（两次 ingest），而不是在失败后重新拉取而跳过。
+	if attempts["evt-1"] != 2 {
+		t.Fatalf("evt-1 ingested %d times, want 2 (failed message must be retried in place, not skipped by re-fetch)", attempts["evt-1"])
+	}
+	// evt-2 只能在 evt-1 解析（提交）之后被 ingest：顺序必须是
+	// evt-1（失败）→ evt-1（重试成功）→ evt-2。
+	if len(order) != 3 || order[0] != "evt-1" || order[1] != "evt-1" || order[2] != "evt-2" {
+		t.Fatalf("ingest order=%v, want [evt-1 evt-1 evt-2]", order)
+	}
+	if len(reader.commits) != 2 || reader.committedOffset != 2 {
+		t.Fatalf("commits=%d committedOffset=%d, want 2/2 (both messages committed once, in order)", len(reader.commits), reader.committedOffset)
+	}
+	if len(reader.published) != 0 {
+		t.Fatalf("published=%v, want no DLQ evidence (message recovered on retry)", reader.published)
 	}
 }
 
