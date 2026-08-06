@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
@@ -158,21 +158,20 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if s.Service == nil || s.Service.Store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
 		return
 	}
 	// Readiness reflects the configured archive dependency: an unavailable
 	// WORM destination must surface here instead of silently degrading the
-	// archived status of new events.
-	if dir := s.Service.Config.ArchiveDir; dir != "" {
-		probe := filepath.Join(dir, ".readyz-probe")
-		if err := os.MkdirAll(dir, 0o750); err != nil || os.WriteFile(probe, []byte("ok"), 0o640) != nil {
+	// archived status of new events. An unconfigured local store (empty dir)
+	// is skipped; S3 stores probe their bucket.
+	if archiveStore, ok := s.Service.Config.Archive.(*archive.FileStore); !ok || archiveStore.Dir != "" {
+		if err := s.Service.Config.Archive.Ready(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "archive_unavailable"})
 			return
 		}
-		_ = os.Remove(probe)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }

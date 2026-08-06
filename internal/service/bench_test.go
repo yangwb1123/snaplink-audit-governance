@@ -76,3 +76,31 @@ func BenchmarkEventDigest(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkQueryLargeLedger measures filtered queries over a 5,000-event
+// ledger. The snapshot is built in one update (not through per-event ingest,
+// whose O(n^2) read-modify-write cost is documented in BENCHMARKS.md); the
+// query path itself remains O(n) per filter.
+func BenchmarkQueryLargeLedger(b *testing.B) {
+	svc := benchService(b)
+	base := time.Unix(1_700_000_010, 0).UTC()
+	now := svc.Now()
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		for i := 0; i < 5000; i++ {
+			event := domain.Event{EventID: fmt.Sprintf("big-%d", i), TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: base.Add(time.Duration(i) * time.Second), ReceivedAt: now, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("big-idem-%d", i), Payload: map[string]any{"resource": "invoice", "value": i}, StreamID: "tenant-a:source:crm", Sequence: int64(i + 1), Hash: fmt.Sprintf("hash-%d", i)}
+			key := store.EventKey("tenant-a", event.EventID)
+			data.Events[key] = event
+			data.Receipts[key] = domain.EventReceipt{EventID: event.EventID, TenantID: "tenant-a", Status: domain.StatusLedgered, AcceptedAt: now, StreamID: event.StreamID, Sequence: event.Sequence, Hash: event.Hash}
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	query := domain.Query{From: base, To: base.Add(6000 * time.Second), EventType: "audit.event", PageSize: 100}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := svc.QueryEvents("tenant-a", query); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

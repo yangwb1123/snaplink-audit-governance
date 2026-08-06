@@ -11,6 +11,7 @@
 |---|---:|---:|---|
 | `BenchmarkIngest` | 2.2 ms/op | 1.25 MB / 9.5k allocs | 单事件全链路（Schema 校验、规范化、敏感字段扫描、哈希、流链接）。快照式存储每次 Update 读-改-写整个控制面快照，成本随累计事件数线性增长（O(n²) 总体），见下 |
 | `BenchmarkQuery` | 448 µs/op | 1.98 MB / 26 allocs | 1,000 事件账本上的时间范围 + 类型过滤查询，100 条页（Read 路径零拷贝） |
+| `BenchmarkQueryLargeLedger` | 3.8 ms/op | 12.6 MB / 32 allocs | 5,000 事件账本同型查询；从 1k→5k 约线性扩展（查询路径 O(n)），快照直接构造（绕过 O(n²) 预填） |
 | `BenchmarkEventDigest` | 10.0 µs/op | 8.2 KB / 186 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
 
 运行方式：
