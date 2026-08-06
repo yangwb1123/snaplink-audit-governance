@@ -5,6 +5,7 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -122,7 +123,12 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 		var event domain.Event
-		if err := json.Unmarshal(message.Value, &event); err != nil {
+		// UseNumber: the consumer re-ingests the event, so payload numbers
+		// must survive as exact json.Number values to keep the derived
+		// digest identical to the producer's digest for the same event.
+		decoder := json.NewDecoder(bytes.NewReader(message.Value))
+		decoder.UseNumber()
+		if err := decoder.Decode(&event); err != nil {
 			// 不可解析的消息没有重试价值：提交并记录死信证据。
 			c.logf("dead-letter topic=%s partition=%d offset=%d error=%v", c.reader.Config().Topic, message.Partition, message.Offset, err)
 			if commitErr := c.reader.CommitMessages(ctx, message); commitErr != nil {

@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -134,7 +135,7 @@ func fromProto(input *auditv1.EventEnvelope) (domain.Event, error) {
 		return domain.Event{}, fmt.Errorf("%w: actor is required", domain.ErrInvalid)
 	}
 	if len(input.GetPayloadJson()) > 0 {
-		if err := json.Unmarshal(input.GetPayloadJson(), &event.Payload); err != nil {
+		if err := decodeJSONNumber(input.GetPayloadJson(), &event.Payload); err != nil {
 			return domain.Event{}, fmt.Errorf("%w: payload_json is invalid", domain.ErrInvalid)
 		}
 	}
@@ -147,18 +148,28 @@ func fromProto(input *auditv1.EventEnvelope) (domain.Event, error) {
 	for _, change := range input.GetChangedFields() {
 		var before, after any
 		if change.GetBeforeJson() != "" {
-			if err := json.Unmarshal([]byte(change.GetBeforeJson()), &before); err != nil {
+			if err := decodeJSONNumber([]byte(change.GetBeforeJson()), &before); err != nil {
 				return domain.Event{}, fmt.Errorf("%w: invalid before_json", domain.ErrInvalid)
 			}
 		}
 		if change.GetAfterJson() != "" {
-			if err := json.Unmarshal([]byte(change.GetAfterJson()), &after); err != nil {
+			if err := decodeJSONNumber([]byte(change.GetAfterJson()), &after); err != nil {
 				return domain.Event{}, fmt.Errorf("%w: invalid after_json", domain.ErrInvalid)
 			}
 		}
 		event.ChangedFields[change.GetField()] = domain.FieldChange{Before: before, After: after}
 	}
 	return event, nil
+}
+
+// decodeJSONNumber decodes JSON with UseNumber so payload and changed-field
+// numbers reach digest derivation as exact json.Number values: a float64
+// decode would collapse int64 values > 2^53 and make the gRPC ingest digest
+// diverge from the HTTP ingest digest of the same event.
+func decodeJSONNumber(data []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(out)
 }
 
 func toProtoReceipt(receipt domain.EventReceipt) *auditv1.WriteResponse {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -170,6 +171,15 @@ func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
 	if strings.TrimSpace(tenant.ID) == "" || strings.TrimSpace(tenant.Name) == "" {
 		return fmt.Errorf("%w: tenant id and name are required", domain.ErrInvalid)
 	}
+	// Key-framing validation before any mutation: a tenant ID containing the
+	// key separator (or other control/whitespace/path characters) would make
+	// its composite keys ambiguous with another tenant's keys
+	// (StreamKey("a\x1fb","s") == StreamKey("a","b\x1fs")). Reject before
+	// the snapshot closure so no tenant, admin action or conflict check runs
+	// for invalid IDs.
+	if err := store.ValidTenantID(tenant.ID); err != nil {
+		return err
+	}
 	if tenant.CreatedAt.IsZero() {
 		tenant.CreatedAt = s.Now()
 	}
@@ -214,6 +224,26 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 	return s.Store.Update(func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[schema.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
+		}
+		// Version-rollback guard: versions for a (tenant_id, schema_id) pair
+		// must be strictly monotonic. Re-registering a version below the
+		// highest registered version would silently re-admit payload shapes
+		// a newer schema deliberately restricted, and because validateEvent
+		// and reconstructAndDerive look schemas up version-exactly, the
+		// weakening would survive VerifyIntegrity. The guard runs inside the
+		// same store.Update closure as the write (atomic check-and-commit,
+		// no TOCTOU window) and precedes the duplicate-key check so a
+		// rollback re-register of an existing version reports ErrInvalid
+		// instead of ErrConflict; re-registering the exact highest version
+		// remains a duplicate conflict.
+		var maxVersion int
+		for _, candidate := range data.Schemas {
+			if candidate.TenantID == schema.TenantID && candidate.SchemaID == schema.SchemaID && candidate.Version > maxVersion {
+				maxVersion = candidate.Version
+			}
+		}
+		if schema.Version < maxVersion {
+			return fmt.Errorf("%w: schema version %d is lower than the highest registered version %d for schema %s; version rollback is not allowed", domain.ErrInvalid, schema.Version, maxVersion, schema.SchemaID)
 		}
 		key := store.SchemaKey(schema.TenantID, schema.SchemaID, schema.Version)
 		if _, exists := data.Schemas[key]; exists {
@@ -870,10 +900,10 @@ func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]dom
 // version-exactly.
 //
 // Number-encoding consistency note: reconstruction must canonicalize numbers
-// exactly like the ingest-time digest path. Both currently round-trip through
-// float64 (clonePayload here and DecryptJSON), so large int64 values stay
-// consistent; the sibling canonical-number-encoding campaign must keep this
-// invariant (pinned by TestVerifyIntegrityLargeIntSensitiveField).
+// exactly like the ingest-time digest path. Both sides decode through
+// json.Number (clonePayload here and DecryptJSON), so int64 values > 2^53
+// keep their exact digits and VerifyIntegrity agrees with the stored digest
+// (pinned by TestVerifyIntegrityLargeIntSensitiveField).
 func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]domain.EventSchema) (string, error) {
 	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
 	if !ok {
@@ -1127,7 +1157,11 @@ func clonePayload(payload map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	var copyPayload map[string]any
-	if err := json.Unmarshal(encoded, &copyPayload); err != nil {
+	// UseNumber: a float64 re-decode would collapse int64 values > 2^53
+	// before digest derivation, corrupting the canonical digest.
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&copyPayload); err != nil {
 		return nil, err
 	}
 	return copyPayload, nil

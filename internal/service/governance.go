@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -123,7 +122,15 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 	return s.Store.Update(func(data *store.Snapshot) error {
 		roots := make([]string, 0, len(data.Checkpoints))
 		for key, checkpoints := range data.Checkpoints {
-			if !strings.HasPrefix(key, tenantID+store.KeySeparator) || len(checkpoints) == 0 {
+			if len(checkpoints) == 0 {
+				continue
+			}
+			// Exact-component membership: a key belongs to the tenant only if
+			// it parses as exactly tenantID + separator + one more component.
+			// Prefix matching would absorb foreign keys for tenant IDs that
+			// embed the separator (StreamKey("a\x1fb","s") has prefix
+			// "a\x1f"); multi-separator keys are excluded from every tenant.
+			if tenant, _, ok := store.SplitTenantKey(key); !ok || tenant != tenantID {
 				continue
 			}
 			roots = append(roots, checkpoints[len(checkpoints)-1].MerkleRoot)
@@ -162,9 +169,11 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 			}
 		}
 		for key, values := range data.Segments {
-			if strings.HasPrefix(key, tenantID+store.KeySeparator) && (streamID == "" || strings.HasSuffix(key, store.KeySeparator+streamID)) {
-				segments = append(segments, values...)
+			tid, sid, ok := store.SplitTenantKey(key)
+			if !ok || tid != tenantID || (streamID != "" && sid != streamID) {
+				continue
 			}
+			segments = append(segments, values...)
 		}
 		for _, aggregate := range data.AggregateCheckpoints {
 			if aggregate.TenantID == tenantID {
@@ -315,9 +324,14 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 			}
 		}
 		for key, values := range data.Segments {
-			if key == store.StreamKey(tenantID, "") || strings.HasPrefix(key, tenantID+store.KeySeparator) {
-				segments = append(segments, values...)
+			// Exact-component membership (see CreateAggregateCheckpoint); the
+			// former StreamKey(tenantID, "") shortcut is subsumed: that key
+			// parses as (tenantID, "", true).
+			tid, _, ok := store.SplitTenantKey(key)
+			if !ok || tid != tenantID {
+				continue
 			}
+			segments = append(segments, values...)
 		}
 		return nil
 	}); err != nil {

@@ -71,7 +71,7 @@ func (p *postgresBackend) load() (*Snapshot, int64, error) {
 		}
 		return nil, 0, fmt.Errorf("load state snapshot: %w", err)
 	}
-	if err := json.Unmarshal(encoded, data); err != nil {
+	if err := decodeSnapshot(encoded, data); err != nil {
 		return nil, 0, fmt.Errorf("decode state snapshot: %w", err)
 	}
 	data.normalize()

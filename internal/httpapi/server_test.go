@@ -534,6 +534,82 @@ func TestHTTPLatencyHistogramExposed(t *testing.T) {
 	}
 }
 
+// TestHTTPIngestLargeAggregateVersionConflictNotDuplicate is AC-4: an event
+// with AggregateVersion 2^53 is ingested; re-ingesting the same event_id
+// with 2^53+1 must return 409 ErrConflict (not silently Duplicate), and
+// re-ingesting the identical content must still return Duplicate.
+func TestHTTPIngestLargeAggregateVersionConflictNotDuplicate(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	at := time.Unix(1_700_000_010, 0).UTC()
+	base := func(version int64) domain.Event {
+		return domain.Event{EventID: "big-agg", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: at, OperationID: "big-op", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "big-idem", AggregateVersion: version, Payload: map[string]any{"resource": "invoice"}}
+	}
+	body, _ := json.Marshal(base(9007199254740992))
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		data, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("first ingest status=%d body=%s", response.StatusCode, data)
+	}
+	response.Body.Close()
+
+	// 2^53+1 is a distinct fact: it must conflict, not dedupe.
+	body, _ = json.Marshal(base(9007199254740993))
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("2^53+1 re-ingest status=%d body=%s, want 409", response.StatusCode, data)
+	}
+	var conflict struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Error.Code != "conflict" || !strings.Contains(conflict.Error.Message, "content differs") {
+		t.Fatalf("unexpected conflict body: %+v", conflict)
+	}
+	response.Body.Close()
+
+	// Re-ingesting the identical content must still dedupe (202, Duplicate).
+	body, _ = json.Marshal(base(9007199254740992))
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("identical re-ingest status=%d body=%s, want 202", response.StatusCode, data)
+	}
+	var wrapped struct {
+		Receipt domain.EventReceipt `json:"receipt"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if !wrapped.Receipt.Duplicate {
+		t.Fatalf("identical re-ingest must be Duplicate=true: %+v", wrapped.Receipt)
+	}
+}
+
 func TestHTTPNegativeCases(t *testing.T) {
 	server := testHTTPServer(t)
 	defer server.Close()
@@ -577,4 +653,55 @@ func TestHTTPNegativeCases(t *testing.T) {
 		t.Fatalf("bad cursor status=%d err=%v, want 400", response.StatusCode, err)
 	}
 	response.Body.Close()
+}
+
+// TestHTTPCreateTenantRejectsKeyFramingIDs is AC-1 over HTTP (REQ-4): the
+// existing statusForError mapping turns ErrInvalid into 400; no handler-level
+// validation is added. Rejected bodies must leave the snapshot untouched.
+func TestHTTPCreateTenantRejectsKeyFramingIDs(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	postTenant := func(id string) int {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"id": id, "name": "X", "active": true})
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/tenants", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+
+	// The control-separator body is exactly the cross-tenant leak vector.
+	for _, id := range []string{"a\u001fb", "a/b", "a b", "\u0000-nul"} {
+		if status := postTenant(id); status != http.StatusBadRequest {
+			t.Fatalf("POST tenant id=%q status=%d, want 400", id, status)
+		}
+	}
+	// A valid creation still works after the rejections, and the rejected
+	// IDs were never persisted.
+	if status := postTenant("tenant-http-c"); status != http.StatusCreated {
+		t.Fatalf("valid POST tenant status=%d, want 201", status)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		for _, id := range []string{"a\u001fb", "a/b", "a b", "\u0000-nul"} {
+			if _, exists := data.Tenants[id]; exists {
+				t.Fatalf("rejected tenant %q was persisted", id)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

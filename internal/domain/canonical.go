@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // CanonicalJSON emits deterministic JSON for hash calculation. Map keys are
 // sorted recursively and time values are encoded in RFC3339Nano UTC form.
+// Numbers are representation-independent: json.Number, int64 and float64
+// values that are numerically equal produce identical bytes, and integers
+// never lose precision (see writeNumber).
 func CanonicalJSON(value any) ([]byte, error) {
 	var b bytes.Buffer
 	if err := writeCanonical(&b, reflect.ValueOf(value)); err != nil {
@@ -35,8 +40,15 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 		return writeCanonical(b, v.Elem())
 	}
 	if v.CanInterface() {
-		if t, ok := v.Interface().(time.Time); ok {
-			return writeString(b, t.UTC().Format(time.RFC3339Nano))
+		switch typed := v.Interface().(type) {
+		case time.Time:
+			return writeString(b, typed.UTC().Format(time.RFC3339Nano))
+		case json.Number:
+			// json.Number must never hit the String branch: it would be
+			// emitted quoted, making the digest representation-dependent
+			// (UseNumber decoders produce json.Number, direct int64/float64
+			// producers do not).
+			return writeNumber(b, typed)
 		}
 	}
 	switch v.Kind() {
@@ -53,7 +65,16 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 		if math.IsNaN(f) || math.IsInf(f, 0) {
 			return fmt.Errorf("non-finite number is not valid JSON")
 		}
-		b.WriteString(strconv.FormatFloat(f, 'g', -1, v.Type().Bits()))
+		if f == 0 {
+			// Normalize -0 to 0: numerically equal values must canonicalize
+			// to identical bytes.
+			b.WriteString("0")
+			return nil
+		}
+		// 'f' (not 'g') keeps byte parity with writeNumber's json.Number
+		// path, e.g. float64(1e15) and json.Number("1e15") both emit
+		// "1000000000000000" instead of "1e+15".
+		b.WriteString(strconv.FormatFloat(f, 'f', -1, v.Type().Bits()))
 	case reflect.Slice, reflect.Array:
 		b.WriteByte('[')
 		for i := 0; i < v.Len(); i++ {
@@ -86,19 +107,132 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 		}
 		b.WriteByte('}')
 	case reflect.Struct:
-		data, err := json.Marshal(v.Interface())
-		if err != nil {
-			return err
-		}
-		var decoded any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			return err
-		}
-		return writeCanonical(b, reflect.ValueOf(decoded))
+		// Direct reflection emission instead of a json.Marshal/Unmarshal
+		// round-trip: the round-trip collapsed int64 values > 2^53 through
+		// float64 (digest collisions) and turned nested time.Time into
+		// zone-preserving strings. The byte shape still matches the old
+		// round-trip for unaffected values (keys sorted byte-wise, stdlib
+		// omitempty semantics), so digests of unaffected events are stable.
+		return writeStruct(b, v)
 	default:
 		return fmt.Errorf("unsupported canonical type %s", v.Type())
 	}
 	return nil
+}
+
+// writeNumber emits a json.Number. Integer literals are reproduced exactly
+// with arbitrary precision (big.Int, normalizing "-0" to "0"); fractional or
+// exponent forms are reduced to the shortest 'f'-format decimal of their
+// float64 value so that e.g. json.Number("1.5e3"), json.Number("1500.0"),
+// json.Number("1500"), int64(1500) and float64(1500) all emit "1500".
+// Non-finite or float64-overflowing literals are rejected.
+func writeNumber(b *bytes.Buffer, n json.Number) error {
+	s := string(n)
+	if !strings.ContainsAny(s, ".eE") {
+		i, ok := new(big.Int).SetString(s, 10)
+		if !ok {
+			return fmt.Errorf("invalid number literal %q", s)
+		}
+		b.WriteString(i.String())
+		return nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return fmt.Errorf("number %q is not representable as a finite float64", s)
+	}
+	if f == 0 {
+		b.WriteString("0")
+		return nil
+	}
+	b.WriteString(strconv.FormatFloat(f, 'f', -1, 64))
+	return nil
+}
+
+// writeStruct emits a struct with the same byte shape encoding/json produces
+// after a Marshal/Unmarshal round-trip through map[string]any: keys sorted
+// byte-wise, fields omitted per the stdlib omitempty rules, and every nested
+// value emitted through writeCanonical (so nested time.Time normalizes to
+// RFC3339Nano UTC and numbers stay exact, including any-typed values).
+func writeStruct(b *bytes.Buffer, v reflect.Value) error {
+	type namedValue struct {
+		name  string
+		value reflect.Value
+	}
+	t := v.Type()
+	fields := make([]namedValue, 0, v.NumField())
+	for i := 0; i < v.NumField(); i++ {
+		sf := t.Field(i)
+		if sf.PkgPath != "" {
+			continue // unexported: encoding/json ignores these
+		}
+		name, omit := jsonFieldName(sf)
+		if name == "" {
+			continue // json:"-"
+		}
+		fv := v.Field(i)
+		if omit && jsonIsEmptyValue(fv) {
+			continue
+		}
+		fields = append(fields, namedValue{name: name, value: fv})
+	}
+	sort.Slice(fields, func(i, j int) bool { return fields[i].name < fields[j].name })
+	b.WriteByte('{')
+	for i, f := range fields {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		if err := writeString(b, f.name); err != nil {
+			return err
+		}
+		b.WriteByte(':')
+		if err := writeCanonical(b, f.value); err != nil {
+			return err
+		}
+	}
+	b.WriteByte('}')
+	return nil
+}
+
+// jsonFieldName mirrors encoding/json's tag handling: the tag name (or the
+// field name when the tag has no name), "-" meaning skip, and the omitempty
+// option.
+func jsonFieldName(sf reflect.StructField) (string, bool) {
+	tag := sf.Tag.Get("json")
+	if tag == "-" {
+		return "", false
+	}
+	parts := strings.Split(tag, ",")
+	name := parts[0]
+	if name == "" {
+		name = sf.Name
+	}
+	omit := false
+	for _, opt := range parts[1:] {
+		if opt == "omitempty" {
+			omit = true
+		}
+	}
+	return name, omit
+}
+
+// jsonIsEmptyValue mirrors encoding/json's isEmptyValue, which decides
+// omitempty omission. Structs are never empty, matching the stdlib.
+func jsonIsEmptyValue(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return !v.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Pointer:
+		return v.IsNil()
+	}
+	return false
 }
 
 func writeString(b *bytes.Buffer, value string) error {

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -68,7 +69,12 @@ func DecryptJSON(encoded, key, associatedData string) (any, error) {
 		return nil, err
 	}
 	var value any
-	if err := json.Unmarshal(plain, &value); err != nil {
+	// UseNumber: the decrypted value feeds digest re-derivation
+	// (reconstructAndDerive); a float64 decode would collapse int64 values
+	// > 2^53 and break parity with the ingest-time digest.
+	decoder := json.NewDecoder(bytes.NewReader(plain))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
 	return value, nil
