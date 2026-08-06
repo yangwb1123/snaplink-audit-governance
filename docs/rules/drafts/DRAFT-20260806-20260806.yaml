@@ -1,0 +1,28 @@
+id: DRAFT-20260806
+title: Kafka 消费者对不可解析消息只提交不记死信（修复前）：账本链路宣称 never silently drop，但 deadLettered 计数与
+  DLQ F
+category: backend
+severity: warning
+scope:
+  languages: []
+  paths:
+  - src/**
+trigger:
+  operations: []
+rationale: 'Observed failure: Kafka 消费者对不可解析消息只提交不记死信（修复前）：账本链路宣称 never silently drop，但
+  deadLettered 计数与 DLQ Failure 记录缺失；根因是解码失败路径未走 deadLetter 流程。修复：ErrorCodeUnparsable
+  + DLQ 记录 + 计数后再提交. Root-cause analysis is required before this draft can be promoted
+  (edit requirements/forbidden/verification with the actual RCA).'
+requirements: []
+forbidden: []
+exceptions:
+- condition: ''
+verification:
+  static: []
+  tests: []
+examples:
+  good: []
+  bad: []
+owner: ''
+version: 0.1.0
+status: draft
