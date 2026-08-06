@@ -9,12 +9,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
 var crmPrincipal = domain.IngestPrincipal{ClientID: "crm"}
+
+// recordingArchive is a Store stub that records Put keys; fail makes it
+// return an error so ingest degrades to StatusIndexed and ArchivePending
+// can retry later.
+type recordingArchive struct {
+	fail bool
+	puts []string
+}
+
+func (r *recordingArchive) Put(_ context.Context, key string, _ []byte) error {
+	r.puts = append(r.puts, key)
+	if r.fail {
+		return errors.New("archive unavailable")
+	}
+	return nil
+}
+
+func (r *recordingArchive) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (r *recordingArchive) Ready(context.Context) error { return nil }
 
 func testService(t *testing.T, archive bool) *Service {
 	t.Helper()
@@ -181,7 +202,7 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 }
 
 func TestQueryReplayAndExport(t *testing.T) {
-	svc := testService(t, false)
+	svc := testService(t, true)
 	at := time.Unix(1_700_000_100, 0).UTC()
 	for i := 0; i < 3; i++ {
 		event := testEvent("evt-q-"+string(rune('1'+i)), "op-query", at.Add(time.Duration(i)*time.Second))
@@ -381,12 +402,70 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	svc.Config.ArchiveDir = filepath.Join(t.TempDir(), "archive")
+	// Wire the archive store itself (not the ArchiveDir string, which
+	// nothing re-derives into Config.Archive): the ingest gate above ran
+	// against the default unconfigured FileStore, so the receipt is
+	// StatusIndexed and ArchivePending must retry it.
+	svc.Config.Archive = &archive.FileStore{Dir: filepath.Join(t.TempDir(), "archive")}
 	count, err := svc.ArchivePending("tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
 	receipt, err := svc.GetReceipt("tenant-a", event.EventID)
+	if err != nil || receipt.Status != domain.StatusArchived {
+		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
+	}
+}
+
+// TestIngestArchivesWithS3OnlyConfig is AC-1: with an S3-equivalent store
+// injected and no ArchiveDir, ingest must still archive. Pre-fix the gate
+// keyed on the empty ArchiveDir string skipped archiving entirely and the
+// receipt stalled at StatusIndexed.
+func TestIngestArchivesWithS3OnlyConfig(t *testing.T) {
+	svc := testService(t, false)
+	archiveStub := &recordingArchive{}
+	svc.Config.Archive = archiveStub
+	event := testEvent("s3-only", "op-s3-only", time.Now().UTC())
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusArchived {
+		t.Fatalf("S3-only receipt not archived: %+v", receipt)
+	}
+	// SegmentSize is 2 and a single event seals no segments: exactly one
+	// object (the event) must have been written.
+	if len(archiveStub.puts) != 1 {
+		t.Fatalf("expected exactly one archive Put, got %d: %v", len(archiveStub.puts), archiveStub.puts)
+	}
+	if !strings.HasPrefix(archiveStub.puts[0], "events/tenant-a/") {
+		t.Fatalf("unexpected archive key: %s", archiveStub.puts[0])
+	}
+}
+
+// TestArchivePendingWithS3OnlyConfig is AC-2: an S3-only deployment where
+// archiving failed at ingest time (receipt stuck at StatusIndexed) must be
+// retried by ArchivePending instead of rejected as unconfigured. Pre-fix the
+// empty ArchiveDir string made ArchivePending return ErrInvalid and the
+// receipt stalled forever.
+func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
+	svc := testService(t, false)
+	archiveStub := &recordingArchive{fail: true}
+	svc.Config.Archive = archiveStub
+	event := testEvent("s3-only-retry", "op-s3-only", time.Now().UTC())
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("ingest with failing archive must stay indexed: %+v", receipt)
+	}
+	archiveStub.fail = false
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 1 {
+		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
+	}
+	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}

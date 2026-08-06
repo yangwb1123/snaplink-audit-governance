@@ -160,7 +160,7 @@ def cmd_check_root() -> int:
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
                "docs", "internal", "migrations", "checks", "test", "bin", ".trends",
                ".pi-batch", "engineering.yaml", "__pycache__"}
-    unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed]
+    unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed and not path.name.startswith(".pi-batch.lock")]
     if unexpected:
         print("root directories/files:", ", ".join(sorted(unexpected)))
     return int(bool(unexpected))

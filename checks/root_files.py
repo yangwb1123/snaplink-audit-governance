@@ -14,7 +14,11 @@ ALLOWED = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AG
 
 
 def run() -> int:
-    unexpected = sorted(path.name for path in ROOT.iterdir() if path.name not in ALLOWED)
+    unexpected = sorted(
+        path.name
+        for path in ROOT.iterdir()
+        if path.name not in ALLOWED and not path.name.startswith(".pi-batch.lock")
+    )
     if unexpected:
         print("FAIL: root files", *unexpected, sep="\n  ")
         return 1

@@ -52,6 +52,64 @@ func TestFileStoreReady(t *testing.T) {
 	}
 }
 
+func TestFileStorePutRejectsEmptyDir(t *testing.T) {
+	// AC-3: an empty-Dir FileStore must fail before any filesystem access
+	// instead of silently writing into the process working directory.
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	store := &FileStore{}
+	putErr := store.Put(context.Background(), "events/a.json", []byte(`{}`))
+	if putErr == nil {
+		t.Fatal("empty dir Put must fail")
+	}
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty-dir Put wrote into the working directory: %v", entries)
+	}
+	// Ready rejects the same configuration with the byte-identical message.
+	readyErr := store.Ready(context.Background())
+	if readyErr == nil || readyErr.Error() != putErr.Error() {
+		t.Fatalf("Put/Ready error mismatch: put=%v ready=%v", putErr, readyErr)
+	}
+}
+
+// unknownStore pins the Configured default: implementations the predicate
+// does not know are treated as configured because the caller injected them
+// deliberately.
+type unknownStore struct{}
+
+func (unknownStore) Put(context.Context, string, []byte) error { return nil }
+
+func (unknownStore) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (unknownStore) Ready(context.Context) error { return nil }
+
+func TestConfigured(t *testing.T) {
+	cases := []struct {
+		name  string
+		store Store
+		want  bool
+	}{
+		{"nil", nil, false},
+		{"typed nil file store", (*FileStore)(nil), false},
+		{"typed nil s3 store", (*S3Store)(nil), false},
+		{"empty dir file store", &FileStore{}, false},
+		{"file store with dir", &FileStore{Dir: "/x"}, true},
+		{"s3 store", &S3Store{}, true},
+		{"unknown store", unknownStore{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Configured(tc.store); got != tc.want {
+				t.Fatalf("Configured(%T) = %v, want %v", tc.store, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFileStorePutMissingData(t *testing.T) {
 	store := &FileStore{Dir: filepath.Join(t.TempDir(), "archive")}
 	if err := store.Put(context.Background(), "a/b/c.json", []byte("x")); err != nil {

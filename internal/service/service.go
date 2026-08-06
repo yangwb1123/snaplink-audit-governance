@@ -512,7 +512,7 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 	if receipt.Duplicate {
 		return receipt, nil
 	}
-	if s.Config.ArchiveDir != "" {
+	if archive.Configured(s.Config.Archive) {
 		archived := s.archiveEvent(event) == nil
 		for _, segment := range sealedSegments {
 			if s.archiveSegment(segment) != nil {

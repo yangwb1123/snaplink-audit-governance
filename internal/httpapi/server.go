@@ -165,9 +165,10 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	// Readiness reflects the configured archive dependency: an unavailable
 	// WORM destination must surface here instead of silently degrading the
-	// archived status of new events. An unconfigured local store (empty dir)
-	// is skipped; S3 stores probe their bucket.
-	if archiveStore, ok := s.Service.Config.Archive.(*archive.FileStore); !ok || archiveStore.Dir != "" {
+	// archived status of new events. An unconfigured store (nil or an
+	// empty-dir local store) is skipped; configured stores probe their
+	// destination.
+	if archive.Configured(s.Service.Config.Archive) {
 		if err := s.Service.Config.Archive.Ready(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "archive_unavailable"})
 			return

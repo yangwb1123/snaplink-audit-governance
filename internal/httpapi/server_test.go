@@ -30,7 +30,10 @@ func testHTTPServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	// The archive is configured by default so export jobs can complete
+	// (unconfigured FileStore.Put fails loudly instead of writing into the
+	// working directory).
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +471,29 @@ func TestHTTPReadyzArchiveProbe(t *testing.T) {
 	response, err = http.Get(server.URL + "/readyz")
 	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("readyz with broken archive status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+}
+
+func TestHTTPReadyzSkipsUnconfiguredArchive(t *testing.T) {
+	// Ready consolidation: an unconfigured archive (nil Store, which New
+	// cannot produce but a caller could inject) must skip the probe and
+	// report ready instead of panicking on the nil interface.
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.Config.Archive = nil
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/readyz")
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("readyz with nil archive status=%d err=%v", response.StatusCode, err)
 	}
 	response.Body.Close()
 }

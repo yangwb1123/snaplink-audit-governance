@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
@@ -308,7 +309,7 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 // an existing file is treated as already archived.
 
 func (s *Service) ArchivePending(tenantID string) (int, error) {
-	if s.Config.ArchiveDir == "" {
+	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
 	var events []domain.Event

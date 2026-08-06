@@ -27,6 +27,26 @@ type Store interface {
 	Ready(ctx context.Context) error
 }
 
+// Configured reports whether an archive destination is enabled. A nil
+// store or a local store without a directory is unconfigured; a local
+// store with a directory and any S3 store are configured. Unknown Store
+// implementations are treated as configured because the caller injected
+// them deliberately. This predicate is the single source of truth for the
+// ingest gate, the governance retry gate and the readiness probe, so the
+// three call sites cannot diverge on what counts as an enabled archive.
+func Configured(store Store) bool {
+	switch s := store.(type) {
+	case nil:
+		return false
+	case *FileStore:
+		return s != nil && s.Dir != ""
+	case *S3Store:
+		return s != nil
+	default:
+		return true
+	}
+}
+
 // FileStore writes into a local append-only directory: O_EXCL creation,
 // read-only permissions, fsync before rename.
 type FileStore struct {
@@ -34,6 +54,9 @@ type FileStore struct {
 }
 
 func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
+	if f.Dir == "" {
+		return fmt.Errorf("archive directory is not configured")
+	}
 	path := filepath.Join(f.Dir, filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
