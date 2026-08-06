@@ -5,3 +5,10 @@
 *.log
 .trends/
 __pycache__/
+
+# ai-batch-runner local state
+/.pi-batch/
+/docs/auto/
+
+# ai-batch-runner local state
+/.pi-batch/
