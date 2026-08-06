@@ -12,7 +12,7 @@ from typing import Optional
 from . import config
 from .config import (AGENT_DEFAULT_MODEL, AGENT_DEFAULT_TIMEOUT,
                      AGENT_DEFAULT_WORKERS, COMMAND_OUTPUT_MAX_BYTES,
-                     COMMAND_TIMEOUT)
+                     COMMAND_TIMEOUT, log)
 from .text_io import read_text_bounded
 
 @dataclass
@@ -161,13 +161,19 @@ class Task:
             fpath = Path(match.group(1))
             if not fpath.is_absolute():
                 fpath = Path(base_dir) / fpath
-            if fpath.exists():
-                return read_text_bounded(fpath, config.INPUT_MAX_BYTES,
-                                         "prompt reference")
+            try:
+                if fpath.exists():
+                    return read_text_bounded(fpath, config.INPUT_MAX_BYTES,
+                                             "prompt reference")
+            except ValueError as exc:
+                log.warning("prompt reference rejected: %s", exc)
             log.warning("referenced file not found: %s", fpath)
             return match.group(0)
 
-        return re.sub(r"@(\S+)", replace, self.prompt)
+        # Only path-like references with a known extension are resolved so
+        # that event versions like vault.file.deleted@1.1 stay literal.
+        return re.sub(r"@((?:[\w./-]+/)*[\w.-]+\.(?:md|txt|ya?ml|json))",
+                      replace, self.prompt)
 
 
 @dataclass

@@ -11,7 +11,7 @@ from pathlib import Path
 
 DEFAULT_ANALYSIS_PROMPT = """Analyze module '{module}' at {module_path} and its related interfaces in the repository.
 Return ONLY a JSON array with at most {candidate_limit} high-value improvement directions, sorted by value.
-Each object must contain: title, problem, value (1-10), risk_reduction (1-10), effort (1-10), confidence (1-10), evidence (existing file/symbol paths), and acceptance (testable checks).
+Each object must contain: title, problem, value (1-10), risk_reduction (1-10), effort (1-10), confidence (1-10), evidence (a JSON array of existing file/symbol paths), and acceptance (a JSON array of testable checks).
 Do not modify code. Claims without repository evidence must be identified as proposed, not verified.
 """
 
@@ -76,6 +76,11 @@ def _number(value) -> float:
 
 
 def _strings(value) -> tuple[str, ...]:
+    """Normalize a list of strings; tolerate a single string (LLMs
+    sometimes emit evidence/acceptance as one string instead of an array)
+    by splitting on newlines and semicolons."""
+    if isinstance(value, str):
+        value = re.split(r"[\n;]+", value)
     if not isinstance(value, list):
         return ()
     return tuple(str(item).strip() for item in value if str(item).strip())
