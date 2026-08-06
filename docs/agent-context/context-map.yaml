@@ -1,0 +1,7 @@
+# Context routing map (generated from the platform map; edit with care).
+routes:
+  - when:
+      task_contains: [平台, 组合, 契约, 边界, 职责, 审计, 权限, 租户, 事件,
+                      platform, contract, composition, boundary, audit,
+                      permission, scope, tenant, event]
+    load: [docs/agent-context/platform-contract.md]
