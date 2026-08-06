@@ -1,0 +1,194 @@
+# Bilingual keyword map for the task type classifier (pbatch/classifier.py).
+# Mirrors role_keywords.yaml: CJK terms use substring matching, Latin terms
+# use word boundaries; each hit scores 2 points, capped at 10 per type.
+#
+# The classifier runs BEFORE execution (--classify / `classify` subcommand)
+# and routes frontend UI tasks to the configured UI generation pipeline.
+# Edit/extend here instead of touching code; malformed YAML falls back to
+# the built-in defaults in classifier.py.
+
+task_types:
+  # Frontend UI work: pages, components, layout, spacing, styling. A match
+  # routes the batch to classifier.frontend_pipeline (ui-generation).
+  frontend_ui:
+    - page
+    - ui
+    - layout
+    - component
+    - spacing
+    - widget
+    - screen
+    - tsx
+    - dart
+    - flutter
+    - react
+    - vue
+    - css
+    - styled
+    - 页面
+    - 前端
+    - 界面
+    - 布局
+    - 组件
+    - 间距
+    - 按钮
+    - 表单
+    - 弹窗
+    - 卡片
+    - 导航
+    - 侧边栏
+    - 表格
+    - 分页
+    - 后台
+    - 管理后台
+    - 登录页
+    - 列表页
+    - 详情页
+    - 设计稿
+    - 视觉
+  # Backend / service work.
+  backend:
+    - api
+    - server
+    - endpoint
+    - database
+    - schema
+    - service
+    - 后端
+    - 接口
+    - 服务端
+    - 数据库
+    - 表结构
+    - 微服务
+    - 分布式
+    - 领域模型
+    - 实体
+    - 聚合
+    - 事务
+    - 消息队列
+    - 对账
+    - 库存
+    - 工作流
+    - domain
+    - entity
+    - workflow
+    - transaction
+  # Data engineering / reporting.
+  data:
+    - sql
+    - etl
+    - 数据管道
+    - 报表
+    - 指标
+    - 数据仓库
+  # Code maintenance / refactoring (no domain-specific specs apply).
+  code_engineering:
+    - 重构
+    - 维护
+    - 修复
+    - 优化
+    - 清理
+    - 技术债
+    - refactor
+    - maintain
+    - fix
+    - optimize
+    - cleanup
+  # Documentation / specs.
+  docs:
+    - documentation
+    - spec
+    - readme
+    - 文档
+    - 需求
+    - 规范
+    - 说明
+    - 手册
+  # CI / deployment / operations.
+  devops:
+    - ci/cd
+    - deploy
+    - docker
+    - kubernetes
+    - 部署
+    - 运维
+    - 发布
+    - 流水线
+  # Review / audit / analysis (non-implementation).
+  analysis:
+    - review
+    - audit
+    - 分析
+    - 审查
+    - 评审
+    - 评估
+    - 调研
+
+# Frontend implementation platform (strong evidence: +2 boost to frontend_ui).
+platforms:
+  tsx:
+    - tsx
+    - react
+    - typescript
+    - antd
+    - 前端组件
+  dart:
+    - dart
+    - flutter
+    - widget
+    - sizedbox
+    - material
+  vue:
+    - vue
+    - nuxt
+    - template
+  rn:
+    - react native
+    - rn
+
+# Frontend business profile (page style/density selection, like
+# ui-specs/business-profiles/ in the UI generation pipeline).
+profiles:
+  erp:
+    - erp
+    - mes
+    - 排程
+    - 库存
+    - 采购单
+    - 工单
+    - 单据
+  cms:
+    - cms
+    - 内容管理
+    - 文章
+    - 审核
+    - 发布
+  oa:
+    - oa
+    - 审批
+    - 待办
+    - 流程
+    - 通知公告
+  dashboard:
+    - dashboard
+    - 大屏
+    - 图表
+    - 数据可视化
+    - 看板
+  immersive:
+    - 特效
+    - 3d
+    - 沉浸
+    - 动画
+    - 滚动叙事
+    - 粒子
+  marketing:
+    - 官网
+    - 落地页
+    - 营销
+    - 转化
+    - landing
+  mobile:
+    - 移动端
+    - app
+    - mobile

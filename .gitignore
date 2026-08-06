@@ -13,3 +13,10 @@ __pycache__/
 # ai-batch-runner local state
 /.pi-batch/
 /internal/**/exports/
+
+# ai-batch-runner runtime artifacts
+.pi-batch/
+logs/
+docs/archive/
+docs/auto/
+docs/requirements/runs/
