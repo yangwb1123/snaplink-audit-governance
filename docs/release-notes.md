@@ -36,6 +36,36 @@ service level, refusal atomicity (no admin action), concurrent distinct-actor
 (1 winner / 1 conflict) and same-actor (all refused) races, platform escape
 hatch.
 
+## 2026-08-06 — Internal error details redacted from 5xx responses
+
+**Behavior change (security):** HTTP error responses with status ≥ 500 no
+longer carry internal error text. Previously `writeError` and the batch
+partial-receipt path serialized `err.Error()` verbatim, so filesystem paths,
+store paths, errno strings and crypto details (e.g. `open …/state.json.tmp:
+is a directory`, archive `ENOTDIR`/`EISDIR` text) leaked to API clients on
+download and ingest failures. `GET /api/v1/exports/{jobID}` also surfaced the
+raw export-failure diagnostic via the `error` field.
+
+Details:
+
+- `errorBody(status, err, r)` is now status-keyed: every ≥ 500 response
+  collapses to the fixed `internal server error` message / `internal_error`
+  code (the code keeps the domain mapping, which by construction never maps
+  to ≥ 500, so the two cannot contradict). The confirmed-dead
+  `strings.Contains(message, "internal server error")` branch and the no-op
+  `if status >= 400 { _ = r }` block were removed.
+- The `Cache-Control: no-store` header on 5xx, the panic-recovery path, all
+  4xx messages, the `os.IsNotExist`→404 download mapping and the envelope
+  (`code`/`message`/`request_id`) are unchanged; OpenAPI `Error.message` is an
+  unconstrained string, so the contract is schema-compatible with no spec
+  edit.
+- `getExport` masks a failed job's `error` field to the fixed
+  `"export failed"` message at the API boundary on a value copy. Raw
+  diagnostics stay in the operator-only snapshot (`state.json`) —
+  persist-time sanitization is a documented deferral.
+
+Migration: none (internal response-body change; no data/config migration).
+Rollback = revert the commit. No new logging was added.
 
 ## 2026-08-06 — Dev authentication flips to fail-closed defaults
 

@@ -278,7 +278,8 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(ingestErr, domain.ErrQuotaExceeded) {
 				s.ingestQuotaCount.Add(1)
 			}
-			writeJSON(w, statusForError(ingestErr), map[string]any{"receipts": receipts, "error": errorBody(ingestErr, r)})
+			partialStatus := statusForError(ingestErr)
+			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, ingestErr, r)})
 			return
 		}
 		s.ingestCount.Add(1)
@@ -420,6 +421,13 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
+	}
+	// The API boundary never surfaces the raw export failure diagnostic
+	// (filesystem paths, errno text); operators read the full detail from
+	// state.json directly. Persist-time sanitization stays deferred: the
+	// snapshot keeps the raw error, the response gets a fixed message.
+	if job.Error != "" {
+		job.Error = "export failed"
 	}
 	writeJSON(w, http.StatusOK, job)
 }
@@ -926,13 +934,16 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
 	if status >= 500 {
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	if status >= 400 {
-		_ = r
-	}
-	writeJSON(w, status, errorBody(err, r))
+	writeJSON(w, status, errorBody(status, err, r))
 }
 
-func errorBody(err error, r *http.Request) map[string]any {
+// errorBody renders the stable error contract. The status is authoritative
+// for the message: responses with status >= 500 never carry internal error
+// text (filesystem paths, errno strings, crypto details) and collapse to the
+// fixed strings, while the code keeps the domain mapping below 500. The two
+// stay consistent by construction because statusForError maps every domain
+// error to < 500, so a >= 500 response always means internal_error.
+func errorBody(status int, err error, r *http.Request) map[string]any {
 	code := "internal_error"
 	switch {
 	case errors.Is(err, domain.ErrInvalid):
@@ -951,7 +962,7 @@ func errorBody(err error, r *http.Request) map[string]any {
 		code = "schema_not_found"
 	}
 	message := err.Error()
-	if strings.Contains(message, "internal server error") {
+	if status >= 500 {
 		message = "internal server error"
 	}
 	return map[string]any{"error": map[string]any{"code": code, "message": message, "request_id": r.Context().Value(requestIDKey)}}
