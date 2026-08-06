@@ -37,7 +37,8 @@ Authorization: Bearer dev:demo:tenant-auditor
 
 与 Snaplink 联调时使用 HTTPS `AUDIT_JWKS_URL`、匹配的
 `AUDIT_JWT_ISSUER`/`AUDIT_JWT_AUDIENCE`，并将 `AUDIT_ALLOW_DEV_AUTH` 设为
-false。允许的签名算法为 EdDSA/Ed25519、ES256/384/512、RS256、PS256。
+false（自 2026-08-06 起默认即为 false：开发认证默认失败关闭，只有显式
+`AUDIT_ALLOW_DEV_AUTH=true` 才启用）。允许的签名算法为 EdDSA/Ed25519、ES256/384/512、RS256、PS256。
 仅本机需要测试 HS256 时，必须同时设置 `AUDIT_JWT_SECRET` 和
 `AUDIT_ALLOW_LOCAL_HS256=true`，且不得设置 JWKS 或 PEM 公钥。
 
@@ -65,15 +66,21 @@ checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
 须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，
 独立于 `AUDIT_ALLOW_DEV_AUTH`）才恢复旧默认行为。
 
-部署预检（不打开存储、不发起网络）：
+部署预检（不打开存储、不发起网络；预检与启动使用相同的认证校验规则）：
 
 ```sh
-AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-api -check-config
+AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... \
+AUDIT_JWT_SECRET=... AUDIT_ALLOW_LOCAL_HS256=true ./bin/audit-api -check-config
 AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker -check-config
 ```
 
 退出码 0 且输出不含 `=well-known-default` 警告即通过；API 与 worker
-必须使用相同的两个值（共用同一条证据链，AC-3）。
+必须使用相同的两个值（共用同一条证据链，AC-3）。自 2026-08-06 起预检
+同时校验认证配置：没有任何 JWT 信任源（密钥/PEM/JWKS，开发认证默认
+关闭）的配置会失败；`-allow-dev-auth` 单独无法满足预检（仅环境变量
+`AUDIT_ALLOW_DEV_AUTH=true` 可白名单开发认证，失败时输出
+`auth=dev_auth_flag_not_allowlisted` 指明原因）；本机开发栈须在运行时
+环境（而非仅 CI 预检步骤）显式设置 `AUDIT_ALLOW_DEV_AUTH=true`。
 
 ## 验证顺序
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,50 @@ func TestJWTRejectsMalformedClientIdentityClaim(t *testing.T) {
 	}
 	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected a non-string client_id to be rejected")
+	}
+}
+
+func TestDevAuthRejectedDespiteConfiguredTrustSource(t *testing.T) {
+	// Genuinely new coverage: with a real trust source configured and
+	// AllowDev=false, rejection must come from the dev gate, not the
+	// missing-trust-source path exercised by (Authenticator{}) today.
+	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	if _, err := authenticator.AuthenticateToken("dev:tenant-a:auditor"); err == nil {
+		t.Fatal("dev token must be rejected when AllowDev is false")
+	} else if strings.Contains(err.Error(), "no JWT verification trust source is configured") {
+		t.Fatalf("rejection must come from the dev gate, not the missing-trust-source path: %v", err)
+	}
+	payload := map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix()}
+	if _, err := authenticator.AuthenticateToken(signJWT(t, payload)); err != nil {
+		t.Fatalf("a valid JWT with the same trust source must still authenticate: %v", err)
+	}
+}
+
+func TestDevAuthAcceptedWhenAllowlisted(t *testing.T) {
+	// D4 companion: AllowDev stays a complete runtime trust source (the
+	// fail-closed flip changes only the default and the check-config gate),
+	// and allowlisted dev auth still rejects malformed dev tokens and
+	// non-dev garbage while real JWTs keep verifying.
+	if err := (Authenticator{AllowDev: true}).ValidateConfiguration(); err != nil {
+		t.Fatalf("AllowDev alone must remain a valid runtime trust source: %v", err)
+	}
+	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true, AllowDev: true}
+	claims, err := authenticator.AuthenticateToken("dev:tenant-a:auditor")
+	if err != nil {
+		t.Fatalf("allowlisted dev auth must accept dev tokens: %v", err)
+	}
+	if claims.TenantID != "tenant-a" || !claims.Allows("audit:event:read") {
+		t.Fatalf("unexpected dev claims: %+v", claims)
+	}
+	if _, err := authenticator.AuthenticateToken("dev:only"); err == nil {
+		t.Fatal("malformed dev token must be rejected even when allowlisted")
+	}
+	if _, err := authenticator.AuthenticateToken("not-a-dev-token"); err == nil {
+		t.Fatal("non-dev garbage must be rejected even when allowlisted")
+	}
+	payload := map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix()}
+	if _, err := authenticator.AuthenticateToken(signJWT(t, payload)); err != nil {
+		t.Fatalf("real JWTs must still verify when dev auth is allowlisted: %v", err)
 	}
 }
 

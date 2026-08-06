@@ -83,6 +83,9 @@
 - 部署前必须通过 `audit-api -check-config` / `audit-governance-worker
   -check-config` 预检（退出码 0 且无 `=well-known-default` 警告），API
   与 worker 必须使用相同的 `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY`。
+  预检同时校验认证配置（与启动同一规则）：无 JWT 信任源或仅凭
+  `-allow-dev-auth` 的开发认证均失败关闭；开发认证白名单仅接受环境变量
+  `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
 
 ## 4. 不在本机验证的攻击面
 
