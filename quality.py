@@ -122,15 +122,28 @@ def _scan_duplicates(tree: ast.AST, path: Path) -> list[str]:
 def main(argv: list[str]) -> int:
     # Standalone repo adaptation: upstream defaulted to "ai-dev"; here the
     # root IS the tool, so a bare run scans the current directory.
-    # --exclude=PATH (repeatable, relative to the target root) skips trees
-    # that legitimately carry legacy/vendored code (e.g. ai-dev/).
-    excludes = [Path(a[len("--exclude="):]).resolve()
-                for a in argv if a.startswith("--exclude=")]
-    targets = [Path(a) for a in (argv or ["."]) if Path(a).exists()]
+    # --exclude=PATH or --exclude PATH (repeatable) skips trees that
+    # legitimately carry legacy/vendored code (e.g. ai-dev/).
+    argv_list = list(argv)
+    excludes: list = []
+    index = 0
+    while index < len(argv_list):
+        arg = argv_list[index]
+        if arg == "--exclude" and index + 1 < len(argv_list):
+            excludes.append(Path(argv_list[index + 1]).resolve())
+            argv_list.pop(index)
+            argv_list.pop(index)
+            continue
+        if arg.startswith("--exclude="):
+            excludes.append(Path(arg[len("--exclude="):]).resolve())
+            argv_list.pop(index)
+            continue
+        index += 1
+    targets = [Path(a) for a in (argv_list or ["."]) if Path(a).exists()]
     if not targets:
         print("quality: no targets found", file=sys.stderr)
         return 1
-    fail_on_legacy = "--strict" in argv
+    fail_on_legacy = "--strict" in argv_list
     total = 0
     for t in targets:
         files = sorted(t.rglob("*.py")) if t.is_dir() else [t]
