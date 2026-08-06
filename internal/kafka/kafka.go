@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"time"
@@ -15,10 +16,42 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/outbox"
 )
 
 // TopicAccepted is the AsyncAPI topic for validated, normalized events.
 const TopicAccepted = "audit.events.accepted.v1"
+
+// TopicDLQ is the AsyncAPI topic for events whose retries were exhausted or
+// that failed permanently (api/asyncapi/asyncapi.yaml channel dlq).
+const TopicDLQ = "audit.events.dlq.v1"
+
+// Dead-letter error codes carried in Failure.ErrorCode, matching the
+// AsyncAPI Failure payload vocabulary.
+const (
+	// ErrorCodePermanentError marks a client-rejected event (4xx except 429)
+	// that can never succeed on retry.
+	ErrorCodePermanentError = "permanent_error"
+	// ErrorCodeAttemptsExhausted marks a transiently failing event that hit
+	// the per-message attempt cap.
+	ErrorCodeAttemptsExhausted = "attempts_exhausted"
+)
+
+// Failure is the dead-letter payload declared by the AsyncAPI contract
+// (api/asyncapi/asyncapi.yaml, components.messages.Failure). The JSON key set
+// is exactly the three required fields.
+type Failure struct {
+	EventID      string `json:"event_id"`
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
+}
+
+// FailurePublisher writes dead-letter Failure records to the DLQ topic.
+// *Producer implements it; the consumer degrades to commit + log when no
+// publisher is attached or publishing fails.
+type FailurePublisher interface {
+	PublishFailure(ctx context.Context, failure Failure) error
+}
 
 // Producer writes canonical events to the accepted topic. It implements
 // outbox.DeliverFunc so the relay can choose Kafka instead of HTTP delivery
@@ -53,6 +86,17 @@ func (p *Producer) Deliver(ctx context.Context, event domain.Event) error {
 	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(event.EventID), Value: encoded})
 }
 
+// PublishFailure serializes a dead-letter Failure and writes it to the
+// producer's topic. The message key is the failing event ID so downstream
+// replay can route by event.
+func (p *Producer) PublishFailure(ctx context.Context, failure Failure) error {
+	encoded, err := json.Marshal(failure)
+	if err != nil {
+		return err
+	}
+	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(failure.EventID), Value: encoded})
+}
+
 func (p *Producer) Close() error { return p.writer.Close() }
 
 // IngestFunc delivers one canonical event into the ledger path. The audit
@@ -69,20 +113,58 @@ type messageReader interface {
 	Close() error
 }
 
+// defaultMaxAttempts caps transient retries per message when no option is
+// given, mirroring outbox.Relay.maxAttempts.
+const defaultMaxAttempts = 8
+
 // Consumer reads the accepted topic with manual offset commits. A message is
-// committed only after ingest succeeds; failures back off and retry the same
-// message (backpressure, never silent drops), matching the degradation
-// policy for an unavailable ledger path. Unparsable messages are committed
-// and logged as dead-letter evidence.
+// committed only after ingest succeeds; transient failures back off and
+// retry the same message up to the per-(partition, offset) attempt cap, then
+// dead-letter it. Permanent failures (outbox.DeliveryError with Permanent
+// set) are dead-lettered immediately. Unparsable messages are committed and
+// logged as dead-letter evidence. Dead-lettering publishes a Failure record
+// to the DLQ topic (when one is attached) and always commits, so partition
+// progress is never blocked by a slow or unavailable DLQ.
 type Consumer struct {
-	reader  messageReader
-	ingest  IngestFunc
-	backoff time.Duration
-	logger  *log.Logger
+	reader      messageReader
+	ingest      IngestFunc
+	backoff     time.Duration
+	logger      *log.Logger
+	maxAttempts int
+	dlq         FailurePublisher
+	attempts    map[messageKey]int
+}
+
+// messageKey identifies one in-flight message for attempt accounting.
+type messageKey struct {
+	partition int
+	offset    int64
+}
+
+// ConsumerOption tunes a Consumer created by NewConsumer. Options are
+// additive; unset options keep the defaults.
+type ConsumerOption func(*Consumer)
+
+// WithMaxAttempts caps transient retries per (partition, offset) before the
+// message is dead-lettered. Non-positive values restore the default of 8.
+func WithMaxAttempts(maxAttempts int) ConsumerOption {
+	return func(c *Consumer) {
+		if maxAttempts > 0 {
+			c.maxAttempts = maxAttempts
+		}
+	}
+}
+
+// WithDLQ attaches the dead-letter publisher. Without one (or when
+// publishing fails) dead-lettering degrades to commit + log.
+func WithDLQ(publisher FailurePublisher) ConsumerOption {
+	return func(c *Consumer) {
+		c.dlq = publisher
+	}
 }
 
 // NewConsumer creates a consumer group reader with manual commit.
-func NewConsumer(brokers []string, topic, groupID string, ingest IngestFunc, backoff time.Duration, logger *log.Logger) *Consumer {
+func NewConsumer(brokers []string, topic, groupID string, ingest IngestFunc, backoff time.Duration, logger *log.Logger, options ...ConsumerOption) *Consumer {
 	if topic == "" {
 		topic = TopicAccepted
 	}
@@ -98,7 +180,11 @@ func NewConsumer(brokers []string, topic, groupID string, ingest IngestFunc, bac
 		CommitInterval: 0, // manual commits only
 		StartOffset:    kafka.FirstOffset,
 	})
-	return &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: logger}
+	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: logger, attempts: make(map[messageKey]int)}
+	for _, option := range options {
+		option(consumer)
+	}
+	return consumer
 }
 
 func (c *Consumer) logf(format string, args ...any) {
@@ -107,12 +193,24 @@ func (c *Consumer) logf(format string, args ...any) {
 	}
 }
 
-// newConsumerWithReader is the test seam for the backpressure state machine.
-func newConsumerWithReader(reader messageReader, ingest IngestFunc, backoff time.Duration) *Consumer {
+// newConsumerWithReader is the test seam for the backpressure/dead-letter
+// state machine.
+func newConsumerWithReader(reader messageReader, ingest IngestFunc, backoff time.Duration, options ...ConsumerOption) *Consumer {
 	if backoff <= 0 {
 		backoff = time.Millisecond
 	}
-	return &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: log.New(io.Discard, "", 0)}
+	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: log.New(io.Discard, "", 0), attempts: make(map[messageKey]int)}
+	for _, option := range options {
+		option(consumer)
+	}
+	return consumer
+}
+
+func (c *Consumer) attemptCap() int {
+	if c.maxAttempts <= 0 {
+		return defaultMaxAttempts
+	}
+	return c.maxAttempts
 }
 
 // Run consumes until ctx is cancelled or a fatal reader error occurs.
@@ -136,10 +234,27 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		key := messageKey{partition: message.Partition, offset: message.Offset}
 		if err := c.ingest(ctx, event); err != nil {
-			// 背压：不提交，退避后重试同一条消息。幂等消费保证
-			// 重试不会产生重复事实。
-			c.logf("ingest failed topic=%s offset=%d event_id=%s error=%v (backoff=%s)", c.reader.Config().Topic, message.Offset, event.EventID, err, c.backoff)
+			// 永久错误（4xx 语义拒绝）没有重试价值：立即死信。
+			var deliveryErr *outbox.DeliveryError
+			if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
+				if deadErr := c.deadLetter(ctx, message, event, ErrorCodePermanentError, err); deadErr != nil {
+					return deadErr
+				}
+				continue
+			}
+			// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；
+			// 否则退避重试同一条消息（背压，幂等消费保证重试不会
+			// 产生重复事实）。
+			c.attempts[key]++
+			if c.attempts[key] >= c.attemptCap() {
+				if deadErr := c.deadLetter(ctx, message, event, ErrorCodeAttemptsExhausted, err); deadErr != nil {
+					return deadErr
+				}
+				continue
+			}
+			c.logf("ingest failed topic=%s offset=%d event_id=%s error=%v (backoff=%s attempt=%d/%d)", c.reader.Config().Topic, message.Offset, event.EventID, err, c.backoff, c.attempts[key], c.attemptCap())
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -147,11 +262,28 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		delete(c.attempts, key)
 		if err := c.reader.CommitMessages(ctx, message); err != nil {
 			return err
 		}
 		c.logf("ingested topic=%s offset=%d event_id=%s", c.reader.Config().Topic, message.Offset, event.EventID)
 	}
+}
+
+// deadLetter publishes the Failure to the DLQ (when one is attached), then
+// commits the message so the partition advances. A publish failure degrades
+// to commit + log: the DLQ must never block ledger progress.
+func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event domain.Event, code string, cause error) error {
+	key := messageKey{partition: message.Partition, offset: message.Offset}
+	delete(c.attempts, key)
+	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error()}
+	if c.dlq != nil {
+		if err := c.dlq.PublishFailure(ctx, failure); err != nil {
+			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
+		}
+	}
+	c.logf("dead-lettered topic=%s partition=%d offset=%d event_id=%s code=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, cause)
+	return c.reader.CommitMessages(ctx, message)
 }
 
 func (c *Consumer) Close() error { return c.reader.Close() }

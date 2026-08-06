@@ -1,5 +1,26 @@
 # Release Notes
 
+## 2026-08-06 — Kafka consumer dead-letters permanently failing messages
+
+**Behavior change (availability):** `audit-kafka-consumer` no longer retries
+poison events forever. Ingest failures classified as permanent
+(`outbox.DeliveryError{Permanent}` — the audit API's 4xx except 429) are
+dead-lettered immediately; transient failures retry per (partition, offset)
+up to `-max-attempts` (default 8, env `AUDIT_KAFKA_MAX_ATTEMPTS`) and are
+then dead-lettered. A dead-letter publishes a `Failure` record
+(`event_id`, `error_code`, `error_message` — the AsyncAPI
+`audit.events.dlq.v1` contract, keyed by the failing event ID) via
+`-dlq-topic` (default `audit.events.dlq.v1`, env `AUDIT_KAFKA_DLQ_TOPIC`),
+commits the message, and continues. A DLQ publish failure or a consumer
+without a publisher degrades to commit + log and never blocks partition
+progress. New `error_code` values: `permanent_error`, `attempts_exhausted`.
+
+- Wire-compatible: `audit-projector` keeps its existing flags and inherits
+  the capped-retry behavior with commit+log degradation (no DLQ publisher).
+- Ops: pre-create `audit.events.dlq.v1` with ≥30d retention before deploy;
+  poison events are expected to clear consumer lag within one backoff cycle
+  instead of stalling the partition.
+
 ## 2026-08-06 — Separation of duties enforced in restore approval
 
 **Behavior change (security):** approving or rejecting a restore run now
