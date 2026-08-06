@@ -419,6 +419,14 @@ func (s *Service) transitionRestore(tenantID, runID, actor, target string) (doma
 		if value.Status != domain.RestoreStatusPendingApproval {
 			return fmt.Errorf("%w: restore run is not pending approval", domain.ErrConflict)
 		}
+		// Separation of duties: the deciding actor must differ from the
+		// requesting actor. Inside the Update closure, so a refusal commits
+		// nothing (no version bump, no admin action). Precedence is pinned
+		// NotFound → Conflict → Forbidden: 404 masks cross-tenant existence,
+		// 409 dominates for decided runs.
+		if value.CreatedBy == actor {
+			return domain.ErrForbidden
+		}
 		now := s.Now()
 		if target == domain.RestoreStatusApproved {
 			value.Status = domain.RestoreStatusApproved

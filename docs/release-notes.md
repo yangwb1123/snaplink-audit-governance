@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-08-06 — Separation of duties enforced in restore approval
+
+**Behavior change (security):** approving or rejecting a restore run now
+requires a decision actor different from the actor who created the run. The
+same principal can no longer create and decide a restore (previously the
+happy path). The 403 response was already part of the documented contract
+(`openapi.yaml` decide endpoints), so this is a wire-compatible tightening:
+
+- The guard runs inside the atomic `Store.Update` closure in
+  `transitionRestore` after the existing 404/409 checks, with precedence
+  pinned **NotFound → Conflict → Forbidden** (404 masks cross-tenant
+  existence; 409 dominates for decided runs). A refusal commits nothing:
+  no version bump, no admin-action record.
+- **Auth hardening (separately revertible):** the JWT `sub` claim is now
+  parsed with the same strict rule as `client_id`/`azp` (`strictIdentityClaim`)
+  — whitespace-padded or non-string subjects are rejected instead of
+  slipping past the empty-string check. Without this, a padded `sub` could
+  canonicalize the same principal into a different-looking actor string and
+  bypass the exact-string same-actor guard.
+- Dev-auth deployments become effectively single-principal per tenant
+  (`sub == tenant ID == creator`), so every run is unapprovable via dev
+  tokens. Documented escape hatch: a platform token
+  (`audit:platform:cross_tenant`) naming the tenant via the `?tenant_id`
+  query parameter — but even the platform cannot self-approve its own run.
+- **Mixed-version window:** during a rolling deploy, the old binary can
+  still approve runs the new binary refuses. Both write well-formed state
+  (the old one simply lacks the check); no data migration or backfill is
+  needed.
+
+Migration: none (no data/config change). Rollback = revert the guard commit
+(refusals write nothing, so reverting restores the old behavior with no
+state repair). New tests: strict-sub rejection, same-actor 403 at HTTP and
+service level, refusal atomicity (no admin action), concurrent distinct-actor
+(1 winner / 1 conflict) and same-actor (all refused) races, platform escape
+hatch.
+
+
 ## 2026-08-06 — Dev authentication flips to fail-closed defaults
 
 **Behavior change (security):** `-allow-dev-auth` now defaults to `false`, so a

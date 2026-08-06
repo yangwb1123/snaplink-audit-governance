@@ -3,7 +3,11 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -49,7 +53,53 @@ func testHTTPServer(t *testing.T) *httptest.Server {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+}
+
+// mintRestoreJWT mints a locally-signable HS256 JWT so HTTP tests can
+// express actors distinct from the dev-token principal (dev tokens fix
+// Subject == tenant ID, so they can never be a second decision actor). The
+// exp is a fixed far-future timestamp because the harness clock is pinned
+// at time.Unix(1_700_000_000, 0).
+func mintRestoreJWT(t *testing.T, subject, tenantID string, roles []string) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]any{"alg": "HS256", "typ": "at+jwt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"sub": subject, "tenant_id": tenantID, "roles": roles, "exp": 4_100_000_000}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	_, _ = mac.Write([]byte(signed))
+	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// httpAdminActionCount lists the tenant-a admin action trail through the
+// public API. The dev tenant-admin token can read it (audit:policy:read).
+func httpAdminActionCount(t *testing.T, server *httptest.Server, token string) int {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/admin/actions", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("list actions status=%d", response.StatusCode)
+	}
+	var result struct {
+		Items []domain.AdminAction `json:"items"`
+		Count int                  `json:"count"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	return result.Count
 }
 
 func TestHTTPIngestQueryAndTenantIsolation(t *testing.T) {
@@ -295,8 +345,24 @@ func TestHTTPRestoreApprovalWorkflow(t *testing.T) {
 	}
 	response.Body.Close()
 
+	// 创建者审批自己的请求 → 403（dev token 的 sub 就是租户 ID，与
+	// CreatedBy 相同，SoD 拒绝）。
 	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run.ID+"/approve", nil)
 	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("same actor approve status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 被拒绝的尝试不写管理动作：count 保持 4（3 bootstrap + restore.created）。
+	if count := httpAdminActionCount(t, server, "dev:tenant-a:tenant-admin"); count != 4 {
+		t.Fatalf("admin actions after refused approve=%d, want 4", count)
+	}
+
+	// 第二主体（minted HS256 JWT，sub=approver-1）审批 → 200。
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run.ID+"/approve", nil)
+	request.Header.Set("Authorization", "Bearer "+mintRestoreJWT(t, "approver-1", "tenant-a", []string{"compliance"}))
 	response, err = http.DefaultClient.Do(request)
 	if err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("approve status=%d err=%v", response.StatusCode, err)
@@ -306,13 +372,16 @@ func TestHTTPRestoreApprovalWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if approved.Status != domain.RestoreStatusApproved || approved.ApprovedBy != "tenant-a" {
+	if approved.Status != domain.RestoreStatusApproved || approved.ApprovedBy != "approver-1" {
 		t.Fatalf("unexpected approved run: %+v", approved)
+	}
+	if count := httpAdminActionCount(t, server, "dev:tenant-a:tenant-admin"); count != 5 {
+		t.Fatalf("admin actions after approve=%d, want 5", count)
 	}
 
 	// 重复审批 → 409。
 	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run.ID+"/approve", nil)
-	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	request.Header.Set("Authorization", "Bearer "+mintRestoreJWT(t, "approver-1", "tenant-a", []string{"compliance"}))
 	response, err = http.DefaultClient.Do(request)
 	if err != nil || response.StatusCode != http.StatusConflict {
 		t.Fatalf("double approve status=%d err=%v", response.StatusCode, err)
@@ -321,7 +390,7 @@ func TestHTTPRestoreApprovalWorkflow(t *testing.T) {
 
 	// 已批准后拒绝 → 409；reject 路径对未决 run 返回 200。
 	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run.ID+"/reject", nil)
-	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	request.Header.Set("Authorization", "Bearer "+mintRestoreJWT(t, "approver-1", "tenant-a", []string{"compliance"}))
 	response, err = http.DefaultClient.Do(request)
 	if err != nil || response.StatusCode != http.StatusConflict {
 		t.Fatalf("reject after approve status=%d err=%v", response.StatusCode, err)
@@ -334,6 +403,109 @@ func TestHTTPRestoreApprovalWorkflow(t *testing.T) {
 	response, err = http.DefaultClient.Do(request)
 	if err != nil || response.StatusCode != http.StatusNotFound {
 		t.Fatalf("cross tenant approve status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	// 拒绝路径：创建者拒绝 → 403，第二主体拒绝 → 200。
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores", bytes.NewReader([]byte(`{"operation_id":"restore-op-1","reason":"reject path"}`)))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("create second restore status=%d err=%v", response.StatusCode, err)
+	}
+	var run2 domain.RestoreRun
+	if err := json.NewDecoder(response.Body).Decode(&run2); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run2.ID+"/reject", nil)
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("same actor reject status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run2.ID+"/reject", nil)
+	request.Header.Set("Authorization", "Bearer "+mintRestoreJWT(t, "approver-1", "tenant-a", []string{"compliance"}))
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("distinct actor reject status=%d err=%v", response.StatusCode, err)
+	}
+	var rejected domain.RestoreRun
+	if err := json.NewDecoder(response.Body).Decode(&rejected); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if rejected.Status != domain.RestoreStatusRejected || rejected.RejectedBy != "approver-1" {
+		t.Fatalf("unexpected rejected run: %+v", rejected)
+	}
+}
+
+func TestHTTPRestorePlatformEscapeHatch(t *testing.T) {
+	// S15: with dev auth every run's creator is the tenant principal, so a
+	// distinct decision actor requires a real JWT. The documented escape
+	// hatch is a platform token (audit:platform:cross_tenant) naming the
+	// tenant via the ?tenant_id query — and even the platform cannot
+	// self-approve its own run.
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	event := domain.Event{EventID: "restore-evt-plat", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "restore-op-plat", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "restore-idem-plat", Payload: map[string]any{"value": 1}}
+	body, _ := json.Marshal(event)
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingest status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores", bytes.NewReader([]byte(`{"operation_id":"restore-op-plat","reason":"rollback user error"}`)))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("create restore status=%d err=%v", response.StatusCode, err)
+	}
+	var run domain.RestoreRun
+	if err := json.NewDecoder(response.Body).Decode(&run); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	// 平台 token（无 tenant_id，platform-admin 角色）通过查询参数审批 → 200。
+	platform := mintRestoreJWT(t, "platform-ops-1", "", []string{"platform-admin"})
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+run.ID+"/approve?tenant_id=tenant-a", nil)
+	request.Header.Set("Authorization", "Bearer "+platform)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("platform approve status=%d err=%v", response.StatusCode, err)
+	}
+	var approved domain.RestoreRun
+	if err := json.NewDecoder(response.Body).Decode(&approved); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if approved.Status != domain.RestoreStatusApproved || approved.ApprovedBy != "platform-ops-1" {
+		t.Fatalf("unexpected platform approval: %+v", approved)
+	}
+
+	// 平台也不能自我审批：平台创建的 run，同一平台主体审批 → 403。
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores?tenant_id=tenant-a", bytes.NewReader([]byte(`{"operation_id":"restore-op-plat","reason":"platform created"}`)))
+	request.Header.Set("Authorization", "Bearer "+platform)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("platform create status=%d err=%v", response.StatusCode, err)
+	}
+	var selfRun domain.RestoreRun
+	if err := json.NewDecoder(response.Body).Decode(&selfRun); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/restores/"+selfRun.ID+"/approve?tenant_id=tenant-a", nil)
+	request.Header.Set("Authorization", "Bearer "+platform)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("platform self approve status=%d err=%v", response.StatusCode, err)
 	}
 	response.Body.Close()
 }

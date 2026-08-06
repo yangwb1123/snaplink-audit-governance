@@ -537,6 +537,14 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 		t.Fatalf("unexpected created run: %+v", run)
 	}
 
+	// 分离职责：创建者不能审批或拒绝自己的请求。
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor approve err=%v, want forbidden", err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
+	}
+
 	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
 	if err != nil {
 		t.Fatal(err)
@@ -552,10 +560,17 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 	if _, err := svc.RejectRestore("tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("reject after approve err=%v, want conflict", err)
 	}
+	// 已决 run 上创建者审批 → 409 优先于 403（Conflict 支配 Forbidden）。
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same actor approve on decided run err=%v, want conflict", err)
+	}
 
 	run2, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "duplicate entry"}, "requester-2")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run2.ID, "requester-2"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
 	}
 	rejected, err := svc.RejectRestore("tenant-a", run2.ID, "approver-3")
 	if err != nil {
@@ -565,12 +580,124 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 		t.Fatalf("unexpected rejection: %+v", rejected)
 	}
 
-	// 租户边界与缺失目标都关闭为 not found。
+	// 租户边界与缺失目标都关闭为 not found；跨租户的创建者审批同样
+	// 被 404 掩盖（NotFound 优先于 Forbidden）。
 	if _, err := svc.ApproveRestore("tenant-b", run.ID, "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross tenant approve err=%v, want not found", err)
 	}
+	if _, err := svc.ApproveRestore("tenant-b", run.ID, "requester-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross tenant same actor approve err=%v, want not found", err)
+	}
 	if _, err := svc.ApproveRestore("tenant-a", "restore-nope", "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing run err=%v, want not found", err)
+	}
+}
+
+func TestRestoreApprovalSeparationOfDutiesRefusalIsAtomic(t *testing.T) {
+	// S13: a refused same-actor decision writes nothing — no state change,
+	// no admin action — and a distinct actor can still decide afterwards.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-sod", "op-sod", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-sod", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor approve err=%v, want forbidden", err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
+	}
+	after, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused decision wrote admin action: %d → %d", len(before), len(after))
+	}
+	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
+	if err != nil {
+		t.Fatalf("distinct actor approve after refusal failed: %v", err)
+	}
+	if approved.Status != domain.RestoreStatusApproved || approved.ApprovedBy != "approver-1" {
+		t.Fatalf("unexpected approval after refusal: %+v", approved)
+	}
+}
+
+func TestRestoreApprovalConcurrentDistinctActors(t *testing.T) {
+	// S11: concurrent decisions from two distinct actors serialize inside
+	// Store.Update — exactly one wins, the loser sees ErrConflict.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race", "op-race", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	decide := func(actor string) {
+		<-start
+		_, err := svc.ApproveRestore("tenant-a", run.ID, actor)
+		errs <- err
+	}
+	go decide("approver-1")
+	go decide("approver-2")
+	close(start)
+	var approved, conflicted int
+	for i := 0; i < 2; i++ {
+		switch err := <-errs; {
+		case err == nil:
+			approved++
+		case errors.Is(err, domain.ErrConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected race error: %v", err)
+		}
+	}
+	if approved != 1 || conflicted != 1 {
+		t.Fatalf("race outcome approved=%d conflicted=%d, want 1/1", approved, conflicted)
+	}
+}
+
+func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
+	// S12: concurrent same-actor decisions all refuse atomically; the run
+	// stays pending and a distinct actor can still decide afterwards.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race2", "op-race2", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race2", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			<-start
+			_, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1")
+			errs <- err
+		}()
+	}
+	close(start)
+	for i := 0; i < 4; i++ {
+		if err := <-errs; !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("same-actor race error = %v, want forbidden", err)
+		}
+	}
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1"); err != nil {
+		t.Fatalf("distinct actor after same-actor race failed: %v", err)
 	}
 }
 
