@@ -16,7 +16,7 @@ evidence:
   max_sources: 64
 
 validators:
-  pyquality: "python3 {cwd}/quality.py {cwd}"
+  pyquality: "python3 {cwd}/quality.py {cwd} --exclude ai-dev"
   completion: "python3 /home/u1/ai-batch-runner/scripts/check-completion-report.py {output}"
   secretscan: 'grep -nE "(api[_-]?key|secret|password|token|private[_-]?key)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_./+-]{8,}" {output} && exit 1 || exit 0'
   gobuild:

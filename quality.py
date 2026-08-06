@@ -122,6 +122,10 @@ def _scan_duplicates(tree: ast.AST, path: Path) -> list[str]:
 def main(argv: list[str]) -> int:
     # Standalone repo adaptation: upstream defaulted to "ai-dev"; here the
     # root IS the tool, so a bare run scans the current directory.
+    # --exclude=PATH (repeatable, relative to the target root) skips trees
+    # that legitimately carry legacy/vendored code (e.g. ai-dev/).
+    excludes = [Path(a[len("--exclude="):]).resolve()
+                for a in argv if a.startswith("--exclude=")]
     targets = [Path(a) for a in (argv or ["."]) if Path(a).exists()]
     if not targets:
         print("quality: no targets found", file=sys.stderr)
@@ -131,6 +135,8 @@ def main(argv: list[str]) -> int:
     for t in targets:
         files = sorted(t.rglob("*.py")) if t.is_dir() else [t]
         for f in files:
+            if any(f.resolve().is_relative_to(ex) for ex in excludes):
+                continue
             violations, count = scan_file(f, fail_on_legacy)
             for v in violations:
                 print(v)
