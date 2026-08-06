@@ -40,6 +40,31 @@ func TestEventDigestExcludesServerProcessingFields(t *testing.T) {
 	}
 }
 
+func TestEventContentDigestEqualsEventDigestWhenSourceDigestUnset(t *testing.T) {
+	event := Event{EventID: "evt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(10, 0).UTC(), ReceivedAt: time.Unix(20, 0).UTC(), Actor: Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "idem-1", Payload: map[string]any{"b": 2, "a": 1}}
+	digest, err := EventDigest(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentDigest, err := EventContentDigest(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != contentDigest {
+		t.Fatalf("EventDigest fallback must delegate to EventContentDigest: %s != %s", digest, contentDigest)
+	}
+	// A stored SourceDigest must never leak into the content derivation.
+	signed := event
+	signed.SourceDigest = "attacker-chosen-value"
+	contentDigest2, err := EventContentDigest(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentDigest2 != contentDigest {
+		t.Fatalf("EventContentDigest must ignore the stored SourceDigest field: %s != %s", contentDigest2, contentDigest)
+	}
+}
+
 func TestCursorRoundTrip(t *testing.T) {
 	cursor := EncodeCursor(42, "evt/1")
 	sequence, eventID, err := DecodeCursor(cursor)

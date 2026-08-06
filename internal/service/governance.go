@@ -148,8 +148,13 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 
 func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, error) {
 	result := IntegrityResult{Valid: true, TenantID: tenantID, StreamID: streamID, CheckedAt: s.Now()}
+	// One snapshot read: events, segments, aggregate checkpoints and schemas
+	// must come from the same ledger version so per-event content checks can
+	// never combine events with schema definitions from another snapshot.
 	var events []domain.Event
 	var segments []domain.Segment
+	var aggregateCheckpoints []domain.AggregateCheckpoint
+	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, event := range data.Events {
 			if event.TenantID == tenantID && (streamID == "" || event.StreamID == streamID) {
@@ -161,6 +166,14 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 				segments = append(segments, values...)
 			}
 		}
+		for _, aggregate := range data.AggregateCheckpoints {
+			if aggregate.TenantID == tenantID {
+				aggregateCheckpoints = append(aggregateCheckpoints, aggregate)
+			}
+		}
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
 		return nil
 	})
 	if err != nil {
@@ -169,17 +182,6 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 	result.EventCount = len(events)
 	result.SegmentCount = len(segments)
 	// 聚合 checkpoint：重算租户各流最后段 root 的 Merkle，与签名记录比对。
-	var aggregateCheckpoints []domain.AggregateCheckpoint
-	if err := s.Store.Read(func(data *store.Snapshot) error {
-		for _, aggregate := range data.AggregateCheckpoints {
-			if aggregate.TenantID == tenantID {
-				aggregateCheckpoints = append(aggregateCheckpoints, aggregate)
-			}
-		}
-		return nil
-	}); err != nil {
-		return result, err
-	}
 	for _, aggregate := range aggregateCheckpoints {
 		roots := append([]string(nil), aggregate.StreamRoots...)
 		sort.Strings(roots)
@@ -197,8 +199,19 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 	for _, event := range events {
 		byStream[event.StreamID] = append(byStream[event.StreamID], event)
 	}
-	for currentStream, streamEvents := range byStream {
-		sort.Slice(streamEvents, func(i, j int) bool { return streamEvents[i].Sequence < streamEvents[j].Sequence })
+	streamKeys := make([]string, 0, len(byStream))
+	for stream := range byStream {
+		streamKeys = append(streamKeys, stream)
+	}
+	sort.Strings(streamKeys)
+	for _, currentStream := range streamKeys {
+		streamEvents := byStream[currentStream]
+		sort.Slice(streamEvents, func(i, j int) bool {
+			if streamEvents[i].Sequence == streamEvents[j].Sequence {
+				return streamEvents[i].EventID < streamEvents[j].EventID
+			}
+			return streamEvents[i].Sequence < streamEvents[j].Sequence
+		})
 		head := ""
 		for _, event := range streamEvents {
 			if event.PrevHash != head {
@@ -209,6 +222,10 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 			if hashErr != nil || expected != event.Hash {
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("stream %s sequence %d hash mismatch", currentStream, event.Sequence))
+			}
+			if err := s.verifyContentDigest(event, schemas); err != nil {
+				result.Valid = false
+				result.Errors = append(result.Errors, err.Error())
 			}
 			head = event.Hash
 		}

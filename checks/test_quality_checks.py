@@ -3,6 +3,7 @@ from pathlib import Path
 
 from checks.architecture import run as architecture
 from checks.config import get_config
+from checks.invariants import default_secrets_single_source
 from checks.route_contract import normalize
 
 
@@ -18,6 +19,9 @@ class QualityChecksTest(unittest.TestCase):
 
     def test_architecture_is_clean(self):
         self.assertEqual(architecture(), 0)
+
+    def test_default_secrets_are_single_source(self):
+        self.assertEqual(default_secrets_single_source(), [])
 
 
 if __name__ == "__main__":

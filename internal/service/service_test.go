@@ -27,7 +27,10 @@ func testService(t *testing.T, archive bool) *Service {
 	if archive {
 		archiveDir = filepath.Join(dir, "archive")
 	}
-	svc := New(st, Config{ArchiveDir: archiveDir, SegmentSize: 2, SigningSecret: "test-secret", Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	svc, err := New(st, Config{ArchiveDir: archiveDir, SegmentSize: 2, SigningSecret: "test-secret", Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +279,10 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := New(st, Config{ArchiveDir: filepath.Join(dir, "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	svc, err := New(st, Config{ArchiveDir: filepath.Join(dir, "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +299,10 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopenedService := New(reopened, Config{ArchiveDir: filepath.Join(dir, "archive")})
+	reopenedService, err := New(reopened, Config{ArchiveDir: filepath.Join(dir, "archive"), AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	event, err := reopenedService.GetEvent("tenant-a", "persisted")
 	if err != nil || event.Hash == "" {
 		t.Fatalf("persisted event missing: %+v %v", event, err)

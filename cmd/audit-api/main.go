@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/grpcapi"
@@ -42,6 +43,8 @@ func main() {
 	issuer := flag.String("jwt-issuer", os.Getenv("AUDIT_JWT_ISSUER"), "expected JWT issuer")
 	audience := flag.String("jwt-audience", os.Getenv("AUDIT_JWT_AUDIENCE"), "expected JWT audience")
 	allowDev := flag.Bool("allow-dev-auth", boolEnv("AUDIT_ALLOW_DEV_AUTH", true), "enable dev:<tenant>:<role> tokens; disable in production")
+	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
+	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, then exit without opening the store or network")
 	bootstrapTenant := flag.String("bootstrap-tenant", envOr("AUDIT_BOOTSTRAP_TENANT", "demo"), "create a local bootstrap tenant when missing")
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
@@ -59,13 +62,26 @@ func main() {
 	if *allowDev {
 		logger.Printf("warning=development_auth_enabled")
 	}
+	if *allowDevSecrets {
+		logger.Printf("warning=development_secrets_enabled")
+	}
+	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets}
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	if *checkConfig {
+		os.Exit(runCheckConfig(logger, cfg, external))
+	}
 	st, err := openStore(*statePath, *postgresDSN, logger)
 	if err != nil {
 		logger.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
-	svc := service.New(st, service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: envOr("AUDIT_SIGNING_SECRET", "development-signing-key-change-me"), EncryptionKey: envOr("AUDIT_ENCRYPTION_KEY", "development-encryption-key-change-me")})
-	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, SigningSecret: svc.Config.SigningSecret, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	svc, err := service.New(st, cfg)
+	if err != nil {
+		logger.Fatalf("invalid secrets: %v", err)
+	}
+	logSecretWarnings(logger, svc.Config)
+	external.SigningSecret = svc.Config.SigningSecret
+	external.EncryptionKey = svc.Config.EncryptionKey
 	if signer, signErr := external.Signer(); signErr != nil {
 		logger.Fatalf("signer: %v", signErr)
 	} else if signer != nil {
@@ -200,6 +216,55 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// runCheckConfig validates the resolved configuration without opening the
+// store or touching the network: service.New performs the secret fail-fast
+// checks (and resolves dev defaults), then the external signer/archive
+// configuration is validated. Output prints names and lengths only, never
+// secret values, so CI can compare API and worker outputs.
+func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive) int {
+	svc, err := service.New(nil, cfg)
+	if err != nil {
+		logger.Printf("invalid secrets: %v", err)
+		return 1
+	}
+	logSecretWarnings(logger, svc.Config)
+	external.SigningSecret = svc.Config.SigningSecret
+	external.EncryptionKey = svc.Config.EncryptionKey
+	signer, signErr := external.Signer()
+	if signErr != nil {
+		logger.Printf("signer: %v", signErr)
+		return 1
+	}
+	archiveStore, archiveErr := external.Archive()
+	if archiveErr != nil {
+		logger.Printf("archive: %v", archiveErr)
+		return 1
+	}
+	signerName := "hmac-sha256"
+	if signer != nil {
+		signerName = signer.Algorithm()
+	}
+	archiveName := "file"
+	if _, ok := archiveStore.(*archive.FileStore); !ok {
+		archiveName = "s3"
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName)
+	return 0
+}
+
+// logSecretWarnings reports loudly whenever a well-known development secret
+// is actually in use, so operators cannot miss the opt-in.
+func logSecretWarnings(logger *log.Logger, cfg service.Config) {
+	for _, secret := range service.KnownDefaultSecrets() {
+		if secret == cfg.SigningSecret {
+			logger.Printf("warning=signing_secret=well-known-default")
+		}
+		if secret == cfg.EncryptionKey {
+			logger.Printf("warning=encryption_key=well-known-default")
+		}
+	}
 }
 
 func boolEnv(name string, fallback bool) bool {

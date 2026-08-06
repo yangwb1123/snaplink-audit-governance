@@ -114,11 +114,14 @@ func (s *Snapshot) normalize() {
 // on error the previously persisted snapshot stays authoritative.
 type Backend interface {
 	// Load returns the current snapshot for read-only access. The returned
-	// snapshot is owned by the backend and must not be retained.
+	// snapshot is owned by the backend and must not be retained. Load must
+	// not mutate backend state: concurrent readers share one backend.
 	Load() (*Snapshot, error)
 	// LoadForUpdate returns a private copy for a read-modify-write cycle so
 	// a failing closure can never corrupt the shared state; the copy is only
-	// committed through Save.
+	// committed through Save. It also establishes the optimistic-lock
+	// baseline for the subsequent Save; callers must not retain the
+	// returned snapshot.
 	LoadForUpdate() (*Snapshot, error)
 	// Save atomically persists data.
 	Save(data *Snapshot) error

@@ -28,6 +28,13 @@ type Config struct {
 	SegmentSize   int
 	MaxEventBytes int
 	Now           func() time.Time
+	// AllowDevSecrets explicitly opts into the well-known development
+	// secrets (empty values, default fallback and SigningSecret ==
+	// EncryptionKey reuse). It is independent of the auth-scoped
+	// -allow-dev-auth flag and defaults to false: production must fail
+	// fast on missing, default or shared secrets instead of running with
+	// publicly known key material.
+	AllowDevSecrets bool
 	// Signer produces checkpoint signatures. Defaults to HMAC-SHA256 over
 	// SigningSecret; a Vault Transit signer can be injected for KMS-backed
 	// signatures where the private key never leaves Vault.
@@ -88,7 +95,10 @@ type IntegrityResult struct {
 	Errors       []string  `json:"errors,omitempty"`
 }
 
-func New(st *store.Store, cfg Config) *Service {
+// New validates and resolves the service configuration, then returns the
+// service. It never dereferences st (the store is opened by the caller), so
+// configuration-only callers such as -check-config can pass nil.
+func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.ServerVersion == "" {
 		cfg.ServerVersion = "audit-governance/dev"
 	}
@@ -98,11 +108,8 @@ func New(st *store.Store, cfg Config) *Service {
 	if cfg.MaxEventBytes <= 0 {
 		cfg.MaxEventBytes = domain.MaxEventBytes
 	}
-	if cfg.SigningSecret == "" {
-		cfg.SigningSecret = "development-signing-key-change-me"
-	}
-	if cfg.EncryptionKey == "" {
-		cfg.EncryptionKey = cfg.SigningSecret
+	if err := resolveSecrets(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.Signer == nil {
 		cfg.Signer = hmacSigner{secret: cfg.SigningSecret}
@@ -113,7 +120,41 @@ func New(st *store.Store, cfg Config) *Service {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}
+	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}, nil
+}
+
+// resolveSecrets fills the development defaults when explicitly allowed and
+// otherwise enforces the production fail-fast rules: missing secrets are
+// rejected, well-known defaults are rejected and the signing and encryption
+// secrets must be distinct. The order matters: a missing secret is reported
+// before a default/equality problem, and validation completes before any
+// key material is derived (hmacSigner) or any external client is built.
+func resolveSecrets(cfg *Config) error {
+	if cfg.SigningSecret == "" {
+		if !cfg.AllowDevSecrets {
+			return fmt.Errorf("%w: %s is empty; set %s and %s to strong distinct values, or enable development mode with %s=true", ErrMissingSecret, "AUDIT_SIGNING_SECRET", "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+		}
+		cfg.SigningSecret = devSigningSecret
+	}
+	if cfg.EncryptionKey == "" {
+		if !cfg.AllowDevSecrets {
+			return fmt.Errorf("%w: %s is empty; set %s and %s to strong distinct values, or enable development mode with %s=true", ErrMissingSecret, "AUDIT_ENCRYPTION_KEY", "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+		}
+		cfg.EncryptionKey = cfg.SigningSecret
+	}
+	if cfg.AllowDevSecrets {
+		return nil
+	}
+	if isKnownDefaultSecret(cfg.SigningSecret) {
+		return fmt.Errorf("%w: %s is a well-known default value that must never be used outside development mode; set a strong secret or enable %s=true", ErrDefaultSecret, "AUDIT_SIGNING_SECRET", "AUDIT_ALLOW_DEV_SECRETS")
+	}
+	if isKnownDefaultSecret(cfg.EncryptionKey) {
+		return fmt.Errorf("%w: %s is a well-known default value that must never be used outside development mode; set a strong secret or enable %s=true", ErrDefaultSecret, "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+	}
+	if cfg.SigningSecret == cfg.EncryptionKey {
+		return fmt.Errorf("%w: %s and %s must be distinct values", ErrSharedSecret, "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY")
+	}
+	return nil
 }
 
 func (s *Service) Now() time.Time { return s.Config.Now().UTC() }
@@ -348,9 +389,17 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 		}
 		key := store.EventKey(tenantID, event.EventID)
 		if existing, ok := data.Events[key]; ok {
-			existingDigest, digestErr := domain.EventDigest(existing)
+			existingDigest, digestErr := s.reconstructAndDerive(existing, data.Schemas)
 			if digestErr != nil {
-				return digestErr
+				// Fallback: legacy stored-digest comparison. Reconstruction needs
+				// the event's exact schema version and the current encryption
+				// key; when either is unavailable (deregistered schema, rotated
+				// key) we preserve historical idempotency behavior instead of
+				// breaking re-ingest.
+				existingDigest, digestErr = domain.EventDigest(existing)
+				if digestErr != nil {
+					return digestErr
+				}
 			}
 			receipt = data.Receipts[key]
 			if existingDigest == inputDigest {
@@ -790,6 +839,67 @@ func (s *Service) protectSensitiveFields(event *domain.Event, schema domain.Even
 		event.Payload[field+"__search_digest"] = digest
 	}
 	return nil
+}
+
+// verifyContentDigest reports a per-event verification error, or nil. It
+// authenticates the stored content by reconstructing the pre-protection
+// payload (the exact inverse of protectSensitiveFields) and comparing a
+// freshly derived digest against the stored SourceDigest. An empty
+// SourceDigest fails closed: an audit ledger must not silently pass events
+// whose content is unauthenticated.
+func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]domain.EventSchema) error {
+	if event.SourceDigest == "" {
+		return fmt.Errorf("stream %s sequence %d missing source_digest", event.StreamID, event.Sequence)
+	}
+	derived, err := s.reconstructAndDerive(event, schemas)
+	if err != nil {
+		return fmt.Errorf("stream %s sequence %d content digest check failed: %w", event.StreamID, event.Sequence, err)
+	}
+	if derived != event.SourceDigest {
+		return fmt.Errorf("stream %s sequence %d content digest mismatch", event.StreamID, event.Sequence)
+	}
+	return nil
+}
+
+// reconstructAndDerive undoes protectSensitiveFields (removing search
+// digests and decrypting encrypted fields with the same tenant/field/eventID
+// AAD binding used at ingest), then derives the content digest from the
+// reconstructed payload. It never mutates event.Payload: the stored map is
+// shared by reference with the store snapshot, so it is deep-copied first.
+// The schema definition the event was ingested under is looked up
+// version-exactly.
+//
+// Number-encoding consistency note: reconstruction must canonicalize numbers
+// exactly like the ingest-time digest path. Both currently round-trip through
+// float64 (clonePayload here and DecryptJSON), so large int64 values stay
+// consistent; the sibling canonical-number-encoding campaign must keep this
+// invariant (pinned by TestVerifyIntegrityLargeIntSensitiveField).
+func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]domain.EventSchema) (string, error) {
+	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
+	if !ok {
+		return "", fmt.Errorf("schema %s v%d not found", event.SchemaID, event.SchemaVersion)
+	}
+	payload, err := clonePayload(event.Payload)
+	if err != nil {
+		return "", err
+	}
+	for _, field := range schema.SearchableFields {
+		delete(payload, field+"__search_digest")
+	}
+	for _, field := range schema.EncryptedFields {
+		encoded, ok := payload[field].(string)
+		if !ok {
+			continue
+		}
+		original, err := security.DecryptJSON(encoded, s.Config.EncryptionKey, event.TenantID+"/"+field+"/"+event.EventID)
+		if err != nil {
+			return "", fmt.Errorf("cannot decrypt field %s: %w", field, err)
+		}
+		payload[field] = original
+	}
+	reconstructed := event
+	reconstructed.Payload = payload
+	return domain.EventContentDigest(reconstructed)
 }
 
 func (s *Service) eventHash(event domain.Event) (string, error) {

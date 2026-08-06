@@ -16,7 +16,10 @@ func benchService(b *testing.B) *Service {
 	if err != nil {
 		b.Fatal(err)
 	}
-	svc := New(st, Config{SegmentSize: 100, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	svc, err := New(st, Config{SegmentSize: 100, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		b.Fatal(err)
+	}
 	if err := svc.CreateTenant("bench", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		b.Fatal(err)
 	}

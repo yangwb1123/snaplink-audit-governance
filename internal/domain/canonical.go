@@ -110,11 +110,13 @@ func writeString(b *bytes.Buffer, value string) error {
 	return nil
 }
 
-func EventDigest(e Event) (string, error) {
-	if e.SourceDigest != "" {
-		return e.SourceDigest, nil
-	}
+// EventContentDigest derives the digest from the event's content alone,
+// ignoring any stored SourceDigest field. It is the canonical content
+// derivation; EventDigest is a thin wrapper that short-circuits on a stored
+// SourceDigest (dedupe and chain hashing) and otherwise delegates here.
+func EventContentDigest(e Event) (string, error) {
 	copyEvent := e
+	copyEvent.SourceDigest = ""
 	copyEvent.ReceivedAt = time.Time{}
 	copyEvent.ServerVersion = ""
 	copyEvent.Hash = ""
@@ -126,6 +128,13 @@ func EventDigest(e Event) (string, error) {
 		return "", err
 	}
 	return HashBytes(data), nil
+}
+
+func EventDigest(e Event) (string, error) {
+	if e.SourceDigest != "" {
+		return e.SourceDigest, nil
+	}
+	return EventContentDigest(e)
 }
 
 func EncodeCursor(sequence int64, eventID string) string {

@@ -5,39 +5,13 @@
 *.log
 .trends/
 __pycache__/
+.internal/
 
-# ai-batch-runner local state
-/.pi-batch/
-/docs/auto/
-
-# ai-batch-runner local state
-/.pi-batch/
+# ai-batch-runner runtime artifacts
+.pi-batch/
+.pi-batch.lock
+logs/
+docs/archive/
+docs/auto/
+docs/requirements/runs/
 /internal/**/exports/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/

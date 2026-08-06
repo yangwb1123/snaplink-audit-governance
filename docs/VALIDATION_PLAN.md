@@ -54,6 +54,27 @@ docker compose -f deploy/docker-compose.verify.yml up -d
 
 Compose 使用 `19000+` 端口和独立网络/数据卷，不应复用本机已有服务的数据。
 
+### 签名与加密密钥
+
+checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
+`AUDIT_ENCRYPTION_KEY`（schema 加密字段、导出文件）必须显式配置为两个
+不同的强随机值（如 `openssl rand -base64 48`，两次取值不同）。任一为空、
+等于公开默认值（`development-signing-key-change-me` /
+`development-encryption-key-change-me`）或两者相同时，两个二进制在
+非开发模式启动失败（退出码非零，错误信息指明需设置的变量）；本机开发
+须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，
+独立于 `AUDIT_ALLOW_DEV_AUTH`）才恢复旧默认行为。
+
+部署预检（不打开存储、不发起网络）：
+
+```sh
+AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-api -check-config
+AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker -check-config
+```
+
+退出码 0 且输出不含 `=well-known-default` 警告即通过；API 与 worker
+必须使用相同的两个值（共用同一条证据链，AC-3）。
+
 ## 验证顺序
 
 1. Schema、规范化 JSON、哈希和游标单元测试。

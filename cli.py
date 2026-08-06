@@ -265,6 +265,25 @@ def cmd_check_exemptions() -> int:
     return 0
 
 
+def default_secrets_single_source() -> list[str]:
+    # The well-known development secrets must exist only in
+    # internal/service/secrets.go (non-test Go). Any other occurrence (a
+    # binary envOr fallback, a scanner, a wrapper) would split the single
+    # source of truth for the deny-list and could silently re-introduce
+    # hard-coded defaults.
+    allowed = {str((ROOT / "internal" / "service" / "secrets.go").resolve())}
+    offenders = []
+    for directory in (ROOT / "internal", ROOT / "cmd"):
+        for path in sorted(directory.rglob("*.go")):
+            if path.name.endswith("_test.go") or str(path.resolve()) in allowed:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for secret in ("development-signing-key-change-me", "development-encryption-key-change-me"):
+                if secret in text:
+                    offenders.append(f"{path.relative_to(ROOT)} contains {secret!r}")
+    return offenders
+
+
 def cmd_check_invariants() -> int:
     checks = {
         "tenant-context": ("TenantID = tenantID", "tenant context assignment"),
@@ -274,8 +293,12 @@ def cmd_check_invariants() -> int:
     }
     source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "internal").rglob("*.go"))
     missing = [label for needle, label in checks.values() if needle not in source]
+    offenders = default_secrets_single_source()
     if missing:
         print("missing security invariants:", *missing, sep="\n  ")
+    if offenders:
+        print("default secrets outside single source:", *offenders, sep="\n  ")
+    if missing or offenders:
         return 1
     print("security invariants: clean")
     return 0
