@@ -305,8 +305,9 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 
 // ArchivePending retries local WORM-compatible archive writes for events that
 // were ledgered/indexed before the archive destination became available.
-// It is intentionally idempotent: archive files are created with O_EXCL and
-// an existing file is treated as already archived.
+// It is intentionally idempotent: a byte-identical existing object is treated
+// as already archived, while a mismatched or unverifiable object at the key
+// surfaces as an error instead of being silently accepted.
 
 func (s *Service) ArchivePending(tenantID string) (int, error) {
 	if !archive.Configured(s.Config.Archive) {

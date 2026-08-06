@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -414,6 +415,57 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	receipt, err := svc.GetReceipt("tenant-a", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
+	}
+}
+
+// TestIngestArchiveMismatchStaysIndexedAndRetries is AC-2: when the archive
+// destination already holds a different object at the exact key the service
+// computes (service.go:966), Put must fail content verification, the receipt
+// must degrade to StatusIndexed instead of StatusArchived, the tampered
+// object must be preserved (WORM), and ArchivePending must converge the
+// receipt once the key is free.
+func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
+	svc := testService(t, true)
+	event := testEvent("evt-mismatch", "op-mismatch", time.Now().UTC())
+	// Seed a tampered object at the exact archive path archiveEvent computes
+	// for the first event of the stream (sequence 1, same layout as the
+	// pinned path in TestIngestIdempotencyConflictAndIntegrity).
+	archivePath := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", "tenant-a_aggregate_invoice_inv-1", fmt.Sprintf("%020d-%s.json", 1, event.EventID))
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivePath, []byte(`tampered`), 0o440); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Sequence != 1 {
+		t.Fatalf("unexpected sequence %d, pinned archive path assumed 1", receipt.Sequence)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("receipt status = %s, want StatusIndexed: a mismatched archive object must not be reported archived", receipt.Status)
+	}
+	// WORM: the tampered object was neither overwritten nor removed.
+	got, err := os.ReadFile(archivePath)
+	if err != nil || string(got) != `tampered` {
+		t.Fatalf("tampered archive object not preserved: %v %q", err, got)
+	}
+
+	// Once the key is free, ArchivePending retries the non-Archived receipt
+	// and converges it to StatusArchived with the canonical object.
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 1 {
+		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
+	}
+	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
+	if err != nil || receipt.Status != domain.StatusArchived {
+		t.Fatalf("receipt was not archived after retry: %+v %v", receipt, err)
 	}
 }
 
