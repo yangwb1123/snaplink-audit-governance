@@ -1,5 +1,49 @@
 # Release Notes
 
+## 2026-08-06 — outbox.Insert reports duplicate/conflict outcomes instead of silently dropping events
+
+**Behavior change (data integrity):** `outbox.Insert` no longer discards the
+`ExecContext` result of its targetless `ON CONFLICT DO NOTHING` insert. When
+`RowsAffected() == 0` (one of the two uniqueness constraints — `event_id` or
+`(tenant_id, idempotency_key)` — absorbed the row), `Insert` now classifies
+the outcome inside the caller's transaction and returns a defined error
+instead of nil, so a business transaction can no longer commit its domain
+mutation believing the audit event was queued when no outbox row exists and
+the relay will never deliver anything. Return contract (also on the `Insert`
+doc comment): `nil` = durably recorded, or an exact duplicate of an existing
+pending/delivered row (idempotent re-inserts never reset
+`attempts`/`next_attempt_at`); `errors.Is(err, domain.ErrConflict)` =
+deterministic conflict (same `event_id` with different canonical content,
+idempotency-key reuse for another event, an identical row already
+dead-lettered, or an unclassifiable zero-row outcome) — roll back, surface
+409, **do not retry**; any other error = acceptance unknown (statement or
+classification read failed) — roll back and retry with bounded backoff plus
+jitter. Identical content is decided by jsonb equality first with an
+`EventContentDigest` cross-check when jsonb differs only in representation
+(same instant in another time zone, `1.0` vs `1`) — matching the ingest
+path's canonicalization; a dead-lettered row is never silently resurrected.
+
+- Public API unchanged: `Insert(ctx, tx Execer, event) error` and `Execer`
+  are byte-identical; only unexported seams were added (`rowScanner`,
+  `rowQueryer`, `classifyZeroRows`). No schema change, no new sentinel, no
+  route/OpenAPI change.
+- Callers: there are no production callers of `outbox.Insert` yet (the e2e
+  suite writes `audit_outbox` directly); the change defines the contract
+  future business-transaction writers rely on. Callers must roll back on
+  any error and must not retry `ErrConflict`.
+- Ops: none — the SQL shape is unchanged (still targetless `DO NOTHING`),
+  so the relay's `ListPending` polling behavior is untouched. The payload
+  parameter is now sent as text instead of `[]byte` (bytea has no cast to
+  jsonb under the simple protocol), which is required for the insert to
+  work on a real PostgreSQL.
+- Known limits (accepted): under REPEATABLE READ/SERIALIZABLE a concurrent
+  duplicate whose winner committed after this transaction's snapshot
+  degrades fail-closed (raw unique violation, non-`ErrConflict` wrapped
+  error) instead of classifying as idempotent; callers must keep the
+  default READ COMMITTED. DSN-gated integration scenarios (S1–S8) cover
+  this and the concurrent-duplicate determinism; they run only when
+  `AUDIT_TEST_POSTGRES_DSN` is set.
+
 ## 2026-08-06 — Kafka consumer dead-letters permanently failing messages
 
 **Behavior change (availability):** `audit-kafka-consumer` no longer retries

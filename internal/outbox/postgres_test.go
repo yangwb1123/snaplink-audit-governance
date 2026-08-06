@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,5 +99,176 @@ VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, now(), 'pending', 0, now() 
 	}
 	if rowStatus != StatusFailed {
 		t.Fatalf("row status=%s, want failed", rowStatus)
+	}
+
+	// ---- Insert conflict reporting: each scenario starts from a clean
+	// table and rolls back between scenarios (the delete is a test-harness
+	// reset, not a product path). ----
+	reset := func() {
+		if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+			t.Fatalf("reset outbox: %v", err)
+		}
+	}
+	countOutbox := func() int {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM audit_outbox`).Scan(&n); err != nil {
+			t.Fatalf("count outbox: %v", err)
+		}
+		return n
+	}
+
+	// S1: identical re-insert in the same caller tx -> nil, one row.
+	reset()
+	base := domain.Event{EventID: "sdk-1", TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "sdk-idem-1", Payload: map[string]any{"n": 1}}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Insert(ctx, tx, base); err != nil {
+		tx.Rollback()
+		t.Fatalf("first Insert: %v", err)
+	}
+	if err := Insert(ctx, tx, base); err != nil {
+		tx.Rollback()
+		t.Fatalf("duplicate Insert must be idempotent: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countOutbox(); n != 1 {
+		t.Fatalf("S1 row count=%d, want 1", n)
+	}
+
+	// S2: same event_id, different canonical content -> ErrConflict.
+	reset()
+	first := base
+	first.EventID, first.IdempotencyKey = "sdk-2", "sdk-idem-2"
+	if err := Insert(ctx, db, first); err != nil {
+		t.Fatalf("S2 first Insert: %v", err)
+	}
+	other := first
+	other.Action = "delete"
+	err = Insert(ctx, db, other)
+	if !errors.Is(err, domain.ErrConflict) || !strings.Contains(err.Error(), "event_id already exists with different canonical content") {
+		t.Fatalf("S2 content conflict: %v", err)
+	}
+
+	// S3: idempotency_key reuse for a different event -> ErrConflict.
+	reset()
+	first = base
+	first.EventID, first.IdempotencyKey = "sdk-3", "sdk-idem-3"
+	if err := Insert(ctx, db, first); err != nil {
+		t.Fatalf("S3 first Insert: %v", err)
+	}
+	sameKey := first
+	sameKey.EventID = "sdk-3b"
+	err = Insert(ctx, db, sameKey)
+	if !errors.Is(err, domain.ErrConflict) || !strings.Contains(err.Error(), "idempotency_key is already associated with another event") {
+		t.Fatalf("S3 idem-key conflict: %v", err)
+	}
+
+	// S4: the same idempotency_key under different tenants is fine.
+	reset()
+	tenantA := base
+	tenantA.EventID, tenantA.IdempotencyKey = "sdk-4a", "cross-key"
+	tenantB := base
+	tenantB.TenantID, tenantB.EventID, tenantB.IdempotencyKey = "tenant-b", "sdk-4b", "cross-key"
+	if err := Insert(ctx, db, tenantA); err != nil {
+		t.Fatalf("S4 tenant A: %v", err)
+	}
+	if err := Insert(ctx, db, tenantB); err != nil {
+		t.Fatalf("S4 tenant B must not conflict with tenant A's key: %v", err)
+	}
+	if n := countOutbox(); n != 2 {
+		t.Fatalf("S4 row count=%d, want 2", n)
+	}
+
+	// S5: an identical re-insert of a dead-lettered row -> ErrConflict,
+	// never nil (the row will never be delivered).
+	reset()
+	dead := base
+	dead.EventID, dead.IdempotencyKey = "sdk-5", "sdk-idem-5"
+	if err := Insert(ctx, db, dead); err != nil {
+		t.Fatalf("S5 first Insert: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE audit_outbox SET status = 'failed' WHERE event_id = 'sdk-5'`); err != nil {
+		t.Fatal(err)
+	}
+	err = Insert(ctx, db, dead)
+	if !errors.Is(err, domain.ErrConflict) || !strings.Contains(err.Error(), "event already dead-lettered") {
+		t.Fatalf("S5 dead-lettered duplicate: %v", err)
+	}
+
+	// S6: same logical event, same instant, different zone encoding -> nil
+	// via the EventContentDigest cross-check, row count stays 1.
+	reset()
+	zone := base
+	zone.EventID, zone.IdempotencyKey = "sdk-6", "sdk-idem-6"
+	if err := Insert(ctx, db, zone); err != nil {
+		t.Fatalf("S6 first Insert: %v", err)
+	}
+	if err := Insert(ctx, db, zoneVariant(zone)); err != nil {
+		t.Fatalf("S6 zone-variant re-insert must be idempotent: %v", err)
+	}
+	if n := countOutbox(); n != 1 {
+		t.Fatalf("S6 row count=%d, want 1", n)
+	}
+
+	// S7: REPEATABLE READ with a snapshot taken before the winner commits
+	// degrades to a fail-closed error (never nil) — documented degradation.
+	reset()
+	rr := base
+	rr.EventID, rr.IdempotencyKey = "sdk-7", "sdk-idem-7"
+	rrTx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rrTx.ExecContext(ctx, `SELECT count(*) FROM audit_outbox`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Insert(ctx, db, rr); err != nil {
+		t.Fatalf("S7 winner Insert: %v", err)
+	}
+	err = Insert(ctx, rrTx, rr)
+	rrTx.Rollback()
+	if err == nil {
+		t.Fatal("S7 REPEATABLE READ duplicate insert must fail closed (never nil)")
+	}
+
+	// S8: two concurrent transactions inserting the same event: exactly one
+	// row survives and both callers observe nil (the blocked insert waits
+	// out the winner and classifies it as an identical duplicate).
+	reset()
+	conc := base
+	conc.EventID, conc.IdempotencyKey = "sdk-8", "sdk-idem-8"
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				results <- err
+				return
+			}
+			err = Insert(ctx, tx, conc)
+			if err != nil {
+				tx.Rollback()
+				results <- err
+				return
+			}
+			results <- tx.Commit()
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("S8 concurrent duplicate Insert: %v", err)
+		}
+	}
+	if n := countOutbox(); n != 1 {
+		t.Fatalf("S8 concurrent inserts must collapse to one row, got %d", n)
 	}
 }
