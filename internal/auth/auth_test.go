@@ -82,6 +82,58 @@ func TestJWTRejectsMalformedClientIdentityClaim(t *testing.T) {
 	}
 }
 
+func TestJWTRejectsWhitespacePaddedSubject(t *testing.T) {
+	// H-1 canonicalization: a whitespace-padded sub would pass the old
+	// empty-string check while comparing unequal to the actor recorded by
+	// CreateRestore, letting the same principal evade a same-actor check
+	// that compares exact strings.
+	payload := map[string]any{
+		"sub": " service-subject ", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+		t.Fatal("expected a whitespace-padded sub to be rejected")
+	}
+}
+
+func TestJWTRejectsNonStringSubject(t *testing.T) {
+	payload := map[string]any{
+		"sub": []string{"service-subject"}, "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+		t.Fatal("expected a non-string sub to be rejected")
+	}
+}
+
+func TestJWTRejectsMissingSubject(t *testing.T) {
+	payload := map[string]any{
+		"tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+		t.Fatal("expected a missing sub to be rejected")
+	}
+}
+
+func TestJWTSubjectSurvivesStrictParsing(t *testing.T) {
+	// Positive companion: strict parsing keeps exact-string subjects and
+	// the plain missing-sub message intact.
+	payload := map[string]any{
+		"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	claims, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload))
+	if err != nil {
+		t.Fatalf("valid sub must authenticate: %v", err)
+	}
+	if claims.Subject != "service-subject" {
+		t.Fatalf("subject = %q", claims.Subject)
+	}
+	payload = map[string]any{
+		"tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "token must contain sub") {
+		t.Fatalf("missing sub error = %v, want preserved message", err)
+	}
+}
+
 func TestDevAuthRejectedDespiteConfiguredTrustSource(t *testing.T) {
 	// Genuinely new coverage: with a real trust source configured and
 	// AllowDev=false, rejection must come from the dev gate, not the

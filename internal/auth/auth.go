@@ -102,7 +102,14 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	if a.Audience != "" && !audienceClaim(payload, a.Audience) {
 		return Claims{}, fmt.Errorf("token audience mismatch")
 	}
-	claims.Subject = stringClaim(payload, "sub")
+	subject, hasSubject, err := strictIdentityClaim(payload, "sub")
+	if err != nil {
+		return Claims{}, err
+	}
+	if !hasSubject {
+		return Claims{}, fmt.Errorf("token must contain sub")
+	}
+	claims.Subject = subject
 	claims.ClientID, err = clientIdentity(payload)
 	if err != nil {
 		return Claims{}, err
@@ -123,9 +130,6 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	}
 	claims.Platform = claims.Permissions["audit:platform:cross_tenant"] || contains(claims.Roles, "platform-admin")
 	claims.Service = contains(claims.Roles, "service") || contains(claims.Roles, "event-writer")
-	if claims.Subject == "" {
-		return Claims{}, fmt.Errorf("token must contain sub")
-	}
 	return claims, nil
 }
 
