@@ -425,8 +425,15 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 	}
 	inputDigest := sourceDigest
 	var receipt domain.EventReceipt
+	// sealedSegments accumulates segments sealed by THIS successful Update
+	// attempt. Store.Update may re-invoke the closure on a CAS conflict, and
+	// a failed attempt's mutations are discarded — so the slice is truncated
+	// at the start of every invocation, never carrying segments from a
+	// superseded snapshot (phantom segments would be archived without ever
+	// being part of the ledger).
 	var sealedSegments []domain.Segment
 	err = s.Store.Update(func(data *store.Snapshot) error {
+		sealedSegments = sealedSegments[:0]
 		commitTenant, accessErr := resolveIngestTenantFromData(data, tenantHint, principal.ClientID, event.SourceSystem)
 		if accessErr != nil || commitTenant != tenantID {
 			return sourceAccessError()

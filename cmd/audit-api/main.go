@@ -158,6 +158,15 @@ func main() {
 
 func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store, error) {
 	if postgresDSN != "" {
+		// Migration hazard guard: an existing non-empty file ledger must not
+		// silently vanish behind an empty PostgreSQL snapshot (missing row ==
+		// fresh deployment on the PG backend). Explicit opt-out documented in
+		// the error message.
+		if os.Getenv("AUDIT_ALLOW_PG_EMPTY_LEDGER") != "true" {
+			if err := store.CheckFileToPostgresMigrationHazard(statePath); err != nil {
+				return nil, err
+			}
+		}
 		db, err := sql.Open("pgx", postgresDSN)
 		if err != nil {
 			return nil, err

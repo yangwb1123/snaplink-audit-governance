@@ -36,6 +36,9 @@ const (
 	// ErrorCodeAttemptsExhausted marks a transiently failing event that hit
 	// the per-message attempt cap.
 	ErrorCodeAttemptsExhausted = "attempts_exhausted"
+	// ErrorCodeUnparsable marks a message that could not be decoded into an
+	// event at all; it is dead-lettered immediately (never retried).
+	ErrorCodeUnparsable = "unparsable_message"
 )
 
 // Failure is the dead-letter payload declared by the AsyncAPI contract
@@ -256,8 +259,18 @@ func (c *Consumer) Run(ctx context.Context) error {
 		decoder := json.NewDecoder(bytes.NewReader(message.Value))
 		decoder.UseNumber()
 		if err := decoder.Decode(&event); err != nil {
-			// 不可解析的消息没有重试价值：提交并记录死信证据。
-			c.logf("dead-letter topic=%s partition=%d offset=%d error=%v", c.reader.Config().Topic, message.Partition, message.Offset, err)
+			// 不可解析的消息没有重试价值：先记录死信证据（DLQ 有挂载时），
+			// 再提交；绝不静默丢弃。
+			c.deadLettered.Add(1)
+			failure := Failure{EventID: string(message.Key), ErrorCode: ErrorCodeUnparsable, ErrorMessage: err.Error()}
+			if c.dlq != nil {
+				if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
+					c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
+				} else {
+					c.dlqPublished.Add(1)
+				}
+			}
+			c.logf("dead-letter topic=%s partition=%d offset=%d event_id=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, err)
 			if commitErr := c.reader.CommitMessages(ctx, message); commitErr != nil {
 				return commitErr
 			}

@@ -118,12 +118,21 @@ func TestConsumerDeadLettersUnparsableMessage(t *testing.T) {
 	runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
 		ingested++
 		return nil
-	})
+	}, WithDLQ(reader))
 	if ingested != 0 {
 		t.Fatalf("unparsable message reached ingest %d times", ingested)
 	}
 	if len(reader.commits) != 1 {
 		t.Fatalf("unparsable message must be committed as dead-letter evidence, commits=%d", len(reader.commits))
+	}
+	if len(reader.published) != 1 {
+		t.Fatalf("unparsable message must publish a DLQ Failure record, published=%d", len(reader.published))
+	}
+	if reader.published[0].ErrorCode != ErrorCodeUnparsable {
+		t.Fatalf("DLQ record code=%s, want %s", reader.published[0].ErrorCode, ErrorCodeUnparsable)
+	}
+	if reader.published[0].EventID != "bad" {
+		t.Fatalf("DLQ record event_id=%s, want bad", reader.published[0].EventID)
 	}
 }
 

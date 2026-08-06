@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -185,4 +186,51 @@ func (s *Store) MustSnapshot() *Snapshot {
 		panic(err)
 	}
 	return snapshot
+}
+
+func TestCheckFileToPostgresMigrationHazard(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file: no hazard (fresh deployment).
+	if err := CheckFileToPostgresMigrationHazard(filepath.Join(dir, "nope.json")); err != nil {
+		t.Fatalf("missing file: %v", err)
+	}
+	// Empty file: no hazard.
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFileToPostgresMigrationHazard(empty); err != nil {
+		t.Fatalf("empty file: %v", err)
+	}
+	// Empty ledger snapshot: no hazard.
+	blank := filepath.Join(dir, "blank.json")
+	encoded, err := json.Marshal(NewSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blank, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFileToPostgresMigrationHazard(blank); err != nil {
+		t.Fatalf("blank snapshot: %v", err)
+	}
+	// Ledger with events: hazard reported.
+	withEvents := filepath.Join(dir, "events.json")
+	snapshot := NewSnapshot()
+	snapshot.Events["t\x1fe"] = domain.Event{EventID: "e", TenantID: "t"}
+	encoded, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(withEvents, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = CheckFileToPostgresMigrationHazard(withEvents)
+	if err == nil {
+		t.Fatal("expected migration hazard for non-empty ledger, got nil")
+	}
+	if !strings.Contains(err.Error(), "AUDIT_ALLOW_PG_EMPTY_LEDGER") {
+		t.Fatalf("error must name the opt-out flag: %v", err)
+	}
 }

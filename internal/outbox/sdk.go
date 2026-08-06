@@ -23,10 +23,36 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// rowQueryer refines Execer for the conflict path. *sql.Tx satisfies it;
-// Execer-only implementations take the fail-closed ErrConflict path.
+// rowQueryer is the scripted-double surface: it returns rowScanner.
 type rowQueryer interface {
 	QueryRowContext(context.Context, string, ...any) rowScanner
+}
+
+// concreteRowQueryer is the exact method set of *sql.Tx: QueryRowContext
+// returns the concrete *sql.Row. Go method-set matching requires identical
+// return types, so a real transaction satisfies this interface (and only
+// this one), never rowQueryer.
+type concreteRowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// compile-time pin: a real database/sql transaction must keep satisfying the
+// concrete classification surface (regression guard for the interface-shape
+// defect where *sql.Tx could never satisfy rowQueryer).
+var _ concreteRowQueryer = (*sql.Tx)(nil)
+
+// queryRow resolves one classification read against either a real *sql.Tx
+// (concrete *sql.Row) or a scripted test double (rowScanner). ok=false means
+// the transaction surface cannot classify zero-row outcomes, which fails
+// closed with ErrConflict instead of guessing.
+func queryRow(ctx context.Context, tx Execer, query string, args ...any) (rowScanner, bool) {
+	switch q := tx.(type) {
+	case concreteRowQueryer:
+		return q.QueryRowContext(ctx, query, args...), true
+	case rowQueryer:
+		return q.QueryRowContext(ctx, query, args...), true
+	}
+	return nil, false
 }
 
 // Insert writes an audit event into a caller-owned business transaction. The
@@ -95,26 +121,30 @@ const unclassifiableMessage = "unable to classify outbox insert outcome"
 // domain.ErrConflict for every conflicting or unclassifiable case, and a
 // wrapped non-ErrConflict error when a classification read itself failed.
 func classifyZeroRows(ctx context.Context, tx Execer, event domain.Event, encoded []byte) error {
-	queryer, ok := tx.(rowQueryer)
+	queryer, ok := queryRow(ctx, tx, classifyEventIDQuery, event.EventID, string(encoded))
 	if !ok {
 		return fmt.Errorf("%w: %s", domain.ErrConflict, unclassifiableMessage)
 	}
 	var status string
 	var identical bool
-	err := queryer.QueryRowContext(ctx, classifyEventIDQuery, event.EventID, string(encoded)).Scan(&status, &identical)
+	err := queryer.Scan(&status, &identical)
 	if err == nil {
 		if identical {
 			return duplicateOutcome(status)
 		}
-		return classifyContentConflict(ctx, queryer, event, status, encoded)
+		return classifyContentConflict(ctx, tx, event, status, encoded)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("insert audit outbox: classify event_id: %w", err)
 	}
 	// No event_id row: the conflict, if any, is the tenant-scoped
 	// idempotency key.
+	queryer, ok = queryRow(ctx, tx, classifyIdemKeyQuery, event.TenantID, event.IdempotencyKey)
+	if !ok {
+		return fmt.Errorf("%w: %s", domain.ErrConflict, unclassifiableMessage)
+	}
 	var exists int
-	err = queryer.QueryRowContext(ctx, classifyIdemKeyQuery, event.TenantID, event.IdempotencyKey).Scan(&exists)
+	err = queryer.Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: %s", domain.ErrConflict, unclassifiableMessage)
 	}
@@ -142,9 +172,13 @@ func duplicateOutcome(status string) error {
 // is representation-canonical (UTC-normalized times, 'f'-format numbers), so
 // agreeing digests mean the re-insert is the same logical event and only the
 // encoding differs.
-func classifyContentConflict(ctx context.Context, queryer rowQueryer, event domain.Event, status string, encoded []byte) error {
+func classifyContentConflict(ctx context.Context, tx Execer, event domain.Event, status string, encoded []byte) error {
+	queryer, ok := queryRow(ctx, tx, classifyPayloadQuery, event.EventID)
+	if !ok {
+		return fmt.Errorf("%w: %s", domain.ErrConflict, unclassifiableMessage)
+	}
 	var stored []byte
-	err := queryer.QueryRowContext(ctx, classifyPayloadQuery, event.EventID).Scan(&stored)
+	err := queryer.Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Not reachable on the real store (append-only table, row visible to
 		// the same transaction); fail closed rather than guess.

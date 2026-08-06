@@ -254,6 +254,38 @@ func (s *Store) Snapshot() (*Snapshot, error) {
 	return cloneSnapshot(data)
 }
 
+// CheckFileToPostgresMigrationHazard reports whether switching the given
+// file-backed state to PostgreSQL would silently start an empty ledger. The
+// PostgreSQL backend maps a missing row to an empty snapshot (a fresh
+// deployment is legitimate), so an existing file ledger with events would
+// silently "forget" every event on switch-over. Callers must refuse to
+// start when this returns an error unless the operator explicitly opts in.
+func CheckFileToPostgresMigrationHazard(statePath string) error {
+	if statePath == "" {
+		return nil
+	}
+	contents, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("check file state before postgres switch: %w", err)
+	}
+	if len(bytes.TrimSpace(contents)) == 0 {
+		return nil
+	}
+	var data Snapshot
+	if err := json.Unmarshal(contents, &data); err != nil {
+		// Not our snapshot format: the file backend will report the real
+		// error on Open; do not guess here.
+		return nil
+	}
+	if len(data.Events) > 0 {
+		return fmt.Errorf("file state %s holds %d events; switching to PostgreSQL would start an empty ledger — migrate the snapshot first (import tool or controlled cutover), or set AUDIT_ALLOW_PG_EMPTY_LEDGER=true to override", statePath, len(data.Events))
+	}
+	return nil
+}
+
 // fileBackend keeps the snapshot in memory and atomically writes it to
 // path on Save.
 type fileBackend struct {

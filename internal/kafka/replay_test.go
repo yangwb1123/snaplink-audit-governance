@@ -119,8 +119,9 @@ func TestReplayPersistsStateAcrossRestarts(t *testing.T) {
 }
 
 // TestReplayTransientRepublishFailureRetriesNextRound pins convergence: a
-// transient republish error leaves the event pending, and the next round
-// retries it instead of losing it.
+// transient republish error leaves the event pending (DLQ offset NOT
+// committed), and the next round re-reads the same record and retries
+// instead of losing it.
 func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-t")}}
 	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-t")}}
@@ -143,8 +144,12 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	if state.Replayed["evt-t"] {
 		t.Fatal("transient failure must not mark the event replayed")
 	}
-	// Next round: the DLQ re-delivers the failure (consumer-group replay or
-	// a fresh DLQ record) and the event converges.
+	if len(dlq.commits) != 0 {
+		t.Fatalf("DLQ offsets committed after transient failure (%d), want 0: the record must stay pending for the next round", len(dlq.commits))
+	}
+	// Next round: the uncommitted DLQ record is re-delivered by real broker
+	// group semantics (offsets never advanced), so the fake re-delivers it
+	// the same way and the event converges.
 	dlq.index = 0
 	accepted.index = 0
 	count, err := replayer.RunOnce(context.Background())
@@ -153,6 +158,9 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	}
 	if count != 1 || attempts != 2 {
 		t.Fatalf("second round replayed=%d attempts=%d, want 1/2", count, attempts)
+	}
+	if len(dlq.commits) != 1 {
+		t.Fatalf("DLQ offsets committed=%d after converged round, want 1", len(dlq.commits))
 	}
 }
 
