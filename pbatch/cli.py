@@ -21,6 +21,7 @@ from . import config
 from .config import (AGENT_BIN, AGENT_DEFAULT_WORKERS, COMMIT_PREFIX_DEFAULT,
                      _resolve_validator_specs, log, yaml)
 from .models import Pipeline, Task
+from .registry import mark_running, unregister
 from .reuse import (reuse_decision, reuse_fingerprint, sidecar_path, write_sidecar)
 from .lock import LOCK_EXIT_CODE, acquire_lock, release_lock, verify_held
 from .triage import (STALL_EXIT_CODE, Circuit, StallDetector, env_signature,
@@ -87,9 +88,8 @@ def _add_runtime_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--session-name", default="",
                    help="Reproducible session base name (default: task source file stem); shared sessions continue across runs")
     _add_memory_arg(p)
+    _add_lock_args(p)
     _add_validate_args(p)
-    p.add_argument("--no-lock", action="store_true",
-                   help="skip the single-instance lock (T4 escape hatch)")
     p.add_argument("--kill-orphans", action="store_true",
                    help="GAP-3: kill orphaned agent process groups found in residue markers "
                         "(agents left running by a SIGKILLed runner — double-billing risk)")
@@ -120,6 +120,14 @@ def _add_logging_args(p: argparse.ArgumentParser) -> None:
 def _add_memory_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument("--memory-mode", choices=["auto", "on", "off"], default=config.MEMORY_MODE,
                    help="Progressive message memory: auto for configured agents; on/off override")
+
+
+def _add_lock_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--no-lock", action="store_true",
+                   help="skip the single-instance lock (T4 escape hatch)")
+    p.add_argument("--wait-lock", type=int, default=0, metavar="MINUTES",
+                   help="queue behind a held lock: poll every 30s up to MINUTES "
+                        "instead of exiting 5 (shared-machine workflows)")
 
 
 def _add_validate_args(p: argparse.ArgumentParser) -> None:
@@ -183,7 +191,14 @@ def main() -> None:
     _auto_detect_pipeline(args)
     _maybe_classify_route(args)
     handler = _configure_run_log(args)
-    lock_path = acquire_lock(no_lock=args.no_lock or args.dry_run)
+    _register_run(args)
+    try:
+        lock_path = acquire_lock(no_lock=args.no_lock or args.dry_run,
+                                 wait_minutes=getattr(args, "wait_lock", 0))
+        mark_running()
+    except SystemExit:
+        unregister()
+        raise
     try:
         _run_configured(args, lock_path)
     except KeyboardInterrupt:
@@ -191,9 +206,22 @@ def main() -> None:
         sys.exit(130)
     finally:
         release_lock(lock_path)
+        unregister()
         if handler:
             log.removeHandler(handler)
             handler.close()
+
+
+def _register_run(args) -> None:
+    """Publish this process in the global run registry (visibility:
+    who runs what in which repo). Unregister happens in the main
+    finally block and via atexit as a safety net."""
+    import atexit
+    from . import registry
+    mode = "pipeline" if args.pipeline else "batch"
+    registry.register_run(mode=mode, repo=os.getcwd(),
+                          session_name=args.session_name or "")
+    atexit.register(registry.unregister)
 
 
 def _validate_runtime_values(parser: argparse.ArgumentParser, args) -> None:
@@ -251,7 +279,7 @@ def _run_configured(args, lock_path) -> None:
 
 
 def _dispatch_subcommand() -> bool:
-    if len(sys.argv) <= 1 or sys.argv[1] not in ("memory", "campaign", "classify", "rules", "assess", "learn", "context", "eval", "check", "advance"):
+    if len(sys.argv) <= 1 or sys.argv[1] not in ("memory", "campaign", "classify", "rules", "assess", "learn", "context", "eval", "check", "advance", "ps", "retro"):
         return False
     if sys.argv[1] == "memory":
         from .memory import main as subcommand
@@ -271,6 +299,10 @@ def _dispatch_subcommand() -> bool:
         from .selfcheck import check_main as subcommand
     elif sys.argv[1] == "advance":
         from .advance import advance_main as subcommand
+    elif sys.argv[1] == "ps":
+        from .registry import ps_main as subcommand
+    elif sys.argv[1] == "retro":
+        from .retro import retro_main as subcommand
     else:
         from .campaign import main as subcommand
     subcommand(sys.argv[2:])

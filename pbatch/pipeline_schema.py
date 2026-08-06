@@ -64,7 +64,8 @@ def _field_errors(stage: dict, prefix: str) -> list[str]:
         errors.append(f"{prefix}.mode must be serial or parallel")
     for key, minimum in (("workers", 1), ("max_iterations", 1),
                          ("max_roles_per_iteration", 1), ("relevance_min_score", 0),
-                         ("command_timeout", 1), ("command_output_max_bytes", 1)):
+                         ("command_timeout", 1), ("command_output_max_bytes", 1),
+                         ("meta_timeout", 1)):
         value = stage.get(key, minimum)
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             errors.append(f"{prefix}.{key} must be an integer >= {minimum}")

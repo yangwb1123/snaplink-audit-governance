@@ -1,0 +1,9 @@
+tasks:
+- prompt: "已批准的审计契约 v2 包（GATE PASSED）进入实施阶段。阅读批次清单：\n@docs/campaigns/implementation-gate.md\n\
+    本仓库（snaplink-audit-governance）负责批次 B1（sink P0：dev-token 关闭/冲突重试/ledger/自审计/读自审计/gRPC\
+    \ 拓扑/e2e/tenant 422）（基线批次，全平台依赖）。\n\n产出实施提案（不修改代码）：\n## 批次逐项设计：每项 = 文件定位（验证清单中的路径是否准确）/改动设计/\n\
+    \  验收断言映射（T-编号或 drill）/测试计划（单元+集成+回归）\n## 依赖与顺序：本仓库批次内部依赖 + 跨批次依赖（按 rollout 顺序）\n\
+    ## 风险：每项的风险（破坏兼容性/回滚方案）\n## 启动条件：批次门禁（G 编号）通过条件核对\n## 未验证标注：清单中标 [PROPOSED] 或无法验证的路径必须标注，不冒充\
+    \ Verified"
+  output: docs/proposals/audit-contract-batch-snaplink-audit-governance.md
+  validate: python3 /home/u1/ai-batch-runner/scripts/check-no-refusal.py {output}

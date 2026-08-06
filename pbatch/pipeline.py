@@ -85,6 +85,7 @@ def _parse_stage_def(s: dict, global_git_commit: bool) -> Stage:
         output_dir=s.get("output_dir", ""),
         max_iterations=s.get("max_iterations", 3),
         max_roles_per_iteration=s.get("max_roles_per_iteration", 3),
+        meta_timeout=s.get("meta_timeout", 0),
         relevance_enabled=s.get("relevance_enabled", True),
         relevance_min_score=s.get("relevance_min_score", 0),
         gate=s.get("gate", False),

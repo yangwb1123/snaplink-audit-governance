@@ -36,6 +36,9 @@ class Stage:
     output_dir: str = ""  # where role deliverables are written (required for meta stages)
     max_iterations: int = 3  # orchestrator -> roles -> fold -> re-ask loop limit
     max_roles_per_iteration: int = 3  # runtime-enforced meta fan-out cap
+    meta_timeout: int = 0  # dedicated per-role/ orchestrator timeout for meta
+                           # stages (long review docs exceed the 900s default;
+                           # 0 = inherit CLI/global timeout)
     relevance_enabled: bool = True  # inject keyword-based role suggestions
     relevance_min_score: int = 0  # 0 keeps backward-compatible advisory-only scoring
     gate: bool = False  # verdict gate: output must contain VERDICT: PASS/FAIL/REJECT; FAIL/REJECT blocks later stages

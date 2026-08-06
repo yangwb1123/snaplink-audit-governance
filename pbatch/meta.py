@@ -300,7 +300,9 @@ def _build_meta_prompt_task(stage: Stage, role_names: list, combined: str, model
     task.provider = stage.provider or task.provider
     if model_override:
         task.model = model_override
-    if timeout_override:
+    if stage.meta_timeout:
+        task.timeout = stage.meta_timeout
+    elif timeout_override:
         task.timeout = timeout_override
     return task
 
@@ -341,7 +343,9 @@ def _build_role_tasks(stage: Stage, roles: list, combined: str, model_override: 
         task.provider = stage.provider or task.provider
         if model_override:
             task.model = model_override
-        if timeout_override:
+        if stage.meta_timeout:
+            task.timeout = stage.meta_timeout
+        elif timeout_override:
             task.timeout = timeout_override
         role_tasks.append((role, task))
     return role_tasks, ok

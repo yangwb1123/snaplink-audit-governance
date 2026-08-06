@@ -1,0 +1,89 @@
+# audit-governance（sink）B1 批次实施 campaign（信任路径门禁 G1 核心）
+# 前置：docs/proposals/audit-contract-batch-snaplink-audit-governance.md（提案）
+# 批次内容（implementation-gate.md B1）：
+#   1. dev-token 关闭（S1，默认 false + dev-only 拒绝启动 + manifest 扫描）
+#   2. 快照冲突重试（F-01，ErrSnapshotConflict 有界 jitter）
+#   3. Relational ledger 或容量预算（决策 #7）
+#   4. Self-audit writer（F13，治理操作 same-store-update）
+#   5. Read self-audit（F-06，QueryEvents/export 追加 audit.event.read/export）
+#   6. gRPC 拓扑收敛（F13，--grpc-listen 入站声明 + 接线/移除孤儿 relay）
+#   7. 跨仓 e2e（T-1.2，IdP token fixture 替换 dev token）
+#   8. tenant 一致性强制（S2/DS-08：envelope tenant ≠ token tenant → 422）
+# 门禁：G1（B1-1+B4-1+B1-7 联合 T-1.1/T-1.2/T-8a）、G2（B1-2..6+8）
+# 用法（audit-governance 仓库内）：
+#   python3 pi-batch.py campaign --config docs/campaigns/campaign-sink-b1.yaml --dry-run
+#   python3 pi-batch.py campaign --config docs/campaigns/campaign-sink-b1.yaml \
+#     --jobs 4 --max-directions 2 --validate gobuild,gotest,pyquality
+
+name: sink-b1-trust-path
+
+discovery:
+  roots:
+    - cmd
+    - internal
+    - migrations
+    - deploy
+  exclude:
+    - testdata
+    - gen
+    - generated
+    - mock
+    - tests
+    - docs
+    - examples
+    - logs
+    - vendor
+    - .git
+    - .pi-batch
+    - __pycache__
+  max_depth: 2
+  fallback_top_level: true
+
+analysis:
+  jobs: 4
+  retries: 2
+  candidate_limit: 3
+  prompt: |
+    Analyze module '{module}' at {module_path} of the Snaplink Audit
+    Governance sink. An approved contract (audit v2, GATE PASSED) assigns
+    this repo the B1 baseline batch — the P0 trust-path gate G1 that the
+    whole platform depends on: (1) dev-token auth default OFF with
+    dev-only config rejected at boot and manifest scan failing CI,
+    (2) snapshot-store conflict retry (ErrSnapshotConflict bounded jitter,
+    no bare 500s), (3) relational ledger wiring or capacity envelope
+    (QueryEvents must not be O(ledger)), (4) self-audit writer for
+    governance operations (same-store-update, failure aborts),
+    (5) read-path self-audit (audit.event.read/export appended),
+    (6) gRPC ingest topology declared as supported with the same auth/
+    validation/self-audit/tenant constraints as HTTP, orphan relay/kafka
+    consumers wired or removed, (7) cross-repo e2e using IdP token
+    fixtures instead of dev tokens, (8) tenant consistency: envelope
+    tenant_id != token tenant claim → 422 reject (never silently
+    rewrite). Return ONLY a JSON array with at most {candidate_limit}
+    high-value directions toward B1, sorted by value. Each object must
+    contain: title, problem, value (1-10), risk_reduction (1-10),
+    effort (1-10), confidence (1-10), evidence (existing file/symbol
+    paths), and acceptance (testable checks mapping to T-1.1/T-1.2/
+    T-6/T-12/T-13). Do not modify code. Claims without repository
+    evidence must be identified as proposed, not verified.
+
+selection:
+  max_directions: 2
+  minimum_score: 0
+
+implementation:
+  pipeline: examples/repository-campaign-pipeline.yaml
+  requirement_stage: requirements
+  concurrency: 1
+  timeout: 14400
+  worktree_root: .pi-batch/worktrees
+
+state:
+  output_dir: docs/auto
+  state_file: docs/auto/state.jsonl
+  summary_file: docs/auto/SUMMARY.md
+  line_max_bytes: 262144
+
+estimates:
+  analysis_minutes: 3
+  pipeline_minutes: 25

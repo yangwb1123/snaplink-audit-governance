@@ -686,7 +686,11 @@ def _result_from_proc(task: Task, proc: subprocess.Popen, stdout_lines: list, st
     if success:
         log.info("OK  done  [%.1fs]  [output=%s]", elapsed, task.output or "(stdout)")
     else:
-        log.warning("FAIL  [code=%d]  [%.1fs]", proc.returncode, elapsed)
+        # F2 (retro finding): failures must carry a stderr tail so root
+        # causes are visible in run logs without reopening agent sessions.
+        tail = "\n".join((stderr_text or "").strip().splitlines()[-3:])[:400]
+        detail = f"\n  stderr: {tail}" if tail else ""
+        log.warning("FAIL  [code=%d]  [%.1fs]%s", proc.returncode, elapsed, detail)
     return TaskResult(
         task=task, success=success, stdout=stdout_text, stderr=stderr_text,
         elapsed=elapsed, returncode=proc.returncode, reason=reason or "",

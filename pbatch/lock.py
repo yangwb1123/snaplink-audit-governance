@@ -90,10 +90,14 @@ def _payload(cwd: str) -> dict:
     }
 
 
-def acquire_lock(cwd: str = "", no_lock: bool = False) -> Optional[Path]:
+def acquire_lock(cwd: str = "", no_lock: bool = False,
+                 wait_minutes: int = 0) -> Optional[Path]:
     """Create the lock file; raises SystemExit(5) when another live
-    instance holds it (or the lock file is unparseable). Returns the lock
-    path (caller must release)."""
+    instance holds it (or the lock file is unparseable). With
+    wait_minutes > 0 the caller queues: poll every 30s until the holder
+    releases or the budget expires (real-world lesson: collaborators
+    share one machine; refuse-and-exit forces manual retry loops).
+    Returns the lock path (caller must release)."""
     if no_lock:
         return None
     lock_path = Path(cwd or os.getcwd()) / LOCK_NAME
@@ -109,7 +113,10 @@ def acquire_lock(cwd: str = "", no_lock: bool = False) -> Optional[Path]:
         try:
             os.link(tmp_name, str(lock_path))
         except FileExistsError:
-            _reject_or_break(lock_path)
+            if wait_minutes > 0:
+                _wait_for_lock(lock_path, wait_minutes)
+            else:
+                _reject_or_break(lock_path)
             return acquire_lock(cwd, no_lock=False)  # stale lock broken; retry
     finally:
         try:
@@ -119,6 +126,25 @@ def acquire_lock(cwd: str = "", no_lock: bool = False) -> Optional[Path]:
     os.chmod(str(lock_path), 0o600)
     _OWNED[str(lock_path)] = payload["token"]
     return lock_path
+
+
+def _wait_for_lock(lock_path: Path, wait_minutes: int) -> None:
+    """Poll until the holder releases the lock or the budget expires.
+    A stale lock (dead holder) is broken immediately, as usual."""
+    deadline = time.monotonic() + wait_minutes * 60
+    while time.monotonic() < deadline:
+        if not lock_path.exists():
+            return
+        holder = _read_holder(lock_path)
+        if holder and not _alive(int(holder.get("pid", 0) or 0)):
+            log.warning("LOCK: holder pid=%s dead; breaking stale lock", holder.get("pid"))
+            return
+        log.info("LOCK: waiting for holder (pid=%s, age=%.1fm); %ds left",
+                 holder.get("pid", "?") if holder else "?",
+                 (time.time() - holder.get("start", time.time())) / 60 if holder else 0,
+                 int(deadline - time.monotonic()))
+        time.sleep(30)
+    raise SystemExit(5)
 
 
 def _read_holder(lock_path: Path) -> dict:
