@@ -711,3 +711,46 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 		t.Fatal("tampered aggregate checkpoint must fail verification")
 	}
 }
+
+func TestOutOfOrderOccurredAtEvents(t *testing.T) {
+	svc := testService(t, true)
+	// 业务时间乱序：先写入 occurred_at 更晚的事件，再写更早的事件。
+	later := testEvent("ooo-later", "op-ooo", time.Unix(1_700_000_100, 0).UTC())
+	later.IdempotencyKey = "ooo-1"
+	earlier := testEvent("ooo-earlier", "op-ooo", time.Unix(1_700_000_010, 0).UTC())
+	earlier.IdempotencyKey = "ooo-2"
+
+	receiptLater, err := svc.Ingest("tenant-a", crmPrincipal, later, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptEarlier, err := svc.Ingest("tenant-a", crmPrincipal, earlier, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 账本序号按写入顺序（接收序），与业务时间无关。
+	if receiptLater.Sequence != 1 || receiptEarlier.Sequence != 2 {
+		t.Fatalf("sequence must follow write order: later=%d earlier=%d", receiptLater.Sequence, receiptEarlier.Sequence)
+	}
+	// 查询返回按账本序号（写入序）：later 先写入，排在前。
+	result, err := svc.QueryEvents("tenant-a", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 2 || result.Items[0].EventID != "ooo-later" || result.Items[1].EventID != "ooo-earlier" {
+		t.Fatalf("event query must follow ledger sequence order: %+v", result.Items)
+	}
+	// 操作时间线按业务时间排序：earlier 在前（与账本序解耦）。
+	timeline, err := svc.OperationTimeline("tenant-a", "op-ooo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 2 || timeline[0].EventID != "ooo-earlier" || timeline[1].EventID != "ooo-later" {
+		t.Fatalf("timeline must order by occurred_at: %+v", timeline)
+	}
+	// 哈希链按 sequence 链接，不受业务时间乱序影响。
+	integrity, err := svc.VerifyIntegrity("tenant-a", "")
+	if err != nil || !integrity.Valid {
+		t.Fatalf("integrity after out-of-order ingest: %+v %v", integrity, err)
+	}
+}

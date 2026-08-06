@@ -18,6 +18,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 
 - [架构设计计划](docs/ARCHITECTURE_PLAN.md)
 - [本机验证计划](docs/VALIDATION_PLAN.md)
+- [SLO、告警与错误预算](docs/SLO_ALERTS.md)
 - [本机性能基线](docs/BENCHMARKS.md)
 - [威胁模型](docs/THREAT_MODEL.md)
 - [术语表](docs/GLOSSARY.md)
@@ -81,6 +82,12 @@ python3 cli.py help
 ```
 
 也可以使用等价的 `make check`、`make quality`、`make test`、`make race` 和 `make build`。
+
+全栈容器验证（outbox → relay → Kafka → 账本 + ClickHouse 投影 + MinIO 归档）：
+
+```sh
+bash test/e2e/fullstack.sh
+```
 
 ## 核心原则
 

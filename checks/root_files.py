@@ -4,7 +4,8 @@ from .config import ROOT
 
 ALLOWED = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
            "Makefile", "go.mod", "go.sum", "cli.py", "engineering.yaml", "api", "cmd",
-           "deploy", "docs", "internal", "migrations", "checks", "bin", ".trends", "__pycache__"}
+           "deploy", "docs", "internal", "migrations", "checks", "bin", "test",
+           ".trends", "__pycache__"}
 
 
 def run() -> int:
