@@ -613,6 +613,254 @@ func TestHTTPMetricsCounters(t *testing.T) {
 	}
 }
 
+// TestErrorBodyRedactsServerErrors is T0: a status × error matrix pinning
+// the redaction contract at the single errorBody choke point. Every domain
+// mapping below 500 keeps its exact message; every >= 500 response collapses
+// to the fixed strings no matter how much internal detail the error carries,
+// and the status wins even when a domain error is forced to 500.
+func TestErrorBodyRedactsServerErrors(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	request = request.WithContext(context.WithValue(request.Context(), requestIDKey, "req-matrix"))
+	cases := []struct {
+		name     string
+		status   int
+		err      error
+		wantCode string
+		wantMsg  string
+	}{
+		{"invalid-400", http.StatusBadRequest, fmt.Errorf("%w: events must not be empty", domain.ErrInvalid), "invalid_request", "invalid request: events must not be empty"},
+		{"unauthorized-401", http.StatusUnauthorized, fmt.Errorf("%w: bad token", domain.ErrUnauthorized), "unauthorized", "unauthorized: bad token"},
+		{"forbidden-403", http.StatusForbidden, domain.ErrForbidden, "forbidden", "forbidden"},
+		{"not-found-404", http.StatusNotFound, domain.ErrNotFound, "not_found", "not found"},
+		{"conflict-409", http.StatusConflict, fmt.Errorf("%w: event_id content differs", domain.ErrConflict), "conflict", "conflict: event_id content differs"},
+		{"quota-429", http.StatusTooManyRequests, domain.ErrQuotaExceeded, "quota_exceeded", "quota exceeded"},
+		{"schema-422", http.StatusUnprocessableEntity, domain.ErrSchemaNotFound, "schema_not_found", "schema not found"},
+		{"internal-raw-path", http.StatusInternalServerError, fmt.Errorf("open /var/lib/audit/state.json.tmp: is a directory"), "internal_error", "internal server error"},
+		{"internal-raw-crypto", http.StatusInternalServerError, fmt.Errorf("cipher: message authentication failed (key id 0x7f)"), "internal_error", "internal server error"},
+		{"internal-domain-error-wins-status", http.StatusInternalServerError, fmt.Errorf("%w: leaked detail", domain.ErrInvalid), "invalid_request", "internal server error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := errorBody(tc.status, tc.err, request)
+			envelope, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("error envelope missing: %v", body)
+			}
+			if envelope["code"] != tc.wantCode || envelope["message"] != tc.wantMsg {
+				t.Fatalf("code=%v message=%v, want code=%s message=%s", envelope["code"], envelope["message"], tc.wantCode, tc.wantMsg)
+			}
+			if envelope["request_id"] != "req-matrix" {
+				t.Fatalf("request_id=%v, want req-matrix", envelope["request_id"])
+			}
+		})
+	}
+}
+
+// TestHTTPDownloadExportRedacts500 is T1 (AC-1): a completed export whose
+// archive destination is broken (a regular file planted at the directory
+// path) makes Archive.Get fail with ENOTDIR. The 500 body must be exactly
+// the fixed strings — no path, no errno text — while the missing-object
+// 404 mapping stays untouched.
+func TestHTTPDownloadExportRedacts500(t *testing.T) {
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: archiveDir, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(func(data *store.Snapshot) error {
+		data.Exports["export-t1"] = domain.ExportJob{ID: "export-t1", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/dummy.jsonl"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	download := func() (int, []byte) {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/exports/export-t1/download", nil)
+		request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, _ := io.ReadAll(response.Body)
+		return response.StatusCode, data
+	}
+
+	// Missing object under a healthy archive stays 404 (D-2: the
+	// os.IsNotExist mapping is untouched).
+	status, _ := download()
+	if status != http.StatusNotFound {
+		t.Fatalf("download with missing object status=%d, want 404", status)
+	}
+
+	// Archive directory replaced by a regular file → ENOTDIR → 500.
+	if err := os.RemoveAll(archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archiveDir, []byte("occupied"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	status, data := download()
+	if status != http.StatusInternalServerError {
+		t.Fatalf("download with broken archive status=%d body=%s, want 500", status, data)
+	}
+	var result struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "internal_error" || result.Error.Message != "internal server error" {
+		t.Fatalf("unexpected 500 body: %s", data)
+	}
+	if strings.Contains(result.Error.Message, "/") || strings.Contains(result.Error.Message, "not a directory") {
+		t.Fatalf("500 message leaks path/errno: %q", result.Error.Message)
+	}
+	if strings.Contains(string(data), "/") {
+		t.Fatalf("500 body leaks a path: %s", data)
+	}
+}
+
+// TestHTTPIngestRedactsStorePersistError is T2 (AC-2): a directory planted
+// at state.json.tmp makes the atomic persist fail with EISDIR on the next
+// write (no privilege required). The 500 body must not contain the store
+// path or the errno text.
+func TestHTTPIngestRedactsStorePersistError(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	// Break the persist path after all bootstrap writes succeeded: the
+	// tmp-path directory makes the next os.WriteFile fail with EISDIR.
+	if err := os.Mkdir(statePath+".tmp", 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	event := domain.Event{EventID: "persist-fail-event", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "persist-fail-idem", Payload: map[string]any{"value": 1}}
+	body, _ := json.Marshal(event)
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("ingest with broken persist status=%d body=%s, want 500", response.StatusCode, data)
+	}
+	var result struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Code != "internal_error" || result.Error.Message != "internal server error" {
+		t.Fatalf("unexpected 500 body: %s", data)
+	}
+	for _, leaked := range []string{"state.json", "is a directory", "/"} {
+		if strings.Contains(string(data), leaked) {
+			t.Fatalf("5xx body leaks %q: %s", leaked, data)
+		}
+	}
+}
+
+// TestHTTPExportFailureIsMasked is T3 (AC-3): an export whose archive Put
+// fails persists the raw diagnostic in the snapshot (operator-only
+// state.json), but the API must never surface it — polled GET
+// /exports/{jobID} reports the fixed "export failed" message.
+func TestHTTPExportFailureIsMasked(t *testing.T) {
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	if err := os.WriteFile(archiveDir, []byte("occupied"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: archiveDir, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_020, 0).UTC()}
+	body, _ := json.Marshal(query)
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/exports", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("export creation failed: status=%d err=%v", response.StatusCode, err)
+	}
+	var job domain.ExportJob
+	if err := json.NewDecoder(response.Body).Decode(&job); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var lastBody []byte
+	for time.Now().Before(deadline) {
+		request, _ = http.NewRequest(http.MethodGet, server.URL+"/api/v1/exports/"+job.ID, nil)
+		request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+		response, err = http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastBody, _ = io.ReadAll(response.Body)
+		response.Body.Close()
+		if err := json.Unmarshal(lastBody, &job); err != nil {
+			t.Fatal(err)
+		}
+		if job.Status == "failed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if job.Status != "failed" {
+		t.Fatalf("export did not fail: %+v", job)
+	}
+	if job.Error != "export failed" {
+		t.Fatalf("export error not masked: %q", job.Error)
+	}
+	for _, leaked := range []string{"archive", "not a directory", "/"} {
+		if strings.Contains(string(lastBody), leaked) {
+			t.Fatalf("export response leaks %q: %s", leaked, lastBody)
+		}
+	}
+}
+
 func TestHTTPReadyzArchiveProbe(t *testing.T) {
 	archiveDir := filepath.Join(t.TempDir(), "archive")
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
