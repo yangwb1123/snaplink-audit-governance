@@ -152,7 +152,7 @@ func TestEventContentDigestMatchesIngestDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, eventID := range []string{"evt-plain", "evt-sensitive"} {
-		stored, err := svc.GetEvent("tenant-a", eventID)
+		stored, err := svc.GetEvent("tenant-a", "test", eventID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +178,7 @@ func TestVerifyIntegrityAcceptsSensitiveEvents(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "evt-sensitive")
+	stored, err := svc.GetEvent("tenant-a", "test", "evt-sensitive")
 	if err != nil {
 		t.Fatal(err)
 	}

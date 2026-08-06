@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -97,6 +98,13 @@ func (p *Producer) PublishFailure(ctx context.Context, failure Failure) error {
 	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(failure.EventID), Value: encoded})
 }
 
+// Republish writes a recovered accepted-topic message back to the producer's
+// topic byte-for-byte, preserving the original canonical encoding so the
+// digest chain stays intact.
+func (p *Producer) Republish(ctx context.Context, key, value []byte) error {
+	return p.writer.WriteMessages(ctx, kafka.Message{Key: key, Value: value})
+}
+
 func (p *Producer) Close() error { return p.writer.Close() }
 
 // IngestFunc delivers one canonical event into the ledger path. The audit
@@ -137,6 +145,11 @@ type Consumer struct {
 	maxAttempts int
 	dlq         FailurePublisher
 	attempts    map[messageKey]int
+
+	ingestFailures    atomic.Uint64
+	deadLettered      atomic.Uint64
+	dlqPublished      atomic.Uint64
+	messagesCommitted atomic.Uint64
 }
 
 // messageKey identifies one in-flight message for attempt accounting.
@@ -148,6 +161,15 @@ type messageKey struct {
 // ConsumerOption tunes a Consumer created by NewConsumer. Options are
 // additive; unset options keep the defaults.
 type ConsumerOption func(*Consumer)
+
+// ConsumerMetrics is a snapshot of the consumer's domain counters for the
+// /metrics endpoint and DLQ traffic alerting.
+type ConsumerMetrics struct {
+	IngestFailures    uint64
+	DeadLettered      uint64
+	DLQPublished      uint64
+	MessagesCommitted uint64
+}
 
 // WithMaxAttempts caps transient retries per (partition, offset) before the
 // message is dead-lettered. Non-positive values restore the default of 8.
@@ -262,9 +284,11 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 			if commitErr := c.reader.CommitMessages(ctx, message); commitErr != nil {
 				return commitErr
 			}
+			c.messagesCommitted.Add(1)
 			c.logf("ingested topic=%s offset=%d event_id=%s", c.reader.Config().Topic, message.Offset, event.EventID)
 			return nil
 		}
+		c.ingestFailures.Add(1)
 		// 永久错误（4xx 语义拒绝）没有重试价值：立即死信。
 		var deliveryErr *outbox.DeliveryError
 		if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
@@ -294,10 +318,23 @@ func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event 
 	if c.dlq != nil {
 		if err := c.dlq.PublishFailure(ctx, failure); err != nil {
 			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
+		} else {
+			c.dlqPublished.Add(1)
 		}
 	}
+	c.deadLettered.Add(1)
 	c.logf("dead-lettered topic=%s partition=%d offset=%d event_id=%s code=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, cause)
 	return c.reader.CommitMessages(ctx, message)
 }
 
 func (c *Consumer) Close() error { return c.reader.Close() }
+
+// Metrics returns a snapshot of the consumer's counters for /metrics.
+func (c *Consumer) Metrics() ConsumerMetrics {
+	return ConsumerMetrics{
+		IngestFailures:    c.ingestFailures.Load(),
+		DeadLettered:      c.deadLettered.Load(),
+		DLQPublished:      c.dlqPublished.Load(),
+		MessagesCommitted: c.messagesCommitted.Load(),
+	}
+}

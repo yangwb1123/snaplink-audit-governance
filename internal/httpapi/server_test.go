@@ -105,7 +105,7 @@ func httpAdminActionCount(t *testing.T, server *httptest.Server, token string) i
 func TestHTTPIngestQueryAndTenantIsolation(t *testing.T) {
 	server := testHTTPServer(t)
 	defer server.Close()
-	event := domain.Event{EventID: "http-evt-1", TenantID: "tenant-b", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "http-op-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-idem-1", Payload: map[string]any{"value": 1}}
+	event := domain.Event{EventID: "http-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "http-op-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-idem-1", Payload: map[string]any{"value": 1}}
 	body, _ := json.Marshal(event)
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
@@ -116,6 +116,22 @@ func TestHTTPIngestQueryAndTenantIsolation(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		data, _ := io.ReadAll(response.Body)
 		t.Fatalf("ingest status=%d body=%s", response.StatusCode, data)
+	}
+	response.Body.Close()
+
+	// DS-08: envelope tenant (tenant-b) inconsistent with the signed tenant
+	// claim (tenant-a) is rejected 422 and nothing is ingested.
+	tampered := domain.Event{EventID: "http-evt-2", TenantID: "tenant-b", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_011, 0).UTC(), OperationID: "http-op-2", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-idem-2", Payload: map[string]any{"value": 2}}
+	tamperedBody, _ := json.Marshal(tampered)
+	req, _ = http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(tamperedBody))
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusUnprocessableEntity {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("tampered tenant status=%d body=%s, want 422", response.StatusCode, data)
 	}
 	response.Body.Close()
 
@@ -1250,7 +1266,7 @@ func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
 
 	// Positive control: the store keeps the digest — stripping must never
 	// mutate the stored payload shared with the snapshot.
-	stored, err := svc.GetEvent("tenant-a", "strip-evt-1")
+	stored, err := svc.GetEvent("tenant-a", "test", "strip-evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}

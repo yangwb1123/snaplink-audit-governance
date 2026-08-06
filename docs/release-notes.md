@@ -1,5 +1,60 @@
 # Release Notes
 
+## 2026-08-06 — Tenant consistency 422; read-path self-audit; snapshot-conflict retry; DLQ replay consumer + alerts
+
+**Behavior changes (contract B1: DS-08, F-06, F-01, DLQ follow-up):**
+
+1. **Envelope tenant consistency (DS-08, 422).** `Ingest` now rejects with
+   `tenant_mismatch` (HTTP 422 / gRPC `FailedPrecondition`, new `Error.code`)
+   any event whose non-empty body `tenant_id` differs from the tenant
+   resolved server-side from the authenticated client — the silent
+   re-stamping of a mismatched envelope tenant is gone. An empty body
+   tenant is still derived from the `(client_id, source_system)`
+   registration. T-13 semantics: envelope tenant-b + token tenant-a → 422,
+   zero ingestion. `POST /api/v1/events`, `POST /api/v1/events:batch` and
+   the gRPC writes share the check (gRPC envelopes never carried
+   `tenant_id`, so only the HTTP surface gains the new 422 response;
+   OpenAPI updated).
+2. **Read self-audit (F-06).** `QueryEvents` and `GetEvent` now append an
+   `audit.event.read` admin action (actor = token subject, target = query /
+   event ID) and export downloads append `audit.event.export`
+   (`RecordExportDownload`, called after the job is verified completed).
+   The append lives in the service layer so no transport can bypass it, and
+   a failed append fails the read closed. Export creation already ran the
+   query through `QueryEvents`, so it now records the exporter's read fact
+   too. Empty-actor (system-internal) reads record nothing.
+3. **Snapshot-conflict retry (F-01).** `Store.Update` re-runs the mutation
+   closure on a fresh snapshot with bounded jitter (3 retries, 5–25 ms
+   exponential + jitter) when the Postgres optimistic-lock save reports
+   `ErrSnapshotConflict`; closure errors are never retried. Exhausted
+   conflicts surface as HTTP 503 `snapshot_conflict` instead of a bare 500
+   (idempotent callers retry). `/readyz` now probes the store backend
+   (Postgres ping; 503 `store_unavailable` when unreachable) in addition
+   to the archive probe.
+4. **DLQ replay consumer + traffic alerts (release-notes follow-up).** New
+   `audit-kafka-dlq-replay` binary recovers dead-lettered events: DLQ
+   `Failure` records carry only metadata, so the original message is
+   recovered from `audit.events.accepted.v1` by key and re-published
+   byte-for-byte (default) or re-ingested via the audit API
+   (`-api-url`/`-token`). Replayed event IDs persist to `-state`
+   (`AUDIT_DLQ_REPLAY_STATE`, default `./data/dlq-replay-state.json`),
+   making full-topic re-scans idempotent; transient republish failures stay
+   pending for the next round, permanent API rejections (4xx except 429)
+   are marked replayed to converge. `-once` for scheduler use or daemon
+   mode with `-interval`. `audit-kafka-consumer` and the replayer expose
+   text-format `/metrics` (`AUDIT_KAFKA_METRICS`/`AUDIT_DLQ_REPLAY_METRICS`;
+   `audit_consumer_dlq_published_total`, `audit_dlq_*`), and
+   `deploy/prometheus-rules.verify.yml` adds `AuditDLQTraffic`,
+   `AuditDLQBacklog` and `AuditDLQRepublishFailures` alerts. Compose
+   (`deploy/docker-compose.verify.yml`) runs the replayer and scrapes both
+   new endpoints.
+
+Migration: none (no schema/data/config change; the state file of the
+replayer is new). Rollback = revert the commit. Contract: OpenAPI gains 422
+on write routes and rewords `Event.tenant_id`; `Error.code` gains
+`tenant_mismatch`/`snapshot_conflict`; the admin trail gains
+`audit.event.read`/`audit.event.export` actions.
+
 ## 2026-08-06 — tenant/field-scoped search digests; digests stripped from API and export responses
 
 **Behavior change (security, threat-model boundary D):** search digests are

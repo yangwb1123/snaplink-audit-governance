@@ -1,0 +1,30 @@
+groups:
+  - name: audit-dlq
+    rules:
+      # DLQ 流量告警（release-notes 后续项）：任何新的死信发布都说明有事件
+      # 无法进入账本，需要人工介入（重放、修 schema、换 token）。
+      - alert: AuditDLQTraffic
+        expr: increase(audit_consumer_dlq_published_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit events are being dead-lettered
+          description: "{{ $value }} DLQ records published in the last 5 minutes by audit-kafka-consumer. Investigate error_code in audit.events.dlq.v1 and replay after fixing the cause."
+
+      # 重放积压告警：DLQ 重放消费者发现未重放事件（重放失败或未调度）。
+      - alert: AuditDLQBacklog
+        expr: audit_dlq_pending > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Dead-letter backlog not draining
+          description: "{{ $value }} dead-lettered events are pending replay. Check audit-kafka-dlq-replay state and the accepted-topic scan."
+
+      # 重放失败告警：永久拒绝被标记为重放完成（不会自动重试），必须人工处理。
+      - alert: AuditDLQRepublishFailures
+        expr: increase(audit_dlq_republish_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Dead-letter replay is failing
+          description: "{{ $value }} replay republish failures in the last 15 minutes. Transient failures retry next round; permanent ones need operator action."

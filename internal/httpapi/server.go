@@ -24,6 +24,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/service"
+	"github.com/snaplink/audit-governance/internal/store"
 )
 
 type Server struct {
@@ -163,6 +164,14 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
 		return
 	}
+	// Readiness reflects the control-plane store dependency first: a
+	// PostgreSQL snapshot backend that cannot be reached must surface here
+	// (503) instead of failing every read-modify-write later. File-backed
+	// stores are always ready.
+	if err := s.Service.Store.Ready(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "store_unavailable"})
+		return
+	}
 	// Readiness reflects the configured archive dependency: an unavailable
 	// WORM destination must surface here instead of silently degrading the
 	// archived status of new events. An unconfigured store (nil or an
@@ -294,7 +303,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenantID := s.tenantFor(r, claims)
-	event, err := s.Service.GetEvent(tenantID, r.PathValue("eventID"))
+	event, err := s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
@@ -337,7 +346,7 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.queryCount.Add(1)
-	result, err := s.Service.QueryEvents(s.tenantFor(r, claims), query)
+	result, err := s.Service.QueryEvents(s.tenantFor(r, claims), claims.Subject, query)
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
@@ -463,6 +472,12 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 	}
 	if job.Status != "completed" || job.ObjectPath == "" {
 		writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
+		return
+	}
+	// 导出下载是治理事实（audit.event.export）：服务层追加失败则中止下载
+	// （fail-closed，与读自审计同一规则）。
+	if err := s.Service.RecordExportDownload(job.TenantID, claims.Subject, job.ID); err != nil {
+		writeError(w, r, statusForError(err), err)
 		return
 	}
 	data, err := s.Service.Config.Archive.Get(r.Context(), job.ObjectPath)
@@ -978,6 +993,10 @@ func errorBody(status int, err error, r *http.Request) map[string]any {
 		code = "quota_exceeded"
 	case errors.Is(err, domain.ErrSchemaNotFound):
 		code = "schema_not_found"
+	case errors.Is(err, domain.ErrTenantMismatch):
+		code = "tenant_mismatch"
+	case errors.Is(err, store.ErrSnapshotConflict):
+		code = "snapshot_conflict"
 	}
 	message := err.Error()
 	if status >= 500 {
@@ -1002,6 +1021,12 @@ func statusForError(err error) int {
 		return http.StatusTooManyRequests
 	case errors.Is(err, domain.ErrSchemaNotFound):
 		return http.StatusUnprocessableEntity
+	case errors.Is(err, domain.ErrTenantMismatch):
+		// 信封租户与令牌解析租户不一致：请求语义无效，拒绝入账（DS-08）。
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, store.ErrSnapshotConflict):
+		// 乐观锁冲突重试耗尽：请求结果未知，客户端应按幂等语义重试。
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

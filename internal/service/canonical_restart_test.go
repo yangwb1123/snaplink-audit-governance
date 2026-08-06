@@ -61,7 +61,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "big-int")
+	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	if !result.Valid || len(result.Errors) != 0 {
 		t.Fatalf("verify after reload failed: %+v", result)
 	}
-	after, err := svc2.GetEvent("tenant-a", "big-int")
+	after, err := svc2.GetEvent("tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "big-int")
+	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	if !result.Valid || len(result.Errors) != 0 {
 		t.Fatalf("verify after postgres reload failed: %+v", result)
 	}
-	after, err := svc2.GetEvent("tenant-a", "big-int")
+	after, err := svc2.GetEvent("tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}

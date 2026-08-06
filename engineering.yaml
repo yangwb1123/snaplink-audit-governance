@@ -22,5 +22,7 @@ build:
       path: ./cmd/audit-outbox-relay
     - name: audit-kafka-consumer
       path: ./cmd/audit-kafka-consumer
+    - name: audit-kafka-dlq-replay
+      path: ./cmd/audit-kafka-dlq-replay
     - name: audit-projector
       path: ./cmd/audit-projector

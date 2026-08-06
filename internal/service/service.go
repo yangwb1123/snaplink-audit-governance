@@ -387,6 +387,16 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 		return domain.EventReceipt{}, err
 	}
 	tenantID = resolvedTenant
+	// Tenant consistency (DS-08): the envelope may carry a tenant_id, but it
+	// must be the tenant resolved server-side from the authenticated client
+	// identity — never a different one. The resolved tenant is authoritative;
+	// a non-empty mismatched envelope tenant is rejected (422) instead of
+	// being silently re-labelled, so a writer cannot attribute events to a
+	// tenant it has no authority for. An empty envelope tenant is derived
+	// from the client/source registration below and stamped by the server.
+	if event.TenantID != "" && event.TenantID != tenantID {
+		return domain.EventReceipt{}, fmt.Errorf("%w: envelope tenant_id %q does not match the tenant resolved from the authenticated client (%q)", domain.ErrTenantMismatch, event.TenantID, tenantID)
+	}
 	if err := s.checkTenantAndQuota(tenantID); err != nil {
 		return domain.EventReceipt{}, err
 	}
@@ -593,7 +603,7 @@ func (s *Service) GetReceipt(tenantID, eventID string) (domain.EventReceipt, err
 	return receipt, err
 }
 
-func (s *Service) GetEvent(tenantID, eventID string) (domain.Event, error) {
+func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error) {
 	var event domain.Event
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.Events[store.EventKey(tenantID, eventID)]
@@ -603,10 +613,33 @@ func (s *Service) GetEvent(tenantID, eventID string) (domain.Event, error) {
 		event = value
 		return nil
 	})
-	return event, err
+	if err != nil {
+		return domain.Event{}, err
+	}
+	// Read self-audit (F-06): every event read is a governance fact appended
+	// to the append-only admin trail. The append happens in the service layer
+	// so no transport can bypass it; a failed append fails the read closed.
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
+		return domain.Event{}, err
+	}
+	return event, nil
 }
 
-func (s *Service) QueryEvents(tenantID string, query domain.Query) (domain.QueryResult, error) {
+// recordReadAction appends one self-audit record for a read-path fact. Reads
+// have no paired mutation, so the record is appended in its own Store.Update
+// after the read succeeds; a failed append aborts the read (fail-closed:
+// an un-auditable read must not be reported as served).
+func (s *Service) recordReadAction(tenantID, actor, action, targetType, targetID, detail string) error {
+	if actor == "" {
+		return nil
+	}
+	return s.Store.Update(func(data *store.Snapshot) error {
+		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, actor, action, targetType, targetID, detail))
+		return nil
+	})
+}
+
+func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
 	if query.From.IsZero() || query.To.IsZero() {
 		return domain.QueryResult{}, fmt.Errorf("%w: from and to are required", domain.ErrInvalid)
 	}
@@ -664,6 +697,12 @@ func (s *Service) QueryEvents(tenantID string, query domain.Query) (domain.Query
 		result.NextCursor = domain.EncodeCursor(last.Sequence, last.EventID)
 	} else {
 		result.Items = events
+	}
+	// Read self-audit (F-06): the query itself is a governance fact. The
+	// append happens in the service layer (every transport shares this
+	// method); a failed append fails the query closed.
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "query", "", fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))); err != nil {
+		return domain.QueryResult{}, err
 	}
 	return result, nil
 }

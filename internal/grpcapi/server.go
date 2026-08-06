@@ -192,6 +192,9 @@ func toStatus(err error) error {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, domain.ErrSchemaNotFound):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, domain.ErrTenantMismatch):
+		// 与 HTTP 422 对齐：请求语义有效但租户一致性不成立。
+		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

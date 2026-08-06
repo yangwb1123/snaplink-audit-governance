@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w' -o /out/audit-governance-worker ./cmd/audit-governance-worker && \
     go build -trimpath -ldflags='-s -w' -o /out/audit-outbox-relay ./cmd/audit-outbox-relay && \
     go build -trimpath -ldflags='-s -w' -o /out/audit-kafka-consumer ./cmd/audit-kafka-consumer && \
+    go build -trimpath -ldflags='-s -w' -o /out/audit-kafka-dlq-replay ./cmd/audit-kafka-dlq-replay && \
     go build -trimpath -ldflags='-s -w' -o /out/audit-projector ./cmd/audit-projector
 
 FROM alpine:3.22
@@ -18,6 +19,7 @@ COPY --from=build /out/audit-api /audit-api
 COPY --from=build /out/audit-governance-worker /audit-governance-worker
 COPY --from=build /out/audit-outbox-relay /audit-outbox-relay
 COPY --from=build /out/audit-kafka-consumer /audit-kafka-consumer
+COPY --from=build /out/audit-kafka-dlq-replay /audit-kafka-dlq-replay
 COPY --from=build /out/audit-projector /audit-projector
 USER audit:audit
 WORKDIR /var/lib/audit

@@ -35,6 +35,11 @@ var (
 	ErrInvalid        = errors.New("invalid request")
 	ErrQuotaExceeded  = errors.New("quota exceeded")
 	ErrSchemaNotFound = errors.New("schema not found")
+	// ErrTenantMismatch means the envelope carried a tenant_id that does not
+	// match the tenant resolved server-side from the authenticated client.
+	// Rejecting instead of silently re-labelling prevents a writer from
+	// attributing an event to a tenant it has no authority for (422).
+	ErrTenantMismatch = errors.New("tenant mismatch")
 )
 
 // Event is the canonical audit fact accepted from a source system. Payload is
@@ -355,6 +360,8 @@ const (
 	AdminActionRestoreCreated     = "restore.created"
 	AdminActionRestoreApproved    = "restore.approved"
 	AdminActionRestoreRejected    = "restore.rejected"
+	AdminActionEventRead          = "audit.event.read"
+	AdminActionEventExport        = "audit.event.export"
 )
 
 func (e Event) ValidateBasic() error {

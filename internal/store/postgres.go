@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -79,6 +80,15 @@ func (p *postgresBackend) load() (*Snapshot, int64, error) {
 }
 
 func (p *postgresBackend) Close() error { return p.db.Close() }
+
+// Ready pings the control-plane database so /readyz can fail fast when the
+// snapshot backend is unreachable. File-backed stores have no probe.
+func (p *postgresBackend) Ready(ctx context.Context) error {
+	if err := p.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("state snapshot store: %w", err)
+	}
+	return nil
+}
 
 func (p *postgresBackend) Save(data *Snapshot) error {
 	encoded, err := json.Marshal(data)

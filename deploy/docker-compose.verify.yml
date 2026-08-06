@@ -53,10 +53,27 @@ services:
       AUDIT_KAFKA_BROKERS: redpanda:9092
       AUDIT_OUTBOX_API_URL: http://audit-api:8089
       AUDIT_OUTBOX_TOKEN: dev:demo:service
+      AUDIT_KAFKA_METRICS: ":9092"
     depends_on:
       - redpanda
       - audit-api
     restart: unless-stopped
+    networks: [audit_verify]
+
+  audit-kafka-dlq-replay:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/audit-kafka-dlq-replay"]
+    environment:
+      AUDIT_KAFKA_BROKERS: redpanda:9092
+      AUDIT_DLQ_REPLAY_STATE: /var/lib/audit/dlq-replay-state.json
+      AUDIT_DLQ_REPLAY_METRICS: ":9093"
+    depends_on:
+      - redpanda
+    restart: unless-stopped
+    volumes:
+      - audit_state:/var/lib/audit
     networks: [audit_verify]
 
   audit-projector:
@@ -153,6 +170,7 @@ services:
     image: prom/prometheus:v2.54.1
     volumes:
       - ./prometheus.verify.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.verify.yml:/etc/prometheus/rules.yml:ro
     ports:
       - "19090:9090"
     networks: [audit_verify]

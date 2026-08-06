@@ -63,7 +63,7 @@ func BenchmarkQuery(b *testing.B) {
 	query := domain.Query{From: base, To: base.Add(2000 * time.Second), EventType: "audit.event", PageSize: 100}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := svc.QueryEvents("tenant-a", query); err != nil {
+		if _, err := svc.QueryEvents("tenant-a", "bench", query); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -102,7 +102,7 @@ func BenchmarkQueryLargeLedger(b *testing.B) {
 	query := domain.Query{From: base, To: base.Add(6000 * time.Second), EventType: "audit.event", PageSize: 100}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := svc.QueryEvents("tenant-a", query); err != nil {
+		if _, err := svc.QueryEvents("tenant-a", "bench", query); err != nil {
 			b.Fatal(err)
 		}
 	}

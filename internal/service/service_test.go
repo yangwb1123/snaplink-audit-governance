@@ -178,13 +178,22 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := testEvent("derived-tenant", "derive-op", time.Unix(1_700_000_010, 0).UTC())
+	// DS-08: a non-empty envelope tenant must match the server-resolved
+	// tenant; a mismatched envelope is rejected (422) instead of silently
+	// re-labelled, so the writer cannot attribute events to tenant-b through
+	// a tenant-a token even when tenant-b owns a same-named source.
 	event.TenantID = "tenant-b"
+	if _, err := svc.Ingest("", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
+		t.Fatalf("mismatched envelope tenant err=%v, want tenant mismatch", err)
+	}
+	// Empty envelope tenant is derived from the server-side binding.
+	event.TenantID = ""
 	receipt, err := svc.Ingest("", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if receipt.TenantID != "tenant-a" {
-		t.Fatalf("body tenant overrode server binding: %+v", receipt)
+		t.Fatalf("server binding was not used: %+v", receipt)
 	}
 	crossTenant := testEvent("cross-tenant", "derive-op", time.Unix(1_700_000_011, 0).UTC())
 	if _, err := svc.Ingest("tenant-b", crmPrincipal, crossTenant, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
@@ -214,12 +223,12 @@ func TestQueryReplayAndExport(t *testing.T) {
 		}
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(10 * time.Second), PageSize: 2}
-	page, err := svc.QueryEvents("tenant-a", query)
+	page, err := svc.QueryEvents("tenant-a", "test", query)
 	if err != nil || len(page.Items) != 2 || page.NextCursor == "" {
 		t.Fatalf("unexpected first page: %+v %v", page, err)
 	}
 	query.Cursor = page.NextCursor
-	page2, err := svc.QueryEvents("tenant-a", query)
+	page2, err := svc.QueryEvents("tenant-a", "test", query)
 	if err != nil || len(page2.Items) != 1 {
 		t.Fatalf("unexpected second page: %+v %v", page2, err)
 	}
@@ -325,7 +334,7 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := reopenedService.GetEvent("tenant-a", "persisted")
+	event, err := reopenedService.GetEvent("tenant-a", "test", "persisted")
 	if err != nil || event.Hash == "" {
 		t.Fatalf("persisted event missing: %+v %v", event, err)
 	}
@@ -351,7 +360,7 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "evt-encrypted")
+	stored, err := svc.GetEvent("tenant-a", "test", "evt-encrypted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,14 +733,14 @@ func TestQueryCorrelationDimensions(t *testing.T) {
 	}
 
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
-	byCorrelation, err := svc.QueryEvents("tenant-a", domain.Query{From: base.From, To: base.To, CorrelationID: "corr-outer", PageSize: 100})
+	byCorrelation, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, CorrelationID: "corr-outer", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if byCorrelation.Count != 2 {
 		t.Fatalf("correlation query count=%d, want 2", byCorrelation.Count)
 	}
-	byCausation, err := svc.QueryEvents("tenant-a", domain.Query{From: base.From, To: base.To, CausationID: "corr-evt-1", PageSize: 100})
+	byCausation, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, CausationID: "corr-evt-1", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -762,9 +771,13 @@ func TestAdminActionSelfAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	if _, err := svc.CreateExport("tenant-a", "compliance-3", query); err != nil {
+	exportJob, err := svc.CreateExport("tenant-a", "compliance-3", query)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// runExport 是异步 goroutine：等待任务收敛（否则其写入与 TempDir 清理
+	// 竞争，race 模式下可见）。
+	waitExport(t, svc, exportJob.ID)
 	at := time.Unix(1_700_000_010, 0).UTC()
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("audit-evt", "op-audit", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
@@ -867,7 +880,7 @@ func TestQueryStreamIDFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
-	filtered, err := svc.QueryEvents("tenant-a", domain.Query{From: base.From, To: base.To, StreamID: "tenant-a:aggregate:invoice:inv-9", PageSize: 100})
+	filtered, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, StreamID: "tenant-a:aggregate:invoice:inv-9", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1000,7 +1013,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 		t.Fatalf("sequence must follow write order: later=%d earlier=%d", receiptLater.Sequence, receiptEarlier.Sequence)
 	}
 	// 查询返回按账本序号（写入序）：later 先写入，排在前。
-	result, err := svc.QueryEvents("tenant-a", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
+	result, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

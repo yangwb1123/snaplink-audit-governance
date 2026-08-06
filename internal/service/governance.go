@@ -13,7 +13,9 @@ import (
 )
 
 func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query) (domain.ExportJob, error) {
-	if _, err := s.QueryEvents(tenantID, query); err != nil {
+	// The export reads events: run the query through the audited read path so
+	// the same actor's audit.event.read fact is recorded, then create the job.
+	if _, err := s.QueryEvents(tenantID, requestedBy, query); err != nil {
 		return domain.ExportJob{}, err
 	}
 	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
@@ -39,6 +41,17 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 		return nil
 	})
 	return job, err
+}
+
+// RecordExportDownload appends the audit.event.export self-audit fact for a
+// completed export being downloaded. Called by the transport after the job
+// is verified completed and before the sealed object is streamed; a failed
+// append aborts the download (fail-closed).
+func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("%w: job id is required", domain.ErrInvalid)
+	}
+	return s.recordReadAction(tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
 }
 
 func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, error) {

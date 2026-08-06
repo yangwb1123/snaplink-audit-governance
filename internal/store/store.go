@@ -2,16 +2,19 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -167,17 +170,64 @@ func (s *Store) Read(fn func(*Snapshot) error) error {
 // snapshotRestorer is no longer needed: LoadForUpdate hands every Update
 // closure a private copy, so failures cannot leak into shared state.
 
+// snapshotConflictRetries bounds the optimistic-lock retry loop in Update.
+// Postgres-backed stores share the single audit_state_snapshot row across
+// replicas; a concurrent writer bumps the version between our LoadForUpdate
+// and Save. The mutation closure is re-run on the fresh snapshot, so the
+// retry is only sound because nothing was committed on a conflict (Save
+// failed atomically).
+const snapshotConflictRetries = 3
+
+// snapshotConflictBackoff returns a bounded jittered delay for retry
+// attempt n (0-based): base 5ms, doubling, capped at 25ms, plus up to 5ms
+// of jitter so concurrent replicas do not retry in lockstep.
+func snapshotConflictBackoff(attempt int) time.Duration {
+	base := time.Duration(5*(1<<min(attempt, 3))) * time.Millisecond
+	if base > 25*time.Millisecond {
+		base = 25 * time.Millisecond
+	}
+	return base + time.Duration(rand.IntN(5_000_000))
+}
+
+// Update runs fn on a private snapshot copy and persists the result. When
+// the backend reports ErrSnapshotConflict (concurrent writer won the
+// optimistic version check), Update re-loads the fresh snapshot and re-runs
+// fn up to snapshotConflictRetries times with bounded jitter. Other errors
+// (including errors returned by fn itself) are returned immediately: they
+// are not conflicts and must not be retried.
 func (s *Store) Update(fn func(*Snapshot) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := s.backend.LoadForUpdate()
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
+		data, err := s.backend.LoadForUpdate()
+		if err != nil {
+			return err
+		}
+		if err := fn(data); err != nil {
+			return err
+		}
+		if err := s.backend.Save(data); err != nil {
+			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
+				lastErr = err
+				time.Sleep(snapshotConflictBackoff(attempt))
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	if err := fn(data); err != nil {
-		return err
+	return lastErr
+}
+
+// Ready probes the persistence backend. File-backed stores are always ready;
+// the Postgres backend pings its connection so /readyz can surface an
+// unavailable control plane before requests start failing.
+func (s *Store) Ready(ctx context.Context) error {
+	if probe, ok := s.backend.(interface{ Ready(context.Context) error }); ok {
+		return probe.Ready(ctx)
 	}
-	return s.backend.Save(data)
+	return nil
 }
 
 // Flush is kept for compatibility; every backend persists synchronously on

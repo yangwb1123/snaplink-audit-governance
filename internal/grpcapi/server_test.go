@@ -62,7 +62,7 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	if receipt.GetTenantId() != "tenant-a" || receipt.GetSequence() != 1 {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
-	ledgered, err := svc.GetEvent("tenant-a", "grpc-evt-1")
+	ledgered, err := svc.GetEvent("tenant-a", "test", "grpc-evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
