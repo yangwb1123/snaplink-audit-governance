@@ -1151,3 +1151,113 @@ func TestHTTPCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// hasDigestKey reports whether any key ending in "__search_digest" exists
+// at any nesting depth of a decoded JSON value (recursive scan).
+func hasDigestKey(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if strings.HasSuffix(key, "__search_digest") || hasDigestKey(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if hasDigestKey(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestHTTPResponsesStripSearchDigestsRecursively is AC-2: GET /events/{id}
+// and GET /events responses contain no key matching *__search_digest
+// anywhere in the payload (recursive scan), while the store keeps the
+// digest — the strip happens on response copies only.
+func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	event := domain.Event{EventID: "strip-evt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 2, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "strip-op-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "strip-idem-1", Payload: map[string]any{"resource": "invoice", "email": "alice@example.test", "nested": map[string]any{"note__search_digest": "sd2:nested", "keep": "yes"}}}
+	postTestEvent(t, server.URL, "dev:tenant-a:service:crm", event)
+
+	get := func(path string) []byte {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status=%d", path, response.StatusCode)
+		}
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	// GET /events/{id}: single event, stripped at every depth.
+	single := get("/api/v1/events/strip-evt-1")
+	var fetched domain.Event
+	if err := json.Unmarshal(single, &fetched); err != nil {
+		t.Fatal(err)
+	}
+	if hasDigestKey(fetched.Payload) {
+		t.Fatalf("GET /events/{id} payload still contains a digest key: %s", single)
+	}
+	if fetched.Payload["email"] != "alice@example.test" {
+		t.Fatalf("plaintext field must survive the strip: %+v", fetched.Payload)
+	}
+	if fetched.Payload["nested"].(map[string]any)["keep"] != "yes" {
+		t.Fatalf("non-digest nested content must survive: %+v", fetched.Payload)
+	}
+
+	// GET /events: list response, stripped at every depth.
+	list := get("/api/v1/events?from=2023-11-14T22:13:00Z&to=2023-11-14T22:14:00Z")
+	var result domain.QueryResult
+	if err := json.Unmarshal(list, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("unexpected query result: %+v", result)
+	}
+	if hasDigestKey(result.Items[0].Payload) {
+		t.Fatalf("GET /events payload still contains a digest key: %s", list)
+	}
+
+	// Positive control: the store keeps the digest — stripping must never
+	// mutate the stored payload shared with the snapshot.
+	stored, err := svc.GetEvent("tenant-a", "strip-evt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stored.Payload["email__search_digest"]; !ok {
+		t.Fatal("store must retain the search digest; strip must be copy-only")
+	}
+	if _, ok := stored.Payload["nested"].(map[string]any)["note__search_digest"]; !ok {
+		t.Fatal("store must retain the nested digest-like key")
+	}
+}

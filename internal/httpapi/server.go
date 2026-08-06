@@ -299,6 +299,15 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, statusForError(err), err)
 		return
 	}
+	// 响应剥离搜索摘要（深拷贝，绝不改动存储快照共享的 map）：摘要值曾
+	// 可用于跨租户关联，且对事件读者无业务价值。剥离失败时 500 —— 宁可
+	// 失败也不泄漏。
+	stripped, err := security.StripSearchDigests(event.Payload)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err)
+		return
+	}
+	event.Payload = stripped
 	writeJSON(w, http.StatusOK, event)
 }
 
@@ -332,6 +341,15 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
+	}
+	// 与 getEvent 相同：列表响应同样剥离搜索摘要，仅在响应副本上进行。
+	for i := range result.Items {
+		stripped, stripErr := security.StripSearchDigests(result.Items[i].Payload)
+		if stripErr != nil {
+			writeError(w, r, http.StatusInternalServerError, stripErr)
+			return
+		}
+		result.Items[i].Payload = stripped
 	}
 	writeJSON(w, http.StatusOK, result)
 }

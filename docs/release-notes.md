@@ -1,5 +1,37 @@
 # Release Notes
 
+## 2026-08-06 — tenant/field-scoped search digests; digests stripped from API and export responses
+
+**Behavior change (security, threat-model boundary D):** search digests are
+now bound to the tenant ID and field name. `security.SearchDigestBound`
+derives `sd2:`-prefixed digests whose HMAC input is the canonical JSON value
+plus the tenant ID and field name, so the same plaintext in two tenants (or
+under two field names) yields different digests — an actor holding read
+access to several tenants can no longer correlate records across tenants by
+digest equality. The stored key name (`<field>__search_digest`) and the
+wire/OpenAPI contract are unchanged.
+
+- Search compatibility: `QueryEvents`, legal-hold filtering and export
+  filtering accept both formats. Same-format digests compare directly;
+  mixed formats re-derive the query-format digest from the stored plaintext
+  (fail-closed when the plaintext is unavailable — encrypted+searchable
+  fields are same-format only). Old v1 clients can search events ingested
+  under the new format and new clients can search legacy events; event
+  idempotency and `VerifyIntegrity` are unaffected (`SourceDigest` is
+  computed pre-protection and `reconstructAndDerive` deletes digest keys by
+  schema name).
+- Response redaction: `GET /api/v1/events/{id}` and `GET /api/v1/events`
+  now strip every `*__search_digest` key from the payload recursively, on
+  deep copies only (the store keeps the digest for search; a strip failure
+  returns 500 rather than leaking). Decrypted export JSONL is stripped the
+  same way.
+- Migration: none — digest values are derived at ingest; existing events
+  keep their v1 digests and keep matching through the fallback. Plain
+  deploy/revert; no backfill (WORM immutability).
+- Scope guard: archive stripping, key rotation/HKDF separation, and
+  timeline/replay endpoints remain explicitly out of scope (sibling
+  findings).
+
 ## 2026-08-06 — outbox.Insert reports duplicate/conflict outcomes instead of silently dropping events
 
 **Behavior change (data integrity):** `outbox.Insert` no longer discards the

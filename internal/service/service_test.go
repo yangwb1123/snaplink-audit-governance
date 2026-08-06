@@ -362,9 +362,9 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	if _, ok := stored.Payload["email__search_digest"]; !ok {
 		t.Fatalf("search digest missing: %+v", stored.Payload)
 	}
-	expectedDigest, err := security.SearchDigest("alice@example.test", svc.Config.EncryptionKey)
+	expectedDigest, err := security.SearchDigestBound("alice@example.test", svc.Config.EncryptionKey, "tenant-a", "email")
 	if err != nil || stored.Payload["email__search_digest"] != expectedDigest {
-		t.Fatalf("search digest must use original value: got=%v want=%v err=%v", stored.Payload["email__search_digest"], expectedDigest, err)
+		t.Fatalf("search digest must use original value and tenant/field binding: got=%v want=%v err=%v", stored.Payload["email__search_digest"], expectedDigest, err)
 	}
 	duplicate, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil || !duplicate.Duplicate || first.Hash != duplicate.Hash {

@@ -477,7 +477,19 @@ func (s *Service) runExport(jobID string) {
 		data.Exports[jobID] = value
 		return nil
 	})
-	events, err := s.eventsFor(job.TenantID, func(event domain.Event) bool { return matches(event, job.Query) })
+	var events []domain.Event
+	schemas := map[string]domain.EventSchema{}
+	err := s.Store.Read(func(data *store.Snapshot) error {
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
+		for _, event := range data.Events {
+			if event.TenantID == job.TenantID && s.matches(event, job.Query, schemas) {
+				events = append(events, event)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())
 		return
@@ -485,6 +497,16 @@ func (s *Service) runExport(jobID string) {
 	sortEvents(events)
 	var bytesWritten []byte
 	for _, event := range events {
+		// 导出内容剥离搜索摘要（深拷贝，不触碰存储共享的 payload）：解密
+		// 后的 JSONL 不得携带可跨租户关联的 digest 值。v2 bound 摘要本身
+		// 已租户隔离，但 v1 遗留摘要对同明文跨租户相等，且摘要对消费者无
+		// 业务价值，因此一律剥离。
+		stripped, stripErr := security.StripSearchDigests(event.Payload)
+		if stripErr != nil {
+			s.finishExport(jobID, "failed", "", "", 0, stripErr.Error())
+			return
+		}
+		event.Payload = stripped
 		line, marshalErr := domain.CanonicalJSON(event)
 		if marshalErr != nil {
 			s.finishExport(jobID, "failed", "", "", 0, marshalErr.Error())

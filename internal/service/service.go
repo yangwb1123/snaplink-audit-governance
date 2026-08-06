@@ -339,6 +339,10 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 	cutoff := now.Add(-time.Duration(policy.ArchiveDays) * 24 * time.Hour)
 	var holds []domain.LegalHold
 	if err := s.Store.Read(func(data *store.Snapshot) error {
+		schemas := map[string]domain.EventSchema{}
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
 		for _, hold := range data.LegalHolds {
 			if hold.TenantID == tenantID && hold.ReleasedAt == nil {
 				holds = append(holds, hold)
@@ -351,7 +355,7 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 			}
 			protected := false
 			for _, hold := range holds {
-				if holdMatchesEvent(hold, event) {
+				if s.holdMatchesEvent(hold, event, schemas) {
 					protected = true
 					report.HoldIDs = appendUnique(report.HoldIDs, hold.ID)
 				}
@@ -619,9 +623,13 @@ func (s *Service) QueryEvents(tenantID string, query domain.Query) (domain.Query
 		return domain.QueryResult{}, fmt.Errorf("%w: page_size exceeds %d", domain.ErrInvalid, domain.MaxPageSize)
 	}
 	var events []domain.Event
+	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
 		for _, event := range data.Events {
-			if event.TenantID == tenantID && matches(event, query) {
+			if event.TenantID == tenantID && s.matches(event, query, schemas) {
 				events = append(events, event)
 			}
 		}
@@ -862,7 +870,13 @@ func (s *Service) protectSensitiveFields(event *domain.Event, schema domain.Even
 		if !ok {
 			continue
 		}
-		digest, err := security.SearchDigest(value, s.Config.EncryptionKey)
+		// Tenant/field-bound digest: the same plaintext in another tenant or
+		// under another field name yields a different digest, so stored
+		// digests can no longer be used to correlate records across tenants
+		// (threat-model boundary D). The key name stays field+"__search_digest"
+		// and the format is self-describing ("sd2:" prefix) so old clients
+		// and legacy stored events remain distinguishable.
+		digest, err := security.SearchDigestBound(value, s.Config.EncryptionKey, event.TenantID, field)
 		if err != nil {
 			return err
 		}
@@ -989,7 +1003,7 @@ func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) 
 	return events, err
 }
 
-func matches(event domain.Event, query domain.Query) bool {
+func (s *Service) matches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
 	if event.OccurredAt.Before(query.From) || !event.OccurredAt.Before(query.To) {
 		return false
 	}
@@ -1027,7 +1041,7 @@ func matches(event domain.Event, query domain.Query) bool {
 		return false
 	}
 	if query.PayloadField != "" {
-		if query.PayloadDigest == "" || event.Payload[query.PayloadField+"__search_digest"] != query.PayloadDigest {
+		if !s.digestMatches(event, query, schemas) {
 			return false
 		}
 	}
@@ -1037,7 +1051,47 @@ func matches(event domain.Event, query domain.Query) bool {
 	return true
 }
 
-func holdMatchesEvent(hold domain.LegalHold, event domain.Event) bool {
+// digestMatches reports whether the stored event satisfies the query's
+// (payload_field, payload_digest) filter. Both digest formats are accepted:
+//   - same format (v1 unbound or v2 bound on both sides) → direct equality;
+//   - mixed formats → the query-format digest is re-derived from the stored
+//     plaintext and compared. The fallback fails closed when the plaintext
+//     is unavailable (encrypted field, missing value, unknown schema
+//     version), so a cross-format query can never match through a
+//     ciphertext or an absent value.
+//
+// The fallback keeps old v1 clients able to search events ingested under
+// the new bound format and new v2 clients able to search legacy events.
+func (s *Service) digestMatches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
+	stored, ok := event.Payload[query.PayloadField+"__search_digest"].(string)
+	if !ok {
+		return false
+	}
+	if security.IsBoundSearchDigest(stored) == security.IsBoundSearchDigest(query.PayloadDigest) {
+		return stored == query.PayloadDigest
+	}
+	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
+	if !ok || containsString(schema.EncryptedFields, query.PayloadField) {
+		return false
+	}
+	value, ok := event.Payload[query.PayloadField]
+	if !ok {
+		return false
+	}
+	var derived string
+	var err error
+	if security.IsBoundSearchDigest(query.PayloadDigest) {
+		derived, err = security.SearchDigestBound(value, s.Config.EncryptionKey, event.TenantID, query.PayloadField)
+	} else {
+		derived, err = security.SearchDigest(value, s.Config.EncryptionKey)
+	}
+	if err != nil {
+		return false
+	}
+	return derived == query.PayloadDigest
+}
+
+func (s *Service) holdMatchesEvent(hold domain.LegalHold, event domain.Event, schemas map[string]domain.EventSchema) bool {
 	filter := hold.Filter
 	if filter.From.IsZero() && filter.To.IsZero() {
 		return true
@@ -1045,7 +1099,7 @@ func holdMatchesEvent(hold domain.LegalHold, event domain.Event) bool {
 	if filter.From.IsZero() || filter.To.IsZero() {
 		return false
 	}
-	return matches(event, filter)
+	return s.matches(event, filter, schemas)
 }
 
 func appendUnique(values []string, wanted string) []string {

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const encryptedPrefix = "enc:v1:"
@@ -88,6 +89,82 @@ func SearchDigest(value any, key string) (string, error) {
 	mac := hmac.New(sha256.New, keyBytes(key))
 	_, _ = mac.Write(plain)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// searchDigestPrefix marks tenant/field-bound search digests (format v2).
+// ':' is outside the base64url alphabet, so a legacy unbound digest (format
+// v1, produced by SearchDigest) can never carry the prefix: the two formats
+// are distinguishable from the value alone, without a versioned struct.
+const searchDigestPrefix = "sd2:"
+
+// SearchDigestBound derives a tenant- and field-scoped search digest. The
+// HMAC input binds the canonical JSON value to the tenant ID and field
+// name, so the same plaintext in two tenants (or under two field names)
+// yields different digests: an actor holding read access to several tenants
+// can no longer correlate records across tenants purely by digest equality
+// (threat-model boundary D). The output is self-describing ("sd2:" prefix);
+// see IsBoundSearchDigest.
+func SearchDigestBound(value any, key, tenantID, field string) (string, error) {
+	plain, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, keyBytes(key))
+	_, _ = mac.Write(plain)
+	// NUL framing: json.Marshal never emits a raw 0x00 byte (control
+	// characters are escaped as \uXXXX), so value/tenantID/field are
+	// unambiguously delimited even for hostile tenant IDs or field names.
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(tenantID))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(field))
+	return searchDigestPrefix + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// IsBoundSearchDigest reports whether digest carries the self-describing
+// tenant/field-bound format marker. Legacy unbound digests never match.
+func IsBoundSearchDigest(digest string) bool {
+	return strings.HasPrefix(digest, searchDigestPrefix)
+}
+
+// StripSearchDigests returns a deep copy of payload with every key ending
+// in "__search_digest" removed at any nesting depth (nested maps and array
+// elements included). The caller's map is never mutated: stored payloads
+// are shared by reference with the store snapshot, so API responses must be
+// redacted on copies. Numbers round-trip through json.Number so int64
+// values > 2^53 keep their exact digits (mirroring the store's snapshot
+// decoding).
+func StripSearchDigests(payload map[string]any) (map[string]any, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var copyPayload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&copyPayload); err != nil {
+		return nil, err
+	}
+	stripSearchDigestKeys(copyPayload)
+	return copyPayload, nil
+}
+
+func stripSearchDigestKeys(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key := range v {
+			if strings.HasSuffix(key, "__search_digest") {
+				delete(v, key)
+			}
+		}
+		for _, child := range v {
+			stripSearchDigestKeys(child)
+		}
+	case []any:
+		for _, child := range v {
+			stripSearchDigestKeys(child)
+		}
+	}
 }
 
 // EncryptBytes seals raw bytes with AES-GCM. The output carries the
