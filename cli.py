@@ -158,7 +158,8 @@ def cmd_check_routes() -> int:
 def cmd_check_root() -> int:
     allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
-               "docs", "internal", "migrations", "checks", "bin", ".trends", "engineering.yaml", "__pycache__"}
+               "docs", "internal", "migrations", "checks", "test", "bin", ".trends",
+               ".pi-batch", "engineering.yaml", "__pycache__"}
     unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed]
     if unexpected:
         print("root directories/files:", ", ".join(sorted(unexpected)))
