@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Claims struct {
@@ -30,6 +31,12 @@ type Authenticator struct {
 	AllowDev                  bool
 	AllowLocalHS256           bool
 	AllowInsecureJWKSLoopback bool
+	// JWKSRefreshInterval bounds how long a parsed JWKS set is reused
+	// without refetching (0 means 10 minutes). A shorter interval trades
+	// IdP round trips for faster key rotation adoption; the cache also
+	// serves the last known-good set during an IdP outage (bounded
+	// staleness, see verifier.go).
+	JWKSRefreshInterval time.Duration
 }
 
 func (a Authenticator) Authenticate(r *http.Request) (Claims, error) {
@@ -90,7 +97,15 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	}
 	claims := Claims{Permissions: map[string]bool{}}
 	now := time.Now().Unix()
-	if expiry, ok := numericClaim(payload, "exp"); ok && now >= int64(expiry) {
+	// exp is mandatory: a bearer token without an expiry is valid forever,
+	// which turns token theft into a permanent replay credential in an audit
+	// system. Requiring the claim keeps the verifier fail-closed even when a
+	// misconfigured IdP omits it.
+	expiry, hasExpiry := numericClaim(payload, "exp")
+	if !hasExpiry {
+		return Claims{}, fmt.Errorf("token must contain exp")
+	}
+	if now >= int64(expiry) {
 		return Claims{}, fmt.Errorf("token is expired")
 	}
 	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore) {
@@ -114,9 +129,16 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	if err != nil {
 		return Claims{}, err
 	}
-	claims.TenantID = stringClaim(payload, "tenant_id")
-	if claims.TenantID == "" {
-		claims.TenantID = stringClaim(payload, "tenant")
+	tenant, hasTenant, err := tenantClaim(payload, "tenant_id")
+	if err != nil {
+		return Claims{}, err
+	}
+	if hasTenant {
+		claims.TenantID = tenant
+	} else if tenant, hasTenant, err := tenantClaim(payload, "tenant"); err != nil {
+		return Claims{}, err
+	} else if hasTenant {
+		claims.TenantID = tenant
 	}
 	claims.Roles = stringSliceClaim(payload, "roles")
 	claims.Permissions = permissionsForRoles(claims.Roles)
@@ -149,6 +171,40 @@ func clientIdentity(payload map[string]any) (string, error) {
 		return clientID, nil
 	}
 	return authorizedParty, nil
+}
+
+// tenantClaim extracts the tenant context claim under the same strictness as
+// sub/client_id, plus a charset rule: control characters and whitespace are
+// rejected so a padded or separator-embedding tenant_id can never reach the
+// tenant consistency comparison (where " a" vs "a" would surface as a
+// confusing 422 instead of an authentication failure) or collide with
+// composite snapshot keys.
+func tenantClaim(payload map[string]any, name string) (string, bool, error) {
+	value, present := payload[name]
+	if !present {
+		return "", false, nil
+	}
+	identity, ok := value.(string)
+	if !ok {
+		return "", false, fmt.Errorf("token %s claim is invalid", name)
+	}
+	if identity == "" {
+		// Empty tenant scope is equivalent to absent: platform tokens
+		// legitimately carry tenant_id: "" and select the tenant via the
+		// ?tenant_id= query parameter (documented escape hatch for restore
+		// approval). Strictness (whitespace/control rejection) still applies
+		// to any non-empty value below.
+		return "", false, nil
+	}
+	if identity != strings.TrimSpace(identity) {
+		return "", false, fmt.Errorf("token %s claim is invalid", name)
+	}
+	for _, r := range identity {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return "", false, fmt.Errorf("token %s claim is invalid", name)
+		}
+	}
+	return identity, true, nil
 }
 
 func strictIdentityClaim(payload map[string]any, name string) (string, bool, error) {

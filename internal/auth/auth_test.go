@@ -113,6 +113,41 @@ func TestJWTRejectsMissingSubject(t *testing.T) {
 	}
 }
 
+func TestJWTRejectsMissingExpiry(t *testing.T) {
+	// A bearer token without exp never expires: a stolen token would stay
+	// replayable forever in an audit system. The verifier must fail closed
+	// when the claim is absent, even if the IdP omitted it.
+	payload := map[string]any{
+		"sub": "service-subject", "tenant_id": "tenant-a",
+	}
+	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "exp") {
+		t.Fatalf("missing exp was not rejected: %v", err)
+	}
+}
+
+func TestJWTRejectsPaddedTenantIDClaim(t *testing.T) {
+	// Mirrors the padded-sub rejection: a padded or control-character
+	// tenant_id must fail authentication (not reach the envelope-mismatch
+	// 422 comparison with confusing raw-string equality).
+	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	cases := []map[string]any{
+		{"sub": "service-subject", "tenant_id": " tenant-a", "exp": time.Now().Add(time.Hour).Unix()},
+		{"sub": "service-subject", "tenant_id": "tenant-a\t", "exp": time.Now().Add(time.Hour).Unix()},
+		{"sub": "service-subject", "tenant_id": "tenant\x1fa", "exp": time.Now().Add(time.Hour).Unix()},
+		{"sub": "service-subject", "tenant": " tenant-a", "exp": time.Now().Add(time.Hour).Unix()},
+	}
+	for _, payload := range cases {
+		if _, err := authenticator.AuthenticateToken(signJWT(t, payload)); err == nil {
+			t.Fatalf("expected padded/control-character tenant_id to be rejected: %v", payload)
+		}
+	}
+	// Positive companion: an exact-string tenant_id still authenticates.
+	claims, err := authenticator.AuthenticateToken(signJWT(t, map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix()}))
+	if err != nil || claims.TenantID != "tenant-a" {
+		t.Fatalf("valid tenant_id must authenticate: claims=%+v err=%v", claims, err)
+	}
+}
+
 func TestJWTSubjectSurvivesStrictParsing(t *testing.T) {
 	// Positive companion: strict parsing keeps exact-string subjects and
 	// the plain missing-sub message intact.

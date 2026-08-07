@@ -337,7 +337,27 @@ func (f *fileBackend) Save(data *Snapshot) error {
 		return err
 	}
 	tmp := f.path + ".tmp"
-	if err := os.WriteFile(tmp, encoded, 0o640); err != nil {
+	// fsync before rename: the snapshot is the control-plane source of
+	// truth, so a crash after rename must not leave an empty or partial
+	// state file behind (B1-2 "fsync" acceptance). Any write/sync error
+	// removes the temp file best-effort, keeping "Save returned an error
+	// ⇒ no file at the target key" (mirrors FileStore.Put).
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, f.path); err != nil {

@@ -2,8 +2,13 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +116,112 @@ func assertPermissionDenied(t *testing.T, err error) {
 	t.Helper()
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+}
+
+// TestToStatusRedactsInternalErrors pins M-1: internal (non-domain) errors
+// must never carry their underlying text — filesystem paths, errno strings,
+// Vault/pgx details — to gRPC clients. The status is codes.Internal with a
+// fixed message, mirroring the HTTP boundary's errorBody redaction. Domain
+// errors keep their mapped codes and messages.
+func TestToStatusRedactsInternalErrors(t *testing.T) {
+	marker := errors.New("marker-path /var/lib/audit/state.json: permission denied")
+	converted := toStatus(marker)
+	if status.Code(converted) != codes.Internal {
+		t.Fatalf("code=%v, want Internal", status.Code(converted))
+	}
+	if message := converted.(interface{ Error() string }).Error(); strings.Contains(message, "marker-path") || strings.Contains(message, "state.json") || strings.Contains(message, "permission") {
+		t.Fatalf("internal detail leaked to client: %q", message)
+	}
+	if message := status.Convert(converted).Message(); message != "internal server error" {
+		t.Fatalf("internal message=%q, want fixed redacted text", message)
+	}
+	// Domain mapping stays intact below Internal.
+	invalid := toStatus(domain.ErrInvalid)
+	if status.Code(invalid) != codes.InvalidArgument || !strings.Contains(status.Convert(invalid).Message(), "invalid") {
+		t.Fatalf("domain error mapping regressed: %v", invalid)
+	}
+	forbidden := toStatus(domain.ErrForbidden)
+	if status.Code(forbidden) != codes.PermissionDenied {
+		t.Fatalf("ErrForbidden mapping regressed: %v", forbidden)
+	}
+}
+
+// TestStatusErrorLogsDetailServerSide pins the diagnostic half of M-1: the
+// full error text is written to the server log before the redacted status is
+// returned, so operators can still diagnose without the client seeing it.
+func TestStatusErrorLogsDetailServerSide(t *testing.T) {
+	var logged strings.Builder
+	server := &Server{Logger: log.New(&logged, "", 0)}
+	marker := errors.New("marker-path /var/lib/audit/state.json: permission denied")
+	converted := server.statusError(marker)
+	if status.Code(converted) != codes.Internal {
+		t.Fatalf("code=%v, want Internal", status.Code(converted))
+	}
+	if !strings.Contains(logged.String(), "marker-path") {
+		t.Fatalf("internal detail not logged server-side: %q", logged.String())
+	}
+	if status.Convert(converted).Message() != "internal server error" {
+		t.Fatalf("client message=%q, want fixed redacted text", status.Convert(converted).Message())
+	}
+	// Domain errors are not logged as internal.
+	logged.Reset()
+	_ = server.statusError(domain.ErrConflict)
+	if logged.Len() != 0 {
+		t.Fatalf("domain error logged as internal: %q", logged.String())
+	}
+}
+
+// TestWriteRedactsStoreFailureEndToEnd drives a real Write through a service
+// whose snapshot file is unwritable, so the store Save fails with an error
+// carrying the state path. The gRPC client must see codes.Internal with the
+// fixed message, never the path (M-1 integration leg).
+func TestWriteRedactsStoreFailureEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Make the snapshot file unwritable: every Save now fails with an error
+	// carrying the state path and errno text.
+	if err := os.Chmod(statePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(statePath, 0o600)
+	})
+	server := &Server{Service: svc, Auth: auth.Authenticator{AllowDev: true}, Logger: log.New(io.Discard, "", 0)}
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:tenant-a:service:crm"))
+	request := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "redact-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_010, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "redact-idem-1", PayloadJson: []byte(`{"value":1}`)}}
+	_, err = server.Write(ctx, request)
+	if err == nil {
+		t.Fatal("Write succeeded against an unwritable store")
+	}
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("code=%v, want Internal", status.Code(err))
+	}
+	if message := status.Convert(err).Message(); message != "internal server error" {
+		t.Fatalf("client message=%q, want fixed redacted text", message)
+	}
+	if strings.Contains(status.Convert(err).Message(), "state.json") {
+		t.Fatalf("state path leaked to client: %q", status.Convert(err).Message())
 	}
 }

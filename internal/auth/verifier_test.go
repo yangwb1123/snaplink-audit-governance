@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,4 +379,133 @@ func marshalPublicKey(t *testing.T, publicKey any) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encoded}))
+}
+
+// TestJWKSCacheFetchesOnceWithinTTLAndNeverForGarbage pins the M-2 contract:
+// the parsed JWKS set is cached, so N valid authentications within the
+// refresh interval cause exactly one fetch, and syntactically valid garbage
+// tokens (which reach key lookup but fail signature verification) cause zero
+// additional fetches. Without the cache every request, including
+// unauthenticated garbage, amplified a full HTTPS fetch to the IdP.
+func TestJWKSCacheFetchesOnceWithinTTLAndNeverForGarbage(t *testing.T) {
+	fixture := fixtureNamed(t, signingFixtures(t), "RS256")
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		body, err := json.Marshal(jwkSetOf(t, fixture.publicKey))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	authenticator := remoteAuthenticator(server.URL)
+	authenticator.JWKSRefreshInterval = time.Hour
+	valid := signFixtureJWT(t, fixture, validJWTClaims())
+	for i := 0; i < 10; i++ {
+		if _, err := authenticator.AuthenticateToken(valid); err != nil {
+			t.Fatalf("valid token %d: %v", i, err)
+		}
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetches=%d for 10 valid tokens within TTL, want 1", got)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := authenticator.AuthenticateToken("garbage.garbage.garbage"); err == nil {
+			t.Fatal("garbage token accepted")
+		}
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetches=%d after 10 garbage tokens, want still 1", got)
+	}
+}
+
+// TestJWKSCacheServesStaleSetDuringIdPOutage pins the stale-on-outage
+// posture: once a set was fetched successfully, an IdP outage must not turn
+// into a total auth outage; the cached set keeps authenticating until the
+// refresh interval recovers. A set that never fetched stays fail-closed.
+func TestJWKSCacheServesStaleSetDuringIdPOutage(t *testing.T) {
+	fixture := fixtureNamed(t, signingFixtures(t), "RS256")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) > 1 {
+			http.Error(response, "idp down", http.StatusServiceUnavailable)
+			return
+		}
+		body, err := json.Marshal(jwkSetOf(t, fixture.publicKey))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	authenticator := remoteAuthenticator(server.URL)
+	authenticator.JWKSRefreshInterval = 10 * time.Millisecond
+	valid := signFixtureJWT(t, fixture, validJWTClaims())
+	if _, err := authenticator.AuthenticateToken(valid); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond) // let the TTL expire so the next auth refetches
+	if _, err := authenticator.AuthenticateToken(valid); err != nil {
+		t.Fatalf("stale set must keep authentication working during IdP outage: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests=%d, want 2 (prime + failed refresh)", got)
+	}
+}
+
+// TestJWKSCacheRefreshesOnKidMiss pins the rotation path: a token whose kid
+// is absent from the cached set forces exactly one refresh, so a rotated-in
+// key becomes usable without waiting for the TTL, and the refreshed set is
+// then reused without further fetches.
+func TestJWKSCacheRefreshesOnKidMiss(t *testing.T) {
+	fixtures := signingFixtures(t)
+	oldFixture := fixtureNamed(t, fixtures, "ES256")
+	newFixture := fixtureNamed(t, fixtures, "ES384")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		key := oldFixture.publicKey
+		if requests.Add(1) > 1 {
+			key = newFixture.publicKey
+		}
+		body, err := json.Marshal(jwkSetOf(t, key))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	authenticator := remoteAuthenticator(server.URL)
+	authenticator.JWKSRefreshInterval = time.Hour
+	// Prime the cache with the old set, then authenticate with the new kid:
+	// the first fetch misses, the forced refresh finds the rotated key.
+	token := signFixtureJWT(t, newFixture, validJWTClaims())
+	if _, err := authenticator.AuthenticateToken(token); err != nil {
+		t.Fatalf("kid-miss refresh did not pick up the rotated key: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests=%d, want 2 (prime miss + forced refresh)", got)
+	}
+	// The refreshed set is cached: no further fetches for the same kid.
+	if _, err := authenticator.AuthenticateToken(token); err != nil {
+		t.Fatalf("refreshed key stopped working: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests=%d after reuse, want still 2", got)
+	}
+}
+
+func jwkSetOf(t *testing.T, key jwk.Key) jwk.Set {
+	t.Helper()
+	set := jwk.NewSet()
+	if err := set.AddKey(key); err != nil {
+		t.Fatal(err)
+	}
+	return set
 }

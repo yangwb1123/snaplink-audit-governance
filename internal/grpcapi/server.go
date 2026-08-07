@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	auditv1 "github.com/snaplink/audit-governance/api/proto"
@@ -23,10 +24,14 @@ type Server struct {
 	auditv1.UnimplementedIngestServer
 	Service *service.Service
 	Auth    auth.Authenticator
+	// Logger receives the full detail of internal errors before they are
+	// redacted for the client (M-1): diagnostics stay server-side while the
+	// gRPC response carries a fixed message.
+	Logger *log.Logger
 }
 
 func Register(server grpc.ServiceRegistrar, svc *service.Service, authenticator auth.Authenticator) {
-	auditv1.RegisterIngestServer(server, &Server{Service: svc, Auth: authenticator})
+	auditv1.RegisterIngestServer(server, &Server{Service: svc, Auth: authenticator, Logger: log.Default()})
 }
 
 func (s *Server) Write(ctx context.Context, request *auditv1.WriteRequest) (*auditv1.WriteResponse, error) {
@@ -39,12 +44,12 @@ func (s *Server) Write(ctx context.Context, request *auditv1.WriteRequest) (*aud
 	}
 	event, err := fromProto(request.GetEvent())
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, s.statusError(err)
 	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	receipt, err := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, s.statusError(err)
 	}
 	return toProtoReceipt(receipt), nil
 }
@@ -62,11 +67,11 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	for _, item := range request.GetEvents() {
 		event, convertErr := fromProto(item)
 		if convertErr != nil {
-			return nil, toStatus(convertErr)
+			return nil, s.statusError(convertErr)
 		}
 		receipt, ingestErr := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
 		if ingestErr != nil {
-			return response, toStatus(ingestErr)
+			return response, s.statusError(ingestErr)
 		}
 		response.Receipts = append(response.Receipts, toProtoReceipt(receipt))
 	}
@@ -92,11 +97,11 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 		}
 		event, convertErr := fromProto(request.GetEvent())
 		if convertErr != nil {
-			return toStatus(convertErr)
+			return s.statusError(convertErr)
 		}
 		receipt, ingestErr := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
 		if ingestErr != nil {
-			return toStatus(ingestErr)
+			return s.statusError(ingestErr)
 		}
 		if sendErr := stream.Send(toProtoReceipt(receipt)); sendErr != nil {
 			return sendErr
@@ -196,6 +201,20 @@ func toStatus(err error) error {
 		// 与 HTTP 422 对齐：请求语义有效但租户一致性不成立。
 		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
-		return status.Error(codes.Internal, err.Error())
+		// Internal errors never carry the underlying text (filesystem paths,
+		// errno strings, Vault/pgx details): the detail is logged server-side
+		// by statusError and the client gets a fixed message, mirroring the
+		// HTTP boundary's errorBody redaction.
+		return status.Error(codes.Internal, "internal server error")
 	}
+}
+
+// statusError converts err for the client and logs the full detail of
+// internal errors server-side before the redacted status is returned.
+func (s *Server) statusError(err error) error {
+	converted := toStatus(err)
+	if status.Code(converted) == codes.Internal && s.Logger != nil {
+		s.Logger.Printf("grpc internal error: %v", err)
+	}
+	return converted
 }

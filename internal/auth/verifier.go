@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
@@ -20,7 +21,25 @@ const (
 	maxJWTBytes               = 1 << 20
 	maxJWKSBytes              = 2 << 20
 	jwksFetchTimeout          = 5 * time.Second
+	// defaultJWKSRefreshInterval bounds JWKS staleness between refetches.
+	defaultJWKSRefreshInterval = 10 * time.Minute
 )
+
+// jwksCacheEntry holds one parsed JWKS set per JWKS URL. The mutex is held
+// across the fetch, so concurrent authentications single-flight the request:
+// an unauthenticated attacker flooding garbage tokens can never amplify
+// fetches to the identity provider beyond one in flight per URL.
+type jwksCacheEntry struct {
+	mu        sync.Mutex
+	set       jwk.Set
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+// jwksCache maps JWKS URL to its cache entry. A process uses one trust
+// source (or a small fixed set), so the map stays tiny; per-URL entries keep
+// tests with ephemeral httptest servers isolated from each other.
+var jwksCache sync.Map
 
 type verifiedHeader struct {
 	algorithm jwa.SignatureAlgorithm
@@ -166,18 +185,62 @@ func (a Authenticator) remoteVerificationKey(ctx context.Context, header verifie
 	if header.keyID == "" {
 		return nil, fmt.Errorf("remote JWKS token requires kid")
 	}
-	set, err := a.fetchJWKS(ctx)
+	set, err := a.cachedJWKS(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	key, err := uniqueKey(set, header.keyID)
 	if err != nil {
-		return nil, err
+		// The kid is missing from the cached set: a rotation may have
+		// happened between refreshes. Force exactly one refresh; a still-
+		// missing kid is rejected (fail-closed) instead of being served
+		// with a stale key.
+		set, err = a.cachedJWKS(ctx, true)
+		if err != nil {
+			return nil, err
+		}
+		key, err = uniqueKey(set, header.keyID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := validateRemoteKey(key, header.algorithm.String()); err != nil {
 		return nil, err
 	}
 	return key, nil
+}
+
+// cachedJWKS returns the parsed JWKS set for a.JWKSURL, fetching it at most
+// once per refresh interval. force bypasses the freshness check (kid-miss
+// refresh). On a fetch failure the last known-good set is served when one
+// exists (stale-on-outage: an IdP outage is not a total auth outage, and
+// staleness is bounded by the refresh interval); a set that never fetched
+// keeps the fail-closed behavior.
+func (a Authenticator) cachedJWKS(ctx context.Context, force bool) (jwk.Set, error) {
+	entryValue, _ := jwksCache.LoadOrStore(a.JWKSURL, &jwksCacheEntry{ttl: a.jwksRefreshInterval()})
+	entry := entryValue.(*jwksCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !force && entry.set != nil && time.Since(entry.fetchedAt) < entry.ttl {
+		return entry.set, nil
+	}
+	set, err := a.fetchJWKS(ctx)
+	if err != nil {
+		if entry.set != nil {
+			return entry.set, nil
+		}
+		return nil, err
+	}
+	entry.set = set
+	entry.fetchedAt = time.Now()
+	return set, nil
+}
+
+func (a Authenticator) jwksRefreshInterval() time.Duration {
+	if a.JWKSRefreshInterval > 0 {
+		return a.JWKSRefreshInterval
+	}
+	return defaultJWKSRefreshInterval
 }
 
 func uniqueKey(set jwk.Set, wantedID string) (jwk.Key, error) {

@@ -110,6 +110,14 @@ func main() {
 	if err := authenticator.ValidateConfiguration(); err != nil {
 		logger.Fatalf("invalid authentication configuration: %v", err)
 	}
+	// AC-3 dev-auth allowlist, applied to the real startup path with the
+	// same rule as the check-config preflight: development auth is only
+	// legal when AUDIT_ALLOW_DEV_AUTH=true is present in the environment.
+	// A flag-only -allow-dev-auth can never start the server, so CI cannot
+	// bless a configuration the runtime would reject.
+	if authenticator.AllowDev && !devAuthAllowlisted() {
+		logger.Fatalf("invalid authentication configuration: development auth (-allow-dev-auth) requires AUDIT_ALLOW_DEV_AUTH=true in the environment (flag-only dev auth is not allowed)")
+	}
 	api := httpapi.NewServer(svc, authenticator, logger)
 	tracer, err := telemetry.Init(context.Background(), *otlpEndpoint, "audit-api")
 	if err != nil {

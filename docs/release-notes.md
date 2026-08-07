@@ -1,5 +1,46 @@
 # Release Notes
 
+## 2026-08-06 — B1 收口：启动路径 dev-auth 白名单、manifest 扫描、快照 fsync、容量 cutover 门禁、compose gRPC
+
+**Behavior changes (contract B1 remainder):**
+
+1. **Startup-path dev-auth allowlist (B1-1, AC-3).** The environment-only
+   allowlist gate that previously guarded only `-check-config` now applies
+   to the real startup path: `audit-api` exits non-zero when development
+   auth is requested via `-allow-dev-auth` without `AUDIT_ALLOW_DEV_AUTH=true`
+   in the environment. Flag-only dev auth can no longer start the server,
+   so CI cannot bless a configuration the runtime would reject. The env
+   allowlist path (compose.verify, local runs) is unchanged.
+2. **Dev-auth manifest scan (B1-1).** New `checks/dev_auth_manifest.py`
+   (wired into `cli.py quality`) fails any non-verify deployment manifest
+   under `deploy/` that enables dev auth (`AUDIT_ALLOW_DEV_AUTH: true` /
+   `-allow-dev-auth=true`). `*verify*` files are the explicit local
+   validation stack and remain exempt; the gate exists so production
+   manifests cannot silently reintroduce dev auth.
+3. **Snapshot fsync (B1-2).** `fileBackend.Save` now writes the temp file
+   through `*os.File` with `Sync()` before the atomic rename (and removes
+   the temp best-effort on any write/sync/close error), so a crash after
+   rename cannot leave an empty or partial control-plane snapshot. Mode
+   0640 and the idempotent atomic-replace semantics are unchanged.
+4. **Capacity envelope + cutover gate (B1-3, decision #7 = option B).**
+   `docs/BENCHMARKS.md` now records the capacity envelope (1k/5k event
+   query curve from `BenchmarkQuery`/`BenchmarkQueryLargeLedger`) and the
+   cutover gate: ≥10⁵ events per tenant or p95 > 500 ms requires wiring
+   the relational ledger (option A) instead of snapshot scans.
+5. **gRPC ingest in compose (B1-6).** `deploy/docker-compose.verify.yml`
+   enables `AUDIT_GRPC_LISTEN` (mapped to host 19051) and
+   `test/e2e/fullstack.sh` asserts the listener is open, covering the
+   declared gRPC inbound in the local stack.
+6. **Test additions.** HTTP-boundary T-12 (read self-audit rows visible via
+   `GET /api/v1/admin/actions`), T-13 (422 body carries `tenant_mismatch`
+   code), error-matrix rows for `tenant_mismatch`-422 and
+   `snapshot_conflict`-503, file-backend fsync atomicity, and DSN-gated
+   PostgreSQL cases for concurrent-update convergence (T-6) and the
+   `Ready` probe failing on an unavailable database.
+
+Migration: none (no schema/data/config change). Rollback = revert the
+commit; the startup gate and manifest scan are the only behavior flips.
+
 ## 2026-08-06 — Tenant consistency 422; read-path self-audit; snapshot-conflict retry; DLQ replay consumer + alerts
 
 **Behavior changes (contract B1: DS-08, F-06, F-01, DLQ follow-up):**

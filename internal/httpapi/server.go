@@ -143,10 +143,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Trace-ID", traceID)
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				s.errorCount.Add(1)
+				// writeError counts the 500: the panic is one error response.
 				span.RecordError(fmt.Errorf("panic: %v", recovered))
 				s.Logger.Printf("request_id=%s panic=%v", requestID, recovered)
-				writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
+				s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
 			}
 			s.requestCount.Add(1)
 			s.recordLatency(time.Since(started))
@@ -222,12 +222,12 @@ func (s *Server) recordLatency(elapsed time.Duration) {
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:event:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var event domain.Event
 	if err := decodeBody(w, r, &event); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
@@ -243,7 +243,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		s.ingestConflictCount.Add(1)
 	}
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"receipt": receipt, "receipt_url": "/api/v1/events/" + receipt.EventID + "/receipt"})
@@ -257,16 +257,16 @@ type batchRequest struct {
 func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:event:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var request batchRequest
 	if err := decodeBody(w, r, &request); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if len(request.Events) == 0 {
-		writeError(w, r, http.StatusBadRequest, fmt.Errorf("%w: events must not be empty", domain.ErrInvalid))
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("%w: events must not be empty", domain.ErrInvalid))
 		return
 	}
 	if request.WaitFor == "" {
@@ -288,6 +288,9 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 				s.ingestQuotaCount.Add(1)
 			}
 			partialStatus := statusForError(ingestErr)
+			if partialStatus >= 500 {
+				s.errorCount.Add(1)
+			}
 			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, ingestErr, r)})
 			return
 		}
@@ -299,13 +302,13 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	tenantID := s.tenantFor(r, claims)
 	event, err := s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// 响应剥离搜索摘要（深拷贝，绝不改动存储快照共享的 map）：摘要值曾
@@ -313,7 +316,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 	// 失败也不泄漏。
 	stripped, err := security.StripSearchDigests(event.Payload)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, err)
+		s.writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	event.Payload = stripped
@@ -323,12 +326,12 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	receipt, err := s.Service.GetReceipt(s.tenantFor(r, claims), r.PathValue("eventID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, receipt)
@@ -337,25 +340,25 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	query, err := parseQuery(r)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	s.queryCount.Add(1)
 	result, err := s.Service.QueryEvents(s.tenantFor(r, claims), claims.Subject, query)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// 与 getEvent 相同：列表响应同样剥离搜索摘要，仅在响应副本上进行。
 	for i := range result.Items {
 		stripped, stripErr := security.StripSearchDigests(result.Items[i].Payload)
 		if stripErr != nil {
-			writeError(w, r, http.StatusInternalServerError, stripErr)
+			s.writeError(w, r, http.StatusInternalServerError, stripErr)
 			return
 		}
 		result.Items[i].Payload = stripped
@@ -366,12 +369,12 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.Operation(s.tenantFor(r, claims), r.PathValue("operationID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -380,12 +383,12 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.OperationTimeline(s.tenantFor(r, claims), r.PathValue("operationID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": result, "count": len(result)})
@@ -394,12 +397,12 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.ReplayOperation(s.tenantFor(r, claims), r.PathValue("operationID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -408,12 +411,12 @@ func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	items, err := s.Service.AggregateTimeline(s.tenantFor(r, claims), r.PathValue("aggregateType"), r.PathValue("aggregateID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -422,17 +425,17 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	query, err := parseBodyQuery(w, r)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	job, err := s.Service.CreateExport(s.tenantFor(r, claims), claims.Subject, query)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -441,12 +444,12 @@ func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	job, err := s.Service.GetExport(s.tenantFor(r, claims), r.PathValue("jobID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// The API boundary never surfaces the raw export failure diagnostic
@@ -462,37 +465,37 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	job, err := s.Service.GetExport(s.tenantFor(r, claims), r.PathValue("jobID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	if job.Status != "completed" || job.ObjectPath == "" {
-		writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
+		s.writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
 		return
 	}
 	// 导出下载是治理事实（audit.event.export）：服务层追加失败则中止下载
 	// （fail-closed，与读自审计同一规则）。
 	if err := s.Service.RecordExportDownload(job.TenantID, claims.Subject, job.ID); err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	data, err := s.Service.Config.Archive.Get(r.Context(), job.ObjectPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, r, http.StatusNotFound, domain.ErrNotFound)
+			s.writeError(w, r, http.StatusNotFound, domain.ErrNotFound)
 			return
 		}
-		writeError(w, r, http.StatusInternalServerError, err)
+		s.writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	// 导出文件独立加密：下载时用平台加密密钥解开密封。
 	decrypted, err := security.DecryptBytes(data, s.Service.Config.EncryptionKey)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, err)
+		s.writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -505,19 +508,19 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:integrity:verify")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var request struct {
 		StreamID string `json:"stream_id"`
 	}
 	if err := decodeBody(w, r, &request); err != nil && !errors.Is(err, io.EOF) {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	result, err := s.Service.VerifyIntegrity(s.tenantFor(r, claims), request.StreamID)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	if result.Valid {
@@ -531,19 +534,19 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var hold domain.LegalHold
 	if err := decodeBody(w, r, &hold); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	hold.TenantID = s.tenantFor(r, claims)
 	hold.CreatedBy = claims.Subject
 	result, err := s.Service.CreateLegalHold(hold)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
@@ -552,12 +555,12 @@ func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	items, err := s.Service.ListLegalHolds(s.tenantFor(r, claims))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -566,12 +569,12 @@ func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	hold, err := s.Service.ReleaseLegalHold(s.tenantFor(r, claims), r.PathValue("holdID"), claims.Subject)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, hold)
@@ -580,17 +583,17 @@ func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var request domain.RestoreRequest
 	if err := decodeBody(w, r, &request); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	result, err := s.Service.PreviewRestore(s.tenantFor(r, claims), request)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -599,17 +602,17 @@ func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var request domain.RestoreRequest
 	if err := decodeBody(w, r, &request); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	result, err := s.Service.CreateRestore(s.tenantFor(r, claims), request, claims.Subject)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, result)
@@ -618,12 +621,12 @@ func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.ApproveRestore(s.tenantFor(r, claims), r.PathValue("runID"), claims.Subject)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -632,12 +635,12 @@ func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.RejectRestore(s.tenantFor(r, claims), r.PathValue("runID"), claims.Subject)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -646,12 +649,12 @@ func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getRestore(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.GetRestore(s.tenantFor(r, claims), r.PathValue("runID"))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -663,12 +666,12 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = domain.ErrForbidden
 		}
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var tenant domain.Tenant
 	if err := decodeBody(w, r, &tenant); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if tenant.CreatedAt.IsZero() {
@@ -678,7 +681,7 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		tenant.Active = true
 	}
 	if err := s.Service.CreateTenant(claims.Subject, tenant); err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, tenant)
@@ -690,12 +693,12 @@ func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = domain.ErrForbidden
 		}
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	items, err := s.Service.ListTenants()
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -704,12 +707,12 @@ func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var source domain.SourceSystem
 	if err := decodeBody(w, r, &source); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if !claims.Platform {
@@ -722,7 +725,7 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 		source.Active = true
 	}
 	if err := s.Service.AddSource(claims.Subject, source); err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, source)
@@ -731,12 +734,12 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	items, err := s.Service.ListSources(s.tenantFor(r, claims))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -745,19 +748,19 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var source domain.SourceSystem
 	if err := decodeBody(w, r, &source); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	source.ID = r.PathValue("sourceID")
 	source.TenantID = s.tenantFor(r, claims)
 	updated, err := s.Service.UpdateSource(claims.Subject, source)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -766,12 +769,12 @@ func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createSchema(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var schema domain.EventSchema
 	if err := decodeBody(w, r, &schema); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if !claims.Platform {
@@ -784,7 +787,7 @@ func (s *Server) createSchema(w http.ResponseWriter, r *http.Request) {
 		schema.Active = true
 	}
 	if err := s.Service.RegisterSchema(claims.Subject, schema); err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, schema)
@@ -793,12 +796,12 @@ func (s *Server) createSchema(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	items, err := s.Service.ListSchemas(s.tenantFor(r, claims))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -807,19 +810,19 @@ func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setRetention(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:write")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	var policy domain.RetentionPolicy
 	if err := decodeBody(w, r, &policy); err != nil {
-		writeError(w, r, http.StatusBadRequest, err)
+		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if !claims.Platform {
 		policy.TenantID = claims.TenantID
 	}
 	if err := s.Service.SetRetentionPolicy(claims.Subject, policy); err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policy)
@@ -828,12 +831,12 @@ func (s *Server) setRetention(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getRetention(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	policy, err := s.Service.GetRetentionPolicy(s.tenantFor(r, claims))
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policy)
@@ -842,12 +845,12 @@ func (s *Server) getRetention(w http.ResponseWriter, r *http.Request) {
 func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	result, err := s.Service.EvaluateRetention(s.tenantFor(r, claims), time.Time{})
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -856,7 +859,7 @@ func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.require(r, "audit:policy:read")
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	tenantID := ""
@@ -869,13 +872,13 @@ func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		limit, err = strconv.Atoi(raw)
 		if err != nil {
-			writeError(w, r, http.StatusBadRequest, fmt.Errorf("%w: invalid limit", domain.ErrInvalid))
+			s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("%w: invalid limit", domain.ErrInvalid))
 			return
 		}
 	}
 	items, err := s.Service.ListAdminActions(tenantID, claims.Platform, limit)
 	if err != nil {
-		writeError(w, r, statusForError(err), err)
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
@@ -963,8 +966,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
+// writeError renders the error contract and counts the response against
+// the error-rate instrumentation (H-3): audit_http_errors_total is the error
+// budget source, so every >=500 response a handler emits must be counted
+// here — the panic-recovery path and the batch partial-failure path both
+// converge on this counter, keeping the SLO error rate measurable.
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
 	if status >= 500 {
+		s.errorCount.Add(1)
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	writeJSON(w, status, errorBody(status, err, r))

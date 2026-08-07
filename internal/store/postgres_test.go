@@ -318,3 +318,73 @@ func TestPostgresBackendDeletedRowKeepsBaseline(t *testing.T) {
 		t.Fatalf("Save after delete error=%v, want ErrSnapshotConflict", err)
 	}
 }
+
+// T-6 PG leg: two store instances over one DSN updating concurrently must
+// converge through the bounded-jitter retry — the loser re-runs its closure
+// on the fresh snapshot and wins its write, instead of surfacing a bare
+// error. (The old single-attempt Update would fail the second writer with
+// ErrSnapshotConflict.) Uses two separate connections on the same DB.
+func TestPostgresBackendConcurrentUpdateConverges(t *testing.T) {
+	db := newPostgresTestDB(t)
+	db2, err := sql.Open("pgx", os.Getenv("AUDIT_TEST_POSTGRES_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db2.Close() })
+	seedTenant(t, db)
+
+	first := &postgresBackend{db: db}
+	second := &postgresBackend{db: db2}
+	firstStore := &Store{backend: first}
+	secondStore := &Store{backend: second}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		errs <- firstStore.Update(func(data *Snapshot) error {
+			data.Tenants["tenant-x"] = domain.Tenant{ID: "tenant-x", Name: "X", Active: true}
+			return nil
+		})
+	}()
+	go func() {
+		<-start
+		errs <- secondStore.Update(func(data *Snapshot) error {
+			data.Tenants["tenant-y"] = domain.Tenant{ID: "tenant-y", Name: "Y", Active: true}
+			return nil
+		})
+	}()
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Update must converge: %v", err)
+		}
+	}
+	if err := firstStore.Read(func(data *Snapshot) error {
+		if _, ok := data.Tenants["tenant-x"]; !ok {
+			t.Fatal("tenant-x missing after concurrent updates")
+		}
+		if _, ok := data.Tenants["tenant-y"]; !ok {
+			t.Fatal("tenant-y missing after concurrent updates")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// T-6 readyz leg: a closed database makes the postgresBackend.Ready probe
+// fail, which the HTTP readyz handler maps to 503 store_unavailable.
+func TestPostgresBackendReadyProbeFailsWhenUnavailable(t *testing.T) {
+	db := newPostgresTestDB(t)
+	backend := &postgresBackend{db: db}
+	if err := backend.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready on live db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Ready(context.Background()); err == nil {
+		t.Fatal("Ready on closed db must fail")
+	}
+}

@@ -28,6 +28,15 @@ $COMPOSE up -d postgres redpanda clickhouse minio jaeger audit-api \
 wait_http "$API/readyz" || { log "audit-api not ready"; exit 1; }
 log "audit-api ready"
 
+log "checking gRPC ingest listener (B1-6 topology: --grpc-listen registered)"
+if (exec 3<>/dev/tcp/localhost/19051) 2>/dev/null; then
+  log "gRPC listener: open on 19051"
+  exec 3<&- 3>&-
+else
+  log "gRPC listener: not reachable"
+  exit 1
+fi
+
 log "applying migrations"
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/001_control_plane.sql" >/dev/null

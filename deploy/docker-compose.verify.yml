@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
     environment:
       AUDIT_LISTEN: ":8089"
+      AUDIT_GRPC_LISTEN: ":50051"
       AUDIT_STATE_PATH: /var/lib/audit/state.json
       AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
       AUDIT_ALLOW_DEV_AUTH: "true"
@@ -23,6 +24,7 @@ services:
       - minio
     ports:
       - "19089:8089"
+      - "19051:50051"
     volumes:
       - audit_state:/var/lib/audit
     networks: [audit_verify]

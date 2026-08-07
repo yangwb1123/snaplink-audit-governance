@@ -22,6 +22,26 @@ python3 cli.py bench        # 全仓库
 go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 ```
 
+## 容量 envelope 与 cutover 门禁（B1-3 决策 #7）
+
+参考实现采用**容量预算**方案（方案 B）：控制面快照同时承载元数据与账本事件，
+`QueryEvents` 为 O(ledger) 全量扫描——这是单节点参考实现的**有界容量承诺**，
+不是生产形态（生产走 Kafka → 关系账本 + ClickHouse 投影，见 ADR-0001/0004）。
+
+容量 envelope（本机基线，机器见上）：
+
+| 账本规模 | Ingest（单事件，累计摊销） | QueryEvents p95 |
+|---|---:|---:|
+| 1,000 事件 | 2.2 ms/op（全链路） | 448 µs/op |
+| 5,000 事件 | O(n²) 累计写入（见下） | 3.8 ms/op |
+
+**Cutover 门禁**：单租户累计事件数超过 **10⁵（100,000）** 或查询 p95 超过
+**500 ms**（30 天范围操作时间线 SLO，架构计划 §3）时，必须启用关系账本方案
+（方案 A：`migrations/001_control_plane.sql` 的 `ledger_events`/`ledger_segments`
+表接线，`QueryEvents` 切 SQL 索引查询），不得继续依赖快照全量扫描。该门禁是
+G2 验收“容量 envelope 记录；高容量类 cutover 门禁”的落点；`cli.py bench` 提供
+回归基线（`BenchmarkIngest`/`BenchmarkQueryLargeLedger`）。
+
 ## 已知特征（如实记录）
 
 - **快照式控制面存储是 O(n²) 累计写入**：每个 Update（含每次事件落账）都对

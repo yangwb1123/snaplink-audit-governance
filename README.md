@@ -57,7 +57,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - API 契约位于 `api/openapi`、`api/asyncapi` 和 `api/proto`。
 - 本机隔离依赖配置位于 `deploy/docker-compose.verify.yml`。
 
-开发令牌仅用于本机验证，例如 `Bearer dev:demo:service`；需要显式模拟来源客户端时使用 `Bearer dev:demo:service:<client_id>`。开发认证自 2026-08-06 起默认关闭（`-allow-dev-auth` 默认 false，`AUDIT_ALLOW_DEV_AUTH=true` 显式启用，非法取值直接启动失败）；生产环境必须保持关闭并接入 OIDC/JWT、外部 Kafka、PostgreSQL、ClickHouse、WORM 存储和 KMS/HSM。
+开发令牌仅用于本机验证，例如 `Bearer dev:demo:service`；需要显式模拟来源客户端时使用 `Bearer dev:demo:service:<client_id>`。开发认证自 2026-08-06 起默认关闭（`-allow-dev-auth` 默认 false，`AUDIT_ALLOW_DEV_AUTH=true` 显式启用，非法取值直接启动失败）；自 B1-1 收口起，`-allow-dev-auth` **单独（无 env 白名单）时真实启动也拒绝**——与 `-check-config` 同一规则（AC-3），仅环境变量 `AUDIT_ALLOW_DEV_AUTH=true` 是合法途径；`cli.py quality` 的 manifest 扫描同时拒绝非 verify 部署清单中出现 dev auth 开启项。生产环境必须保持关闭并接入 OIDC/JWT、外部 Kafka、PostgreSQL、ClickHouse、WORM 存储和 KMS/HSM。
 
 事件写入还会把签名访问令牌中的 `client_id` 与来源系统绑定。兼容发行方可仅提供 `azp`，但 `client_id` 与 `azp` 同时存在时必须一致；`sub` 永不作为客户端身份。来源的 `allowed_client_ids` 是精确匹配列表；空列表安全默认只允许 `client_id == source.id`。
 

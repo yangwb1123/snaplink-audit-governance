@@ -651,6 +651,8 @@ func TestErrorBodyRedactsServerErrors(t *testing.T) {
 		{"conflict-409", http.StatusConflict, fmt.Errorf("%w: event_id content differs", domain.ErrConflict), "conflict", "conflict: event_id content differs"},
 		{"quota-429", http.StatusTooManyRequests, domain.ErrQuotaExceeded, "quota_exceeded", "quota exceeded"},
 		{"schema-422", http.StatusUnprocessableEntity, domain.ErrSchemaNotFound, "schema_not_found", "schema not found"},
+		{"tenant-mismatch-422", http.StatusUnprocessableEntity, fmt.Errorf("%w: envelope tenant_id %q does not match", domain.ErrTenantMismatch, "tenant-b"), "tenant_mismatch", "tenant mismatch: envelope tenant_id \"tenant-b\" does not match"},
+		{"snapshot-conflict-503", http.StatusServiceUnavailable, store.ErrSnapshotConflict, "snapshot_conflict", "internal server error"},
 		{"internal-raw-path", http.StatusInternalServerError, fmt.Errorf("open /var/lib/audit/state.json.tmp: is a directory"), "internal_error", "internal server error"},
 		{"internal-raw-crypto", http.StatusInternalServerError, fmt.Errorf("cipher: message authentication failed (key id 0x7f)"), "internal_error", "internal server error"},
 		{"internal-domain-error-wins-status", http.StatusInternalServerError, fmt.Errorf("%w: leaked detail", domain.ErrInvalid), "invalid_request", "internal server error"},
@@ -1275,5 +1277,83 @@ func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
 	}
 	if _, ok := stored.Payload["nested"].(map[string]any)["note__search_digest"]; !ok {
 		t.Fatal("store must retain the nested digest-like key")
+	}
+}
+
+// TestHTTPReadSelfAuditVisible pins T-12 at the HTTP boundary: after a
+// single-event read and a query, the caller's audit.event.read rows are
+// visible through GET /api/v1/admin/actions — the self-audit is not only a
+// service-layer side effect.
+func TestHTTPReadSelfAuditVisible(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	ingestEvent := domain.Event{EventID: "t12-evt", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "t12-idem", Payload: map[string]any{"value": 1}}
+	body, _ := json.Marshal(ingestEvent)
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	if response, err := http.DefaultClient.Do(req); err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingest: %v status=%v", err, response)
+	}
+	readReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events/t12-evt", nil)
+	readReq.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	if response, err := http.DefaultClient.Do(readReq); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("read: %v status=%v", err, response)
+	}
+	queryReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events?from=2023-11-14T22:13:00Z&to=2023-11-14T22:14:00Z", nil)
+	queryReq.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	if response, err := http.DefaultClient.Do(queryReq); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("query: %v status=%v", err, response)
+	}
+	actionsReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/admin/actions", nil)
+	actionsReq.Header.Set("Authorization", "Bearer dev:tenant-a:tenant-admin")
+	response, err := http.DefaultClient.Do(actionsReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var result struct {
+		Items []domain.AdminAction `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	var reads int
+	for _, action := range result.Items {
+		if action.Action == domain.AdminActionEventRead && action.Actor == "tenant-a" {
+			reads++
+		}
+	}
+	if reads != 2 {
+		t.Fatalf("audit.event.read rows visible at HTTP boundary=%d, want 2 (get + query)", reads)
+	}
+}
+
+// TestHTTPTenantMismatchBodyCode pins T-13's response contract: the 422 body
+// carries the machine-readable tenant_mismatch code.
+func TestHTTPTenantMismatchBodyCode(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	event := domain.Event{EventID: "t13-evt", TenantID: "tenant-b", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_011, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "t13-idem", Payload: map[string]any{"value": 1}}
+	body, _ := json.Marshal(event)
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d, want 422", response.StatusCode)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "tenant_mismatch" {
+		t.Fatalf("error code=%q, want tenant_mismatch", envelope.Error.Code)
 	}
 }
