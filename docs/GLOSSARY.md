@@ -5,7 +5,7 @@
 | **审计事件 (Event)** | 一条规范化的业务审计事实，含信封字段（event_id、tenant_id、source_system、actor、action、outcome 等）与版本化 payload |
 | **event_id** | 调用方生成的全局唯一事件 ID；接入端幂等键之一 |
 | **idempotency_key** | 来源系统幂等键，租户内唯一；重复使用关联到不同事件会冲突 |
-| **tenant_id** | 租户标识；只由服务端从签名 Token 与来源注册解析，请求体值被忽略 |
+| **tenant_id** | 租户标识；只由服务端从签名 Token 与来源注册解析；请求体若携带则必须与解析租户一致，不一致 → 422 `tenant_mismatch` 拒绝入账（DS-08，禁止静默重标） |
 | **source_system** | 事件来源系统；与签名 `client_id` 精确绑定（`allowed_client_ids` 白名单） |
 | **operation_id** | 一次完整业务操作的关联 ID；跨事件关联与恢复的最小单位 |
 | **causation_id** | 触发当前事件的上游事件 ID |
@@ -28,6 +28,12 @@
 | **Legal Hold** | 按查询条件保全事件，阻止其进入可删除/归档窗口 |
 | **Retention Policy** | 按租户 + retention_class 的 hot/warm/archive 天数策略；评估只归档、永不删除不可变账本 |
 | **Export Job** | 异步 JSONL 导出任务（pending→running→completed/failed），租户鉴权下载 + 摘要 |
+| **来源绑定（source binding）** | 来源的 `allowed_client_ids` 精确白名单；空列表只允许 `client_id == source.id`；未知/停用/越权来源同一拒绝 |
+| **自审计轨迹（AdminAction）** | append-only 管理操作记录（含读路径 `audit.event.read`/`audit.event.export`），与变更同事务原子写入 |
+| **DLQ（audit.events.dlq.v1）** | 终止重试后的失败事件隔离 topic；`Failure` 记录（event_id/error_code/error_message），含 `unparsable_message` |
+| **DLQ 重放（audit-kafka-dlq-replay）** | 按 key 从 accepted topic 恢复原消息重发（或经 API 重新接入）；状态文件去重、瞬态失败下轮重试、永久拒绝收敛 |
+| **聚合 Checkpoint** | 对租户内全部流最新 checkpoint 的周期签名 Merkle 根（第三层证据链） |
+| **G1 模式** | 真实 IdP token 的 e2e 模式：dev auth 关闭 + JWKS 验证 + dev token 401 负向断言（B1-7） |
 | **Restore** | 恢复流程：预览（无副作用状态重建）→ 申请（pending_approval）→ 审批（approved/rejected）；审批与业务执行是两个独立事实 |
 | **Replay** | 基于 changed_fields 的无副作用状态重建；不调用任何外部副作用接口 |
 | **VerifyIntegrity** | 逐流校验 prev_hash 链、事件 hash、段 Merkle Root 与签名 |

@@ -65,12 +65,14 @@ elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ];
   export AUDIT_JWKS_URL="${AUDIT_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}"
   export AUDIT_JWT_ISSUER="${AUDIT_JWT_ISSUER:-http://localhost:18082}"
   AUTH_POLICY="Bearer ${AUDIT_E2E_TOKEN}"
+  AUTH_WRITE="Bearer ${AUDIT_E2E_TOKEN}"
   log "PASS: real IdP token in use (G1 fixture path); dev auth off"
 else
   log "WARN: no IdP token fixture configured; using dev tokens (transitional, B1-7 awaits B4-1)"
   AUTH_READ="Bearer dev:demo:tenant-auditor"
   AUTH_COMPLIANCE="Bearer dev:demo:compliance"
   AUTH_POLICY="Bearer dev:demo:platform-admin"
+  AUTH_WRITE="Bearer dev:demo:service"
 fi
 
 log "starting infrastructure (postgres/redpanda/clickhouse/minio/jaeger)"
@@ -105,12 +107,20 @@ $COMPOSE exec -T minio mc version enable "$MINIO_ALIAS/worm-audit" >/dev/null 2>
 wait_http "$API/readyz" || { log "audit-api not ready"; exit 1; }
 log "audit-api ready"
 
-log "checking gRPC ingest listener (B1-6 topology: --grpc-listen registered)"
+log "checking gRPC ingest (B1-6 topology: listener + real Write over socket)"
 if (exec 3<>/dev/tcp/localhost/19051) 2>/dev/null; then
   log "gRPC listener: open on 19051"
   exec 3<&- 3>&-
 else
   log "gRPC listener: not reachable"
+  exit 1
+fi
+G_TOKEN="${AUTH_WRITE#Bearer }"
+if (cd "${ROOT}" && go run ./test/e2e/grpcwrite -address localhost:19051 -token "$G_TOKEN" \
+    -event-id "grpc-e2e-$(date +%s)" | grep -q "grpc-write-ok"); then
+  log "PASS: gRPC Write ingested"
+else
+  log "FAIL: gRPC Write failed"
   exit 1
 fi
 

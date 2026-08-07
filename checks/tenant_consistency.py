@@ -13,8 +13,9 @@ CHECK_MARKER = "ErrTenantMismatch"
 STAMP = "event.TenantID = tenantID"
 
 
-def run() -> int:
-    root = Path(__file__).resolve().parents[1]
+def run(root=None) -> int:
+    if root is None:
+        root = Path(__file__).resolve().parents[1]
     path = root / TARGET
     if not path.exists():
         print(f"FAIL: tenant consistency check — {TARGET} missing")

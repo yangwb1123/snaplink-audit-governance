@@ -21,8 +21,9 @@ DEV_AUTH_TRUE = re.compile(
 )
 
 
-def run() -> int:
-    root = Path(__file__).resolve().parents[1]
+def run(root=None) -> int:
+    if root is None:
+        root = Path(__file__).resolve().parents[1]
     failures = []
     scanned = 0
     for path in sorted((root / "deploy").glob("*.yml")):

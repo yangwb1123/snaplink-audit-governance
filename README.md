@@ -27,6 +27,8 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - [ADR-0003 哈希链分段与检查点](docs/adr/ADR-0003.md)
 - [ADR-0004 查询投影与租户路由](docs/adr/ADR-0004.md)
 - [ADR-0005 合规归档与密钥](docs/adr/ADR-0005.md)
+- [ADR-0006 租户 ID 键框架校验](docs/adr/ADR-0006.md)
+- [ADR-0007 开发认证默认失败关闭](docs/adr/ADR-0007.md)
 
 ## 当前实现
 
