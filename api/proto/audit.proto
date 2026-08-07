@@ -83,8 +83,14 @@ message WriteBatchResponse {
 }
 
 service Ingest {
-  // Tenant identity is resolved from signed token claims or the unique
-  // server-side (client_id, source_system) registration, never request data.
+  // Supported inbound for the audit ingest surface (B1-6): Write,
+  // WriteBatch and WriteStream are production-supported and share the HTTP
+  // path's constraints — bearer-token authentication (same Authenticator),
+  // server-side tenant resolution with envelope-tenant consistency (DS-08,
+  // mismatch -> FailedPrecondition/422), schema validation, idempotency and
+  // service-layer self-audit. Tenant identity is resolved from signed token
+  // claims or the unique server-side (client_id, source_system)
+  // registration, never request data.
   rpc Write(WriteRequest) returns (WriteResponse);
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   rpc WriteStream(stream WriteRequest) returns (stream WriteResponse);

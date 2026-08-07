@@ -1,5 +1,25 @@
 # Release Notes
 
+## 2026-08-07 — 真实 JWT 路径验证（B1-7 服务端前提）；gRPC 受支持入站契约声明
+
+**验证（无 dev auth，本地签发 RS256 JWT 带 IdP 同款 claims）：**
+
+1. **真实 JWT 全路径**（`AUDIT_JWT_PUBLIC_KEY_PEM` + 固定 alg，dev auth 关闭）：
+   dev token 全路由 401；真实 JWT（`client_id`/`tenant_id`/`roles` claims，与
+   snaplink IdP B4-1 `buildAccessPayload` 同构）管理操作 201、写入 202
+   （client_id → 来源绑定租户解析）、envelope tenant 不匹配 422、篡改签名
+   401。RBAC 在真实路径完整生效：service 角色只写（查询 403）、auditor
+   只读、`audit:policy:read` 才可见 admin/actions；读自审计
+   （`audit.event.read`）actor = token `sub`。这验证了 B1-7 的服务端前提：
+   IdP 只需发出同构 claims（B4-1 已落地）即可收口 G1。
+2. **gRPC 受支持入站契约声明（B1-6）**：`api/proto/audit.proto` 的 Ingest
+   service 注释显式声明 Write/WriteBatch/WriteStream 为受支持入站，与 HTTP
+   共享认证/租户一致性（DS-08）/schema 校验/幂等/服务层自审计约束。
+3. **全链路 e2e 复验**：drain 窗口修复后 fullstack.sh 再次全绿（账本 →
+   ClickHouse → MinIO WORM → integrity → Jaeger → gRPC 探活）。
+
+Migration: none（proto 注释级变更，无需重新生成 pb.go）。
+
 ## 2026-08-07 — 真实容器 e2e 全链路验证；DLQ 重放 drain 窗口修复；B1-7 fixture 路径；规则草案 RCA 收口
 
 **验证与修复（全链路真实容器）：**
