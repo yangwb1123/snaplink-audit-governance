@@ -10,7 +10,12 @@ services:
       AUDIT_GRPC_LISTEN: ":50051"
       AUDIT_STATE_PATH: /var/lib/audit/state.json
       AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
-      AUDIT_ALLOW_DEV_AUTH: "true"
+      # G1 模式（AUDIT_IDP_* 配置存在时 fullstack.sh 注入 false + JWKS）：
+      # 过渡期默认 true（dev token），IdP fixture 接入后显式 false。
+      AUDIT_ALLOW_DEV_AUTH: ${AUDIT_ALLOW_DEV_AUTH:-true}
+      AUDIT_JWKS_URL: ${AUDIT_JWKS_URL:-}
+      AUDIT_JWT_ISSUER: ${AUDIT_JWT_ISSUER:-}
+      AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK: ${AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK:-false}
       AUDIT_BOOTSTRAP_TENANT: demo
       AUDIT_SIGNING_SECRET: local-only-change-me
       AUDIT_ENCRYPTION_KEY: local-only-encryption-key
@@ -19,6 +24,8 @@ services:
       AUDIT_S3_BUCKET: worm-audit
       AUDIT_S3_ACCESS_KEY: audit-local
       AUDIT_S3_SECRET_KEY: audit-local-change-me
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - jaeger
       - minio

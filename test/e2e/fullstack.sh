@@ -25,6 +25,8 @@ wait_http() { # url tries
 # IdP deployment (B4-1) is available. Precedence: AUDIT_E2E_TOKEN env
 # (explicit) -> mint-token.sh (IdP config present) -> dev token (transitional,
 # G1 not yet closed; logs a warning).
+# G1 mode also flips the stack to real-token-only: dev auth off, JWKS pointed
+# at the host-run IdP via the host-gateway alias.
 if [ -n "${AUDIT_E2E_TOKEN:-}" ]; then
   AUTH_READ="Bearer ${AUDIT_E2E_TOKEN}"
   AUTH_COMPLIANCE="Bearer ${AUDIT_E2E_TOKEN}"
@@ -35,7 +37,13 @@ elif [ -n "${AUDIT_IDP_TOKEN_URL:-}" ] && [ -n "${AUDIT_IDP_CLIENT_ID:-}" ]; the
   AUTH_READ="Bearer ${AUDIT_E2E_TOKEN}"
   AUTH_COMPLIANCE="Bearer ${AUDIT_E2E_TOKEN}"
   export AUDIT_OUTBOX_TOKEN
-  log "PASS: real IdP token in use (G1 fixture path)"
+  # G1: dev auth OFF + JWKS verification against the host IdP. The IdP's
+  # issuer must equal AUDIT_JWT_ISSUER (host-visible URL of the IdP).
+  export AUDIT_ALLOW_DEV_AUTH=false
+  export AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK=true
+  export AUDIT_JWKS_URL="${AUDIT_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}"
+  export AUDIT_JWT_ISSUER="${AUDIT_JWT_ISSUER:-http://localhost:18082}"
+  log "PASS: real IdP token in use (G1 fixture path); dev auth off"
 else
   log "WARN: no IdP token fixture configured; using dev tokens (transitional, B1-7 awaits B4-1)"
   AUTH_READ="Bearer dev:demo:tenant-auditor"
@@ -79,6 +87,14 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/003_outbox_relay.sql" >/dev/null
 
 log "ensuring clickhouse database"
+# ClickHouse 容器启动需要数秒：就绪前 curl 会失败（CURLE_RECV_ERROR）。
+for _ in $(seq 1 30); do
+  if curl -sf -u audit:audit-local-only "$CH/ping" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+  log "waiting for clickhouse"
+done
 curl -sf -u audit:audit-local-only -X POST \
   --data-binary 'CREATE DATABASE IF NOT EXISTS audit' "$CH/" >/dev/null
 log "ensuring Kafka topic"
@@ -105,6 +121,17 @@ if [ "$COUNT" -lt 1 ]; then
   exit 1
 fi
 log "PASS: event in ledger"
+
+if [ -n "${AUDIT_IDP_TOKEN_URL:-}" ]; then
+  # G1 (T-1.1) negative leg: with dev auth off, dev tokens must be rejected
+  # on the read route too.
+  DEV_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/events?from=2026-08-01T00:00:00Z&to=2026-09-01T00:00:00Z" -H 'Authorization: Bearer dev:demo:tenant-auditor' 2>/dev/null || true)"
+  if [ "$DEV_STATUS" != "401" ]; then
+    log "FAIL: dev token accepted in G1 mode (status=$DEV_STATUS, want 401)"
+    exit 1
+  fi
+  log "PASS: dev token rejected (401) in G1 mode"
+fi
 
 sleep 5
 log "verifying ClickHouse projection"

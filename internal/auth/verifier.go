@@ -394,6 +394,15 @@ func loopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+	// host.docker.internal is the canonical container-side alias for the
+	// host's loopback (extra_hosts host-gateway). Accepting it here only
+	// matters under the explicit AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK flag:
+	// local verification stacks (docker compose) reach a host-run IdP
+	// through this name; production stays HTTPS-only because the flag is
+	// off by default and rejected by -check-config parity.
+	if strings.EqualFold(host, "host.docker.internal") || strings.EqualFold(host, "gateway.docker.internal") {
+		return true
+	}
 	address := net.ParseIP(host)
 	return address != nil && address.IsLoopback()
 }

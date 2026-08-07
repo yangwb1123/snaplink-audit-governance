@@ -1,5 +1,30 @@
 # Release Notes
 
+## 2026-08-07 — G1 e2e 全栈通过：真实 IdP token + dev auth 关闭（T-1.1/T-1.2 联合断言链）
+
+**跨仓收口（本仓侧完成，B1-7/B4-1 联合）：**
+
+1. **G1 模式 fullstack e2e 全绿**：`AUDIT_IDP_TOKEN_URL`/`AUDIT_IDP_CLIENT_ID`/
+   `AUDIT_IDP_CLIENT_SECRET`/`AUDIT_IDP_SCOPE` 配置后，`fullstack.sh` 自动
+   mint 真实 IdP token 并把栈切到 **dev auth 关闭 + JWKS 验证**（
+   `AUDIT_ALLOW_DEV_AUTH=false`、`AUDIT_JWKS_URL=http://host.docker.internal:
+   18082/.well-known/jwks.json`、issuer 校验、loopback 豁免）。断言链：
+   relay → Kafka → consumer → 账本（真实 token 202）→ **dev token 401 负向
+   断言（T-1.1）** → ClickHouse 投影 → MinIO WORM 归档 → 完整性 valid →
+   Jaeger trace（T-1.2 完整链）。实测通过（本机 sso-server + 全栈 compose）。
+2. **JWKS loopback 豁免扩展**：`loopbackHost` 接受 `host.docker.internal` /
+   `gateway.docker.internal`（容器侧宿主机回环的规范别名，仅在该显式
+   flag 下生效；生产 HTTPS 强制不变，默认关闭且 check-config parity 拒绝）。
+   compose audit-api 增加 `extra_hosts: host-gateway`。
+3. **compose G1 插值**：`AUDIT_ALLOW_DEV_AUTH`/`AUDIT_JWKS_URL`/
+   `AUDIT_JWT_ISSUER`/`AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK` 可经环境变量
+   覆盖（过渡期默认 dev auth true 不变）。
+4. **e2e 脚本健壮性**：ClickHouse 就绪等待（容器启动竞态，此前 curl 失败
+   exit 56）。
+
+迁移：无。IdP 侧剩余动作 = 部署仓将 sso-server 容器化接入（提供
+`AUDIT_IDP_*`），本仓 G1 fixture 路径与断言链已完整验证。
+
 ## 2026-08-07 — G1 真实 IdP 集成闭环：sso-server 签发 token 全链路验证 + mint-token.sh 修复
 
 **跨仓收口验证（B1-7/B4-1/B4-2 联合）：**

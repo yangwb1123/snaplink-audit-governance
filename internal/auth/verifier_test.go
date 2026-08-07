@@ -165,6 +165,9 @@ func TestJWKSURLRequiresHTTPSOrExplicitLoopback(t *testing.T) {
 		{"remote HTTP", "http://snaplink.example/.well-known/jwks.json", true, true},
 		{"loopback HTTP default", "http://127.0.0.1:8080/jwks", false, true},
 		{"loopback HTTP explicit", "http://127.0.0.1:8080/jwks", true, false},
+		{"host-gateway HTTP explicit", "http://host.docker.internal:8080/jwks", true, false},
+		{"host-gateway HTTP default", "http://host.docker.internal:8080/jwks", false, true},
+		{"gateway.docker.internal explicit", "http://gateway.docker.internal:8080/jwks", true, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
