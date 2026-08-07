@@ -98,7 +98,13 @@ AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker 
 
 - **PostgreSQL**：控制面快照后端（乐观锁）、outbox 表（relay 台账）。
 - **Redpanda（Kafka 兼容）**：outbox → relay(Kafka) → topic → consumer/audit-api
-  全链路；手动 offset 提交、失败背压、不可解析消息死信。
+  全链路；手动 offset 提交、失败背压、不可解析消息死信（unparsable_message
+  DLQ 记录 + 计数）。
+- **DLQ 重放（2026-08-07 真实链路闭环）**：未注册 schema 事件 → 422 permanent
+  → `audit.events.dlq.v1` Failure；注册 schema 后 `audit-kafka-dlq-replay -once`
+  按 key 从 accepted topic 恢复原消息重发 → consumer 重新接入 → 事件入账，
+  状态文件持久化；`-once` 使用独立 consumer group（避免与常驻实例 rebalance
+  竞争），每阶段独立 drain 窗口。
 - **ClickHouse**：`audit-projector` 消费 accepted topic 写入查询投影表
   （ReplacingMergeTree、tenant 前缀排序键、按月分区），投影可 SQL 查询。
 - **MinIO（Object Lock）**：事件/段清单/导出写入 `--with-lock` 桶；
