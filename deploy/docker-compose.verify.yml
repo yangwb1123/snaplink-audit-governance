@@ -9,6 +9,10 @@ services:
       AUDIT_LISTEN: ":8089"
       AUDIT_GRPC_LISTEN: ":50051"
       AUDIT_STATE_PATH: /var/lib/audit/state.json
+      AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      # 验证栈明示：允许从残留文件状态切到 PostgreSQL 快照（防数据丢失保护
+      # 的显式覆盖，仅限本机 verify 栈；生产切换必须走受控迁移）。
+      AUDIT_ALLOW_PG_EMPTY_LEDGER: "true"
       AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
       # G1 模式（AUDIT_IDP_* 配置存在时 fullstack.sh 注入 false + JWKS）：
       # 过渡期默认 true（dev token），IdP fixture 接入后显式 false。
@@ -83,6 +87,48 @@ services:
     restart: unless-stopped
     volumes:
       - audit_state:/var/lib/audit
+    networks: [audit_verify]
+
+  audit-governance-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/audit-governance-worker"]
+    command: ["-interval", "5m"]
+    environment:
+      # 与 audit-api 共享控制面快照（PostgreSQL 单行 + 乐观锁，B1-2 多副本
+      # 冲突重试的真实载体）；归档目标与签名/加密密钥必须与 audit-api 一致。
+      AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
+      AUDIT_SIGNING_SECRET: local-only-change-me
+      AUDIT_ENCRYPTION_KEY: local-only-encryption-key
+      AUDIT_S3_ENDPOINT: minio:9000
+      AUDIT_S3_BUCKET: worm-audit
+      AUDIT_S3_ACCESS_KEY: audit-local
+      AUDIT_S3_SECRET_KEY: audit-local-change-me
+    depends_on:
+      - postgres
+      - minio
+    restart: unless-stopped
+    volumes:
+      - audit_state:/var/lib/audit
+    networks: [audit_verify]
+
+  # G1 fixture: self-contained IdP for the real-token e2e (B1-7). Built from
+  # the sibling snaplink checkout (../snaplink); its port is published so the
+  # audit-api container reaches it via host.docker.internal (host-gateway)
+  # and the host-side mint-token.sh reaches it via localhost.
+  audit-idp:
+    build:
+      # 兄弟仓库 snaplink（sso-server）：deploy/ 上一级是仓库根，再上一级
+      # 是 demo/ 工作区，snaplink 与其并列。
+      context: ../../snaplink
+      dockerfile: Dockerfile
+    command: ["--config", "/etc/sso/idp.yaml"]
+    volumes:
+      - ./idp.verify.yaml:/etc/sso/idp.yaml:ro
+    ports:
+      - "18082:18082"
     networks: [audit_verify]
 
   audit-projector:

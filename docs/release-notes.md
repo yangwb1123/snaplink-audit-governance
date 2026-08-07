@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-08-07 — 自包含验证栈：audit-idp 容器 + governance-worker 入栈 + 治理断言链（G1 一键复现）
+
+**验证栈完整性（fullstack.sh 单命令复现 G1，无需手动启动 IdP）：**
+
+1. **audit-idp 容器**（deploy/idp.verify.yaml + compose 服务，从兄弟仓库
+   snaplink 构建）：G1 模式不再依赖宿主手动启动的 IdP——`AUDIT_IDP_CLIENT_ID`
+   /`AUDIT_IDP_CLIENT_SECRET` 两个环境变量即可复现完整 G1（token 铸造 →
+   dev auth 关闭 → JWKS 验证 → dev token 401 断言 → 全链路）。
+2. **audit-governance-worker 入栈**：与 audit-api 共享 PostgreSQL 控制面快照
+   （`audit_state_snapshot` 单行 + 乐观锁）——B1-2 多副本冲突重试的真实
+   载体；迁移 004 在应用启动前应用（audit-api bootstrap 需要表存在）。
+   e2e 新增 worker `-once` 断言（留存评估输出）。
+3. **治理断言链**：留存策略设置/评估、Legal Hold 创建、导出完成/下载、
+   worker 单轮评估——G1 与 dev 双模式均通过。
+4. **PG 切换保护**：audit-api 的文件→PG 切换检测（防数据丢失）在验证栈
+   中由 `AUDIT_ALLOW_PG_EMPTY_LEDGER=true` 显式覆盖（仅 verify 栈；生产
+   切换必须走受控迁移）。
+5. **e2e 依赖顺序重构**：基础服务（postgres/redpanda/clickhouse/minio/
+   jaeger）先行 → 迁移 → 应用服务；IdP 先行就绪再 mint token。
+
+实测（2026-08-07）：G1 模式 exit 0（12 项断言）、dev 模式 exit 0（8 项
+断言）、QUALITY PASS。
+
 ## 2026-08-07 — G1 e2e 全栈通过：真实 IdP token + dev auth 关闭（T-1.1/T-1.2 联合断言链）
 
 **跨仓收口（本仓侧完成，B1-7/B4-1 联合）：**

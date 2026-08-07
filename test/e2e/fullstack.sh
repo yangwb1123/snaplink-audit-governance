@@ -21,6 +21,22 @@ wait_http() { # url tries
   return 1
 }
 
+# G1 模式：先启动 audit-idp（token 铸造依赖它），就绪后 mint 并把 dev-auth
+# 关闭 / JWKS env 导出（必须在其余服务 up 之前，compose 插值需要它们）。
+if [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ]; then
+  log "starting audit-idp (G1 fixture)"
+  $COMPOSE up -d audit-idp
+  for _ in $(seq 1 30); do
+    if curl -sf -m 2 -X POST "${AUDIT_IDP_TOKEN_URL:-http://localhost:18082/token}" \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data "grant_type=client_credentials&client_id=${AUDIT_IDP_CLIENT_ID}&client_secret=${AUDIT_IDP_CLIENT_SECRET}&scope=audit:event:write" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+    log "waiting for audit-idp"
+  done
+fi
+
 # B1-7 (T-1.2) token fixture: a real IdP token replaces dev tokens once the
 # IdP deployment (B4-1) is available. Precedence: AUDIT_E2E_TOKEN env
 # (explicit) -> mint-token.sh (IdP config present) -> dev token (transitional,
@@ -30,8 +46,13 @@ wait_http() { # url tries
 if [ -n "${AUDIT_E2E_TOKEN:-}" ]; then
   AUTH_READ="Bearer ${AUDIT_E2E_TOKEN}"
   AUTH_COMPLIANCE="Bearer ${AUDIT_E2E_TOKEN}"
-elif [ -n "${AUDIT_IDP_TOKEN_URL:-}" ] && [ -n "${AUDIT_IDP_CLIENT_ID:-}" ]; then
+elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ]; then
+  # compose 栈自带 audit-idp：默认 URL 指向其发布端口（调用方可覆盖）。
+  export AUDIT_IDP_TOKEN_URL="${AUDIT_IDP_TOKEN_URL:-http://localhost:18082/token}"
   log "minting IdP token from ${AUDIT_IDP_TOKEN_URL}"
+  # 默认 scope 覆盖 e2e 全部治理断言（策略/Legal Hold/导出/完整性/读写）；
+  # 调用方可覆盖。
+  export AUDIT_IDP_SCOPE="${AUDIT_IDP_SCOPE:-audit:event:write audit:event:read audit:operation:read audit:export:create audit:integrity:verify audit:legal_hold:manage audit:policy:read audit:policy:write}"
   # shellcheck disable=SC1091
   source "${ROOT}/scripts/mint-token.sh"
   AUTH_READ="Bearer ${AUDIT_E2E_TOKEN}"
@@ -43,16 +64,29 @@ elif [ -n "${AUDIT_IDP_TOKEN_URL:-}" ] && [ -n "${AUDIT_IDP_CLIENT_ID:-}" ]; the
   export AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK=true
   export AUDIT_JWKS_URL="${AUDIT_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}"
   export AUDIT_JWT_ISSUER="${AUDIT_JWT_ISSUER:-http://localhost:18082}"
+  AUTH_POLICY="Bearer ${AUDIT_E2E_TOKEN}"
   log "PASS: real IdP token in use (G1 fixture path); dev auth off"
 else
   log "WARN: no IdP token fixture configured; using dev tokens (transitional, B1-7 awaits B4-1)"
   AUTH_READ="Bearer dev:demo:tenant-auditor"
   AUTH_COMPLIANCE="Bearer dev:demo:compliance"
+  AUTH_POLICY="Bearer dev:demo:platform-admin"
 fi
 
-log "starting stack (postgres/redpanda/clickhouse/minio/jaeger/audit-api/relay/consumer/projector)"
-$COMPOSE up -d postgres redpanda clickhouse minio jaeger audit-api \
-  audit-outbox-relay audit-kafka-consumer audit-projector audit-kafka-dlq-replay
+log "starting infrastructure (postgres/redpanda/clickhouse/minio/jaeger)"
+$COMPOSE up -d postgres redpanda clickhouse minio jaeger
+
+log "applying migrations before starting applications (audit-api bootstrap writes the PG snapshot)"
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/001_control_plane.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/003_outbox_relay.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
+
+log "starting applications (audit-api/relay/consumer/projector/worker/idp)"
+$COMPOSE up -d audit-api audit-outbox-relay audit-kafka-consumer \
+  audit-projector audit-kafka-dlq-replay audit-governance-worker audit-idp
 
 # 自举归档依赖：S3Store.Ready 要求 bucket 存在且启用 Object Lock（WORM），
 # 因此 MinIO bucket 必须在等待 /readyz 之前创建。
@@ -80,12 +114,6 @@ else
   exit 1
 fi
 
-log "applying migrations"
-$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
-  -f - < "${ROOT}/migrations/001_control_plane.sql" >/dev/null
-$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
-  -f - < "${ROOT}/migrations/003_outbox_relay.sql" >/dev/null
-
 log "ensuring clickhouse database"
 # ClickHouse 容器启动需要数秒：就绪前 curl 会失败（CURLE_RECV_ERROR）。
 for _ in $(seq 1 30); do
@@ -99,6 +127,8 @@ curl -sf -u audit:audit-local-only -X POST \
   --data-binary 'CREATE DATABASE IF NOT EXISTS audit' "$CH/" >/dev/null
 log "ensuring Kafka topic"
 $COMPOSE exec -T redpanda rpk topic create audit.events.accepted.v1 \
+  --partitions 1 --replicas 1 >/dev/null 2>&1 || true
+$COMPOSE exec -T redpanda rpk topic create audit.events.dlq.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 
 EVENT_ID="fullstack-e2e-$(date +%s)"
@@ -151,6 +181,42 @@ VALID="$(curl -s -X POST "$API/api/v1/integrity/verify" \
   -d '{}' 2>/dev/null | grep -o '"valid":true' || true)"
 [ -n "$VALID" ] || { log "FAIL: integrity invalid"; exit 1; }
 log "PASS: integrity valid"
+
+log "verifying governance chain (retention / legal hold / export / worker)"
+# 留存策略（policy:write 角色；G1 模式为 IdP token）
+POLICY_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$API/api/v1/policies/retention" \
+  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
+  -d '{"tenant_id":"demo","hot_days":1,"warm_days":7,"archive_days":30,"retention_class":"standard"}')"
+[ "$POLICY_STATUS" = "200" ] || { log "FAIL: set retention policy ($POLICY_STATUS)"; exit 1; }
+EVAL_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/retention/evaluate" \
+  -H "Authorization: $AUTH_POLICY")"
+[ "$EVAL_STATUS" = "200" ] || { log "FAIL: retention evaluate ($EVAL_STATUS)"; exit 1; }
+log "PASS: retention policy set and evaluated"
+
+HOLD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds" \
+  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-hold","reason":"verification","filter":{"from":"2026-08-01T00:00:00Z","to":"2026-09-01T00:00:00Z"}}')"
+[ "$HOLD_STATUS" = "201" ] || { log "FAIL: create legal hold ($HOLD_STATUS)"; exit 1; }
+log "PASS: legal hold created"
+
+EXPORT_ID="$(curl -s -X POST "$API/api/v1/exports" \
+  -H "Authorization: $AUTH_COMPLIANCE" -H 'Content-Type: application/json' \
+  -d '{"from":"2026-08-01T00:00:00Z","to":"2026-09-01T00:00:00Z"}' | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
+[ -n "$EXPORT_ID" ] || { log "FAIL: create export"; exit 1; }
+for _ in $(seq 1 30); do
+  EXPORT_STATUS="$(curl -s "$API/api/v1/exports/$EXPORT_ID" -H "Authorization: $AUTH_COMPLIANCE" | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+  [ "$EXPORT_STATUS" = "completed" -o "$EXPORT_STATUS" = "failed" ] && break
+  sleep 2
+done
+[ "$EXPORT_STATUS" = "completed" ] || { log "FAIL: export did not complete ($EXPORT_STATUS)"; exit 1; }
+DOWNLOAD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/exports/$EXPORT_ID/download" -H "Authorization: $AUTH_COMPLIANCE")"
+[ "$DOWNLOAD_STATUS" = "200" ] || { log "FAIL: export download ($DOWNLOAD_STATUS)"; exit 1; }
+log "PASS: export completed and downloaded"
+
+# worker 单轮评估（与常驻实例共享 PG 快照 —— 乐观锁 + 有界重试的真实载体）
+$COMPOSE exec -T audit-governance-worker /audit-governance-worker -once 2>&1 | \
+  grep -q "eligible=" || { log "FAIL: governance worker once-run produced no retention evaluation"; exit 1; }
+log "PASS: governance worker once-run"
 
 log "verifying Jaeger trace export"
 sleep 8

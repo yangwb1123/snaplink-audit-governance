@@ -1,0 +1,34 @@
+# G1 verify-stack IdP configuration: a self-contained sso-server instance
+# for the fullstack e2e (B1-7). The demo client's id equals the audit-api
+# bootstrap source id so the default source binding (client_id == source.id)
+# applies; the tenant binding makes every minted token carry tenant_id=demo.
+# This file is consumed only by deploy/docker-compose.verify.yml (audit-idp
+# service); production deployments provision clients through the IdP's own
+# configuration and scope registry.
+version: 1
+server:
+  issuer: http://localhost:18082
+  listen: ":18082"
+  default_token_strategy: jwt
+identity:
+  backend: memory
+oauth:
+  backend: memory
+clients:
+  - id: demo
+    secret: demo-secret
+    name: Demo Audit Relay
+    tenant_id: demo
+    redirect_uris: []
+    allowed_scopes: [audit:event:write, audit:event:read, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read, audit:policy:write]
+    allowed_authenticators: [apikey, client_secret]
+    token_strategy: jwt
+    active: true
+permissions:
+  enabled: true
+  backend: memory
+  apps:
+    - client_id: demo
+      roles:
+        - code: service
+          permissions: [audit:event:write]
