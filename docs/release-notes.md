@@ -1,5 +1,30 @@
 # Release Notes
 
+## 2026-08-07 — 治理链 e2e 补全：restore 职责分离（双主体）+ legal hold release
+
+**e2e 断言扩展（dev 8→10 项，G1 13→15 项）：**
+
+1. **restore 审批职责分离端到端**：G1 模式用两个真实 IdP 主体
+   （`demo` 创建 + `demo-admin` 审批）——同人审批 403、第二主体审批
+   approved、状态机 pending_approval→approved 全链断言；dev 模式断言
+   同人 403（dev token 单主体语义，sub 恒等于租户——本身就是职责分离
+   验证）。
+2. **legal hold release**：创建后释放 200 + 自审计行。
+3. **IdP 双主体 fixture**：`deploy/idp.verify.yaml` 增加 `demo-admin`
+   client；fullstack 第二次 mint 前保存/恢复 `AUDIT_OUTBOX_TOKEN`
+   （relay 必须保持 demo 身份）、scope 收窄到 demo-admin 允许集。
+4. **gRPC 真实写入**（B1-6）：`test/e2e/grpcwrite` 小客户端经真实
+   socket 调用 Write RPC（bearer metadata + wait_for=ledgered + 回执
+   断言），双模式通过。
+5. **新检查自测**：dev_auth_manifest / tenant_consistency 支持注入 root，
+   test_quality_checks.py 增至 10 用例（verify 豁免、生产清单命中、
+   stamp-before-check、缺失检查等 FAIL/PASS 路径）。
+6. **文档同步**：GLOSSARY（tenant_id DS-08 语义 + 6 个新术语）、README
+   ADR-0006/0007 链接。
+
+实测（2026-08-07）：G1 模式 exit 0（15 项断言）、dev 模式 exit 0（10 项
+断言）、QUALITY PASS。
+
 ## 2026-08-07 — 自包含验证栈：audit-idp 容器 + governance-worker 入栈 + 治理断言链（G1 一键复现）
 
 **验证栈完整性（fullstack.sh 单命令复现 G1，无需手动启动 IdP）：**

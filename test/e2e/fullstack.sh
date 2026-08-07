@@ -66,6 +66,15 @@ elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ];
   export AUDIT_JWT_ISSUER="${AUDIT_JWT_ISSUER:-http://localhost:18082}"
   AUTH_POLICY="Bearer ${AUDIT_E2E_TOKEN}"
   AUTH_WRITE="Bearer ${AUDIT_E2E_TOKEN}"
+  # 第二主体（demo-admin）：职责分离 e2e 的审批者。mint 会覆盖
+  # AUDIT_OUTBOX_TOKEN，先保存再恢复（relay 必须保持 demo 客户端身份）。
+  FIRST_OUTBOX_TOKEN="${AUDIT_OUTBOX_TOKEN}"
+  AUDIT_IDP_CLIENT_ID="${AUDIT_IDP_ADMIN_CLIENT_ID:-demo-admin}"
+  AUDIT_IDP_CLIENT_SECRET="${AUDIT_IDP_ADMIN_CLIENT_SECRET:-demo-admin-secret}"
+  AUDIT_IDP_SCOPE="audit:event:read audit:operation:read audit:export:create audit:integrity:verify audit:legal_hold:manage audit:policy:read"
+  source "${ROOT}/scripts/mint-token.sh" >/dev/null
+  AUTH_SECONDARY="Bearer ${AUDIT_E2E_TOKEN}"
+  export AUDIT_OUTBOX_TOKEN="${FIRST_OUTBOX_TOKEN}"
   log "PASS: real IdP token in use (G1 fixture path); dev auth off"
 else
   log "WARN: no IdP token fixture configured; using dev tokens (transitional, B1-7 awaits B4-1)"
@@ -73,6 +82,7 @@ else
   AUTH_COMPLIANCE="Bearer dev:demo:compliance"
   AUTH_POLICY="Bearer dev:demo:platform-admin"
   AUTH_WRITE="Bearer dev:demo:service"
+  AUTH_SECONDARY="Bearer dev:demo:compliance"
 fi
 
 log "starting infrastructure (postgres/redpanda/clickhouse/minio/jaeger)"
@@ -227,6 +237,40 @@ log "PASS: export completed and downloaded"
 $COMPOSE exec -T audit-governance-worker /audit-governance-worker -once 2>&1 | \
   grep -q "eligible=" || { log "FAIL: governance worker once-run produced no retention evaluation"; exit 1; }
 log "PASS: governance worker once-run"
+
+log "verifying restore approval chain (separation of duties)"
+# 先写入一个带 operation_id 的事件作为恢复对象
+RESTORE_OP="restore-op-$(date +%s)"
+curl -s -X POST "$API/api/v1/events?wait_for=ledgered" \
+  -H "Authorization: $AUTH_WRITE" -H 'Content-Type: application/json' \
+  -d "{\"event_id\":\"restore-evt-$(date +%s)\",\"operation_id\":\"$RESTORE_OP\",\"source_system\":\"demo\",\"event_type\":\"audit.event\",\"schema_id\":\"audit.event\",\"schema_version\":1,\"occurred_at\":\"2026-08-07T12:00:00Z\",\"actor\":{\"id\":\"u\"},\"action\":\"update\",\"outcome\":\"success\",\"data_classification\":\"internal\",\"retention_class\":\"standard\",\"idempotency_key\":\"restore-idem-$(date +%s)\",\"payload\":{\"x\":1}}" \
+  -o /dev/null -w '%{http_code}' | grep -q 202 || { log "FAIL: restore op event ingest"; exit 1; }
+RUN_ID="$(curl -s -X POST "$API/api/v1/restores" \
+  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
+  -d "{\"operation_id\":\"$RESTORE_OP\",\"reason\":\"e2e verification\"}" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
+[ -n "$RUN_ID" ] || { log "FAIL: create restore run"; exit 1; }
+# 同人审批必须 403（职责分离）
+SAME_ACTOR="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/restores/$RUN_ID/approve" \
+  -H "Authorization: $AUTH_POLICY")"
+[ "$SAME_ACTOR" = "403" ] || { log "FAIL: same-actor approve must be 403 (got $SAME_ACTOR)"; exit 1; }
+# 第二主体审批 -> approved（仅 G1 模式：dev token 的 sub 恒等于租户，
+# 单主体语义下同人 403 本身就是职责分离验证；真实第二主体需要 IdP）
+if [ -n "${AUDIT_IDP_CLIENT_ID:-}" ]; then
+  APPROVE_STATUS="$(curl -s -X POST "$API/api/v1/restores/$RUN_ID/approve" \
+    -H "Authorization: $AUTH_SECONDARY" | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+  [ "$APPROVE_STATUS" = "approved" ] || { log "FAIL: restore approve ($APPROVE_STATUS)"; exit 1; }
+  log "PASS: restore approval chain (same-actor 403, distinct-actor approved)"
+else
+  log "PASS: restore same-actor refusal (dev single-principal semantics)"
+fi
+
+log "verifying legal hold release"
+HOLD_ID="$(curl -s "$API/api/v1/legal-holds" -H "Authorization: $AUTH_POLICY" | python3 -c "import json,sys; items=json.load(sys.stdin).get('items',[]); print(items[0]['id'] if items else '')")"
+[ -n "$HOLD_ID" ] || { log "FAIL: no legal hold to release"; exit 1; }
+RELEASE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds/$HOLD_ID/release" \
+  -H "Authorization: $AUTH_POLICY")"
+[ "$RELEASE_STATUS" = "200" ] || { log "FAIL: legal hold release ($RELEASE_STATUS)"; exit 1; }
+log "PASS: legal hold released"
 
 log "verifying Jaeger trace export"
 sleep 8

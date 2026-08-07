@@ -24,6 +24,16 @@ clients:
     allowed_authenticators: [apikey, client_secret]
     token_strategy: jwt
     active: true
+  # 第二个主体：职责分离 e2e（restore 创建者与审批者必须不同）。
+  - id: demo-admin
+    secret: demo-admin-secret
+    name: Demo Admin
+    tenant_id: demo
+    redirect_uris: []
+    allowed_scopes: [audit:event:read, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read]
+    allowed_authenticators: [apikey, client_secret]
+    token_strategy: jwt
+    active: true
 permissions:
   enabled: true
   backend: memory
