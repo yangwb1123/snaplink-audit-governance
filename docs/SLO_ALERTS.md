@@ -18,6 +18,12 @@
 
 ## 2. 告警规则（映射到现有指标）
 
+> 已落地：`deploy/prometheus-rules.verify.yml`（12 条规则，3 组：audit-dlq /
+> audit-slo / audit-production）。本机可验证的 7 条 SLO 规则直接映射
+> audit-api `/metrics`；消费滞后与签名失败依赖生产形态指标（本机不提供，
+> 规则已声明待生产接入）；readyz 的 store/archive 503 由部署侧探针负责
+> （本机以 `AuditAPIDown`（up=0）兜底）。
+
 | 告警 | 表达式 | 级别 | 动作 |
 |---|---|---|---|
 | 接入错误率超限 | `rate(audit_http_errors_total[5m]) / rate(audit_http_requests_total[5m]) > 0.01` | P1 | 检查 ingest 与存储依赖 |

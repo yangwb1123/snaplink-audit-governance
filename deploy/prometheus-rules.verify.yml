@@ -28,3 +28,85 @@ groups:
         annotations:
           summary: Dead-letter replay is failing
           description: "{{ $value }} replay republish failures in the last 15 minutes. Transient failures retry next round; permanent ones need operator action."
+
+  - name: audit-slo
+    # docs/SLO_ALERTS.md §2 告警规则 → audit-api /metrics 指标。
+    # 完整性与签名失败独立于错误预算（安全事件）。
+    rules:
+      - alert: AuditIngestErrorRate
+        expr: rate(audit_http_errors_total[5m]) / rate(audit_http_requests_total[5m]) > 0.01
+        labels:
+          severity: page
+        annotations:
+          summary: Audit ingest error rate above SLO budget
+          description: "Ingest 5xx/error rate {{ $value }} > 1% over 5m. Check ingest and storage dependencies (SLO 99.99% / month)."
+
+      - alert: AuditDuplicateStorm
+        expr: increase(audit_ingest_duplicates_total[5m]) > 10 * increase(audit_ingest_requests_total[5m])
+        labels:
+          severity: warning
+        annotations:
+          summary: Duplicate ingest storm
+          description: "Duplicate hits exceed 10x request volume over 5m. Check source-system retry storms."
+
+      - alert: AuditContentConflict
+        expr: increase(audit_ingest_conflicts_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Event content conflicts detected
+          description: "{{ $value }} event_id content conflicts (or idempotency-key reuse) in 5m. Suspected replay or faulty re-send; investigate the producer."
+
+      - alert: AuditQuotaExceeded
+        expr: increase(audit_ingest_quota_exceeded_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant write quota exceeded
+          description: "{{ $value }} quota rejections (429) in 5m. Notify the tenant and review per-tenant QPS/burst limits."
+
+      - alert: AuditIntegrityInvalid
+        expr: audit_integrity_checks_total{result="invalid"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Integrity verification failed
+          description: "A chain/segment/content verification failed. Isolate the evidence chain immediately and investigate manually (P0, outside error budget)."
+
+      - alert: AuditLatencyDegradation
+        expr: histogram_quantile(0.99, rate(audit_http_request_duration_seconds_bucket[5m])) > 1
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit API latency degraded
+          description: "p99 request latency {{ $value }}s > 1s over 5m. Check resources and backpressure."
+
+      - alert: AuditAPIDown
+        expr: up{job="audit-api"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Audit API unreachable
+          description: "audit-api /metrics scrape failing for 2m. readyz 503 (store_unavailable / archive_unavailable) precedes this when the PostgreSQL snapshot backend or the WORM destination is down; production should probe /readyz via a blackbox exporter."
+
+  - name: audit-production
+    # 需要生产形态指标/日志，本机参考实现不提供（见 VALIDATION_PLAN
+    # 「不在本机宣称通过的项目」）；声明规则以便生产接入时直接生效。
+    rules:
+      - alert: AuditConsumerLag
+        expr: kafka_consumer_lag > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kafka consumer lag growing
+          description: "Consumer lag has been non-zero for 10m. Scale consumers/projector or investigate blocked partitions."
+
+      - alert: AuditSigningFailure
+        expr: audit_worker_sign_errors_total > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Checkpoint signing failing
+          description: "Aggregate/segment checkpoint signing failures (KMS/Vault/HSM unavailable). Stop generating new checkpoints; do not fake archive success."
