@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-08-07 — G1 真实 IdP 集成闭环：sso-server 签发 token 全链路验证 + mint-token.sh 修复
+
+**跨仓收口验证（B1-7/B4-1/B4-2 联合）：**
+
+1. **真实 IdP（snaplink sso-server）签发 token 全链路验证通过**：本机启动
+   sso-server（EdDSA 签名，`/.well-known/jwks.json`），audit-api 以
+   `AUDIT_JWKS_URL` + loopback 豁免 + issuer 校验接入，**dev auth 关闭**。
+   结果：dev token 全路由 401；IdP 签发的平台 token（9 个审计 scope）管理
+   操作 201；服务 token（`client_id=audit-relay` + `tenant_id=tenant-a`，
+   B4-1 claims 落地）经来源绑定写入 202；envelope tenant 不匹配 422；
+   篡改 token 401（JWKS 验签）；scope→权限映射（现有实现）使 `scope=
+   audit:event:write` 直接授权写入。这验证了 B1-7 的完整跨仓语义：
+   `scripts/mint-token.sh` 可直接消费该 IdP。
+2. **mint-token.sh 修复**：改为 source 时直接 `export`（同时保留打印供
+   `eval "$(...)"`）；fail-closed 缺配置退出码验证为 1。实测：source 模式
+   拿到 token 并写入事件 202。
+3. **验证过程记录**：sso-server 的 bootstrap 运行时产物（bootstrap.json）
+   如落入仓库根目录会被 root-files 门禁捕获（已清理）；临时 IdP 配置仅用于
+   验证，未修改 snaplink 仓库任何文件。
+
+迁移：无。G1 收口剩余动作 = IdP 部署仓将 sso-server 接入 compose 编排
+（提供 `AUDIT_IDP_*` 配置），本仓 fixture 路径与验证链路全部就绪。
+
 ## 2026-08-07 — 真实 JWT 路径验证（B1-7 服务端前提）；gRPC 受支持入站契约声明
 
 **验证（无 dev auth，本地签发 RS256 JWT 带 IdP 同款 claims）：**

@@ -42,6 +42,8 @@ if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "None" ]; then
   exit 1
 fi
 
-# Shell-exportable output; e2e scripts source this file.
-printf 'export AUDIT_OUTBOX_TOKEN=%q\n' "${TOKEN}"
-printf 'export AUDIT_E2E_TOKEN=%q\n' "${TOKEN}"
+# Shell-exportable output; works both when sourced (`source mint-token.sh`)
+# and when evaluated (`eval "$(./mint-token.sh)"`).
+export AUDIT_OUTBOX_TOKEN="${TOKEN}"
+export AUDIT_E2E_TOKEN="${TOKEN}"
+printf 'export AUDIT_OUTBOX_TOKEN=%q\nexport AUDIT_E2E_TOKEN=%q\n' "${TOKEN}" "${TOKEN}"
