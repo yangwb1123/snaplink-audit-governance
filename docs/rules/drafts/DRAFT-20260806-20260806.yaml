@@ -1,6 +1,6 @@
 id: DRAFT-20260806
-title: Kafka 消费者对不可解析消息只提交不记死信（修复前）：账本链路宣称 never silently drop，但 deadLettered 计数与
-  DLQ F
+title: 'RESOLVED: Kafka 消费者对不可解析消息只提交不记死信（修复前）：账本链路宣称 never silently
+  drop，但 deadLettered 计数与 DLQ Failure 记录缺失'
 category: backend
 severity: warning
 scope:
@@ -9,20 +9,27 @@ scope:
   - src/**
 trigger:
   operations: []
-rationale: 'Observed failure: Kafka 消费者对不可解析消息只提交不记死信（修复前）：账本链路宣称 never silently drop，但
-  deadLettered 计数与 DLQ Failure 记录缺失；根因是解码失败路径未走 deadLetter 流程。修复：ErrorCodeUnparsable
-  + DLQ 记录 + 计数后再提交. Root-cause analysis is required before this draft can be promoted
-  (edit requirements/forbidden/verification with the actual RCA).'
-requirements: []
-forbidden: []
-exceptions:
-- condition: ''
+rationale: 'RCA COMPLETE (2026-08-06): 修复已落地（commit eedcae1）——解码失败路径
+  不再“只提交记日志”：先 deadLettered 计数 +1，有 DLQ 挂载时发布 Failure 记录
+  （error_code=unparsable_message，AsyncAPI audit.events.dlq.v1 契约），发布成功
+  dlqPublished +1，最后提交 offset。任何情况下都不静默丢弃：DLQ 不可用时降级为
+  提交 + 日志（与永久/瞬态失败死信同一降级路径，分区进度永不阻塞）。消费者单测
+  覆盖 unparsable 消息的 DLQ 记录与计数（internal/kafka/kafka_test.go）。'
+requirements:
+- 不可解析消息必须产生 DLQ Failure 记录（error_code=unparsable_message）并计数
+forbidden:
+- 解码失败后直接提交而不留任何死信证据
 verification:
-  static: []
-  tests: []
+  static:
+  - internal/kafka/kafka.go Run 解码失败路径：deadLettered.Add + PublishFailure + 提交
+  - api/asyncapi/asyncapi.yaml dlq channel Failure 契约含 error_code
+  tests:
+  - internal/kafka/kafka_test.go unparsable 消息用例（DLQ 记录 + 计数断言）
 examples:
-  good: []
-  bad: []
-owner: ''
-version: 0.1.0
-status: draft
+  good:
+  - 垃圾字节消息 → DLQ Failure(unparsable_message) + deadLettered 递增，分区继续前进
+  bad:
+  - 垃圾字节消息被静默提交且无任何可观测证据
+owner: platform-eng
+version: 1.0.0
+status: resolved

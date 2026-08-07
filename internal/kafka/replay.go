@@ -165,29 +165,28 @@ func (r *Replayer) Metrics() (dlqRecords, acceptedScanned, replayed, republishFa
 // mid-round) leaves that record uncommitted, so the next round re-reads it
 // and retries. Replayed IDs in the state file keep re-reads idempotent.
 func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
-	window := r.drainTimeout
-	if window <= 0 {
-		window = defaultDrainTimeout
-	}
-	drainCtx, cancel := context.WithTimeout(ctx, window)
-	defer cancel()
-	collected, err := r.collectFailures(drainCtx)
-	if err != nil && !isDrained(drainCtx, err) {
+	// Each phase gets its own drain window: a shared window would let
+	// collectFailures burn the whole budget waiting for the DLQ to go quiet,
+	// leaving scanAccepted with an already-expired context (real kafka-go
+	// returns ctx.Err() before any queued data, so the scan would replay
+	// nothing).
+	collected, err := r.collectFailures(ctx)
+	if err != nil && !isDrained(ctx, err) {
 		return 0, err
 	}
 	wanted := wantedEvents(collected)
 	if len(wanted) == 0 {
 		// Every collected record is already replayed (or unparsable):
 		// consume them so the next round does not re-read the same offsets.
-		if commitErr := r.commitResolved(drainCtx, collected, nil); commitErr != nil {
+		if commitErr := r.commitResolved(ctx, collected, nil); commitErr != nil {
 			return 0, commitErr
 		}
 		return 0, nil
 	}
 	r.pending.Store(uint64(len(wanted)))
-	replayed, resolved, scanErr := r.scanAccepted(drainCtx, wanted)
+	replayed, resolved, scanErr := r.scanAccepted(ctx, wanted)
 	r.pending.Store(0)
-	if scanErr != nil && !isDrained(drainCtx, scanErr) {
+	if scanErr != nil && !isDrained(ctx, scanErr) {
 		// Transport failure: the round did not complete. Leave every
 		// collected record uncommitted so the next round retries.
 		return replayed, scanErr
@@ -197,10 +196,18 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	// stay pending for the next round. A commit failure is fatal: the
 	// records stay pending and the next round re-reads them (state file
 	// keeps replay idempotent).
-	if commitErr := r.commitResolved(drainCtx, collected, resolved); commitErr != nil {
+	if commitErr := r.commitResolved(ctx, collected, resolved); commitErr != nil {
 		return replayed, commitErr
 	}
 	return replayed, nil
+}
+
+// drainWindow returns the configured drain timeout with the default fallback.
+func (r *Replayer) drainWindow() time.Duration {
+	if r.drainTimeout <= 0 {
+		return defaultDrainTimeout
+	}
+	return r.drainTimeout
 }
 
 // dlqRecord is one collected DLQ failure with its parsed event ID.
@@ -250,9 +257,11 @@ func isDrained(ctx context.Context, err error) bool {
 // them pending for the next round. Returns the held messages and the event
 // IDs that are not yet marked replayed.
 func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
+	drainCtx, cancel := context.WithTimeout(ctx, r.drainWindow())
+	defer cancel()
 	var collected []dlqRecord
 	for {
-		message, err := r.dlqReader.FetchMessage(ctx)
+		message, err := r.dlqReader.FetchMessage(drainCtx)
 		if err != nil {
 			return collected, err
 		}
@@ -281,10 +290,12 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 // round (replayed, permanently rejected, or unparsable — NOT transiently
 // failed).
 func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (int, map[string]bool, error) {
+	drainCtx, cancel := context.WithTimeout(ctx, r.drainWindow())
+	defer cancel()
 	replayed := 0
 	resolved := map[string]bool{}
 	for {
-		message, err := r.accepted.FetchMessage(ctx)
+		message, err := r.accepted.FetchMessage(drainCtx)
 		if err != nil {
 			return replayed, resolved, err
 		}

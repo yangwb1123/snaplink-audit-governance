@@ -1,5 +1,6 @@
 id: DRAFT-20260805
-title: outbox relay 在 Kafka 分区重新平衡期间重复投递同一事件，消费者端幂等键未覆盖 (client_id, event_id) 组合，导致审计账本
+title: 'RESOLVED: outbox relay 在 Kafka 分区重新平衡期间重复投递同一事件，消费者端幂等键未覆盖 (client_id,
+  event_id) 组合，导致审计账本出现重复记录'
 category: backend
 severity: error
 scope:
@@ -8,20 +9,36 @@ scope:
   - src/**
 trigger:
   operations: []
-rationale: 'Observed failure: outbox relay 在 Kafka 分区重新平衡期间重复投递同一事件，消费者端幂等键未覆盖 (client_id,
-  event_id) 组合，导致审计账本出现重复记录；根因是幂等去重仅按 event_id 全局去重，未按租户/来源维度收窄. Root-cause analysis
-  is required before this draft can be promoted (edit requirements/forbidden/verification
-  with the actual RCA).'
-requirements: []
-forbidden: []
-exceptions:
-- condition: ''
+rationale: 'RCA COMPLETE (2026-08-06): 草案描述的“幂等去重仅按 event_id 全局去重”与
+  当前实现不符——账本幂等键为 (tenant_id, event_id)（internal/service/service.go
+  Ingest：store.EventKey(tenantID, event.EventID) = tenant_id + separator + event_id），
+  idempotency_key 检查同样 tenant-scoped（existing.TenantID != tenantID 跳过）。
+  tenant 维度严格不弱于 client 维度：写入客户端经服务端 (client_id, source_system)
+  来源绑定唯一解析租户（零命中/跨租户多命中失败关闭），同一 client/source 组合
+  不能跨租户复用，因此 (tenant_id, event_id) 幂等覆盖 (client_id, event_id) 组合。
+  Kafka 重平衡场景：消息 key = event_id（hash balancer），重平衡后同一事件路由到
+  同一 partition；消费端 at-least-once + (tenant, event_id) 幂等吸收重复投递，
+  返回原回执（Duplicate=true）。附加防线：outbox 表 (tenant_id, idempotency_key)
+  唯一约束 + relay 分类（事件已投递 delivered 不重投）。结论：重复入账风险已被
+  消除，草案关闭。'
+requirements:
+- 账本幂等键必须是 (tenant_id, event_id)，禁止全局 event_id 去重
+- idempotency_key 唯一性必须在租户维度收窄
+forbidden:
+- 以无租户上下文的全局 event_id 作为幂等键
 verification:
-  static: []
-  tests: []
+  static:
+  - internal/service/service.go Ingest 使用 store.EventKey(tenantID, event.EventID)
+  - internal/outbox/postgres.go 唯一约束覆盖 (tenant_id, idempotency_key)
+  tests:
+  - internal/service/service_test.go TestIngestIdempotency*（重复投递返回原回执）
+  - internal/service/service_test.go TestIngestDerivesTenantFromUniqueServerSideSourceBinding（跨租户绑定失败关闭）
+  - internal/store/postgres_test.go 并发 Update 收敛（T-6）
 examples:
-  good: []
-  bad: []
-owner: ''
-version: 0.1.0
-status: draft
+  good:
+  - 同一 (tenant, event_id) 重投 → 202 + Duplicate=true，账本 1 行
+  bad:
+  - 跨租户同 event_id → 互不干扰（各自入账，键空间隔离）
+owner: platform-eng
+version: 1.0.0
+status: resolved

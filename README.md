@@ -86,11 +86,17 @@ python3 cli.py help
 
 也可以使用等价的 `make check`、`make quality`、`make test`、`make race` 和 `make build`。
 
-全栈容器验证（outbox → relay → Kafka → 账本 + ClickHouse 投影 + MinIO 归档）：
+全栈容器验证（outbox → relay → Kafka → 账本 + ClickHouse 投影 + MinIO WORM 归档 +
+DLQ 重放 + gRPC 入站，2026-08-07 真实容器全链路通过）：
 
 ```sh
 bash test/e2e/fullstack.sh
 ```
+
+B1-7 真实 IdP token 注入：设置 `AUDIT_IDP_TOKEN_URL`/`AUDIT_IDP_CLIENT_ID`/
+`AUDIT_IDP_CLIENT_SECRET` 后 e2e 自动调用 `scripts/mint-token.sh` 铸造带
+`tenant_id`/`roles`/`scope` claims 的 JWT 替换 dev token（未配置时过渡期使用
+dev token 并告警；G1 收口依赖 IdP 部署仓 B4-1）。
 
 ## 核心原则
 

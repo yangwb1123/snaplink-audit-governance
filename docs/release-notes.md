@@ -1,5 +1,51 @@
 # Release Notes
 
+## 2026-08-07 — 真实容器 e2e 全链路验证；DLQ 重放 drain 窗口修复；B1-7 fixture 路径；规则草案 RCA 收口
+
+**验证与修复（全链路真实容器）：**
+
+1. **Full-stack e2e 真实容器验证通过**（outbox → relay → Redpanda → consumer →
+   账本 → ClickHouse 投影 → MinIO WORM 归档 → integrity → Jaeger；含 gRPC
+   监听探活与 DLQ replay 服务）。修复了脚本自身的问题：MinIO Object Lock
+   bucket 自举移到 `/readyz` 之前（S3Store.Ready 要求 bucket 存在且启用
+   versioning）、integrity 断言匹配紧凑 JSON（`"valid":true`）。
+2. **DLQ 重放真实链路闭环**（死信 → 重放 → 入账）：向 accepted topic 注入
+   schema 未注册事件 → consumer 422 permanent → DLQ Failure；注册 schema 后
+   `-once` 重放 → 事件最终入账（账本可查）+ 状态文件持久化。
+3. **Replay drain 窗口修复**：`RunOnce` 的 collectFailures 与 scanAccepted
+   曾共享一个 5 秒 drain context——DLQ drain 耗尽窗口后 scan 拿到已过期
+   context（真实 kafka-go 在 ctx 过期时优先返回错误而非排队数据），重放
+   静默为 0。现在每个阶段各自持有 drain 窗口（单测的 fake reader 在队列
+   非空时无视 ctx 过期，掩盖了该问题；真实 broker 暴露）。
+4. **`-once` 独立 consumer group + 不启动 metrics**：与常驻实例共享 group
+   会在 rebalance 中竞争 accepted partition 导致单轮扫描读不到消息；`-once`
+   现在使用 `-group-once` 后缀的独立 group，且不再抢占 metrics 端口。
+5. **B1-7 fixture 路径（本仓部分）**：新增 `scripts/mint-token.sh`（调用
+   IdP `/token` client_credentials，fail-closed 配置校验，输出
+   `AUDIT_OUTBOX_TOKEN`/`AUDIT_E2E_TOKEN`）；`fullstack.sh` 按优先级使用
+   显式 env token → mint 脚本 → 过渡期 dev token（显式 WARN）；compose 的
+   relay/consumer token 改为 `${AUDIT_OUTBOX_TOKEN:-dev:demo:service}` 可
+   覆盖。G1 收口仍需 IdP 侧 B4-1。
+6. **规则草案 RCA 收口**：DRAFT-20260805（幂等维度）——账本幂等键为
+   `(tenant_id, event_id)` 租户维度收窄，client 经来源绑定唯一映射租户，
+   重复入账风险已被消除，promote 为 resolved；DRAFT-20260806（不可解析
+   消息死信）——`unparsable_message` DLQ + 计数已落地（eedcae1），promote
+   为 resolved。两者补齐 requirements/verification 字段。
+7. **新门禁**：`checks/tenant_consistency.py`（B1-8 机械守卫：禁止
+   `event.TenantID = tenantID` 出现在 mismatch 判定之前）挂入 quality。
+8. **基准刷新**：读自审计（F-06）后 `BenchmarkQuery` 448 µs → 13.4 ms（每次
+   查询追加一次全快照 Update 的写放大，参考实现固有成本；生产查询走
+   ClickHouse 投影）；`BenchmarkQueryLargeLedger` 3.8 → 65.9 ms；
+   BENCHMARKS.md 记录新旧基线。
+9. **B1-4 原子性显式断言**：`TestGovernanceMutationAtomicity`（租户不存在
+   / 重复 ID / 释放缺失 hold → 零部分写入、零 admin action）。
+10. **ERP 契约对拍测试编译修复**（远程协作者提交引入）：
+    `internal/httpapi/erp_contract_test.go` 的 `service.New` 少一个返回值
+    （且需 `AllowDevSecrets: true`），修复后 M0-1..M0-5 全部通过。
+
+Migration: none。Rollback = revert；replay drain 修复与 `-once` group 分离
+是行为修复，`-once` 重放依赖独立 group 语义。
+
 ## 2026-08-06 — B1 收口：启动路径 dev-auth 白名单、manifest 扫描、快照 fsync、容量 cutover 门禁、compose gRPC
 
 **Behavior changes (contract B1 remainder):**

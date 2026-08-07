@@ -61,7 +61,16 @@ func main() {
 	}
 	replayer := kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group, state, republish, logger)
 	defer replayer.Close()
-	if *metricsListen != "" {
+	// -once 使用独立 group：与常驻实例共享 group 会在 rebalance 中竞争
+	// accepted partition，导致单轮扫描读不到消息（静默 replayed=0）。
+	if *once {
+		if err := replayer.Close(); err != nil {
+			logger.Printf("close initial replayer: %v", err)
+		}
+		replayer = kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group+"-once", state, republish, logger)
+		defer replayer.Close()
+	}
+	if *metricsListen != "" && !*once {
 		go serveMetrics(*metricsListen, replayer, logger)
 	}
 	logger.Printf("brokers=%s dlq_topic=%s accepted_topic=%s group=%s api_mode=%v state=%s", *brokers, *dlqTopic, *acceptedTopic, *group, *apiURL != "", *statePath)

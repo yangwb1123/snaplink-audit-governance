@@ -7,13 +7,17 @@
 
 ## 结果
 
+更新：2026-08-06（读自审计 F-06 落地后重测，`-benchtime=1s`）
+
 | Benchmark | 单次耗时 | 分配 | 说明 |
 |---|---:|---:|---|
-| `BenchmarkIngest` | 2.2 ms/op | 1.25 MB / 9.5k allocs | 单事件全链路（Schema 校验、规范化、敏感字段扫描、哈希、流链接）。快照式存储每次 Update 读-改-写整个控制面快照，成本随累计事件数线性增长（O(n²) 总体），见下 |
-| `BenchmarkQuery` | 448 µs/op | 1.98 MB / 26 allocs | 1,000 事件账本上的时间范围 + 类型过滤查询，100 条页（Read 路径零拷贝） |
-| `BenchmarkQueryLargeLedger` | 3.8 ms/op | 12.6 MB / 32 allocs | 5,000 事件账本同型查询；从 1k→5k 约线性扩展（查询路径 O(n)），快照直接构造（绕过 O(n²) 预填） |
-| `BenchmarkEventDigest` | 10.0 µs/op | 8.2 KB / 186 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
-| `BenchmarkVerifyIntegrity` | 4.19 ms/op（改造前）→ 22.8 ms/op（内容认证后） | 5.9 MB / 41k allocs → 16.3 MB / 267k allocs | 1,000 事件混合账本（半数敏感字段，10 个密封段）。内容认证增加逐事件 payload 重建（深拷贝 + 解密 + 重新规范化），约 5× 耗时、2.8× 分配；按流验证（`stream_id` 参数）与分批核对可分摊 |
+| `BenchmarkIngest` | 1.27 ms/op | 292 KB / 2.0k allocs | 单事件全链路（Schema 校验、规范化、敏感字段扫描、哈希、流链接、快照持久化） |
+| `BenchmarkQuery` | 13.4 ms/op | 14.6 MB / 55.7k allocs | 1,000 事件账本过滤查询，100 条页。**F-06 读自审计后每次查询追加一次全快照 Update**（actor 非空时），查询成本由 448 µs 上升约 30×——参考实现的固有写放大，生产查询路径走 ClickHouse 投影（ADR-0004），不存在该成本 |
+| `BenchmarkQueryLargeLedger` | 65.9 ms/op | 47.9 MB / 260k allocs | 5,000 事件账本同型查询；含读自审计快照写（同上） |
+| `BenchmarkEventDigest` | 9.9 µs/op | 5.8 KB / 126 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
+| `BenchmarkVerifyIntegrity` | 22.8 ms/op | 16.3 MB / 267k allocs | 1,000 事件混合账本（半数敏感字段，10 个密封段）；内容认证（深拷贝 + 解密 + 重新规范化） |
+
+旧基线（2026-08-04，读自审计前）：`BenchmarkIngest` 2.2 ms、`BenchmarkQuery` 448 µs（1,000 事件）、`BenchmarkQueryLargeLedger` 3.8 ms、`BenchmarkEventDigest` 10.0 µs、`BenchmarkVerifyIntegrity` 4.19 ms → 22.8 ms（内容认证改造）。
 
 运行方式：
 

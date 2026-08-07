@@ -158,8 +158,8 @@ def cmd_check_routes() -> int:
 def cmd_check_root() -> int:
     allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
-               "docs", "internal", "migrations", "checks", "test", "bin", ".trends",
-               ".pi-batch", "engineering.yaml", "__pycache__"}
+               "docs", "internal", "migrations", "checks", "test", "bin", "scripts",
+               ".trends", ".pi-batch", "engineering.yaml", "__pycache__"}
     unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed and not path.name.startswith(".pi-batch.lock")]
     if unexpected:
         print("root directories/files:", ", ".join(sorted(unexpected)))
@@ -402,11 +402,12 @@ def cmd_quality() -> int:
     from checks.dev_auth_manifest import run as dev_auth_manifest
     from checks.route_contract import run as route_contract
     from checks.sensitive_logging import run as sensitive_logging
+    from checks.tenant_consistency import run as tenant_consistency
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
                     adr_compliance, make_help, route_contract, contract_fields,
-                    dev_auth_manifest, sensitive_logging, cmd_vet, cmd_python_checks,
-                    cmd_test, cmd_race, build):
+                    dev_auth_manifest, tenant_consistency, sensitive_logging,
+                    cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):
         if command() != 0:
             return 1
     print("QUALITY PASS")

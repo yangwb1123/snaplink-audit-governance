@@ -38,7 +38,7 @@ services:
     environment:
       AUDIT_OUTBOX_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
       AUDIT_OUTBOX_KAFKA_BROKERS: redpanda:9092
-      AUDIT_OUTBOX_TOKEN: dev:demo:service
+      AUDIT_OUTBOX_TOKEN: ${AUDIT_OUTBOX_TOKEN:-dev:demo:service}
       AUDIT_OUTBOX_INTERVAL: 5s
     depends_on:
       - postgres
@@ -54,7 +54,7 @@ services:
     environment:
       AUDIT_KAFKA_BROKERS: redpanda:9092
       AUDIT_OUTBOX_API_URL: http://audit-api:8089
-      AUDIT_OUTBOX_TOKEN: dev:demo:service
+      AUDIT_OUTBOX_TOKEN: ${AUDIT_OUTBOX_TOKEN:-dev:demo:service}
       AUDIT_KAFKA_METRICS: ":9092"
     depends_on:
       - redpanda
