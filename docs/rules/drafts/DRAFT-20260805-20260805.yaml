@@ -1,0 +1,27 @@
+id: DRAFT-20260805
+title: outbox relay 在 Kafka 分区重新平衡期间重复投递同一事件，消费者端幂等键未覆盖 (client_id, event_id) 组合，导致审计账本
+category: backend
+severity: error
+scope:
+  languages: []
+  paths:
+  - src/**
+trigger:
+  operations: []
+rationale: 'Observed failure: outbox relay 在 Kafka 分区重新平衡期间重复投递同一事件，消费者端幂等键未覆盖 (client_id,
+  event_id) 组合，导致审计账本出现重复记录；根因是幂等去重仅按 event_id 全局去重，未按租户/来源维度收窄. Root-cause analysis
+  is required before this draft can be promoted (edit requirements/forbidden/verification
+  with the actual RCA).'
+requirements: []
+forbidden: []
+exceptions:
+- condition: ''
+verification:
+  static: []
+  tests: []
+examples:
+  good: []
+  bad: []
+owner: ''
+version: 0.1.0
+status: draft

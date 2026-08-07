@@ -13,6 +13,7 @@
 | `BenchmarkQuery` | 448 µs/op | 1.98 MB / 26 allocs | 1,000 事件账本上的时间范围 + 类型过滤查询，100 条页（Read 路径零拷贝） |
 | `BenchmarkQueryLargeLedger` | 3.8 ms/op | 12.6 MB / 32 allocs | 5,000 事件账本同型查询；从 1k→5k 约线性扩展（查询路径 O(n)），快照直接构造（绕过 O(n²) 预填） |
 | `BenchmarkEventDigest` | 10.0 µs/op | 8.2 KB / 186 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
+| `BenchmarkVerifyIntegrity` | 4.19 ms/op（改造前）→ 22.8 ms/op（内容认证后） | 5.9 MB / 41k allocs → 16.3 MB / 267k allocs | 1,000 事件混合账本（半数敏感字段，10 个密封段）。内容认证增加逐事件 payload 重建（深拷贝 + 解密 + 重新规范化），约 5× 耗时、2.8× 分配；按流验证（`stream_id` 参数）与分批核对可分摊 |
 
 运行方式：
 
@@ -37,3 +38,5 @@ go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 - 5,000 / 50,000 / 100,000 事件账本上的查询延迟曲线。
 - 大 payload（64KB/256KB）的 Ingest 分配与延迟。
 - 并发写 + 并发查混合场景（`-cpu` 矩阵）。
+- `VerifyIntegrity` 按流验证与全量验证的成本对比；`DecryptJSON` 一致性改造后的
+  大整数敏感字段回归（`TestVerifyIntegrityLargeIntSensitiveField` 哨兵）。

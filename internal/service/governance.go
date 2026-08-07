@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
@@ -123,7 +123,15 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 	return s.Store.Update(func(data *store.Snapshot) error {
 		roots := make([]string, 0, len(data.Checkpoints))
 		for key, checkpoints := range data.Checkpoints {
-			if !strings.HasPrefix(key, tenantID+store.KeySeparator) || len(checkpoints) == 0 {
+			if len(checkpoints) == 0 {
+				continue
+			}
+			// Exact-component membership: a key belongs to the tenant only if
+			// it parses as exactly tenantID + separator + one more component.
+			// Prefix matching would absorb foreign keys for tenant IDs that
+			// embed the separator (StreamKey("a\x1fb","s") has prefix
+			// "a\x1f"); multi-separator keys are excluded from every tenant.
+			if tenant, _, ok := store.SplitTenantKey(key); !ok || tenant != tenantID {
 				continue
 			}
 			roots = append(roots, checkpoints[len(checkpoints)-1].MerkleRoot)
@@ -148,8 +156,13 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 
 func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, error) {
 	result := IntegrityResult{Valid: true, TenantID: tenantID, StreamID: streamID, CheckedAt: s.Now()}
+	// One snapshot read: events, segments, aggregate checkpoints and schemas
+	// must come from the same ledger version so per-event content checks can
+	// never combine events with schema definitions from another snapshot.
 	var events []domain.Event
 	var segments []domain.Segment
+	var aggregateCheckpoints []domain.AggregateCheckpoint
+	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, event := range data.Events {
 			if event.TenantID == tenantID && (streamID == "" || event.StreamID == streamID) {
@@ -157,9 +170,19 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 			}
 		}
 		for key, values := range data.Segments {
-			if strings.HasPrefix(key, tenantID+store.KeySeparator) && (streamID == "" || strings.HasSuffix(key, store.KeySeparator+streamID)) {
-				segments = append(segments, values...)
+			tid, sid, ok := store.SplitTenantKey(key)
+			if !ok || tid != tenantID || (streamID != "" && sid != streamID) {
+				continue
 			}
+			segments = append(segments, values...)
+		}
+		for _, aggregate := range data.AggregateCheckpoints {
+			if aggregate.TenantID == tenantID {
+				aggregateCheckpoints = append(aggregateCheckpoints, aggregate)
+			}
+		}
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
 		}
 		return nil
 	})
@@ -169,17 +192,6 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 	result.EventCount = len(events)
 	result.SegmentCount = len(segments)
 	// 聚合 checkpoint：重算租户各流最后段 root 的 Merkle，与签名记录比对。
-	var aggregateCheckpoints []domain.AggregateCheckpoint
-	if err := s.Store.Read(func(data *store.Snapshot) error {
-		for _, aggregate := range data.AggregateCheckpoints {
-			if aggregate.TenantID == tenantID {
-				aggregateCheckpoints = append(aggregateCheckpoints, aggregate)
-			}
-		}
-		return nil
-	}); err != nil {
-		return result, err
-	}
 	for _, aggregate := range aggregateCheckpoints {
 		roots := append([]string(nil), aggregate.StreamRoots...)
 		sort.Strings(roots)
@@ -197,8 +209,19 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 	for _, event := range events {
 		byStream[event.StreamID] = append(byStream[event.StreamID], event)
 	}
-	for currentStream, streamEvents := range byStream {
-		sort.Slice(streamEvents, func(i, j int) bool { return streamEvents[i].Sequence < streamEvents[j].Sequence })
+	streamKeys := make([]string, 0, len(byStream))
+	for stream := range byStream {
+		streamKeys = append(streamKeys, stream)
+	}
+	sort.Strings(streamKeys)
+	for _, currentStream := range streamKeys {
+		streamEvents := byStream[currentStream]
+		sort.Slice(streamEvents, func(i, j int) bool {
+			if streamEvents[i].Sequence == streamEvents[j].Sequence {
+				return streamEvents[i].EventID < streamEvents[j].EventID
+			}
+			return streamEvents[i].Sequence < streamEvents[j].Sequence
+		})
 		head := ""
 		for _, event := range streamEvents {
 			if event.PrevHash != head {
@@ -209,6 +232,10 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 			if hashErr != nil || expected != event.Hash {
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("stream %s sequence %d hash mismatch", currentStream, event.Sequence))
+			}
+			if err := s.verifyContentDigest(event, schemas); err != nil {
+				result.Valid = false
+				result.Errors = append(result.Errors, err.Error())
 			}
 			head = event.Hash
 		}
@@ -278,11 +305,12 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 
 // ArchivePending retries local WORM-compatible archive writes for events that
 // were ledgered/indexed before the archive destination became available.
-// It is intentionally idempotent: archive files are created with O_EXCL and
-// an existing file is treated as already archived.
+// It is intentionally idempotent: a byte-identical existing object is treated
+// as already archived, while a mismatched or unverifiable object at the key
+// surfaces as an error instead of being silently accepted.
 
 func (s *Service) ArchivePending(tenantID string) (int, error) {
-	if s.Config.ArchiveDir == "" {
+	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
 	var events []domain.Event
@@ -298,9 +326,14 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 			}
 		}
 		for key, values := range data.Segments {
-			if key == store.StreamKey(tenantID, "") || strings.HasPrefix(key, tenantID+store.KeySeparator) {
-				segments = append(segments, values...)
+			// Exact-component membership (see CreateAggregateCheckpoint); the
+			// former StreamKey(tenantID, "") shortcut is subsumed: that key
+			// parses as (tenantID, "", true).
+			tid, _, ok := store.SplitTenantKey(key)
+			if !ok || tid != tenantID {
+				continue
 			}
+			segments = append(segments, values...)
 		}
 		return nil
 	}); err != nil {
@@ -386,6 +419,14 @@ func (s *Service) transitionRestore(tenantID, runID, actor, target string) (doma
 		if value.Status != domain.RestoreStatusPendingApproval {
 			return fmt.Errorf("%w: restore run is not pending approval", domain.ErrConflict)
 		}
+		// Separation of duties: the deciding actor must differ from the
+		// requesting actor. Inside the Update closure, so a refusal commits
+		// nothing (no version bump, no admin action). Precedence is pinned
+		// NotFound → Conflict → Forbidden: 404 masks cross-tenant existence,
+		// 409 dominates for decided runs.
+		if value.CreatedBy == actor {
+			return domain.ErrForbidden
+		}
 		now := s.Now()
 		if target == domain.RestoreStatusApproved {
 			value.Status = domain.RestoreStatusApproved
@@ -436,7 +477,19 @@ func (s *Service) runExport(jobID string) {
 		data.Exports[jobID] = value
 		return nil
 	})
-	events, err := s.eventsFor(job.TenantID, func(event domain.Event) bool { return matches(event, job.Query) })
+	var events []domain.Event
+	schemas := map[string]domain.EventSchema{}
+	err := s.Store.Read(func(data *store.Snapshot) error {
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
+		for _, event := range data.Events {
+			if event.TenantID == job.TenantID && s.matches(event, job.Query, schemas) {
+				events = append(events, event)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())
 		return
@@ -444,6 +497,16 @@ func (s *Service) runExport(jobID string) {
 	sortEvents(events)
 	var bytesWritten []byte
 	for _, event := range events {
+		// 导出内容剥离搜索摘要（深拷贝，不触碰存储共享的 payload）：解密
+		// 后的 JSONL 不得携带可跨租户关联的 digest 值。v2 bound 摘要本身
+		// 已租户隔离，但 v1 遗留摘要对同明文跨租户相等，且摘要对消费者无
+		// 业务价值，因此一律剥离。
+		stripped, stripErr := security.StripSearchDigests(event.Payload)
+		if stripErr != nil {
+			s.finishExport(jobID, "failed", "", "", 0, stripErr.Error())
+			return
+		}
+		event.Payload = stripped
 		line, marshalErr := domain.CanonicalJSON(event)
 		if marshalErr != nil {
 			s.finishExport(jobID, "failed", "", "", 0, marshalErr.Error())

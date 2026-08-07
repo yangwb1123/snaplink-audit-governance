@@ -23,7 +23,7 @@
 | 威胁 | 场景 | 缓解（对应实现） |
 |---|---|---|
 | **Spoofing** | 伪造来源系统写入他人租户事件；伪造管理身份 | 签名 Token 的 `client_id`/`azp` 绑定来源白名单（`AllowedClientIDs`）；`sub` 永不当客户端身份；JWT 仅接受 EdDSA/ES256/384/512/RS256/PS256 且严格匹配 kid/alg/kty/crv/use/key_ops；HS256 仅限显式本机模式 |
-| **Tampering** | 篡改账本事件、段清单、签名 | 分段哈希链（prev_hash/head_hash）、Merkle Root、HMAC 签名 checkpoint（生产 KMS/HSM 只签名不可导出）；WORM 归档（O_EXCL 只读 + fsync）；`VerifyIntegrity` 逐流校验 |
+| **Tampering** | 篡改账本事件、段清单、签名 | 分段哈希链（prev_hash/head_hash）、Merkle Root、HMAC 签名 checkpoint（生产 KMS/HSM 只签名不可导出）；WORM 归档（O_EXCL 只读 + fsync）；`VerifyIntegrity` 逐流校验，且逐事件把内容摘要与存储的 `SourceDigest` 比对——先反向重建保护前 payload（去掉 `*__search_digest`、用与写入相同的 AAD 解密 `encrypted_fields`），再从内容重新推导摘要；篡改内容而不一致地重推摘要（或复用旧摘要）必然报 `content digest mismatch`；缺失 `SourceDigest` 的事件按 fail-closed 报 `missing source_digest`（详见 §3.5） |
 | **Repudiation** | 管理员否认执行过策略变更/导出/审批 | append-only 自审计轨迹（`AdminAction`），与变更同事务原子写入；审批记录审批人/时间 |
 | **Information Disclosure** | 跨租户读取、导出他人数据；敏感字段泄漏到日志 | 服务端 `(client_id, source_system)` 租户解析（body tenant 忽略）；所有查询强制租户过滤 + 时间范围；导出/下载租户鉴权；字段级 AES-GCM 加密 + 搜索摘要；`rejectSensitive` 拒绝密码/Token/私钥等进入事件；日志不打印 payload；指标禁用 user_id/event_id 标签 |
 | **Denial of Service** | 超大 payload、压缩炸弹、批量滥用、慢查询 | `MaxBytesReader` + 单事件 256KB 上限；`page_size ≤ 1000` 游标分页；每租户 QPS/突发配额（429）；请求超时（Read/Write/IdleTimeout）；panic 恢复中间件 |
@@ -50,10 +50,42 @@
   event_id）与 `searchable_fields`（HMAC 摘要，查询只走摘要）。
 - before/after 大快照生产走加密对象引用（`payload_ref`），事件只留摘要。
 
-### 3.4 供应链与部署
+### 3.5 内容认证完整性校验（VerifyIntegrity）
+
+- 链式校验（`prev_hash`/`hash`/段 Merkle/签名）绑定的是存储的 `SourceDigest`
+  字段本身；自 2026-08 起 `VerifyIntegrity` 额外对每个事件做**内容认证**：
+  用事件摄入时的 schema 版本（版本精确查找）把 payload 重建为保护前形态
+  （深拷贝 → 删除 `field__search_digest` → 用 `tenant/field/event_id` AAD
+  解密 `encrypted_fields`），再以 `EventContentDigest` 重新推导并与存储的
+  `SourceDigest` 比对。不匹配报 `content digest mismatch`，字段解密失败报
+  `cannot decrypt field …`，schema 版本缺失报 `schema … vN not found`，摘要
+  为空报 `missing source_digest` —— 全部是新增错误串，`IntegrityResult` 的
+  JSON 形状与 OpenAPI 契约不变。
+- 运行不变式（违反会误报）：**已注册 schema 版本的**
+  `encrypted_fields`/`searchable_fields` 列表不可原地修改（应注册新版本）；
+  **加密密钥必须与摄入时一致**（轮换会导致敏感事件 `cannot decrypt` 假
+  阴性，需带历史密钥验证或重加密）；数字编码的摄入/重建两侧必须一致
+  （见 `TestVerifyIntegrityLargeIntSensitiveField` 耦合哨兵）。
+- 全面重算型攻击者（同时持有签名密钥）仍无法被逐事件检查发现——密封段
+  的签名清单与 WORM 归档（O_EXCL）是最终锚点。签名密钥由
+  `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY` 显式配置：公开默认值
+  （`development-signing-key-change-me`/`development-encryption-key-change-me`）、
+  空值与两值相同在非开发模式一律启动失败（`service.New` 校验 + 二进制
+  非零退出，`-check-config` 可预检），开发模式必须显式
+  `AUDIT_ALLOW_DEV_SECRETS=true`。曾以默认密钥运行过的部署必须把既有
+  证据视为已泄露（签名可伪造、密文可解密），需要轮换密钥并重新密封；
+  本参考实现不做多密钥历史验证。
+
+### 3.6 供应链与部署
 - 依赖锁定（go.sum）、工程门禁（gofmt/复杂度/架构方向/路由契约/竞态/
   构建）；生产：最小运行时镜像、非 root、SBOM、镜像签名、依赖扫描、
   GitOps 发布、Canary 验证。
+- 部署前必须通过 `audit-api -check-config` / `audit-governance-worker
+  -check-config` 预检（退出码 0 且无 `=well-known-default` 警告），API
+  与 worker 必须使用相同的 `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY`。
+  预检同时校验认证配置（与启动同一规则）：无 JWT 信任源或仅凭
+  `-allow-dev-auth` 的开发认证均失败关闭；开发认证白名单仅接受环境变量
+  `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
 
 ## 4. 不在本机验证的攻击面
 

@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -47,7 +48,12 @@ func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, e
 			return nil, fmt.Errorf("scan outbox record: %w", err)
 		}
 		record.LastError = lastError.String
-		if err := json.Unmarshal(payload, &record.Event); err != nil {
+		// UseNumber: the relay re-ingests the event, so payload numbers must
+		// survive as exact json.Number values to keep the derived digest
+		// identical to the original ingest digest.
+		decoder := json.NewDecoder(bytes.NewReader(payload))
+		decoder.UseNumber()
+		if err := decoder.Decode(&record.Event); err != nil {
 			return nil, fmt.Errorf("decode outbox payload id=%d: %w", record.ID, err)
 		}
 		records = append(records, record)

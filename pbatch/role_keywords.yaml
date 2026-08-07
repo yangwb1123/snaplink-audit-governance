@@ -1,0 +1,367 @@
+# Bilingual role-relevance keywords for meta-stage orchestration.
+# Each hit is worth two points, capped at ten by pbatch.relevance.
+architect:
+  - architecture
+  - design
+  - coupling
+  - dependency
+  - API surface
+  - 架构
+  - 设计
+  - 依赖
+  - 分层
+business_analyst:
+  - requirement
+  - value
+  - user need
+  - business
+  - ROI
+  - 需求
+  - 价值
+  - 用户
+  - 场景
+code-implementer:
+  - implementation
+  - code
+  - function
+  - tests
+  - 实现
+  - 代码
+  - 函数
+  - 测试
+compliance_officer:
+  - compliance
+  - GDPR
+  - privacy
+  - retention
+  - audit trail
+  - 合规
+  - 隐私
+  - 保留
+  - 审计
+cto:
+  - strategy
+  - roadmap
+  - portfolio
+  - investment
+  - decision
+  - 战略
+  - 路线图
+  - 投资
+  - 决策
+database_architect:
+  - schema
+  - migration
+  - index
+  - transaction
+  - store
+  - storage
+  - persistence
+  - SQL
+  - 存储
+  - 持久化
+  - 数据库
+  - 迁移
+  - 索引
+  - 事务
+devops_engineer:
+  - deploy
+  - CI
+  - CD
+  - release
+  - environment
+  - container
+  - 部署
+  - 发布
+  - 环境
+  - 配置
+distributed_engineer:
+  - consistency
+  - partition
+  - replication
+  - distributed
+  - consensus
+  - 一致性
+  - 分区
+  - 复制
+  - 分布式
+  - 并发
+performance_engineer:
+  - performance
+  - latency
+  - throughput
+  - cache
+  - bottleneck
+  - 性能
+  - 延迟
+  - 吞吐
+  - 缓存
+  - 瓶颈
+pm:
+  - milestone
+  - scope
+  - priority
+  - timeline
+  - 排期
+  - 优先级
+  - 里程碑
+  - 范围
+principal_reviewer:
+  - review
+  - risk
+  - decision
+  - tradeoff
+  - 评审
+  - 风险
+  - 决策
+  - 权衡
+protocol_expert:
+  - protocol
+  - OAuth
+  - OIDC
+  - token
+  - RFC
+  - spec
+  - 协议
+  - 标准
+  - 规范
+qa_lead:
+  - test
+  - acceptance
+  - regression
+  - edge case
+  - coverage
+  - 测试
+  - 用例
+  - 验收
+  - 回归
+  - 边界
+security_engineer:
+  - security
+  - secret
+  - credential
+  - encryption
+  - injection
+  - authentication
+  - authorization
+  - 安全
+  - 漏洞
+  - 密钥
+  - 凭证
+  - 加密
+  - 认证
+  - 授权
+sre_engineer:
+  - availability
+  - monitoring
+  - alert
+  - capacity
+  - SLO
+  - observability
+  - 可用性
+  - 监控
+  - 告警
+  - 容量
+  - 可观测
+staff_engineer:
+  - architecture
+  - complexity
+  - tech debt
+  - evolution
+  - 架构
+  - 复杂
+  - 技术债
+  - 演进
+tech_lead:
+  - technical design
+  - review
+  - implementation plan
+  - 技术方案
+  - 评审
+  - 实现
+ux_designer:
+  - UX
+  - UI
+  - usability
+  - interaction
+  - user experience
+  - 体验
+  - 界面
+  - 交互
+  - 可用性
+ui_designer:
+  - ui
+  - design
+  - layout
+  - component
+  - spacing
+  - 界面
+  - 布局
+  - 组件
+  - 间距
+  - 视觉
+ui_reviewer:
+  - ui review
+  - spacing
+  - token
+  - consistency
+  - 间距
+  - 一致性
+  - 组件规范
+  - 布局
+visual_reviewer:
+  - visual
+  - screenshot
+  - hierarchy
+  - whitespace
+  - 视觉
+  - 截图
+  - 层级
+  - 留白
+accessibility_reviewer:
+  - accessibility
+  - aria
+  - contrast
+  - keyboard
+  - 无障碍
+  - 对比度
+  - 键盘
+  - 触控
+frontend_engineer:
+  - frontend
+  - tsx
+  - dart
+  - vue
+  - component
+  - hook
+  - 前端
+  - 组件
+  - 编码
+  - 实现
+async_reviewer:
+  - async
+  - race
+  - debounce
+  - throttle
+  - request
+  - concurrent
+  - 异步
+  - 竞态
+  - 防抖
+  - 请求
+  - 并发
+code_architecture_reviewer:
+  - architecture
+  - module
+  - dependency
+  - god file
+  - complexity
+  - 架构
+  - 模块
+  - 依赖
+  - 复杂度
+  - 上帝文件
+backend_engineer:
+  - backend
+  - api
+  - service
+  - use case
+  - domain
+  - 后端
+  - 接口
+  - 服务
+  - 用例
+  - 领域
+  - 事务
+design_pattern_reviewer:
+  - design pattern
+  - factory
+  - strategy
+  - adapter
+  - repository
+  - interface
+  - 设计模式
+  - 工厂
+  - 策略
+  - 适配器
+  - 接口
+  - 过度设计
+algorithm_reviewer:
+  - algorithm
+  - complexity
+  - data structure
+  - performance
+  - n+1
+  - top k
+  - 算法
+  - 复杂度
+  - 数据结构
+  - 性能
+  - 数据规模
+  - 布隆
+architecture_constitution_reviewer:
+  - architecture
+  - blast radius
+  - coupling
+  - change amplification
+  - reversibility
+  - 架构
+  - 爆炸半径
+  - 耦合
+  - 变化放大
+  - 可逆
+  - 演进
+  - 一致性
+product_thinker:
+  - product
+  - requirement
+  - mvp
+  - commercialization
+  - open source
+  - 产品
+  - 需求
+  - 商业化
+  - 开源
+  - 推演
+  - 产品化
+testing_reviewer:
+  - test
+  - coverage
+  - assertion
+  - reproduce
+  - contract test
+  - 测试
+  - 覆盖率
+  - 断言
+  - 复现
+  - 契约测试
+requirement_interpreter:
+  - requirement
+  - interpret
+  - user goal
+  - scope
+  - P0
+  - 需求
+  - 目标
+  - 范围
+  - 用户角色
+capability_architect:
+  - capability
+  - reuse
+  - composition
+  - capability map
+  - 能力
+  - 复用
+  - 组合
+  - 能力映射
+composition_reviewer:
+  - composition
+  - ownership
+  - primary project
+  - sync chain
+  - failure policy
+  - 组合
+  - 责任项目
+  - 同步链
+  - 失败策略
+  - 跨项目

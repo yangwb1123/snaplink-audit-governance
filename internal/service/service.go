@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -28,6 +29,13 @@ type Config struct {
 	SegmentSize   int
 	MaxEventBytes int
 	Now           func() time.Time
+	// AllowDevSecrets explicitly opts into the well-known development
+	// secrets (empty values, default fallback and SigningSecret ==
+	// EncryptionKey reuse). It is independent of the auth-scoped
+	// -allow-dev-auth flag and defaults to false: production must fail
+	// fast on missing, default or shared secrets instead of running with
+	// publicly known key material.
+	AllowDevSecrets bool
 	// Signer produces checkpoint signatures. Defaults to HMAC-SHA256 over
 	// SigningSecret; a Vault Transit signer can be injected for KMS-backed
 	// signatures where the private key never leaves Vault.
@@ -88,7 +96,10 @@ type IntegrityResult struct {
 	Errors       []string  `json:"errors,omitempty"`
 }
 
-func New(st *store.Store, cfg Config) *Service {
+// New validates and resolves the service configuration, then returns the
+// service. It never dereferences st (the store is opened by the caller), so
+// configuration-only callers such as -check-config can pass nil.
+func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.ServerVersion == "" {
 		cfg.ServerVersion = "audit-governance/dev"
 	}
@@ -98,11 +109,8 @@ func New(st *store.Store, cfg Config) *Service {
 	if cfg.MaxEventBytes <= 0 {
 		cfg.MaxEventBytes = domain.MaxEventBytes
 	}
-	if cfg.SigningSecret == "" {
-		cfg.SigningSecret = "development-signing-key-change-me"
-	}
-	if cfg.EncryptionKey == "" {
-		cfg.EncryptionKey = cfg.SigningSecret
+	if err := resolveSecrets(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.Signer == nil {
 		cfg.Signer = hmacSigner{secret: cfg.SigningSecret}
@@ -113,7 +121,41 @@ func New(st *store.Store, cfg Config) *Service {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}
+	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}, nil
+}
+
+// resolveSecrets fills the development defaults when explicitly allowed and
+// otherwise enforces the production fail-fast rules: missing secrets are
+// rejected, well-known defaults are rejected and the signing and encryption
+// secrets must be distinct. The order matters: a missing secret is reported
+// before a default/equality problem, and validation completes before any
+// key material is derived (hmacSigner) or any external client is built.
+func resolveSecrets(cfg *Config) error {
+	if cfg.SigningSecret == "" {
+		if !cfg.AllowDevSecrets {
+			return fmt.Errorf("%w: %s is empty; set %s and %s to strong distinct values, or enable development mode with %s=true", ErrMissingSecret, "AUDIT_SIGNING_SECRET", "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+		}
+		cfg.SigningSecret = devSigningSecret
+	}
+	if cfg.EncryptionKey == "" {
+		if !cfg.AllowDevSecrets {
+			return fmt.Errorf("%w: %s is empty; set %s and %s to strong distinct values, or enable development mode with %s=true", ErrMissingSecret, "AUDIT_ENCRYPTION_KEY", "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+		}
+		cfg.EncryptionKey = cfg.SigningSecret
+	}
+	if cfg.AllowDevSecrets {
+		return nil
+	}
+	if isKnownDefaultSecret(cfg.SigningSecret) {
+		return fmt.Errorf("%w: %s is a well-known default value that must never be used outside development mode; set a strong secret or enable %s=true", ErrDefaultSecret, "AUDIT_SIGNING_SECRET", "AUDIT_ALLOW_DEV_SECRETS")
+	}
+	if isKnownDefaultSecret(cfg.EncryptionKey) {
+		return fmt.Errorf("%w: %s is a well-known default value that must never be used outside development mode; set a strong secret or enable %s=true", ErrDefaultSecret, "AUDIT_ENCRYPTION_KEY", "AUDIT_ALLOW_DEV_SECRETS")
+	}
+	if cfg.SigningSecret == cfg.EncryptionKey {
+		return fmt.Errorf("%w: %s and %s must be distinct values", ErrSharedSecret, "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY")
+	}
+	return nil
 }
 
 func (s *Service) Now() time.Time { return s.Config.Now().UTC() }
@@ -128,6 +170,15 @@ func (s *Service) adminAction(tenantID, actor, action, targetType, targetID, det
 func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
 	if strings.TrimSpace(tenant.ID) == "" || strings.TrimSpace(tenant.Name) == "" {
 		return fmt.Errorf("%w: tenant id and name are required", domain.ErrInvalid)
+	}
+	// Key-framing validation before any mutation: a tenant ID containing the
+	// key separator (or other control/whitespace/path characters) would make
+	// its composite keys ambiguous with another tenant's keys
+	// (StreamKey("a\x1fb","s") == StreamKey("a","b\x1fs")). Reject before
+	// the snapshot closure so no tenant, admin action or conflict check runs
+	// for invalid IDs.
+	if err := store.ValidTenantID(tenant.ID); err != nil {
+		return err
 	}
 	if tenant.CreatedAt.IsZero() {
 		tenant.CreatedAt = s.Now()
@@ -173,6 +224,26 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 	return s.Store.Update(func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[schema.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
+		}
+		// Version-rollback guard: versions for a (tenant_id, schema_id) pair
+		// must be strictly monotonic. Re-registering a version below the
+		// highest registered version would silently re-admit payload shapes
+		// a newer schema deliberately restricted, and because validateEvent
+		// and reconstructAndDerive look schemas up version-exactly, the
+		// weakening would survive VerifyIntegrity. The guard runs inside the
+		// same store.Update closure as the write (atomic check-and-commit,
+		// no TOCTOU window) and precedes the duplicate-key check so a
+		// rollback re-register of an existing version reports ErrInvalid
+		// instead of ErrConflict; re-registering the exact highest version
+		// remains a duplicate conflict.
+		var maxVersion int
+		for _, candidate := range data.Schemas {
+			if candidate.TenantID == schema.TenantID && candidate.SchemaID == schema.SchemaID && candidate.Version > maxVersion {
+				maxVersion = candidate.Version
+			}
+		}
+		if schema.Version < maxVersion {
+			return fmt.Errorf("%w: schema version %d is lower than the highest registered version %d for schema %s; version rollback is not allowed", domain.ErrInvalid, schema.Version, maxVersion, schema.SchemaID)
 		}
 		key := store.SchemaKey(schema.TenantID, schema.SchemaID, schema.Version)
 		if _, exists := data.Schemas[key]; exists {
@@ -268,6 +339,10 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 	cutoff := now.Add(-time.Duration(policy.ArchiveDays) * 24 * time.Hour)
 	var holds []domain.LegalHold
 	if err := s.Store.Read(func(data *store.Snapshot) error {
+		schemas := map[string]domain.EventSchema{}
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
 		for _, hold := range data.LegalHolds {
 			if hold.TenantID == tenantID && hold.ReleasedAt == nil {
 				holds = append(holds, hold)
@@ -280,7 +355,7 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 			}
 			protected := false
 			for _, hold := range holds {
-				if holdMatchesEvent(hold, event) {
+				if s.holdMatchesEvent(hold, event, schemas) {
 					protected = true
 					report.HoldIDs = appendUnique(report.HoldIDs, hold.ID)
 				}
@@ -348,9 +423,17 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 		}
 		key := store.EventKey(tenantID, event.EventID)
 		if existing, ok := data.Events[key]; ok {
-			existingDigest, digestErr := domain.EventDigest(existing)
+			existingDigest, digestErr := s.reconstructAndDerive(existing, data.Schemas)
 			if digestErr != nil {
-				return digestErr
+				// Fallback: legacy stored-digest comparison. Reconstruction needs
+				// the event's exact schema version and the current encryption
+				// key; when either is unavailable (deregistered schema, rotated
+				// key) we preserve historical idempotency behavior instead of
+				// breaking re-ingest.
+				existingDigest, digestErr = domain.EventDigest(existing)
+				if digestErr != nil {
+					return digestErr
+				}
 			}
 			receipt = data.Receipts[key]
 			if existingDigest == inputDigest {
@@ -433,7 +516,7 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 	if receipt.Duplicate {
 		return receipt, nil
 	}
-	if s.Config.ArchiveDir != "" {
+	if archive.Configured(s.Config.Archive) {
 		archived := s.archiveEvent(event) == nil
 		for _, segment := range sealedSegments {
 			if s.archiveSegment(segment) != nil {
@@ -540,9 +623,13 @@ func (s *Service) QueryEvents(tenantID string, query domain.Query) (domain.Query
 		return domain.QueryResult{}, fmt.Errorf("%w: page_size exceeds %d", domain.ErrInvalid, domain.MaxPageSize)
 	}
 	var events []domain.Event
+	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
+		for key, schema := range data.Schemas {
+			schemas[key] = schema
+		}
 		for _, event := range data.Events {
-			if event.TenantID == tenantID && matches(event, query) {
+			if event.TenantID == tenantID && s.matches(event, query, schemas) {
 				events = append(events, event)
 			}
 		}
@@ -783,13 +870,80 @@ func (s *Service) protectSensitiveFields(event *domain.Event, schema domain.Even
 		if !ok {
 			continue
 		}
-		digest, err := security.SearchDigest(value, s.Config.EncryptionKey)
+		// Tenant/field-bound digest: the same plaintext in another tenant or
+		// under another field name yields a different digest, so stored
+		// digests can no longer be used to correlate records across tenants
+		// (threat-model boundary D). The key name stays field+"__search_digest"
+		// and the format is self-describing ("sd2:" prefix) so old clients
+		// and legacy stored events remain distinguishable.
+		digest, err := security.SearchDigestBound(value, s.Config.EncryptionKey, event.TenantID, field)
 		if err != nil {
 			return err
 		}
 		event.Payload[field+"__search_digest"] = digest
 	}
 	return nil
+}
+
+// verifyContentDigest reports a per-event verification error, or nil. It
+// authenticates the stored content by reconstructing the pre-protection
+// payload (the exact inverse of protectSensitiveFields) and comparing a
+// freshly derived digest against the stored SourceDigest. An empty
+// SourceDigest fails closed: an audit ledger must not silently pass events
+// whose content is unauthenticated.
+func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]domain.EventSchema) error {
+	if event.SourceDigest == "" {
+		return fmt.Errorf("stream %s sequence %d missing source_digest", event.StreamID, event.Sequence)
+	}
+	derived, err := s.reconstructAndDerive(event, schemas)
+	if err != nil {
+		return fmt.Errorf("stream %s sequence %d content digest check failed: %w", event.StreamID, event.Sequence, err)
+	}
+	if derived != event.SourceDigest {
+		return fmt.Errorf("stream %s sequence %d content digest mismatch", event.StreamID, event.Sequence)
+	}
+	return nil
+}
+
+// reconstructAndDerive undoes protectSensitiveFields (removing search
+// digests and decrypting encrypted fields with the same tenant/field/eventID
+// AAD binding used at ingest), then derives the content digest from the
+// reconstructed payload. It never mutates event.Payload: the stored map is
+// shared by reference with the store snapshot, so it is deep-copied first.
+// The schema definition the event was ingested under is looked up
+// version-exactly.
+//
+// Number-encoding consistency note: reconstruction must canonicalize numbers
+// exactly like the ingest-time digest path. Both sides decode through
+// json.Number (clonePayload here and DecryptJSON), so int64 values > 2^53
+// keep their exact digits and VerifyIntegrity agrees with the stored digest
+// (pinned by TestVerifyIntegrityLargeIntSensitiveField).
+func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]domain.EventSchema) (string, error) {
+	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
+	if !ok {
+		return "", fmt.Errorf("schema %s v%d not found", event.SchemaID, event.SchemaVersion)
+	}
+	payload, err := clonePayload(event.Payload)
+	if err != nil {
+		return "", err
+	}
+	for _, field := range schema.SearchableFields {
+		delete(payload, field+"__search_digest")
+	}
+	for _, field := range schema.EncryptedFields {
+		encoded, ok := payload[field].(string)
+		if !ok {
+			continue
+		}
+		original, err := security.DecryptJSON(encoded, s.Config.EncryptionKey, event.TenantID+"/"+field+"/"+event.EventID)
+		if err != nil {
+			return "", fmt.Errorf("cannot decrypt field %s: %w", field, err)
+		}
+		payload[field] = original
+	}
+	reconstructed := event
+	reconstructed.Payload = payload
+	return domain.EventContentDigest(reconstructed)
 }
 
 func (s *Service) eventHash(event domain.Event) (string, error) {
@@ -849,7 +1003,7 @@ func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) 
 	return events, err
 }
 
-func matches(event domain.Event, query domain.Query) bool {
+func (s *Service) matches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
 	if event.OccurredAt.Before(query.From) || !event.OccurredAt.Before(query.To) {
 		return false
 	}
@@ -887,7 +1041,7 @@ func matches(event domain.Event, query domain.Query) bool {
 		return false
 	}
 	if query.PayloadField != "" {
-		if query.PayloadDigest == "" || event.Payload[query.PayloadField+"__search_digest"] != query.PayloadDigest {
+		if !s.digestMatches(event, query, schemas) {
 			return false
 		}
 	}
@@ -897,7 +1051,47 @@ func matches(event domain.Event, query domain.Query) bool {
 	return true
 }
 
-func holdMatchesEvent(hold domain.LegalHold, event domain.Event) bool {
+// digestMatches reports whether the stored event satisfies the query's
+// (payload_field, payload_digest) filter. Both digest formats are accepted:
+//   - same format (v1 unbound or v2 bound on both sides) → direct equality;
+//   - mixed formats → the query-format digest is re-derived from the stored
+//     plaintext and compared. The fallback fails closed when the plaintext
+//     is unavailable (encrypted field, missing value, unknown schema
+//     version), so a cross-format query can never match through a
+//     ciphertext or an absent value.
+//
+// The fallback keeps old v1 clients able to search events ingested under
+// the new bound format and new v2 clients able to search legacy events.
+func (s *Service) digestMatches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
+	stored, ok := event.Payload[query.PayloadField+"__search_digest"].(string)
+	if !ok {
+		return false
+	}
+	if security.IsBoundSearchDigest(stored) == security.IsBoundSearchDigest(query.PayloadDigest) {
+		return stored == query.PayloadDigest
+	}
+	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
+	if !ok || containsString(schema.EncryptedFields, query.PayloadField) {
+		return false
+	}
+	value, ok := event.Payload[query.PayloadField]
+	if !ok {
+		return false
+	}
+	var derived string
+	var err error
+	if security.IsBoundSearchDigest(query.PayloadDigest) {
+		derived, err = security.SearchDigestBound(value, s.Config.EncryptionKey, event.TenantID, query.PayloadField)
+	} else {
+		derived, err = security.SearchDigest(value, s.Config.EncryptionKey)
+	}
+	if err != nil {
+		return false
+	}
+	return derived == query.PayloadDigest
+}
+
+func (s *Service) holdMatchesEvent(hold domain.LegalHold, event domain.Event, schemas map[string]domain.EventSchema) bool {
 	filter := hold.Filter
 	if filter.From.IsZero() && filter.To.IsZero() {
 		return true
@@ -905,7 +1099,7 @@ func holdMatchesEvent(hold domain.LegalHold, event domain.Event) bool {
 	if filter.From.IsZero() || filter.To.IsZero() {
 		return false
 	}
-	return matches(event, filter)
+	return s.matches(event, filter, schemas)
 }
 
 func appendUnique(values []string, wanted string) []string {
@@ -1017,7 +1211,11 @@ func clonePayload(payload map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	var copyPayload map[string]any
-	if err := json.Unmarshal(encoded, &copyPayload); err != nil {
+	// UseNumber: a float64 re-decode would collapse int64 values > 2^53
+	// before digest derivation, corrupting the canonical digest.
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&copyPayload); err != nil {
 		return nil, err
 	}
 	return copyPayload, nil

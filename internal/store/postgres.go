@@ -12,6 +12,11 @@ import (
 // Store.mu within one process; across processes the version column provides
 // an optimistic lock so a stale writer fails with ErrSnapshotConflict
 // instead of overwriting a concurrent commit.
+//
+// lastVersion is the optimistic-lock baseline. It is written ONLY on the
+// write path: LoadForUpdate records it and Save advances it, both of which
+// Store.Update serializes with the exclusive lock. Load is side-effect-free
+// and therefore safe under concurrent RLock readers.
 type postgresBackend struct {
 	db          *sql.DB
 	lastVersion int64
@@ -28,25 +33,49 @@ SET snapshot = $1::jsonb, version = version + 1, updated_at = now()
 WHERE id = 1 AND version = $2`
 )
 
-func (p *postgresBackend) LoadForUpdate() (*Snapshot, error) { return p.Load() }
-
 func (p *postgresBackend) Load() (*Snapshot, error) {
+	data, _, err := p.load()
+	if errors.Is(err, sql.ErrNoRows) {
+		return data, nil
+	}
+	return data, err
+}
+
+func (p *postgresBackend) LoadForUpdate() (*Snapshot, error) {
+	data, version, err := p.load()
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No row: keep the previous baseline, exactly like the pre-split
+			// Load. A backend primed at an older version whose row was
+			// deleted externally still conflicts loudly on Save instead of
+			// silently recreating an empty row.
+			return data, nil
+		}
+		return nil, err
+	}
+	p.lastVersion = version // write-path baseline; serialized by Store.mu
+	return data, nil
+}
+
+// load reads the snapshot row without touching any backend state. A missing
+// row yields an empty snapshot plus sql.ErrNoRows so each caller decides
+// whether the optimistic-lock baseline changes.
+func (p *postgresBackend) load() (*Snapshot, int64, error) {
 	data := NewSnapshot()
 	var encoded []byte
 	var version int64
 	err := p.db.QueryRow(snapshotLoadQuery).Scan(&encoded, &version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return data, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("load state snapshot: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return data, 0, err
+		}
+		return nil, 0, fmt.Errorf("load state snapshot: %w", err)
 	}
-	if err := json.Unmarshal(encoded, data); err != nil {
-		return nil, fmt.Errorf("decode state snapshot: %w", err)
+	if err := decodeSnapshot(encoded, data); err != nil {
+		return nil, 0, fmt.Errorf("decode state snapshot: %w", err)
 	}
 	data.normalize()
-	p.lastVersion = version
-	return data, nil
+	return data, version, nil
 }
 
 func (p *postgresBackend) Close() error { return p.db.Close() }

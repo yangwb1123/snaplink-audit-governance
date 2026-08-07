@@ -3,18 +3,40 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
 var crmPrincipal = domain.IngestPrincipal{ClientID: "crm"}
+
+// recordingArchive is a Store stub that records Put keys; fail makes it
+// return an error so ingest degrades to StatusIndexed and ArchivePending
+// can retry later.
+type recordingArchive struct {
+	fail bool
+	puts []string
+}
+
+func (r *recordingArchive) Put(_ context.Context, key string, _ []byte) error {
+	r.puts = append(r.puts, key)
+	if r.fail {
+		return errors.New("archive unavailable")
+	}
+	return nil
+}
+
+func (r *recordingArchive) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (r *recordingArchive) Ready(context.Context) error { return nil }
 
 func testService(t *testing.T, archive bool) *Service {
 	t.Helper()
@@ -27,7 +49,10 @@ func testService(t *testing.T, archive bool) *Service {
 	if archive {
 		archiveDir = filepath.Join(dir, "archive")
 	}
-	svc := New(st, Config{ArchiveDir: archiveDir, SegmentSize: 2, SigningSecret: "test-secret", Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	svc, err := New(st, Config{ArchiveDir: archiveDir, SegmentSize: 2, SigningSecret: "test-secret", Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +203,7 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 }
 
 func TestQueryReplayAndExport(t *testing.T) {
-	svc := testService(t, false)
+	svc := testService(t, true)
 	at := time.Unix(1_700_000_100, 0).UTC()
 	for i := 0; i < 3; i++ {
 		event := testEvent("evt-q-"+string(rune('1'+i)), "op-query", at.Add(time.Duration(i)*time.Second))
@@ -276,7 +301,10 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := New(st, Config{ArchiveDir: filepath.Join(dir, "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
+	svc, err := New(st, Config{ArchiveDir: filepath.Join(dir, "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +321,10 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopenedService := New(reopened, Config{ArchiveDir: filepath.Join(dir, "archive")})
+	reopenedService, err := New(reopened, Config{ArchiveDir: filepath.Join(dir, "archive"), AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	event, err := reopenedService.GetEvent("tenant-a", "persisted")
 	if err != nil || event.Hash == "" {
 		t.Fatalf("persisted event missing: %+v %v", event, err)
@@ -331,9 +362,9 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	if _, ok := stored.Payload["email__search_digest"]; !ok {
 		t.Fatalf("search digest missing: %+v", stored.Payload)
 	}
-	expectedDigest, err := security.SearchDigest("alice@example.test", svc.Config.EncryptionKey)
+	expectedDigest, err := security.SearchDigestBound("alice@example.test", svc.Config.EncryptionKey, "tenant-a", "email")
 	if err != nil || stored.Payload["email__search_digest"] != expectedDigest {
-		t.Fatalf("search digest must use original value: got=%v want=%v err=%v", stored.Payload["email__search_digest"], expectedDigest, err)
+		t.Fatalf("search digest must use original value and tenant/field binding: got=%v want=%v err=%v", stored.Payload["email__search_digest"], expectedDigest, err)
 	}
 	duplicate, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil || !duplicate.Duplicate || first.Hash != duplicate.Hash {
@@ -372,12 +403,121 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	svc.Config.ArchiveDir = filepath.Join(t.TempDir(), "archive")
+	// Wire the archive store itself (not the ArchiveDir string, which
+	// nothing re-derives into Config.Archive): the ingest gate above ran
+	// against the default unconfigured FileStore, so the receipt is
+	// StatusIndexed and ArchivePending must retry it.
+	svc.Config.Archive = &archive.FileStore{Dir: filepath.Join(t.TempDir(), "archive")}
 	count, err := svc.ArchivePending("tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
 	receipt, err := svc.GetReceipt("tenant-a", event.EventID)
+	if err != nil || receipt.Status != domain.StatusArchived {
+		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
+	}
+}
+
+// TestIngestArchiveMismatchStaysIndexedAndRetries is AC-2: when the archive
+// destination already holds a different object at the exact key the service
+// computes (service.go:966), Put must fail content verification, the receipt
+// must degrade to StatusIndexed instead of StatusArchived, the tampered
+// object must be preserved (WORM), and ArchivePending must converge the
+// receipt once the key is free.
+func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
+	svc := testService(t, true)
+	event := testEvent("evt-mismatch", "op-mismatch", time.Now().UTC())
+	// Seed a tampered object at the exact archive path archiveEvent computes
+	// for the first event of the stream (sequence 1, same layout as the
+	// pinned path in TestIngestIdempotencyConflictAndIntegrity).
+	archivePath := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", "tenant-a_aggregate_invoice_inv-1", fmt.Sprintf("%020d-%s.json", 1, event.EventID))
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivePath, []byte(`tampered`), 0o440); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Sequence != 1 {
+		t.Fatalf("unexpected sequence %d, pinned archive path assumed 1", receipt.Sequence)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("receipt status = %s, want StatusIndexed: a mismatched archive object must not be reported archived", receipt.Status)
+	}
+	// WORM: the tampered object was neither overwritten nor removed.
+	got, err := os.ReadFile(archivePath)
+	if err != nil || string(got) != `tampered` {
+		t.Fatalf("tampered archive object not preserved: %v %q", err, got)
+	}
+
+	// Once the key is free, ArchivePending retries the non-Archived receipt
+	// and converges it to StatusArchived with the canonical object.
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 1 {
+		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
+	}
+	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
+	if err != nil || receipt.Status != domain.StatusArchived {
+		t.Fatalf("receipt was not archived after retry: %+v %v", receipt, err)
+	}
+}
+
+// TestIngestArchivesWithS3OnlyConfig is AC-1: with an S3-equivalent store
+// injected and no ArchiveDir, ingest must still archive. Pre-fix the gate
+// keyed on the empty ArchiveDir string skipped archiving entirely and the
+// receipt stalled at StatusIndexed.
+func TestIngestArchivesWithS3OnlyConfig(t *testing.T) {
+	svc := testService(t, false)
+	archiveStub := &recordingArchive{}
+	svc.Config.Archive = archiveStub
+	event := testEvent("s3-only", "op-s3-only", time.Now().UTC())
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusArchived {
+		t.Fatalf("S3-only receipt not archived: %+v", receipt)
+	}
+	// SegmentSize is 2 and a single event seals no segments: exactly one
+	// object (the event) must have been written.
+	if len(archiveStub.puts) != 1 {
+		t.Fatalf("expected exactly one archive Put, got %d: %v", len(archiveStub.puts), archiveStub.puts)
+	}
+	if !strings.HasPrefix(archiveStub.puts[0], "events/tenant-a/") {
+		t.Fatalf("unexpected archive key: %s", archiveStub.puts[0])
+	}
+}
+
+// TestArchivePendingWithS3OnlyConfig is AC-2: an S3-only deployment where
+// archiving failed at ingest time (receipt stuck at StatusIndexed) must be
+// retried by ArchivePending instead of rejected as unconfigured. Pre-fix the
+// empty ArchiveDir string made ArchivePending return ErrInvalid and the
+// receipt stalled forever.
+func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
+	svc := testService(t, false)
+	archiveStub := &recordingArchive{fail: true}
+	svc.Config.Archive = archiveStub
+	event := testEvent("s3-only-retry", "op-s3-only", time.Now().UTC())
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("ingest with failing archive must stay indexed: %+v", receipt)
+	}
+	archiveStub.fail = false
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 1 {
+		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
+	}
+	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}
@@ -397,6 +537,14 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 		t.Fatalf("unexpected created run: %+v", run)
 	}
 
+	// 分离职责：创建者不能审批或拒绝自己的请求。
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor approve err=%v, want forbidden", err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
+	}
+
 	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
 	if err != nil {
 		t.Fatal(err)
@@ -412,10 +560,17 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 	if _, err := svc.RejectRestore("tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("reject after approve err=%v, want conflict", err)
 	}
+	// 已决 run 上创建者审批 → 409 优先于 403（Conflict 支配 Forbidden）。
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same actor approve on decided run err=%v, want conflict", err)
+	}
 
 	run2, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "duplicate entry"}, "requester-2")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run2.ID, "requester-2"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
 	}
 	rejected, err := svc.RejectRestore("tenant-a", run2.ID, "approver-3")
 	if err != nil {
@@ -425,12 +580,124 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 		t.Fatalf("unexpected rejection: %+v", rejected)
 	}
 
-	// 租户边界与缺失目标都关闭为 not found。
+	// 租户边界与缺失目标都关闭为 not found；跨租户的创建者审批同样
+	// 被 404 掩盖（NotFound 优先于 Forbidden）。
 	if _, err := svc.ApproveRestore("tenant-b", run.ID, "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross tenant approve err=%v, want not found", err)
 	}
+	if _, err := svc.ApproveRestore("tenant-b", run.ID, "requester-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross tenant same actor approve err=%v, want not found", err)
+	}
 	if _, err := svc.ApproveRestore("tenant-a", "restore-nope", "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing run err=%v, want not found", err)
+	}
+}
+
+func TestRestoreApprovalSeparationOfDutiesRefusalIsAtomic(t *testing.T) {
+	// S13: a refused same-actor decision writes nothing — no state change,
+	// no admin action — and a distinct actor can still decide afterwards.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-sod", "op-sod", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-sod", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor approve err=%v, want forbidden", err)
+	}
+	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("same actor reject err=%v, want forbidden", err)
+	}
+	after, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused decision wrote admin action: %d → %d", len(before), len(after))
+	}
+	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
+	if err != nil {
+		t.Fatalf("distinct actor approve after refusal failed: %v", err)
+	}
+	if approved.Status != domain.RestoreStatusApproved || approved.ApprovedBy != "approver-1" {
+		t.Fatalf("unexpected approval after refusal: %+v", approved)
+	}
+}
+
+func TestRestoreApprovalConcurrentDistinctActors(t *testing.T) {
+	// S11: concurrent decisions from two distinct actors serialize inside
+	// Store.Update — exactly one wins, the loser sees ErrConflict.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race", "op-race", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	decide := func(actor string) {
+		<-start
+		_, err := svc.ApproveRestore("tenant-a", run.ID, actor)
+		errs <- err
+	}
+	go decide("approver-1")
+	go decide("approver-2")
+	close(start)
+	var approved, conflicted int
+	for i := 0; i < 2; i++ {
+		switch err := <-errs; {
+		case err == nil:
+			approved++
+		case errors.Is(err, domain.ErrConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected race error: %v", err)
+		}
+	}
+	if approved != 1 || conflicted != 1 {
+		t.Fatalf("race outcome approved=%d conflicted=%d, want 1/1", approved, conflicted)
+	}
+}
+
+func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
+	// S12: concurrent same-actor decisions all refuse atomically; the run
+	// stays pending and a distinct actor can still decide afterwards.
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race2", "op-race2", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race2", Reason: "rollback"}, "requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			<-start
+			_, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1")
+			errs <- err
+		}()
+	}
+	close(start)
+	for i := 0; i < 4; i++ {
+		if err := <-errs; !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("same-actor race error = %v, want forbidden", err)
+		}
+	}
+	if _, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1"); err != nil {
+		t.Fatalf("distinct actor after same-actor race failed: %v", err)
 	}
 }
 

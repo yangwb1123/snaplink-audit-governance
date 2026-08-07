@@ -165,9 +165,10 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	// Readiness reflects the configured archive dependency: an unavailable
 	// WORM destination must surface here instead of silently degrading the
-	// archived status of new events. An unconfigured local store (empty dir)
-	// is skipped; S3 stores probe their bucket.
-	if archiveStore, ok := s.Service.Config.Archive.(*archive.FileStore); !ok || archiveStore.Dir != "" {
+	// archived status of new events. An unconfigured store (nil or an
+	// empty-dir local store) is skipped; configured stores probe their
+	// destination.
+	if archive.Configured(s.Service.Config.Archive) {
 		if err := s.Service.Config.Archive.Ready(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "archive_unavailable"})
 			return
@@ -277,7 +278,8 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(ingestErr, domain.ErrQuotaExceeded) {
 				s.ingestQuotaCount.Add(1)
 			}
-			writeJSON(w, statusForError(ingestErr), map[string]any{"receipts": receipts, "error": errorBody(ingestErr, r)})
+			partialStatus := statusForError(ingestErr)
+			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, ingestErr, r)})
 			return
 		}
 		s.ingestCount.Add(1)
@@ -297,6 +299,15 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, statusForError(err), err)
 		return
 	}
+	// 响应剥离搜索摘要（深拷贝，绝不改动存储快照共享的 map）：摘要值曾
+	// 可用于跨租户关联，且对事件读者无业务价值。剥离失败时 500 —— 宁可
+	// 失败也不泄漏。
+	stripped, err := security.StripSearchDigests(event.Payload)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err)
+		return
+	}
+	event.Payload = stripped
 	writeJSON(w, http.StatusOK, event)
 }
 
@@ -330,6 +341,15 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
+	}
+	// 与 getEvent 相同：列表响应同样剥离搜索摘要，仅在响应副本上进行。
+	for i := range result.Items {
+		stripped, stripErr := security.StripSearchDigests(result.Items[i].Payload)
+		if stripErr != nil {
+			writeError(w, r, http.StatusInternalServerError, stripErr)
+			return
+		}
+		result.Items[i].Payload = stripped
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -419,6 +439,13 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, statusForError(err), err)
 		return
+	}
+	// The API boundary never surfaces the raw export failure diagnostic
+	// (filesystem paths, errno text); operators read the full detail from
+	// state.json directly. Persist-time sanitization stays deferred: the
+	// snapshot keeps the raw error, the response gets a fixed message.
+	if job.Error != "" {
+		job.Error = "export failed"
 	}
 	writeJSON(w, http.StatusOK, job)
 }
@@ -925,13 +952,16 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
 	if status >= 500 {
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	if status >= 400 {
-		_ = r
-	}
-	writeJSON(w, status, errorBody(err, r))
+	writeJSON(w, status, errorBody(status, err, r))
 }
 
-func errorBody(err error, r *http.Request) map[string]any {
+// errorBody renders the stable error contract. The status is authoritative
+// for the message: responses with status >= 500 never carry internal error
+// text (filesystem paths, errno strings, crypto details) and collapse to the
+// fixed strings, while the code keeps the domain mapping below 500. The two
+// stay consistent by construction because statusForError maps every domain
+// error to < 500, so a >= 500 response always means internal_error.
+func errorBody(status int, err error, r *http.Request) map[string]any {
 	code := "internal_error"
 	switch {
 	case errors.Is(err, domain.ErrInvalid):
@@ -950,7 +980,7 @@ func errorBody(err error, r *http.Request) map[string]any {
 		code = "schema_not_found"
 	}
 	message := err.Error()
-	if strings.Contains(message, "internal server error") {
+	if status >= 500 {
 		message = "internal server error"
 	}
 	return map[string]any{"error": map[string]any{"code": code, "message": message, "request_id": r.Context().Value(requestIDKey)}}

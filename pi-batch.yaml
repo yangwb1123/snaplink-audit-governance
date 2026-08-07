@@ -1,0 +1,30 @@
+# Declarative defaults for pi-batch.py (synced from ai-batch-runner).
+agent:
+  bin: pi
+  default_timeout: 900
+  default_workers: 4
+  session_flags:
+    start: ["--session-id", "{session}", "--name", "{name}"]
+    continue: ["--session-id", "{session}"]
+
+defaults:
+  timeout: 900
+  retries: 2
+
+evidence:
+  max_bytes: 65536
+  max_sources: 64
+
+validators:
+  pyquality: "python3 {cwd}/quality.py {cwd} --exclude ai-dev"
+  completion: "python3 /home/u1/ai-batch-runner/scripts/check-completion-report.py {output}"
+  secretscan: 'grep -nE "(api[_-]?key|secret|password|token|private[_-]?key)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_./+-]{8,}" {output} && exit 1 || exit 0'
+  gobuild:
+    cmd: "go build ./... && go vet ./..."
+    scope: repo
+  gotest:
+    cmd: "go test ./... -count=1"
+    scope: repo
+  gofmtcheck:
+    cmd: 'test -z "$(gofmt -l .)"'
+    scope: repo

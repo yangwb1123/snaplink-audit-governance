@@ -1,0 +1,17 @@
+tasks:
+- prompt: '已批准的组合变更 COMPOSE-2026-017。本仓库（snaplink-audit-governance）
+
+    评估职责：事件类型 vault.file.deleted@1.1 与 vault.file.notify@1.1 的
+
+    接入评估——若通用 ingest 已支持任意事件 schema 则可能零修改；
+
+    输出评估结论（Verified/Partial/Missing）+ 需要的适配（如有）：
+
+    schema 注册、幂等键约定、留存分级、敏感字段（文件路径/原因）脱敏。
+
+    输出提案文档，不修改代码。
+
+    '
+  output: docs/proposals/compose-2026-017-audit-governance.md
+  validate: python3 /home/u1/ai-batch-runner/examples/snaplink-platform/scripts/check-no-refusal.py
+    {output}

@@ -1,14 +1,18 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
@@ -114,11 +118,14 @@ func (s *Snapshot) normalize() {
 // on error the previously persisted snapshot stays authoritative.
 type Backend interface {
 	// Load returns the current snapshot for read-only access. The returned
-	// snapshot is owned by the backend and must not be retained.
+	// snapshot is owned by the backend and must not be retained. Load must
+	// not mutate backend state: concurrent readers share one backend.
 	Load() (*Snapshot, error)
 	// LoadForUpdate returns a private copy for a read-modify-write cycle so
 	// a failing closure can never corrupt the shared state; the copy is only
-	// committed through Save.
+	// committed through Save. It also establishes the optimistic-lock
+	// baseline for the subsequent Save; callers must not retain the
+	// returned snapshot.
 	LoadForUpdate() (*Snapshot, error)
 	// Save atomically persists data.
 	Save(data *Snapshot) error
@@ -210,7 +217,7 @@ func openFileBackend(path string) (*fileBackend, error) {
 	if path != "" {
 		contents, err := os.ReadFile(path)
 		if err == nil && len(contents) > 0 {
-			if err := json.Unmarshal(contents, data); err != nil {
+			if err := decodeSnapshot(contents, data); err != nil {
 				return nil, err
 			}
 			data.normalize()
@@ -264,11 +271,21 @@ func cloneSnapshot(data *Snapshot) (*Snapshot, error) {
 		return nil, err
 	}
 	copyData := NewSnapshot()
-	if err := json.Unmarshal(encoded, copyData); err != nil {
+	if err := decodeSnapshot(encoded, copyData); err != nil {
 		return nil, err
 	}
 	copyData.normalize()
 	return copyData, nil
+}
+
+// decodeSnapshot decodes a persisted snapshot with UseNumber so payload
+// numbers survive the reload as json.Number instead of collapsing through
+// float64. Digest re-derivation after a restart (VerifyIntegrity, dedupe)
+// must see the exact digits the event was ingested with.
+func decodeSnapshot(encoded []byte, data *Snapshot) error {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	return decoder.Decode(data)
 }
 
 // KeySeparator joins composite snapshot keys. It must not be NUL: Go JSON
@@ -287,3 +304,35 @@ func SchemaKey(tenantID, schemaID string, version int) string {
 func EventKey(tenantID, eventID string) string { return tenantID + KeySeparator + eventID }
 
 func StreamKey(tenantID, streamID string) string { return tenantID + KeySeparator + streamID }
+
+// ValidTenantID validates a tenant identifier against the key-framing
+// invariant. The critical rule is rejection of KeySeparator (0x1F): a tenant
+// ID containing it makes composite keys ambiguous with another tenant's keys
+// (StreamKey("a\x1fb","s") == StreamKey("a","b\x1fs")). Control
+// characters, whitespace and path separators are rejected as hygiene (URLs,
+// logs, archive paths). Returns a domain.ErrInvalid-wrapped error, or nil.
+func ValidTenantID(id string) error {
+	for _, r := range id {
+		switch {
+		case unicode.IsControl(r): // includes 0x1F, NUL, CR, LF, TAB, ...
+			return fmt.Errorf("%w: tenant id must not contain control characters", domain.ErrInvalid)
+		case unicode.IsSpace(r): // \t \n \v \f \r, ' ', U+0085, U+00A0
+			return fmt.Errorf("%w: tenant id must not contain whitespace", domain.ErrInvalid)
+		case r == '/' || r == '\\':
+			return fmt.Errorf("%w: tenant id must not contain path separators", domain.ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// SplitTenantKey splits a composite key into its tenant prefix and the
+// remaining component. ok is false unless the key contains exactly one
+// KeySeparator; keys with zero or multiple separators are attributed to no
+// tenant (fail-closed). rest may be empty (StreamKey(t, "")).
+func SplitTenantKey(key string) (tenantID, rest string, ok bool) {
+	tenantID, rest, found := strings.Cut(key, KeySeparator)
+	if !found || strings.Contains(rest, KeySeparator) {
+		return "", "", false
+	}
+	return tenantID, rest, true
+}
