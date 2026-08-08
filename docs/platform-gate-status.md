@@ -18,7 +18,7 @@
 | **B2-5 死信重放** | aero-id | ✅ | `cmd/audit-replay`（dead→pending、attempt 归零、幂等批量、dry-run） |
 | **B2-6 激活门** | aero-id | ⚠️ | 配置项存在（configs/config.yaml），boot fail-closed 断言需在 aero-id 仓库验证 |
 | **B3-1 永久错误终态** | aero-vault | ✅ | `isPermanentDeliveryError` + `failFact` terminal-with-retention + `relay_terminal_test.go` |
-| **B3-2 Ready 解耦** | aero-vault | ⚠️ | `Runtime.Ready` 有 maxLag 探测；degraded/450s 告警语义需 aero-vault 仓库验证 |
+| **B3-2 Ready 解耦** | aero-vault | ✅ | **2026-08-07 实施（15763e2）**：backlog 超 maxLag → degraded（Ready nil + warn）不再 503；`BacklogAge` accessor + `audit_governance_backlog_age_seconds` gauge + 450s 告警（alerts.yml）；draining/store 错误保持 fail-closed；2 个测试 + pre-commit 验收 PASS |
 | **B3-3 确定性 fact ID** | aero-vault | ✅ | `repository/audit_governance_factid.go` + 三个写入点 + gap 复用 + `fact_id_test.go` |
 | **B3-4 relay 指标** | aero-vault | ✅ | `relay_metrics_test.go` |
 | **B3-6 激活门** | aero-vault | ⚠️ | `AUDIT_GOVERNANCE_ENABLED` 配置门需 aero-vault 仓库验证 |
@@ -56,7 +56,7 @@
 
 1. **IdP 部署仓**：把 `deploy/idp.verify.yaml` 的 scope registry 参考配置（9 审计 scope）应用到生产部署清单；`AUDIT_IDP_*` 注入 CI。
 2. **aero-id（G3 收口）**：激活门 boot fail-closed 断言、仓库门禁全绿。
-3. **aero-vault（G4 收口）**：Ready degraded/450s 告警语义验证、激活门断言、仓库门禁全绿。
+3. **aero-vault（G4）**：B3 全项已实现（终态/Ready 解耦/确定性 ID/指标/激活门），剩余为仓库门禁与部署验证。
 4. **aero-im（G6）/ console（G7）**：各自批次推进。
 5. **G8**：全部仓库 CI 全绿 + 迁移骨架 + 首个事件端到端验证。
 
