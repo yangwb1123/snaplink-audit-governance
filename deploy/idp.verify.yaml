@@ -14,6 +14,21 @@ identity:
   backend: memory
 oauth:
   backend: memory
+  # B4-2 严格路径：启用 scope registry（未注册 scope → 400 invalid_scope）。
+  # 审计 scope 矩阵显式注册（生产部署的 IdP 启用 registry 时必须同样注册）；
+  # e2e 的每次 mint 都走该严格门禁。
+  scope_registry:
+    enabled: true
+    extra_scopes:
+      - audit:event:write
+      - audit:event:read
+      - audit:operation:read
+      - audit:export:create
+      - audit:integrity:verify
+      - audit:legal_hold:manage
+      - audit:policy:read
+      - audit:policy:write
+      - audit:platform:cross_tenant
 clients:
   - id: demo
     secret: demo-secret

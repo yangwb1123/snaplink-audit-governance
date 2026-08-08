@@ -1,5 +1,20 @@
 # Release Notes
 
+## 2026-08-07 — B4-2 严格 scope registry 在验证栈启用：审计 scope 矩阵注册 + e2e 全链复验
+
+**跨仓语义闭环（IdP 侧 B4-2 的验证栈落地）：**
+
+1. **scope registry 启用**（deploy/idp.verify.yaml `oauth.scope_registry.enabled: true`
+   + `extra_scopes` 注册全部 9 个审计 scope）：未注册 scope → 400
+   `invalid_scope`（实测）；注册的审计 scope 正常发证。e2e 每次 mint 都走
+   该严格门禁，验证栈配置同时是生产 B4-2 的参考注册表。
+2. **G1 全链复验（registry 严格路径）**：真实 IdP token 全链路 15 项断言
+   exit 0（dev token 401、gRPC 写入、账本/投影/归档/完整性、治理链、
+   restore 职责分离双主体、legal hold release）。
+3. **e2e 健壮性**：PostgreSQL 冷启动就绪等待（迁移前 pg_isready 循环）。
+
+迁移：无。
+
 ## 2026-08-07 — 治理链 e2e 补全：restore 职责分离（双主体）+ legal hold release
 
 **e2e 断言扩展（dev 8→10 项，G1 13→15 项）：**

@@ -88,6 +88,15 @@ fi
 log "starting infrastructure (postgres/redpanda/clickhouse/minio/jaeger)"
 $COMPOSE up -d postgres redpanda clickhouse minio jaeger
 
+# PostgreSQL 冷启动需要数秒：等待 healthy 后再应用迁移。
+for _ in $(seq 1 30); do
+  if $COMPOSE exec -T postgres pg_isready -U audit -d audit >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+  log "waiting for postgres"
+done
+
 log "applying migrations before starting applications (audit-api bootstrap writes the PG snapshot)"
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/001_control_plane.sql" >/dev/null
