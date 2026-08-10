@@ -59,13 +59,28 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	defer connection.Close()
 	client := auditv1.NewIngestClient(connection)
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:tenant-a:service:crm"))
-	request := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "grpc-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_010, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-1", WorkflowInstanceId: "wf-1", ExecutionRunId: "run-1", PayloadJson: []byte(`{"value":1}`)}}
+	request := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "grpc-evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_010, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-1", WorkflowInstanceId: "wf-1", ExecutionRunId: "run-1", PayloadJson: []byte(`{"value":1}`)}, WaitFor: "ledgered"}
 	receipt, err := client.Write(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if receipt.GetTenantId() != "tenant-a" || receipt.GetSequence() != 1 {
 		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	// M1: the WriteResponse stream_id is a read-only receipt field; with no
+	// aggregate on the envelope the stream is server-derived to the source.
+	if receipt.GetStreamId() != "tenant-a:source:crm" {
+		t.Fatalf("unexpected derived stream on receipt: %+v", receipt)
+	}
+	// With aggregate fields set, the receipt stream is derived from
+	// tenant + aggregate/operation/source — never client-controlled.
+	aggregateRequest := &auditv1.WriteRequest{Event: &auditv1.EventEnvelope{EventId: "grpc-evt-agg", SourceSystem: "crm", EventType: "audit.event", SchemaId: "audit.event", SchemaVersion: 1, OccurredAt: timestamppb.New(time.Unix(1_700_000_012, 0).UTC()), Actor: &auditv1.Actor{Id: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "grpc-idem-agg", AggregateType: "invoice", AggregateId: "inv-1", PayloadJson: []byte(`{"value":3}`)}, WaitFor: "ledgered"}
+	aggregateReceipt, err := client.Write(ctx, aggregateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregateReceipt.GetStreamId() != "tenant-a:aggregate:invoice:inv-1" {
+		t.Fatalf("aggregate-derived stream mismatch: %+v", aggregateReceipt)
 	}
 	ledgered, err := svc.GetEvent("tenant-a", "test", "grpc-evt-1")
 	if err != nil {

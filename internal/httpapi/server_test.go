@@ -1074,11 +1074,44 @@ func TestHTTPIngestLargeAggregateVersionConflictNotDuplicate(t *testing.T) {
 	}
 }
 
+// TestHTTPIngestStripsClientStreamID is L6 (FR-5 at the wire surface): a
+// body-supplied stream_id is accepted (202, not 400) and stripped; the
+// receipt carries the server-derived stream and the crafted value never
+// appears in the response.
+func TestHTTPIngestStripsClientStreamID(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	event := domain.Event{EventID: "http-strip-1", StreamID: "crafted-stream", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), AggregateType: "invoice", AggregateID: "inv-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-strip-idem-1", Payload: map[string]any{"value": 1}}
+	body, _ := json.Marshal(event)
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("ingest status=%d body=%s, want 202", response.StatusCode, data)
+	}
+	var wrapped struct {
+		Receipt domain.EventReceipt `json:"receipt"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if wrapped.Receipt.StreamID != "tenant-a:aggregate:invoice:inv-1" {
+		t.Fatalf("receipt stream_id=%q want tenant-a:aggregate:invoice:inv-1", wrapped.Receipt.StreamID)
+	}
+	if bytes.Contains(data, []byte("crafted-stream")) {
+		t.Fatalf("crafted stream value leaked into response: %s", data)
+	}
+}
+
 func TestHTTPNegativeCases(t *testing.T) {
 	server := testHTTPServer(t)
 	defer server.Close()
 	fromTo := "?from=2026-08-01T00:00:00Z&to=2026-09-01T00:00:00Z"
-
 	// 401：缺少 Authorization 头。
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events"+fromTo, nil)
 	response, err := http.DefaultClient.Do(request)

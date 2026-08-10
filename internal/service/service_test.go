@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -384,16 +386,9 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 func TestIntegrityChecksStreamsIndependently(t *testing.T) {
 	svc := testService(t, false)
 	base := time.Unix(1_700_000_000, 0).UTC()
-	first := testEvent("stream-a", "", base.Add(10*time.Second))
-	first.OperationID = ""
-	first.AggregateID = ""
-	first.AggregateType = ""
-	first.StreamID = "stream-a"
-	second := testEvent("stream-b", "", base)
-	second.OperationID = ""
-	second.AggregateID = ""
-	second.AggregateType = ""
-	second.StreamID = "stream-b"
+	first := testEvent("evt-a-1", "", base.Add(10*time.Second))
+	second := testEvent("evt-b-1", "", base)
+	second.AggregateID = "inv-2" // derived stream: tenant-a:aggregate:invoice:inv-2
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
@@ -403,6 +398,222 @@ func TestIntegrityChecksStreamsIndependently(t *testing.T) {
 	result, err := svc.VerifyIntegrity("tenant-a", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("independent streams should validate: %+v %v", result, err)
+	}
+}
+
+// TestIngestStripsClientStreamID is AC-1: a body-supplied stream_id is
+// stripped on ingest, so the stored event, receipt and archive object carry
+// the server-derived stream (tenant + aggregate/operation/source) and never
+// the client value. Regression property: against pre-fix code, the stored
+// stream equals the crafted value and this test fails.
+func TestIngestStripsClientStreamID(t *testing.T) {
+	cases := []struct {
+		name     string
+		crafted  string
+		mutate   func(*domain.Event)
+		expected string
+	}{
+		{name: "tenant-mimicking", crafted: "tenant-b:aggregate:invoice:inv-1", expected: "tenant-a:aggregate:invoice:inv-1"},
+		{name: "arbitrary", crafted: "attacker-stream", expected: "tenant-a:aggregate:invoice:inv-1"},
+		{name: "operation-derived", crafted: "attacker-stream", expected: "tenant-a:operation:op-9", mutate: func(e *domain.Event) {
+			e.OperationID = "op-9"
+			e.AggregateType = ""
+			e.AggregateID = ""
+		}},
+		{name: "source-derived", crafted: "attacker-stream", expected: "tenant-a:source:crm", mutate: func(e *domain.Event) {
+			e.OperationID = ""
+			e.AggregateType = ""
+			e.AggregateID = ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := testService(t, true)
+			base := time.Unix(1_700_000_000, 0).UTC()
+			e := testEvent("evt-1", "", base)
+			e.OperationID = ""
+			if tc.mutate != nil {
+				tc.mutate(&e)
+			}
+			e.StreamID = tc.crafted
+			receipt, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Duplicate || receipt.Status != domain.StatusArchived {
+				t.Fatalf("unexpected receipt: %+v", receipt)
+			}
+			if receipt.StreamID != tc.expected {
+				t.Fatalf("receipt stream=%q want %q", receipt.StreamID, tc.expected)
+			}
+			stored, err := svc.GetEvent("tenant-a", "crm", "evt-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.StreamID != tc.expected || stored.Sequence != 1 || stored.PrevHash != "" {
+				t.Fatalf("stored stream=%q seq=%d prev=%q want stream=%q seq=1 prev=\"\"", stored.StreamID, stored.Sequence, stored.PrevHash, tc.expected)
+			}
+			// Ingest strips its own copy only; the caller's event is untouched.
+			if e.StreamID != tc.crafted {
+				t.Fatalf("caller event mutated: %q", e.StreamID)
+			}
+			craftedBytes := []byte(tc.crafted)
+			if canonical, err := json.Marshal(stored); err != nil {
+				t.Fatal(err)
+			} else if bytes.Contains(canonical, craftedBytes) {
+				t.Fatalf("crafted stream value in stored canonical JSON: %s", canonical)
+			}
+			if canonical, err := json.Marshal(receipt); err != nil {
+				t.Fatal(err)
+			} else if bytes.Contains(canonical, craftedBytes) {
+				t.Fatalf("crafted stream value in receipt JSON: %s", canonical)
+			}
+			archiveFile := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", safeName(tc.expected), "00000000000000000001-evt-1.json")
+			data, err := os.ReadFile(archiveFile)
+			if err != nil {
+				t.Fatalf("archive object missing at %s: %v", archiveFile, err)
+			}
+			var archived domain.Event
+			if err := json.Unmarshal(data, &archived); err != nil {
+				t.Fatal(err)
+			}
+			if archived.StreamID != tc.expected {
+				t.Fatalf("archived stream=%q want %q", archived.StreamID, tc.expected)
+			}
+			if bytes.Contains(data, craftedBytes) {
+				t.Fatalf("crafted stream value in archive object: %s", data)
+			}
+		})
+	}
+}
+
+// TestIngestCollapsesCraftedStreamIDs is AC-2: N events with N distinct
+// crafted stream_ids collapse into exactly 1 stream (1 stream state, 1
+// segment chain, 1 archive directory) instead of minting N streams.
+// Regression property: against pre-fix code, the snapshot holds N stream
+// keys and this test fails.
+func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
+	svc := testService(t, true)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	const n = 20
+	const derived = "tenant-a:source:crm"
+	for i := 0; i < n; i++ {
+		e := testEvent(fmt.Sprintf("evt-%d", i), "", base.Add(time.Duration(i)*time.Second))
+		e.OperationID = ""
+		e.AggregateType = ""
+		e.AggregateID = ""
+		e.StreamID = fmt.Sprintf("crafted-%d", i)
+		if _, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Streams) != 1 {
+		t.Fatalf("crafted stream_ids minted %d streams, want 1", len(snap.Streams))
+	}
+	key := store.StreamKey("tenant-a", derived)
+	stream, ok := snap.Streams[key]
+	if !ok {
+		t.Fatalf("sole stream key %q missing; got %v", key, snapStreamKeys(snap.Streams))
+	}
+	if stream.NextSequence != n+1 {
+		t.Fatalf("NextSequence=%d want %d", stream.NextSequence, n+1)
+	}
+	var prevHash string
+	for i := 0; i < n; i++ {
+		stored, err := svc.GetEvent("tenant-a", "crm", fmt.Sprintf("evt-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.StreamID != derived || stored.Sequence != int64(i+1) || stored.PrevHash != prevHash {
+			t.Fatalf("event %d stream=%q seq=%d prev=%q want stream=%q seq=%d prev=%q", i, stored.StreamID, stored.Sequence, stored.PrevHash, derived, i+1, prevHash)
+		}
+		prevHash = stored.Hash
+	}
+	if len(snap.Segments) != 1 {
+		t.Fatalf("segments keyed by %d streams, want 1", len(snap.Segments))
+	}
+	for _, segment := range snap.Segments[key] {
+		if segment.StreamID != derived {
+			t.Fatalf("sealed segment stream=%q want %q", segment.StreamID, derived)
+		}
+	}
+	if got := len(snap.Segments[key]); got != n/2 {
+		t.Fatalf("sealed segment count=%d want %d (SegmentSize=2 over %d events on the single stream)", got, n/2, n)
+	}
+	dirs, err := os.ReadDir(filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0].Name() != safeName(derived) {
+		t.Fatalf("archive dirs=%v want exactly one %s", dirs, safeName(derived))
+	}
+	result, err := svc.VerifyIntegrity("tenant-a", "")
+	if err != nil || !result.Valid || result.EventCount != n {
+		t.Fatalf("collapsed-stream integrity failed: %+v %v", result, err)
+	}
+}
+
+func snapStreamKeys(streams map[string]store.StreamState) []string {
+	keys := make([]string, 0, len(streams))
+	for key := range streams {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// TestIngestDuplicateWithCraftedStreamID is L5: idempotency is keyed on
+// event_id + content digest, which excludes stream_id (A1), so re-sending
+// the same content with a different crafted stream_id is a duplicate and
+// never mints a second stream.
+func TestIngestDuplicateWithCraftedStreamID(t *testing.T) {
+	svc := testService(t, false)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	first := testEvent("evt-dup", "", base)
+	first.StreamID = "crafted-a"
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	again := testEvent("evt-dup", "", base)
+	again.StreamID = "crafted-b"
+	receipt, err := svc.Ingest("tenant-a", crmPrincipal, again, domain.StatusLedgered)
+	if err != nil || !receipt.Duplicate {
+		t.Fatalf("expected duplicate: %+v %v", receipt, err)
+	}
+	if receipt.StreamID != "tenant-a:aggregate:invoice:inv-1" {
+		t.Fatalf("receipt stream=%q want derived tenant-a:aggregate:invoice:inv-1", receipt.StreamID)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Streams) != 1 {
+		t.Fatalf("duplicate re-send minted %d streams, want 1", len(snap.Streams))
+	}
+}
+
+// TestIngestTenantMismatchPrecedesStreamStrip is M3: a mismatched envelope
+// tenant_id combined with a crafted stream_id is rejected with
+// ErrTenantMismatch before the strip/derivation, and no stream state is
+// created even transiently.
+func TestIngestTenantMismatchPrecedesStreamStrip(t *testing.T) {
+	svc := testService(t, false)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	e := testEvent("evt-x", "", base)
+	e.TenantID = "tenant-b"
+	e.StreamID = "crafted-foreign"
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
+		t.Fatalf("expected ErrTenantMismatch, got %v", err)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Streams) != 0 || len(snap.Events) != 0 {
+		t.Fatalf("rejected ingest created state: streams=%d events=%d", len(snap.Streams), len(snap.Events))
 	}
 }
 

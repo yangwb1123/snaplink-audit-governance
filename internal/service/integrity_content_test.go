@@ -380,25 +380,18 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	svc := testService(t, false)
 	base := time.Unix(1_700_000_000, 0).UTC()
 	first := testEvent("evt-a-1", "", base.Add(10*time.Second))
-	first.OperationID = ""
-	first.AggregateID = ""
-	first.AggregateType = ""
-	first.StreamID = "stream-a"
 	second := testEvent("evt-b-1", "", base)
-	second.OperationID = ""
-	second.AggregateID = ""
-	second.AggregateType = ""
-	second.StreamID = "stream-b"
+	second.AggregateID = "inv-2" // derived stream: tenant-a:aggregate:invoice:inv-2
 	for _, event := range []domain.Event{first, second} {
 		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
-	scoped, err := svc.VerifyIntegrity("tenant-a", "stream-a")
+	scoped, err := svc.VerifyIntegrity("tenant-a", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !scoped.Valid || scoped.EventCount != 1 || scoped.StreamID != "stream-a" {
+	if !scoped.Valid || scoped.EventCount != 1 || scoped.StreamID != "tenant-a:aggregate:invoice:inv-1" {
 		t.Fatalf("scoped verify failed: %+v", scoped)
 	}
 	if err := svc.Store.Update(func(data *store.Snapshot) error {
@@ -412,7 +405,7 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scoped, err = svc.VerifyIntegrity("tenant-a", "stream-a")
+	scoped, err = svc.VerifyIntegrity("tenant-a", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +418,64 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	}
 	if full.Valid || len(full.Errors) == 0 {
 		t.Fatalf("full verify must surface the tampered stream: %+v", full)
+	}
+}
+
+// TestVerifyIntegrityMixedLegacyAndDerivedStreams is M4 (§4.3 no-backfill):
+// events stored under a client-supplied stream before the strip fix coexist
+// with new server-derived streams. Each stream's chain stays internally
+// consistent and full verify passes over both without re-filing; scoped
+// verifies of each stream are independently valid.
+func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
+	svc := testService(t, false)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	legacy := testEvent("legacy-1", "", base)
+	legacy.OperationID = ""
+	legacy.AggregateType = ""
+	legacy.AggregateID = ""
+	legacy.StreamID = "tenant-a:legacy:stream" // client-value stream, pre-fix placement
+	legacy.TenantID = "tenant-a"
+	legacy.Sequence = 1
+	legacy.PrevHash = ""
+	sourceDigest, err := domain.EventContentDigest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SourceDigest = sourceDigest
+	hash, err := svc.eventHash(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Hash = hash
+	key := store.EventKey("tenant-a", legacy.EventID)
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Events[key] = legacy
+		streamKey := store.StreamKey("tenant-a", legacy.StreamID)
+		data.Streams[streamKey] = store.StreamState{TenantID: "tenant-a", StreamID: legacy.StreamID, NextSequence: 2, HeadHash: hash}
+		data.Receipts[key] = domain.EventReceipt{EventID: legacy.EventID, TenantID: "tenant-a", Status: domain.StatusIndexed, AcceptedAt: legacy.OccurredAt, LedgeredAt: legacy.OccurredAt, StreamID: legacy.StreamID, Sequence: 1, Hash: hash}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("new-1", "", base.Add(time.Second)), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity("tenant-a", "")
+	if err != nil || !result.Valid || result.EventCount != 2 {
+		t.Fatalf("mixed-stream integrity failed: %+v %v", result, err)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Streams) != 2 {
+		t.Fatalf("streams=%d want 2 (legacy client-value + derived)", len(snap.Streams))
+	}
+	for _, sid := range []string{"tenant-a:legacy:stream", "tenant-a:aggregate:invoice:inv-1"} {
+		scoped, err := svc.VerifyIntegrity("tenant-a", sid)
+		if err != nil || !scoped.Valid || scoped.EventCount != 1 {
+			t.Fatalf("scoped verify %q failed: %+v %v", sid, scoped, err)
+		}
 	}
 }
 

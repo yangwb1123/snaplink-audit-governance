@@ -107,3 +107,96 @@ class TenantConsistencyCheckTest(unittest.TestCase):
         tree = self.make_tree("func ingest() {}\n")
         self.addCleanup(tree.cleanup)
         self.assertNotEqual(run(Path(tree.name)), 0)
+
+
+class StreamConsistencyCheckTest(unittest.TestCase):
+    """stream_consistency: the client stream_id strip must appear after the
+    DS-08 tenant check, before the first event.Stream() derivation, and the
+    server stamp must follow the derivation; any reorder fails the gate."""
+
+    GOOD = (
+        "func ingest() {\n"
+        "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
+        "\t\treturn ErrTenantMismatch\n"
+        "\t}\n"
+        "\tevent.StreamID = \"\"\n"
+        "\tstreamID := event.Stream()\n"
+        "\tevent.StreamID = streamID\n"
+        "}\n"
+    )
+    BAD_ORDER = (
+        "func ingest() {\n"
+        "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
+        "\t\treturn ErrTenantMismatch\n"
+        "\t}\n"
+        "\tstreamID := event.Stream()\n"
+        "\tevent.StreamID = \"\"\n"
+        "\tevent.StreamID = streamID\n"
+        "}\n"
+    )
+    BAD_NO_STRIP = (
+        "func ingest() {\n"
+        "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
+        "\t\treturn ErrTenantMismatch\n"
+        "\t}\n"
+        "\tstreamID := event.Stream()\n"
+        "\tevent.StreamID = streamID\n"
+        "}\n"
+    )
+    BAD_NO_STAMP = (
+        "func ingest() {\n"
+        "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
+        "\t\treturn ErrTenantMismatch\n"
+        "\t}\n"
+        "\tevent.StreamID = \"\"\n"
+        "\tstreamID := event.Stream()\n"
+        "}\n"
+    )
+    BAD_STRIP_BEFORE_TENANT = (
+        "func ingest() {\n"
+        "\tevent.StreamID = \"\"\n"
+        "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
+        "\t\treturn ErrTenantMismatch\n"
+        "\t}\n"
+        "\tstreamID := event.Stream()\n"
+        "\tevent.StreamID = streamID\n"
+        "}\n"
+    )
+
+    def make_tree(self, content):
+        import tempfile
+        tree = tempfile.TemporaryDirectory()
+        internal = Path(tree.name) / "internal" / "service"
+        internal.mkdir(parents=True)
+        (internal / "service.go").write_text(content, encoding="utf-8")
+        return tree
+
+    def test_strip_before_derivation_passes(self):
+        from checks.stream_consistency import run
+        tree = self.make_tree(self.GOOD)
+        self.addCleanup(tree.cleanup)
+        self.assertEqual(run(Path(tree.name)), 0)
+
+    def test_strip_after_derivation_fails(self):
+        from checks.stream_consistency import run
+        tree = self.make_tree(self.BAD_ORDER)
+        self.addCleanup(tree.cleanup)
+        self.assertNotEqual(run(Path(tree.name)), 0)
+
+    def test_missing_strip_fails(self):
+        from checks.stream_consistency import run
+        tree = self.make_tree(self.BAD_NO_STRIP)
+        self.addCleanup(tree.cleanup)
+        self.assertNotEqual(run(Path(tree.name)), 0)
+
+    def test_missing_stamp_fails(self):
+        from checks.stream_consistency import run
+        tree = self.make_tree(self.BAD_NO_STAMP)
+        self.addCleanup(tree.cleanup)
+        self.assertNotEqual(run(Path(tree.name)), 0)
+
+    def test_strip_before_tenant_check_fails(self):
+        from checks.stream_consistency import run
+        tree = self.make_tree(self.BAD_STRIP_BEFORE_TENANT)
+        self.addCleanup(tree.cleanup)
+        self.assertNotEqual(run(Path(tree.name)), 0)

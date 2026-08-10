@@ -67,6 +67,11 @@ message WriteResponse {
   string event_id = 1;
   string tenant_id = 2;
   string status = 3;
+  // Read-only receipt field: the ledger stream is server-derived
+  // (tenant + aggregate/operation/source) and stamped on ingest. The ingest
+  // envelope (EventEnvelope) intentionally carries no stream_id — a
+  // client-supplied value is stripped by Service.Ingest (stream
+  // consistency), so any future envelope field must NOT be mapped.
   string stream_id = 4;
   int64 sequence = 5;
   string hash = 6;

@@ -397,6 +397,12 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 	if event.TenantID != "" && event.TenantID != tenantID {
 		return domain.EventReceipt{}, fmt.Errorf("%w: envelope tenant_id %q does not match the tenant resolved from the authenticated client (%q)", domain.ErrTenantMismatch, event.TenantID, tenantID)
 	}
+	// Stream consistency (this direction): the envelope may carry a stream_id,
+	// but the ledger stream is server-derived from tenant + aggregate/operation/
+	// source (Event.Stream). A client-supplied value is stripped here so it can
+	// never participate in stream resolution, StreamKey, storage, hashing,
+	// segment sealing or archive keys. stream_id is a read/query filter only.
+	event.StreamID = ""
 	if err := s.checkTenantAndQuota(tenantID); err != nil {
 		return domain.EventReceipt{}, err
 	}

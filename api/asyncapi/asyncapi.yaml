@@ -98,7 +98,7 @@ components:
         data_classification: { type: string }
         retention_class: { type: string }
         idempotency_key: { type: string }
-        stream_id: { type: string }
+        stream_id: { type: string, description: Server-assigned; a client-supplied value is stripped on ingest. }
         sequence: { type: integer }
         prev_hash: { type: string }
         hash: { type: string }

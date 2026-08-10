@@ -1,5 +1,20 @@
 # Release Notes
 
+## 2026-08-10 — body `stream_id` stripped on ingest (stream consistency)
+
+**写给写入方：** `POST /api/v1/events`（及 batch）请求体中的 `stream_id`
+自本版本起在 `Service.Ingest` 中被剥离——字段仍被接受（不做 400/422
+拒绝），但不再参与流解析、存储、哈希、分段封存或归档路径。流由服务端
+从 tenant + aggregate/operation/source 派生并回填（与 `tenant_id` DS-08
+同级的 stream consistency 规则）；`stream_id` 仅作为查询/完整性校验的
+只读过滤条件。回执与存储事件的 `stream_id` 恒为服务端派生值。
+
+- 兼容性：无数据迁移、无回填；历史事件保持原流位置，链哈希与签名
+  manifest 不受影响（混合流可共存，逐流校验）。
+- 幂等语义不变：去重/冲突按 `event_id` + 内容摘要（不含 `stream_id`）。
+- 新增机械门禁 `checks/stream_consistency.py` 随 `python3 cli.py quality`
+  强制执行剥离顺序（DS-08 之后、`event.Stream()` 之前、服务端回填之后）。
+
 ## 2026-08-07 — B4-2 严格 scope registry 在验证栈启用：审计 scope 矩阵注册 + e2e 全链复验
 
 **跨仓语义闭环（IdP 侧 B4-2 的验证栈落地）：**

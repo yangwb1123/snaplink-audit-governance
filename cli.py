@@ -402,11 +402,13 @@ def cmd_quality() -> int:
     from checks.dev_auth_manifest import run as dev_auth_manifest
     from checks.route_contract import run as route_contract
     from checks.sensitive_logging import run as sensitive_logging
+    from checks.stream_consistency import run as stream_consistency
     from checks.tenant_consistency import run as tenant_consistency
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
                     adr_compliance, make_help, route_contract, contract_fields,
-                    dev_auth_manifest, tenant_consistency, sensitive_logging,
+                    dev_auth_manifest, tenant_consistency, stream_consistency,
+                    sensitive_logging,
                     cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):
         if command() != 0:
             return 1
