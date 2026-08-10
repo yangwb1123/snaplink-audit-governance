@@ -26,3 +26,13 @@ build:
       path: ./cmd/audit-kafka-dlq-replay
     - name: audit-projector
       path: ./cmd/audit-projector
+
+# Single source of truth for the api/proto generator toolchain pins.
+# checks/proto_sync.py and scripts/proto-gen.py read only this block;
+# the checked-in generated headers (api/proto/*.pb.go) must match these
+# pins, and the protoc-gen-go pin must equal the google.golang.org/protobuf
+# version in go.mod (enforced by the quality gate).
+proto:
+  protoc: v3.21.12
+  protoc-gen-go: v1.36.11
+  protoc-gen-go-grpc: v1.5.1

@@ -167,6 +167,7 @@ def cmd_check_root() -> int:
 
 
 def cmd_generate() -> int:
+    from checks.proto_sync import run as proto_sync
     required = [ROOT / "api" / "openapi" / "openapi.yaml",
                 ROOT / "api" / "asyncapi" / "asyncapi.yaml",
                 ROOT / "api" / "proto" / "audit.proto"]
@@ -174,8 +175,10 @@ def cmd_generate() -> int:
     if missing:
         print("missing engineering contracts:", *missing, sep="\n  ")
         return 1
-    print("engineering scaffolding is present; no generated files require regeneration")
-    return 0
+    # R7: the generate command reflects the real sync state (descriptor
+    # comparison + version pins + replay) instead of reporting a false
+    # "no regeneration required" success.
+    return proto_sync(ROOT)
 
 
 def go_imports(path: Path) -> set[str]:
@@ -400,6 +403,7 @@ def cmd_quality() -> int:
     from checks.root_files import run as root_files
     from checks.contract_fields import run as contract_fields
     from checks.dev_auth_manifest import run as dev_auth_manifest
+    from checks.proto_sync import run as proto_sync
     from checks.route_contract import run as route_contract
     from checks.sensitive_logging import run as sensitive_logging
     from checks.stream_consistency import run as stream_consistency
@@ -407,6 +411,7 @@ def cmd_quality() -> int:
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
                     adr_compliance, make_help, route_contract, contract_fields,
+                    proto_sync,  # proto drift guard: fails fast, before the ~95s Go stages
                     dev_auth_manifest, tenant_consistency, stream_consistency,
                     sensitive_logging,
                     cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):

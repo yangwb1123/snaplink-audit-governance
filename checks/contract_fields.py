@@ -2,6 +2,8 @@ import re
 import sys
 from pathlib import Path
 
+from checks.proto_sync import ProtoSyncParseError, envelope_fields
+
 
 # Architecture plan §19 requires OpenAPI/Protobuf/AsyncAPI contract checks.
 # This guard verifies that the JSON-serialized domain.Event fields stay
@@ -47,17 +49,9 @@ def asyncapi_envelope_props(root: Path) -> set[str]:
     return set(re.findall(r"^\s+(\w+): \{", match.group(1), re.MULTILINE))
 
 
-def proto_envelope_fields(root: Path) -> set[str]:
-    proto = (root / "api/proto/audit.proto").read_text(encoding="utf-8")
-    match = re.search(r"message EventEnvelope \{(.*?)\n\}", proto, re.S)
-    if not match:
-        raise SystemExit("FAIL: proto EventEnvelope not found")
-    # 类型可能带包前缀（google.protobuf.Timestamp），字段名才是目标。
-    return set(re.findall(r"^\s+(?:repeated\s+)?[\w.]+\s+(\w+) = \d+;", match.group(1), re.MULTILINE))
-
-
-def run() -> int:
-    root = Path(__file__).resolve().parents[1]
+def run(root=None) -> int:
+    if root is None:
+        root = Path(__file__).resolve().parents[1]
     domain_fields = domain_event_fields(root)
     business_fields = domain_fields - SERVER_ASSIGNED - INGEST_ONLY
 
@@ -72,7 +66,15 @@ def run() -> int:
         if field not in asyncapi_props:
             failures.append(f"AsyncAPI EventEnvelope missing field {field}")
 
-    proto_fields = proto_envelope_fields(root)
+    # The gRPC envelope field set comes from the GENERATED descriptor
+    # (checks.proto_sync.envelope_fields), never from the .proto source text:
+    # a field added only to audit.proto is not part of the compiled runtime
+    # and cannot satisfy the parity loop (R4).
+    try:
+        proto_fields = envelope_fields(root)
+    except ProtoSyncParseError as error:
+        print(f"FAIL: contract fields: proto descriptor parse error: {error}")
+        return 1
     # The gRPC envelope carries the payload as bytes named payload_json.
     proto_lookup = set(proto_fields)
     if "payload_json" in proto_lookup:

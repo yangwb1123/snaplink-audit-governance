@@ -525,14 +525,19 @@ func (x *WriteRequest) GetWaitFor() string {
 }
 
 type WriteResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
-	StreamId      string                 `protobuf:"bytes,4,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
-	Sequence      int64                  `protobuf:"varint,5,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	Hash          string                 `protobuf:"bytes,6,opt,name=hash,proto3" json:"hash,omitempty"`
-	Duplicate     bool                   `protobuf:"varint,7,opt,name=duplicate,proto3" json:"duplicate,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	EventId  string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	TenantId string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Status   string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	// Read-only receipt field: the ledger stream is server-derived
+	// (tenant + aggregate/operation/source) and stamped on ingest. The ingest
+	// envelope (EventEnvelope) intentionally carries no stream_id — a
+	// client-supplied value is stripped by Service.Ingest (stream
+	// consistency), so any future envelope field must NOT be mapped.
+	StreamId      string `protobuf:"bytes,4,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	Sequence      int64  `protobuf:"varint,5,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Hash          string `protobuf:"bytes,6,opt,name=hash,proto3" json:"hash,omitempty"`
+	Duplicate     bool   `protobuf:"varint,7,opt,name=duplicate,proto3" json:"duplicate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

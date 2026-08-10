@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan
+.PHONY: help check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan"
+	@echo "make targets: check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan"
 
 check:
 	$(CLI) check
@@ -32,6 +32,9 @@ fmt:
 
 build:
 	$(CLI) build
+
+proto:
+	python3 scripts/proto-gen.py
 
 check-routes:
 	$(CLI) check-routes

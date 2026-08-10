@@ -28,8 +28,14 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type IngestClient interface {
-	// Tenant identity is resolved from signed token claims or the unique
-	// server-side (client_id, source_system) registration, never request data.
+	// Supported inbound for the audit ingest surface (B1-6): Write,
+	// WriteBatch and WriteStream are production-supported and share the HTTP
+	// path's constraints — bearer-token authentication (same Authenticator),
+	// server-side tenant resolution with envelope-tenant consistency (DS-08,
+	// mismatch -> FailedPrecondition/422), schema validation, idempotency and
+	// service-layer self-audit. Tenant identity is resolved from signed token
+	// claims or the unique server-side (client_id, source_system)
+	// registration, never request data.
 	Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
 	WriteBatch(ctx context.Context, in *WriteBatchRequest, opts ...grpc.CallOption) (*WriteBatchResponse, error)
 	WriteStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WriteRequest, WriteResponse], error)
@@ -80,8 +86,14 @@ type Ingest_WriteStreamClient = grpc.BidiStreamingClient[WriteRequest, WriteResp
 // All implementations must embed UnimplementedIngestServer
 // for forward compatibility.
 type IngestServer interface {
-	// Tenant identity is resolved from signed token claims or the unique
-	// server-side (client_id, source_system) registration, never request data.
+	// Supported inbound for the audit ingest surface (B1-6): Write,
+	// WriteBatch and WriteStream are production-supported and share the HTTP
+	// path's constraints — bearer-token authentication (same Authenticator),
+	// server-side tenant resolution with envelope-tenant consistency (DS-08,
+	// mismatch -> FailedPrecondition/422), schema validation, idempotency and
+	// service-layer self-audit. Tenant identity is resolved from signed token
+	// claims or the unique server-side (client_id, source_system)
+	// registration, never request data.
 	Write(context.Context, *WriteRequest) (*WriteResponse, error)
 	WriteBatch(context.Context, *WriteBatchRequest) (*WriteBatchResponse, error)
 	WriteStream(grpc.BidiStreamingServer[WriteRequest, WriteResponse]) error
