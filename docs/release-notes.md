@@ -1,5 +1,34 @@
 # Release Notes
 
+## 2026-08-10 — proto 漂移门禁：生成的 pb.go 与 audit.proto 强一致
+
+**写给开发者的行为变化：** `api/proto/` 的 checked-in 生成代码（`audit.pb.go`、
+`audit_grpc.pb.go`）从本版本起由质量门禁强制与 `api/proto/audit.proto` 同步，
+不再可能“改了 .proto 但忘了重新生成”还保持全绿：
+
+- **新门禁 `proto-sync`**（`checks/proto_sync.py`，随 `python3 cli.py quality` 执行，
+  位于 `contract_fields` 之后、Go 阶段之前快速失败）：
+  1. **描述符解析（始终开启、零外部依赖）**：解码 `audit.pb.go` 内嵌的
+     `file_audit_proto_rawDesc`，与 `.proto` 逐消息逐字段比对
+     （字段名/编号/repeated/类型）——新增字段未重新生成即报 FAIL 并点名字段；
+  2. **生成器版本钉死**：生成文件头版本注释必须匹配 `engineering.yaml` 的
+     `proto:` 块（protoc v3.21.12 / protoc-gen-go v1.36.11 /
+     protoc-gen-go-grpc v1.5.1），且 `protoc-gen-go` 必须等于 `go.mod` 的
+     protobuf 版本；
+  3. **字节回放（工具链存在时）**：`scripts/proto-gen.py --check` 用钉死工具
+     重新生成并逐字节比对；无工具链时显式跳过（绝不静默通过）。
+- **`python3 cli.py generate` 不再谎报成功**：同步失败时以非零码退出；
+  成功路径输出改为执行真实检查。
+- **`make proto`**：钉死工具链引导（protoc zip → gitignored `bin/`、
+  `go install @pin`）并重新生成。CI 断言：
+  `make proto && test -z "$(git status --porcelain api/proto)"`。
+- **对账**：checked-in 生成文件已用钉死工具重新生成——仅注释/格式差异，
+  `rawDesc` 2234 字节逐字节一致，无任何线协议/字段变化，无 go.mod 变更。
+- 漂移演练：`bash scripts/drift-simulate.sh` 在 `git archive HEAD` 副本注入
+  漂移字段，要求门禁点名失败、恢复后通过（绝不改动工作树）。
+
+迁移：无（纯门禁/构建工具链变化；运行期行为不变）。
+
 ## 2026-08-10 — body `stream_id` stripped on ingest (stream consistency)
 
 **写给写入方：** `POST /api/v1/events`（及 batch）请求体中的 `stream_id`
