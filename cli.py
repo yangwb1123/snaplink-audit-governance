@@ -91,10 +91,14 @@ def cmd_build() -> int:
 def cmd_check_filesize() -> int:
     # The sibling CLI treats this as a gate.  Keep a generous threshold for
     # service implementations while still catching accidental generated blobs.
+    # Test suites are exempt, matching checks/filesize.py (the checker the
+    # quality gate runs): the line budget governs production code only.
     limit = QUALITY_MAX_GO_LINES
     failed = False
     for path in sorted(ROOT.rglob("*.go")):
         if any(part in {".git", "bin", "vendor"} for part in path.parts):
+            continue
+        if "_test.go" in path.name:
             continue
         lines = len(path.read_text(encoding="utf-8").splitlines())
         if lines > limit:
