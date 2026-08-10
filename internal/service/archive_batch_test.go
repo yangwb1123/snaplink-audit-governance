@@ -322,3 +322,116 @@ func TestArchivePassConflictCounterPersistsAndResets(t *testing.T) {
 		t.Fatalf("counter after successful pass = %d, %v; want 0", n, err)
 	}
 }
+
+// TestArchivePendingMissingReceiptAbortsAtomically pins the whole-batch abort
+// on a missing receipt (FM-3): the closure's ErrNotFound aborts the pass
+// before any Save, so zero receipts are marked and the counter is untouched.
+// No receipt-deletion path exists in the service; the corrupted-snapshot
+// case is simulated directly through the store.
+func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := testServiceWithBackend(t, backend)
+	archiveStub := &recordingArchive{fail: true}
+	seedPendingEvents(t, svc, archiveStub, 5)
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		delete(data.Receipts, store.EventKey("tenant-a", "evt-3"))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.saves = 0
+	archiveStub.fail = false
+	archiveStub.puts = nil
+	count, err := svc.ArchivePending("tenant-a")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ArchivePending err=%v, want ErrNotFound", err)
+	}
+	if count != 0 {
+		t.Fatalf("count=%d, want 0 (whole-batch abort)", count)
+	}
+	if backend.saves != 0 {
+		t.Fatalf("saves=%d, want 0 (closure error commits nothing)", backend.saves)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		receipt, ok := snap.Receipts[store.EventKey("tenant-a", fmt.Sprintf("evt-%d", i))]
+		if i == 3 {
+			if ok {
+				t.Fatalf("event 3 receipt still present, want deleted")
+			}
+			continue
+		}
+		if !ok || receipt.Status != domain.StatusIndexed {
+			t.Fatalf("event %d receipt ok=%v status=%+v, want untouched StatusIndexed", i, ok, receipt.Status)
+		}
+	}
+	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+		t.Fatalf("counter = %d, %v; want 0 untouched", n, err)
+	}
+}
+
+// TestArchivePendingEmptyPassLeavesCounter pins the zero-event semantics: a
+// pass with nothing to mark opens no window and must not reset the counter
+// (it counts consecutive passes aborted by exhaustion; an empty pass cannot
+// have been aborted).
+func TestArchivePendingEmptyPassLeavesCounter(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := testServiceWithBackend(t, backend)
+	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	svc.Config.Archive = &recordingArchive{}
+
+	backend.saves = 0
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 0 {
+		t.Fatalf("ArchivePending = %d, %v; want 0, nil", count, err)
+	}
+	if backend.saves != 0 {
+		t.Fatalf("saves=%d, want 0 (empty pass opens no window)", backend.saves)
+	}
+	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+		t.Fatalf("counter = %d, %v; want 1 (empty pass must not reset)", n, err)
+	}
+}
+
+// TestArchivePendingPutFailureReturnsZeroWithoutWindow pins the mid-loop Put
+// failure contract: the pass aborts on the first Put failure with count 0,
+// no receipts are marked and no Update window was opened (Put happens before
+// the batch commit).
+func TestArchivePendingPutFailureReturnsZeroWithoutWindow(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := testServiceWithBackend(t, backend)
+	archiveStub := &recordingArchive{fail: true}
+	seedPendingEvents(t, svc, archiveStub, 5)
+	// The stub stays failing: the pass's Put loop aborts on the first event.
+	archiveStub.puts = nil
+	backend.saves = 0
+
+	count, err := svc.ArchivePending("tenant-a")
+	if err == nil {
+		t.Fatal("ArchivePending err=nil, want Put failure")
+	}
+	if count != 0 {
+		t.Fatalf("count=%d, want 0 (no receipts committed on Put failure)", count)
+	}
+	if backend.saves != 0 {
+		t.Fatalf("saves=%d, want 0 (no window before all Puts succeed)", backend.saves)
+	}
+	if len(archiveStub.puts) != 1 {
+		t.Fatalf("pass Puts = %d, want 1 (aborts on the first event)", len(archiveStub.puts))
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if receipt := snap.Receipts[store.EventKey("tenant-a", fmt.Sprintf("evt-%d", i))]; receipt.Status == domain.StatusArchived {
+			t.Fatalf("event %d marked archived despite Put failure", i)
+		}
+	}
+}

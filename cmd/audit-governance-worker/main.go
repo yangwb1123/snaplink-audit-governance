@@ -89,17 +89,7 @@ func main() {
 			}
 			archived, archiveErr := svc.ArchivePending(tenant.ID)
 			if archiveErr != nil {
-				// Persisted exhaustion signal: the per-tenant counter survives
-				// restarts and is reset by the next successful pass. The
-				// increment is best-effort — a failed counter write must not
-				// mask the pass failure.
-				if errors.Is(archiveErr, store.ErrSnapshotConflict) {
-					if recErr := svc.RecordArchivePassConflict(tenant.ID); recErr != nil {
-						logger.Printf("tenant=%s archive_conflict_record_error=%v", tenant.ID, recErr)
-					}
-				}
-				failures, _ := svc.ArchivePassConflictFailures(tenant.ID)
-				logger.Printf("tenant=%s archive_error=%v archived=%d conflict_failures=%d", tenant.ID, archiveErr, archived, failures)
+				handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
 			}
 			report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
 			if reportErr != nil {
@@ -126,6 +116,22 @@ func main() {
 			return
 		}
 	}
+}
+
+// handleArchiveError logs a failed archive pass and persists the per-tenant
+// exhausted-retry signal: when the pass aborted on ErrSnapshotConflict, the
+// tenant's counter is incremented (best-effort — a failed counter write is
+// logged separately and never masks the pass error) so the exhaustion
+// survives restarts and is queryable after the fact; the next successful
+// pass resets it inside its atomic batch commit.
+func handleArchiveError(logger *log.Logger, svc *service.Service, tenantID string, archived int, archiveErr error) {
+	if errors.Is(archiveErr, store.ErrSnapshotConflict) {
+		if recErr := svc.RecordArchivePassConflict(tenantID); recErr != nil {
+			logger.Printf("tenant=%s archive_conflict_record_error=%v", tenantID, recErr)
+		}
+	}
+	failures, _ := svc.ArchivePassConflictFailures(tenantID)
+	logger.Printf("tenant=%s archive_error=%v archived=%d conflict_failures=%d", tenantID, archiveErr, archived, failures)
 }
 
 func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store, error) {

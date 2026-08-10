@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-10 — worker: archive pass 一次乐观锁窗口提交 + 持久化冲突计数
+
+**写给运营（worker 日志行形状变化）：** `audit-governance-worker` 的
+`archive_error` 日志行自本版本起追加 `conflict_failures=%d` 字段（原行其余
+字段不变）：
+
+```
+tenant=<id> archive_error=<err> archived=<n> conflict_failures=<n>
+```
+
+- `conflict_failures` 是**持久化**的每租户连续失败计数（快照 jsonb 新增字段
+  `archive_conflict_failures`，旧快照缺失字段解码为空并自动归一化，**无迁移**）；
+  仅在归档 pass 因乐观锁耗尽（`ErrSnapshotConflict`）失败时自增，下一次成功
+  pass 在同一次原子提交中归零。重启后仍可查询：
+  `SELECT snapshot->'archive_conflict_failures' FROM audit_state_snapshot WHERE id=1;`
+  （文件后端直接读 state 文件）。
+
+**写给开发（行为变化）：** `ArchivePending` 从每事件一次 `Store.Update` 改为
+每个 pass **恰好一次** `Store.Update`（一个乐观锁窗口、一次全快照 jsonb 重写），
+闭包基于本 pass 成功 Put 的事件列表重跑，Put 循环与幂等语义不变：
+
+- **原子失败**：单次批量提交失败时 `archived=0` 且零收据被标记（不再有部分进度）；
+  已 Put 对象字节级幂等，下一 pass 重 Put 后收据收敛。
+- **Put 失败/收据缺失**：pass 中止，返回 `(0, err)`，不开窗口。
+- **日志**：耗尽失败时 worker 先尽力自增计数器（写失败单独记录
+  `archive_conflict_record_error`，绝不掩盖原 pass 错误），再打印带计数日志行。
+- 存储重试预算（3 次、≤30ms 抖动退避）、`Store.Update` 语义、归档 WORM/
+  幂等、worker 每租户调用序列均不变；无 API 路由/OpenAPI/迁移变化。
+
+**回归测试：** `internal/service/archive_batch_test.go`（AC-1 单窗口 saves==1、
+预算内收敛 saves==3/loads==3、AC-2 耗尽原子中止+自愈收敛、AC-3 计数自增/
+重启存活/同窗归零、缺收据/空 pass/Put 失败边界）与
+`cmd/audit-governance-worker/main_test.go`（worker 计数分支：耗尽自增、非冲突
+错误不记录、计数写失败不掩盖原错误）。
+
 ## 2026-08-10 — search digests stripped from timeline responses
 
 **写给读方（API 行为变化）：** `GET /api/v1/operations/{operationID}/timeline`
