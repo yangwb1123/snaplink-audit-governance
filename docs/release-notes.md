@@ -1,5 +1,38 @@
 # Release Notes
 
+## 2026-08-10 — search digests stripped from timeline responses
+
+**写给读方（API 行为变化）：** `GET /api/v1/operations/{operationID}/timeline`
+与 `GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline` 的响应自本版本起
+与 `/events`、`/events/{id}` 一致，在 HTTP 边界剥离事件 payload 中所有
+`*__search_digest` 键（任意嵌套深度，仅响应副本，绝不改动存储快照）：
+
+- 摘要值曾在响应中可见，可被用于跨租户关联（威胁模型边界 D）；两个时间线端点
+  是最后一个未剥离的读路径，现已闭合。剥离失败时 500 失败关闭（不写任何响应字节）。
+- **存储与导出不变**：摘要仍留在 store/投影/归档与导出的源快照中
+  （`runExport` 本就在自身边界剥离）；`GET /api/v1/operations/{id}/replay` 返回
+  派生状态（`ChangedFields` 回声，不含服务端派生摘要），不受影响。
+- 响应形状不变：`200 {"items": [...], "count": n}`，`404`/`401`/`403` 语义不变，
+  无 OpenAPI/权限/迁移变化。
+- 新增回归测试（AC-1，两条时间线路由）+ 静态守卫测试（AC-2）：
+  `TestEventReturningHandlersStripSearchDigests` 解析 `server.go`，要求路由表与
+  `Handler()` 实际注册一致、每个调用事件返回型 `s.Service.<Method>` 的处理器在
+  `writeJSON` 之前调用 `StripSearchDigests`——未来新增未剥离的事件返回型路由会直接失败。
+
+**已记录的后续决策（不在本次范围内）：**
+
+- **R1/F2（v1 未绑定摘要探测）**：`payload_digest` 查询仍接受 v1 未绑定摘要的相等匹配与
+  v1 重派生（`service.go digestMatches`）；已捕获的 v1 摘要值仍可作为跨租户探测句柄。
+  建议后续弃用 v1 匹配（仅保留 v2 绑定重派生）+ 遗留摘要轮换策略。
+- **R2/F3（时间线无界）**：时间线无分页/上限，剥离增加每事件 CPU；后续需
+  分页/封顶。
+- **R3/F4（ingest 卫生）**：无 `AllowedFields` 的 schema 下，客户端植入的
+  `*__search_digest` 键会原样入库并参与匹配；后续需在 ingest 时删除/拒绝未声明键。
+- **F5（replay/restore 状态回声）**：`ChangedFields` 中的摘要命名键会出现在
+  `/replay` 与恢复预览中（仅客户端自回声）；本变更不处理，后续在状态边界剥离。
+
+迁移：无（纯响应边界修复）。
+
 ## 2026-08-10 — proto 漂移门禁：生成的 pb.go 与 audit.proto 强一致
 
 **写给开发者的行为变化：** `api/proto/` 的 checked-in 生成代码（`audit.pb.go`、

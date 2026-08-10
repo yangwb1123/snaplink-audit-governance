@@ -8,12 +8,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1388,5 +1392,332 @@ func TestHTTPTenantMismatchBodyCode(t *testing.T) {
 	}
 	if envelope.Error.Code != "tenant_mismatch" {
 		t.Fatalf("error code=%q, want tenant_mismatch", envelope.Error.Code)
+	}
+}
+
+// timelineStripFixture seeds one event carrying BOTH an OperationID and an
+// AggregateType/AggregateID, with a top-level digest key (email__search_digest,
+// server-derived because email is searchable) and a nested digest key
+// (nested.note__search_digest, client-planted), plus non-digest content. It
+// returns the HTTP server and the service (for store-level positive controls).
+// Mirrors the fixture style of TestHTTPResponsesStripSearchDigestsRecursively.
+func timelineStripFixture(t *testing.T) (*httptest.Server, *service.Service) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	event := domain.Event{EventID: "strip-evt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 2, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "strip-op-1", AggregateType: "invoice", AggregateID: "inv-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "strip-idem-1", Payload: map[string]any{"resource": "invoice", "email": "alice@example.test", "nested": map[string]any{"note__search_digest": "sd2:nested", "keep": "yes"}}}
+	postTestEvent(t, server.URL, "dev:tenant-a:service:crm", event)
+	return server, svc
+}
+
+// timelineStripAssertions runs the shared AC-1 assertions over one decoded
+// timeline response: 200 already checked by the caller; count/len coherence,
+// no *__search_digest key at any nesting depth in any item payload, plaintext
+// survival, and the store-level positive control (digests retained).
+func timelineStripAssertions(t *testing.T, svc *service.Service, body []byte) {
+	t.Helper()
+	var result struct {
+		Items []domain.Event `json:"items"`
+		Count int            `json:"count"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode timeline response: %v (body=%s)", err, body)
+	}
+	if result.Count != len(result.Items) || result.Count != 1 {
+		t.Fatalf("count=%d len(items)=%d, want 1/1: %s", result.Count, len(result.Items), body)
+	}
+	for i := range result.Items {
+		if hasDigestKey(result.Items[i].Payload) {
+			t.Fatalf("timeline item %d payload still contains a digest key: %s", i, body)
+		}
+	}
+	payload := result.Items[0].Payload
+	if payload["email"] != "alice@example.test" {
+		t.Fatalf("plaintext field must survive the strip: %+v", payload)
+	}
+	if payload["nested"].(map[string]any)["keep"] != "yes" {
+		t.Fatalf("non-digest nested content must survive: %+v", payload)
+	}
+	// Positive control: the store keeps the digests — stripping must never
+	// mutate the stored payload shared with the snapshot (REQ-3).
+	stored, err := svc.GetEvent("tenant-a", "test", "strip-evt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stored.Payload["email__search_digest"]; !ok {
+		t.Fatal("store must retain the search digest; strip must be copy-only")
+	}
+	if _, ok := stored.Payload["nested"].(map[string]any)["note__search_digest"]; !ok {
+		t.Fatal("store must retain the nested digest-like key")
+	}
+}
+
+// TestHTTPOperationTimelineStripsSearchDigests is AC-1 (REQ-1): the operation
+// timeline response contains no key matching *__search_digest at any nesting
+// depth, count stays coherent, plaintext survives, and the store keeps the
+// digests. Fails on the pre-fix tree (digests are live in the response).
+func TestHTTPOperationTimelineStripsSearchDigests(t *testing.T) {
+	server, svc := timelineStripFixture(t)
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/operations/strip-op-1/timeline", nil)
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("operation timeline status=%d, want 200", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timelineStripAssertions(t, svc, body)
+}
+
+// TestHTTPAggregateTimelineStripsSearchDigests is AC-1 (REQ-2): the aggregate
+// timeline response gets the identical treatment as the operation timeline.
+// Fails on the pre-fix tree (digests are live in the response).
+func TestHTTPAggregateTimelineStripsSearchDigests(t *testing.T) {
+	server, svc := timelineStripFixture(t)
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/aggregates/invoice/inv-1/timeline", nil)
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("aggregate timeline status=%d, want 200", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timelineStripAssertions(t, svc, body)
+}
+
+// registeredRoutes is the exhaustive route table of (s *Server).Handler() —
+// every mux.HandleFunc registration in server.go. Adding a route without
+// declaring it here fails the guard test, forcing a conscious review.
+var registeredRoutes = []struct {
+	pattern string
+	handler string
+}{
+	{"GET /healthz", "healthz"},
+	{"GET /readyz", "readyz"},
+	{"GET /metrics", "metrics"},
+	{"POST /api/v1/events", "postEvent"},
+	{"POST /api/v1/events:batch", "postBatch"},
+	{"GET /api/v1/events/{eventID}", "getEvent"},
+	{"GET /api/v1/events/{eventID}/receipt", "getReceipt"},
+	{"GET /api/v1/events", "queryEvents"},
+	{"GET /api/v1/operations/{operationID}", "getOperation"},
+	{"GET /api/v1/operations/{operationID}/timeline", "getOperationTimeline"},
+	{"GET /api/v1/operations/{operationID}/replay", "replayOperation"},
+	{"GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline", "getAggregateTimeline"},
+	{"POST /api/v1/exports", "createExport"},
+	{"GET /api/v1/exports/{jobID}", "getExport"},
+	{"GET /api/v1/exports/{jobID}/download", "downloadExport"},
+	{"POST /api/v1/integrity/verify", "verifyIntegrity"},
+	{"POST /api/v1/legal-holds", "createLegalHold"},
+	{"GET /api/v1/legal-holds", "listLegalHolds"},
+	{"POST /api/v1/legal-holds/{holdID}/release", "releaseLegalHold"},
+	{"POST /api/v1/restores/preview", "previewRestore"},
+	{"POST /api/v1/restores", "createRestore"},
+	{"GET /api/v1/restores/{runID}", "getRestore"},
+	{"POST /api/v1/restores/{runID}/approve", "approveRestore"},
+	{"POST /api/v1/restores/{runID}/reject", "rejectRestore"},
+	{"POST /api/v1/tenants", "createTenant"},
+	{"GET /api/v1/tenants", "listTenants"},
+	{"POST /api/v1/sources", "createSource"},
+	{"GET /api/v1/sources", "listSources"},
+	{"PUT /api/v1/sources/{sourceID}", "updateSource"},
+	{"POST /api/v1/schemas", "createSchema"},
+	{"GET /api/v1/schemas", "listSchemas"},
+	{"PUT /api/v1/policies/retention", "setRetention"},
+	{"GET /api/v1/policies/retention", "getRetention"},
+	{"POST /api/v1/retention/evaluate", "evaluateRetention"},
+	{"GET /api/v1/admin/actions", "listAdminActions"},
+}
+
+// eventReturningServiceMethods is the provably complete set of service methods
+// returning domain.Event payloads (verified by auditing every s.Service.<Method>
+// call site in server.go; replay/restore/integrity return derived state, never
+// Payload). A future event-returning service method must be added here AND to
+// the guard's handler check at the same commit — documented, accepted surface.
+var eventReturningServiceMethods = map[string]bool{
+	"GetEvent":          true,
+	"QueryEvents":       true,
+	"OperationTimeline": true,
+	"AggregateTimeline": true,
+}
+
+// TestEventReturningHandlersStripSearchDigests is AC-2 (REQ-7): a static
+// repository-level guard proving every handler that serializes domain.Event
+// payloads (derived from its actual s.Service.<Method> calls) invokes
+// security.StripSearchDigests BEFORE writeJSON. Route inventory walks
+// (s *Server).Handler() — where all mux.HandleFunc registrations live — and
+// must equal the declared route table, so any new route fails until declared.
+//
+// Mutation checks (verified during development): commenting out either
+// timeline strip loop fails this test; adding an unstripped event-returning
+// route to Handler() + table fails it too. It also failed on the pre-fix tree
+// (both timeline handlers called event-returning methods without stripping).
+func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go (go test runs with CWD=package dir): %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server.go", src, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse server.go: %v", err)
+	}
+
+	// Locate func (s *Server) Handler() — the sole route registrar.
+	var handlerDecl *ast.FuncDecl
+	handlers := map[string]*ast.FuncDecl{}
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Recv == nil {
+			continue
+		}
+		handlers[fd.Name.Name] = fd
+		if fd.Name.Name == "Handler" {
+			handlerDecl = fd
+		}
+	}
+	if handlerDecl == nil {
+		t.Fatal("server.go: func (s *Server) Handler() not found")
+	}
+
+	// Route inventory: every mux.HandleFunc("METHOD /path", s.handler) call
+	// inside Handler()'s body.
+	type route struct{ pattern, handler string }
+	var found []route
+	ast.Inspect(handlerDecl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "HandleFunc" || len(call.Args) != 2 {
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			t.Fatalf("HandleFunc pattern arg is not a string literal: %s", fset.Position(call.Pos()))
+		}
+		pattern, err := strconv.Unquote(lit.Value)
+		if err != nil || !strings.Contains(pattern, " ") {
+			t.Fatalf("HandleFunc pattern %q must be \"METHOD /path\": %s", lit.Value, fset.Position(call.Pos()))
+		}
+		handlerArg, ok := call.Args[1].(*ast.SelectorExpr)
+		if !ok {
+			t.Fatalf("HandleFunc %q second arg must be s.<handler>: %s", pattern, fset.Position(call.Pos()))
+		}
+		found = append(found, route{pattern: pattern, handler: handlerArg.Sel.Name})
+		return true
+	})
+
+	// Exhaustive route-table assertion: any new route fails until declared.
+	table := map[string]string{}
+	for _, r := range registeredRoutes {
+		table[r.pattern] = r.handler
+	}
+	collected := map[string]string{}
+	for _, r := range found {
+		collected[r.pattern] = r.handler
+	}
+	if len(collected) != len(table) {
+		t.Fatalf("route count mismatch: collected=%d declared=%d\ncollected=%v\ndeclared=%v", len(collected), len(table), collected, table)
+	}
+	for pattern, handler := range table {
+		if got, ok := collected[pattern]; !ok || got != handler {
+			t.Fatalf("route %q: collected handler=%q, declared=%q (update registeredRoutes when adding routes)", pattern, collected[pattern], handler)
+		}
+	}
+
+	// The four event routes must map to the four event-returning handlers
+	// (explicit mapping assertion, REQ-7 step 4).
+	eventRoutes := map[string]string{
+		"GET /api/v1/events/{eventID}":                                  "getEvent",
+		"GET /api/v1/events":                                            "queryEvents",
+		"GET /api/v1/operations/{operationID}/timeline":                 "getOperationTimeline",
+		"GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline": "getAggregateTimeline",
+	}
+	for pattern, want := range eventRoutes {
+		if table[pattern] != want {
+			t.Fatalf("event route %q maps to %q, want %q", pattern, table[pattern], want)
+		}
+	}
+
+	// For every handler, derive event-returning service calls from its actual
+	// AST body; require StripSearchDigests before writeJSON in each.
+	for _, r := range found {
+		decl, ok := handlers[r.handler]
+		if !ok {
+			t.Fatalf("route %q: handler s.%s has no method declaration in server.go", r.pattern, r.handler)
+		}
+		var serviceMethods []string
+		var stripAt, writeJSONAt = -1, -1
+		ast.Inspect(decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fun := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				// s.Service.<Method>(...) — direct service calls only.
+				if inner, ok := fun.X.(*ast.SelectorExpr); ok {
+					if ident, ok := inner.X.(*ast.Ident); ok && ident.Name == "s" && inner.Sel.Name == "Service" {
+						serviceMethods = append(serviceMethods, fun.Sel.Name)
+					}
+				}
+				// security.StripSearchDigests or any selector form.
+				if fun.Sel.Name == "StripSearchDigests" && stripAt == -1 {
+					stripAt = fset.Position(fun.Pos()).Offset
+				}
+			case *ast.Ident:
+				if fun.Name == "StripSearchDigests" && stripAt == -1 {
+					stripAt = fset.Position(fun.Pos()).Offset
+				}
+				if fun.Name == "writeJSON" && writeJSONAt == -1 {
+					writeJSONAt = fset.Position(fun.Pos()).Offset
+				}
+			}
+			return true
+		})
+		for _, method := range serviceMethods {
+			if !eventReturningServiceMethods[method] {
+				continue
+			}
+			if stripAt == -1 {
+				t.Errorf("handler s.%s (route %s) calls event-returning s.Service.%s but never calls StripSearchDigests — digest keys leak into the response", r.handler, r.pattern, method)
+				continue
+			}
+			if writeJSONAt == -1 || stripAt >= writeJSONAt {
+				t.Errorf("handler s.%s (route %s) calls StripSearchDigests at offset %d but writes the response (writeJSON at %d) before/without it — strip must dominate serialization", r.handler, r.pattern, stripAt, writeJSONAt)
+			}
+		}
 	}
 }

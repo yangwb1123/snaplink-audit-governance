@@ -391,6 +391,16 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
+	// 与 getEvent/queryEvents 相同：时间线响应剥离搜索摘要（深拷贝，绝不
+	// 改动存储快照共享的 map）。剥离失败时 500 —— 宁可失败也不泄漏。
+	for i := range result {
+		stripped, stripErr := security.StripSearchDigests(result[i].Payload)
+		if stripErr != nil {
+			s.writeError(w, r, http.StatusInternalServerError, stripErr)
+			return
+		}
+		result[i].Payload = stripped
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": result, "count": len(result)})
 }
 
@@ -418,6 +428,16 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
+	}
+	// 与 getEvent/queryEvents 相同：聚合时间线响应剥离搜索摘要（深拷贝，
+	// 绝不改动存储快照共享的 map）。剥离失败时 500 —— 宁可失败也不泄漏。
+	for i := range items {
+		stripped, stripErr := security.StripSearchDigests(items[i].Payload)
+		if stripErr != nil {
+			s.writeError(w, r, http.StatusInternalServerError, stripErr)
+			return
+		}
+		items[i].Payload = stripped
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 }
