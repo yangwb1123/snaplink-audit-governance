@@ -13,7 +13,8 @@
 set -euo pipefail
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+logdir=$(mktemp -d)
+trap 'rm -rf "$tmp" "$logdir"' EXIT
 git archive HEAD | tar -x -C "$tmp"
 cd "$tmp"
 
@@ -49,12 +50,14 @@ source = source.replace(anchor, anchor + f"\n  string drift_probe = {number};")
 open(path, "w").write(source)
 EOF
 
-# The drifted tree must FAIL the gate, naming the drifted field.
-if $GATE_CMD > gate.log 2>&1; then
+# The drifted tree must FAIL the gate, naming the drifted field.  Gate logs
+# live OUTSIDE the copy (a sibling temp dir): the gate's own root-files
+# check rejects unexpected files in the repo root.
+if $GATE_CMD > "$logdir/gate.log" 2>&1; then
     echo "FAIL: drift simulation: gate passed despite proto drift" >&2
     exit 1
 fi
-if ! grep -q "drift_probe" gate.log || ! grep -q "EventEnvelope" gate.log; then
+if ! grep -q "drift_probe" "$logdir/gate.log" || ! grep -q "EventEnvelope" "$logdir/gate.log"; then
     echo "FAIL: drift simulation: gate failed but did not name drifted field 'drift_probe' in EventEnvelope" >&2
     exit 1
 fi
@@ -76,8 +79,8 @@ if grep -q "drift_probe" api/proto/audit.proto; then
 fi
 
 # The restored tree must PASS the full gate.
-if ! $GATE_CMD > gate2.log 2>&1; then
-    echo "FAIL: drift simulation: restored tree gate failed (see gate2.log)" >&2
+if ! $GATE_CMD > "$logdir/gate2.log" 2>&1; then
+    echo "FAIL: drift simulation: restored tree gate failed (see $logdir/gate2.log)" >&2
     exit 1
 fi
 echo "drift simulation: PASS"

@@ -479,6 +479,8 @@ class ProtoDriftSimulationTest(unittest.TestCase):
 
     def test_drift_simulate_script(self):
         """Stub-gate runs of the real script (fast, deterministic)."""
+        if not in_git_repo():
+            self.skipTest("requires the git repository (git archive HEAD)")
         stub_dir = Path(tempfile.mkdtemp(prefix="drift-stub-"))
         self.addCleanup(shutil.rmtree, str(stub_dir))
 
