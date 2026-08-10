@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -88,7 +89,17 @@ func main() {
 			}
 			archived, archiveErr := svc.ArchivePending(tenant.ID)
 			if archiveErr != nil {
-				logger.Printf("tenant=%s archive_error=%v archived=%d", tenant.ID, archiveErr, archived)
+				// Persisted exhaustion signal: the per-tenant counter survives
+				// restarts and is reset by the next successful pass. The
+				// increment is best-effort — a failed counter write must not
+				// mask the pass failure.
+				if errors.Is(archiveErr, store.ErrSnapshotConflict) {
+					if recErr := svc.RecordArchivePassConflict(tenant.ID); recErr != nil {
+						logger.Printf("tenant=%s archive_conflict_record_error=%v", tenant.ID, recErr)
+					}
+				}
+				failures, _ := svc.ArchivePassConflictFailures(tenant.ID)
+				logger.Printf("tenant=%s archive_error=%v archived=%d conflict_failures=%d", tenant.ID, archiveErr, archived, failures)
 			}
 			report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
 			if reportErr != nil {

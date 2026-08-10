@@ -321,6 +321,13 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 // It is intentionally idempotent: a byte-identical existing object is treated
 // as already archived, while a mismatched or unverifiable object at the key
 // surfaces as an error instead of being silently accepted.
+//
+// All receipts for events whose Put succeeded in this pass are committed in
+// exactly one Store.Update (one optimistic-lock window instead of one per
+// event), so a pass fails atomically — either every receipt is marked
+// StatusArchived or none is. The same atomic write resets the tenant's
+// archive-conflict counter, and the successful pass's receipts share one
+// timestamp.
 
 func (s *Service) ArchivePending(tenantID string) (int, error) {
 	if !archive.Configured(s.Config.Archive) {
@@ -357,29 +364,69 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 			return 0, err
 		}
 	}
-	archived := 0
+	archivedEvents := []domain.Event{}
 	for _, event := range events {
 		if err := s.archiveEvent(event); err != nil {
-			return archived, err
+			return 0, err
 		}
-		if err := s.Store.Update(func(data *store.Snapshot) error {
+		archivedEvents = append(archivedEvents, event)
+	}
+	if len(archivedEvents) == 0 {
+		// Nothing to mark; the conflict counter is deliberately not reset on
+		// an empty pass (it counts consecutive passes aborted by exhaustion,
+		// and an empty pass cannot have been aborted).
+		return 0, nil
+	}
+	// One batch Update for the whole pass: the captured event list (not a
+	// re-derivation from the fresh snapshot) keeps the closure re-runnable
+	// — Store.Update re-runs it on a fresh snapshot after each conflict and
+	// a failed Save commits nothing, so re-runs apply the same mutations.
+	// The reset of the tenant's conflict counter rides in the same atomic
+	// write as the receipt marking (no extra window).
+	now := s.Now()
+	if err := s.Store.Update(func(data *store.Snapshot) error {
+		for _, event := range archivedEvents {
 			key := store.EventKey(tenantID, event.EventID)
 			receipt, ok := data.Receipts[key]
 			if !ok {
 				return domain.ErrNotFound
 			}
-			now := s.Now()
 			receipt.Status = domain.StatusArchived
 			receipt.IndexedAt = now
 			receipt.ArchivedAt = now
 			data.Receipts[key] = receipt
-			return nil
-		}); err != nil {
-			return archived, err
 		}
-		archived++
+		data.ArchiveConflictFailures[tenantID] = 0
+		return nil
+	}); err != nil {
+		return 0, err
 	}
-	return archived, nil
+	return len(archivedEvents), nil
+}
+
+// RecordArchivePassConflict increments the tenant's persisted archive-pass
+// conflict counter. Best-effort: the worker invokes it after ArchivePending
+// returned an exhausted ErrSnapshotConflict; if this write itself exhausts
+// under sustained load it fails without masking the original error. The
+// closure is conflict-safe by construction: Store.Update re-runs it on the
+// fresh snapshot, and a failed Save commits nothing, so each committed
+// attempt applies exactly one increment.
+func (s *Service) RecordArchivePassConflict(tenantID string) error {
+	return s.Store.Update(func(data *store.Snapshot) error {
+		data.ArchiveConflictFailures[tenantID]++
+		return nil
+	})
+}
+
+// ArchivePassConflictFailures returns the tenant's persisted archive-pass
+// conflict counter, for the worker's log line and for tests.
+func (s *Service) ArchivePassConflictFailures(tenantID string) (int, error) {
+	var count int
+	err := s.Store.Read(func(data *store.Snapshot) error {
+		count = data.ArchiveConflictFailures[tenantID]
+		return nil
+	})
+	return count, err
 }
 
 func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest) (domain.RestorePreview, error) {

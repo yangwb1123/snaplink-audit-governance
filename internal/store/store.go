@@ -51,24 +51,32 @@ type Snapshot struct {
 	RestoreRuns          map[string]domain.RestoreRun      `json:"restore_runs"`
 	AdminActions         []domain.AdminAction              `json:"admin_actions"`
 	AggregateCheckpoints []domain.AggregateCheckpoint      `json:"aggregate_checkpoints"`
+	// ArchiveConflictFailures counts consecutive archive passes aborted by
+	// optimistic-lock exhaustion, per tenant. Reset to zero by the batch
+	// receipt commit in ArchivePending; incremented best-effort by the
+	// worker when a pass fails with ErrSnapshotConflict. It lives inside
+	// the snapshot document, so old snapshots decode as nil and normalize
+	// to an empty map — no migration is needed.
+	ArchiveConflictFailures map[string]int `json:"archive_conflict_failures,omitempty"`
 }
 
 func NewSnapshot() *Snapshot {
 	return &Snapshot{
-		Tenants:              map[string]domain.Tenant{},
-		Sources:              map[string]domain.SourceSystem{},
-		Schemas:              map[string]domain.EventSchema{},
-		Policies:             map[string]domain.RetentionPolicy{},
-		Events:               map[string]domain.Event{},
-		Receipts:             map[string]domain.EventReceipt{},
-		Streams:              map[string]StreamState{},
-		Segments:             map[string][]domain.Segment{},
-		Checkpoints:          map[string][]domain.Checkpoint{},
-		LegalHolds:           map[string]domain.LegalHold{},
-		Exports:              map[string]domain.ExportJob{},
-		RestoreRuns:          map[string]domain.RestoreRun{},
-		AdminActions:         []domain.AdminAction{},
-		AggregateCheckpoints: []domain.AggregateCheckpoint{},
+		Tenants:                 map[string]domain.Tenant{},
+		Sources:                 map[string]domain.SourceSystem{},
+		Schemas:                 map[string]domain.EventSchema{},
+		Policies:                map[string]domain.RetentionPolicy{},
+		Events:                  map[string]domain.Event{},
+		Receipts:                map[string]domain.EventReceipt{},
+		Streams:                 map[string]StreamState{},
+		Segments:                map[string][]domain.Segment{},
+		Checkpoints:             map[string][]domain.Checkpoint{},
+		LegalHolds:              map[string]domain.LegalHold{},
+		Exports:                 map[string]domain.ExportJob{},
+		RestoreRuns:             map[string]domain.RestoreRun{},
+		AdminActions:            []domain.AdminAction{},
+		AggregateCheckpoints:    []domain.AggregateCheckpoint{},
+		ArchiveConflictFailures: map[string]int{},
 	}
 }
 
@@ -115,6 +123,9 @@ func (s *Snapshot) normalize() {
 	if s.AggregateCheckpoints == nil {
 		s.AggregateCheckpoints = []domain.AggregateCheckpoint{}
 	}
+	if s.ArchiveConflictFailures == nil {
+		s.ArchiveConflictFailures = map[string]int{}
+	}
 }
 
 // Backend persists the control-plane state snapshot. Save must be atomic:
@@ -156,6 +167,11 @@ func Open(path string) (*Store, error) {
 func OpenPostgres(db *sql.DB) (*Store, error) {
 	return &Store{backend: &postgresBackend{db: db}}, nil
 }
+
+// NewWithBackend builds a Store over an arbitrary Backend. It is a test
+// seam so service-level tests can script optimistic-lock conflict
+// sequences; production code uses Open or OpenPostgres.
+func NewWithBackend(b Backend) *Store { return &Store{backend: b} }
 
 func (s *Store) Read(fn func(*Snapshot) error) error {
 	s.mu.RLock()
