@@ -88,7 +88,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,7 +189,7 @@ func TestVerifyIntegrityAcceptsSensitiveEvents(t *testing.T) {
 	if naive == stored.SourceDigest {
 		t.Fatalf("naive re-derivation must not match the stored digest (reconstruction is mandatory): %s", naive)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestVerifyIntegrityReportsKeyMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.Config.EncryptionKey = "rotated-key"
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "")
+	result, err = svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -341,7 +341,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +363,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -387,7 +387,7 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	scoped, err := svc.VerifyIntegrity("tenant-a", "tenant-a:aggregate:invoice:inv-1")
+	scoped, err := svc.VerifyIntegrity("tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,14 +405,14 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scoped, err = svc.VerifyIntegrity("tenant-a", "tenant-a:aggregate:invoice:inv-1")
+	scoped, err = svc.VerifyIntegrity("tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !scoped.Valid || scoped.EventCount != 1 {
 		t.Fatalf("cross-stream tamper must not affect scoped verify: %+v", scoped)
 	}
-	full, err := svc.VerifyIntegrity("tenant-a", "")
+	full, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("new-1", "", base.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil || !result.Valid || result.EventCount != 2 {
 		t.Fatalf("mixed-stream integrity failed: %+v %v", result, err)
 	}
@@ -472,7 +472,7 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 		t.Fatalf("streams=%d want 2 (legacy client-value + derived)", len(snap.Streams))
 	}
 	for _, sid := range []string{"tenant-a:legacy:stream", "tenant-a:aggregate:invoice:inv-1"} {
-		scoped, err := svc.VerifyIntegrity("tenant-a", sid)
+		scoped, err := svc.VerifyIntegrity("tenant-a", "", sid)
 		if err != nil || !scoped.Valid || scoped.EventCount != 1 {
 			t.Fatalf("scoped verify %q failed: %+v %v", sid, scoped, err)
 		}
@@ -506,7 +506,7 @@ func TestVerifyIntegrityConcurrentIngest(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			result, err := svc.VerifyIntegrity("tenant-a", "")
+			result, err := svc.VerifyIntegrity("tenant-a", "", "")
 			if err != nil {
 				mu.Lock()
 				verifyErr = err
@@ -546,7 +546,7 @@ func TestVerifyIntegrityLargeIntSensitiveField(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func BenchmarkVerifyIntegrity(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := svc.VerifyIntegrity("tenant-a", "")
+		result, err := svc.VerifyIntegrity("tenant-a", "", "")
 		if err != nil || !result.Valid {
 			b.Fatalf("verify failed: %+v %v", result, err)
 		}

@@ -25,6 +25,16 @@ type scriptedConflictBackend struct {
 	conflicts int // remaining conflicts before Save commits
 	saves     int
 	loads     int
+	// saveErr, when set, makes Save return a non-conflict error immediately
+	// (no retries, no sleeps). It is a mutable field so fail-closed tests can
+	// seed through a clean backend and arm the append failure afterwards —
+	// arming at construction would fail the seeding writes themselves.
+	saveErr error
+	// alwaysConflict makes Save fail with ErrSnapshotConflict forever, so
+	// Update's bounded retry loop exhausts regardless of the unexported
+	// snapshotConflictRetries value. Mutable for the same seed-then-arm
+	// reason.
+	alwaysConflict bool
 }
 
 func (b *scriptedConflictBackend) Load() (*store.Snapshot, error) { return b.data, nil }
@@ -36,8 +46,13 @@ func (b *scriptedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
 
 func (b *scriptedConflictBackend) Save(data *store.Snapshot) error {
 	b.saves++
-	if b.conflicts > 0 {
-		b.conflicts--
+	if b.saveErr != nil {
+		return b.saveErr
+	}
+	if b.alwaysConflict || b.conflicts > 0 {
+		if b.conflicts > 0 {
+			b.conflicts--
+		}
 		return store.ErrSnapshotConflict
 	}
 	b.data = data

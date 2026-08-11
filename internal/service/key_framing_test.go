@@ -235,7 +235,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 
 	// (ii) VerifyIntegrity's SegmentCount equals the stored total — the
 	// fail-closed skip would undercount it.
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

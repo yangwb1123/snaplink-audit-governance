@@ -77,7 +77,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	}
 	defer reopened.Close()
 	svc2 := reloadService(t, reopened, false)
-	result, err := svc2.VerifyIntegrity("tenant-a", "")
+	result, err := svc2.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	}
 	defer reopened.Close()
 	svc2 := reloadService(t, reopened, false)
-	result, err := svc2.VerifyIntegrity("tenant-a", "")
+	result, err := svc2.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -355,7 +355,7 @@ func TestVerifyIntegrityMixedDigestFormats(t *testing.T) {
 	// Legacy-format event seeded directly on its own stream.
 	seedLegacyEvent(t, svc, testEvent("v1-legacy-1", "op-mixed", at.Add(2*time.Second)), map[string]any{"resource": "invoice", "email": "carol@example.test"})
 
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

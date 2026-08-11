@@ -1,5 +1,43 @@
 # Release Notes
 
+## 2026-08-11 — 读路径自审计闭环：timeline/replay/receipt/verify 全部追加 audit.event.read 事实
+
+**写给运营（行为变化，观察类）：**
+
+- **五个此前不落账的读端点现在记录 `audit.event.read` 事实**：
+  `GET /api/v1/events/{eventID}/receipt`、`GET /api/v1/operations/{operationID}/timeline`、
+  `GET /api/v1/operations/{operationID}/replay`、
+  `GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline`、
+  `POST /api/v1/integrity/verify`。事实携带调用者 subject（`actor`）与
+  确定性目标编码（FR-4）：`(operation, id, timeline/replay)`、
+  `(aggregate, id, aggregateType/replay)`、`(event, id, receipt)`、
+  `(integrity, stream_id, verify)`。`GET /api/v1/admin/actions` 现在能回答
+  “谁读过这条时间线/这个事件”——此前只有 `getEvent`/`queryEvents` 落账。
+- **失败关闭语义与既有读一致**：事实追加失败（存储不可写、乐观锁冲突耗尽）
+  时读请求返回 500/503，**不返回读结果**；`Valid:false` 的完整性校验仍
+  落账（记录的是“读”，不是“结论”）。
+- **恢复预览/创建不落读账（设计门决定，F1 显式拒绝）**：
+  `POST /api/v1/restores/preview` 与 `POST /api/v1/restores` 内部重放事件
+  内容，但保持零 `audit.event.read` 行（仅 `restore.created` 等既有事实）。
+  这是有意识的产品决策，由行为固定测试钉住；如需预览读可见需产品决策。
+- **`stream_id` 边界（安全评审 F2）**：`POST /api/v1/integrity/verify` 的
+  `stream_id` 现在拒绝控制字符/空白/路径分隔符（复用 key-framing 字符集
+  规则）且长度上限 256 字节，违规返回 400 且不落账——防止攻击者用超大
+  `stream_id` 无界膨胀单一 JSONB 行内的自审计足迹。合法值行为不变。
+
+**写给开发（API 契约变化）：**
+
+- 六个内部 service 方法签名增加 `actor string` 参数（位于 `tenantID` 之后）：
+  `GetReceipt`、`OperationTimeline`、`AggregateTimeline`、`ReplayOperation`、
+  `ReplayAggregate`、`VerifyIntegrity`；空 `actor` 不落账（内部调用者静默）。
+- 重放不再委托给带审计的公开方法：提取 `operationTimelineNoAudit` /
+  `aggregateTimelineNoAudit` 内部核心，一次重放调用恰好追加一条事实。
+- 五个 HTTP 处理器转发 `claims.Subject`；`PreviewRestore`/`CreateRestore`
+  传 `""`（F1 显式拒绝）。
+- OpenAPI 仅更新 `admin/actions` 描述（纯文本，无路由/模式变化）。
+- 测试调用点机械更新 41 处（`VerifyIntegrity` ×36、`GetReceipt` ×3、
+  `OperationTimeline` ×1、`ReplayOperation` ×1），全部传 `""`。
+
 ## 2026-08-11 — key-framing 字符集不变量：所有非受信 API 边界拒绝控制字符/空白/路径分隔符标识符
 
 **写给运营（行为变化，破坏性类）：**

@@ -199,8 +199,30 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 	})
 }
 
-func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, error) {
+// maxVerifyStreamIDLength bounds the stream_id accepted by VerifyIntegrity
+// (security review F2). The fact append records stream_id verbatim as
+// target_id in the unbounded admin trail; the cap keeps one verify call's
+// trail growth bounded. 256 bytes is far above any real stream id (the
+// longest derived stream key today is ~60 chars) and below any plausible
+// audit-format concern.
+const maxVerifyStreamIDLength = 256
+
+func (s *Service) VerifyIntegrity(tenantID, actor, streamID string) (IntegrityResult, error) {
 	result := IntegrityResult{Valid: true, TenantID: tenantID, StreamID: streamID, CheckedAt: s.Now()}
+	// Self-audit trail bound (security review F2): the fact records stream_id
+	// verbatim as target_id into the unbounded single-row admin trail, so an
+	// integrity-verify caller must not be able to grow it without bound.
+	// Reject non-key-framing characters via the shared charset rule and cap
+	// the length at the service layer (transport-independent); rejected
+	// calls append nothing.
+	if streamID != "" {
+		if err := domain.ValidKeyComponent("stream_id", streamID); err != nil {
+			return result, err
+		}
+		if len(streamID) > maxVerifyStreamIDLength {
+			return result, fmt.Errorf("%w: stream_id exceeds %d bytes", domain.ErrInvalid, maxVerifyStreamIDLength)
+		}
+	}
 	// One snapshot read: events, segments, aggregate checkpoints and schemas
 	// must come from the same ledger version so per-event content checks can
 	// never combine events with schema definitions from another snapshot.
@@ -318,6 +340,12 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 			result.Valid = false
 			result.Errors = append(result.Errors, fmt.Sprintf("stream %s segment %d-%d signature mismatch", segment.StreamID, segment.FirstSequence, segment.LastSequence))
 		}
+	}
+	// Read self-audit (F-06): the verification itself is a governance fact.
+	// It is appended regardless of result.Valid — the fact documents the
+	// read, not the verdict (FM-6). A failed append fails the verify closed.
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "integrity", streamID, "verify"); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -466,7 +494,14 @@ func (s *Service) ArchivePassConflictFailures(tenantID string) (int, error) {
 }
 
 func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest) (domain.RestorePreview, error) {
-	result, err := s.ReplayOperation(tenantID, request.OperationID)
+	// F1 (security review): restore preview replays event-derived state with
+	// the same read permission as the audited timeline/replay endpoints, but
+	// the design gate records an explicit rejection of audit here: the actor
+	// stays empty, so recordReadAction appends nothing (compat constraint 3,
+	// pinned by TestReadSelfAuditRestoreFlowRecordsNothing). A restore
+	// preview is a proposal for a compensating action, not a content read;
+	// changing this requires a product decision, not a code change alone.
+	result, err := s.ReplayOperation(tenantID, "", request.OperationID)
 	if err != nil {
 		return domain.RestorePreview{}, err
 	}
@@ -477,7 +512,7 @@ func (s *Service) CreateRestore(tenantID string, request domain.RestoreRequest, 
 	if request.OperationID == "" || request.Reason == "" {
 		return domain.RestoreRun{}, fmt.Errorf("%w: operation_id and reason are required", domain.ErrInvalid)
 	}
-	if _, err := s.ReplayOperation(tenantID, request.OperationID); err != nil {
+	if _, err := s.ReplayOperation(tenantID, "", request.OperationID); err != nil {
 		return domain.RestoreRun{}, err
 	}
 	run := domain.RestoreRun{ID: newID("restore"), TenantID: tenantID, OperationID: request.OperationID, Status: domain.RestoreStatusPendingApproval, Reason: request.Reason, CreatedBy: requestedBy, CreatedAt: s.Now()}

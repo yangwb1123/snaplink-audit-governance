@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -2178,6 +2179,274 @@ func TestHTTPDevTokenRejectsKeyFramingTenant(t *testing.T) {
 // tenantFor — and tenantFor returns two values (compile-forced error
 // handling at every call site). Any duplicate raw read re-opens the forged
 // escape hatch.
+// scriptedStoreBackend is an in-memory store.Backend whose Save can be armed
+// to fail (non-conflict error or permanent ErrSnapshotConflict). It exists so
+// fail-closed HTTP tests can seed through a clean backend and arm the append
+// failure afterwards — the file-backed testHTTPServerWithStore has no
+// injection seam (async review finding 1). LoadForUpdate hands Update a deep
+// copy so closure mutations never leak into shared state when Save fails.
+type scriptedStoreBackend struct {
+	data           *store.Snapshot
+	saveErr        error // armed after seeding: Save returns it immediately
+	alwaysConflict bool  // armed after seeding: Save conflicts forever
+	saves          int
+	loads          int
+}
+
+func (b *scriptedStoreBackend) Load() (*store.Snapshot, error) { return b.data, nil }
+
+func (b *scriptedStoreBackend) LoadForUpdate() (*store.Snapshot, error) {
+	b.loads++
+	encoded, err := json.Marshal(b.data)
+	if err != nil {
+		return nil, err
+	}
+	copyData := store.NewSnapshot()
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(copyData); err != nil {
+		return nil, err
+	}
+	return copyData, nil
+}
+
+func (b *scriptedStoreBackend) Save(data *store.Snapshot) error {
+	b.saves++
+	if b.saveErr != nil {
+		return b.saveErr
+	}
+	if b.alwaysConflict {
+		return store.ErrSnapshotConflict
+	}
+	b.data = data
+	return nil
+}
+
+// testHTTPServerWithBackend builds the standard test server (same tenants,
+// source and schema as testHTTPServerWithStore) over an in-memory scripted
+// backend instead of a file-backed store, so fail-closed tests can arm Save
+// failures after seeding. Returns the server and the service for backend
+// access.
+func testHTTPServerWithBackend(t *testing.T, backend *scriptedStoreBackend) (*httptest.Server, *service.Service) {
+	t.Helper()
+	svc, err := service.New(store.NewWithBackend(backend), service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), svc
+}
+
+// httpReadSeedEvent is the standard event for HTTP read-endpoint tests: it
+// carries an aggregate so the aggregate timeline route resolves, and an
+// operation so timeline/replay resolve.
+func httpReadSeedEvent() domain.Event {
+	return domain.Event{EventID: "http-read-evt", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "http-read-op", AggregateType: "invoice", AggregateID: "inv-1", AggregateVersion: 1, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-read-idem", Payload: map[string]any{"value": 1}}
+}
+
+// performReadEndpoints executes the five audited read endpoints with the
+// given bearer token and returns the response status codes in fixed order
+// (receipt, timeline, replay, aggregate timeline, integrity verify).
+func performReadEndpoints(t *testing.T, server *httptest.Server, token string) []int {
+	t.Helper()
+	requests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/v1/events/http-read-evt/receipt", ""},
+		{http.MethodGet, "/api/v1/operations/http-read-op/timeline", ""},
+		{http.MethodGet, "/api/v1/operations/http-read-op/replay", ""},
+		{http.MethodGet, "/api/v1/aggregates/invoice/inv-1/timeline", ""},
+		{http.MethodPost, "/api/v1/integrity/verify", `{"stream_id":""}`},
+	}
+	statuses := make([]int, 0, len(requests))
+	for _, req := range requests {
+		var reader io.Reader
+		if req.body != "" {
+			reader = bytes.NewReader([]byte(req.body))
+		}
+		request, _ := http.NewRequest(req.method, server.URL+req.path, reader)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		statuses = append(statuses, response.StatusCode)
+	}
+	return statuses
+}
+
+// httpReadFacts lists tenant-a's admin trail through the public API and
+// returns the audit.event.read rows.
+func httpReadFacts(t *testing.T, server *httptest.Server) []domain.AdminAction {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/admin/actions", nil)
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:tenant-admin")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("list actions status=%d body=%s", response.StatusCode, data)
+	}
+	var result struct {
+		Items []domain.AdminAction `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	var reads []domain.AdminAction
+	for _, action := range result.Items {
+		if action.Action == domain.AdminActionEventRead {
+			reads = append(reads, action)
+		}
+	}
+	return reads
+}
+
+// TestHTTPReadEndpointsAppendSelfAuditFacts is AC-1 (HTTP): the five read
+// routes append exactly five audit.event.read rows carrying the acting
+// subject (claims.Subject) and the FR-4 target encoding.
+func TestHTTPReadEndpointsAppendSelfAuditFacts(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	if result := postTestEvent(t, server.URL, "dev:tenant-a:service:crm", httpReadSeedEvent()); result.Status != http.StatusAccepted {
+		t.Fatalf("seed ingest status=%d: %+v", result.Status, result)
+	}
+	// The acting subject must be distinct from the tenant for the actor
+	// assertion to be meaningful: dev tokens fix Subject == tenant id, so a
+	// locally signed JWT expresses the auditor (mintRestoreJWT pattern).
+	token := mintRestoreJWT(t, "auditor", "tenant-a", []string{"compliance"})
+	for i, status := range performReadEndpoints(t, server, token) {
+		if status != http.StatusOK {
+			t.Fatalf("read endpoint %d status=%d, want 200", i, status)
+		}
+	}
+	reads := httpReadFacts(t, server)
+	if len(reads) != 5 {
+		t.Fatalf("audit.event.read rows=%d, want 5; %+v", len(reads), reads)
+	}
+	for _, read := range reads {
+		if read.Actor != "auditor" {
+			t.Fatalf("read actor=%q, want auditor (claims.Subject); %+v", read.Actor, read)
+		}
+	}
+	got := map[string]bool{}
+	for _, read := range reads {
+		got[read.TargetType+"|"+read.TargetID+"|"+read.Detail] = true
+	}
+	want := map[string]bool{
+		"event|http-read-evt|receipt":     true,
+		"operation|http-read-op|timeline": true,
+		"operation|http-read-op|replay":   true,
+		"aggregate|inv-1|invoice":         true,
+		"integrity||verify":               true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("read facts=%v, want exact set %v", got, want)
+	}
+	for key := range want {
+		if !got[key] {
+			t.Fatalf("read facts=%v, missing %q", got, key)
+		}
+	}
+}
+
+// TestHTTPReadEndpointsFailClosedOnAppendFailure is AC-2 (HTTP) plus the F3
+// status mapping: when the admin-action append fails, all five read routes
+// return non-200 and append nothing. The backend is seeded and the event
+// ingested through a clean backend FIRST, then the failure is armed (async
+// review finding 1).
+func TestHTTPReadEndpointsFailClosedOnAppendFailure(t *testing.T) {
+	seed := func(t *testing.T, backend *scriptedStoreBackend) (*httptest.Server, string) {
+		t.Helper()
+		server, _ := testHTTPServerWithBackend(t, backend)
+		t.Cleanup(server.Close)
+		if result := postTestEvent(t, server.URL, "dev:tenant-a:service:crm", httpReadSeedEvent()); result.Status != http.StatusAccepted {
+			t.Fatalf("seed ingest status=%d: %+v", result.Status, result)
+		}
+		return server, mintRestoreJWT(t, "auditor", "tenant-a", []string{"compliance"})
+	}
+	t.Run("non-conflict append failure fails reads closed with 500", func(t *testing.T) {
+		backend := &scriptedStoreBackend{data: store.NewSnapshot()}
+		server, token := seed(t, backend)
+		backend.saveErr = errors.New("append failed") // arm AFTER seeding + ingest
+		for i, status := range performReadEndpoints(t, server, token) {
+			if status != http.StatusInternalServerError {
+				t.Fatalf("endpoint %d status=%d, want 500 (statusForError non-conflict save error)", i, status)
+			}
+		}
+		if reads := httpReadFacts(t, server); len(reads) != 0 {
+			t.Fatalf("audit.event.read rows=%d, want 0; %+v", len(reads), reads)
+		}
+	})
+	t.Run("conflict exhaustion fails reads closed with 503", func(t *testing.T) {
+		backend := &scriptedStoreBackend{data: store.NewSnapshot()}
+		server, token := seed(t, backend)
+		backend.alwaysConflict = true // arm AFTER seeding + ingest
+		for i, status := range performReadEndpoints(t, server, token) {
+			if status != http.StatusServiceUnavailable {
+				t.Fatalf("endpoint %d status=%d, want 503 (statusForError ErrSnapshotConflict)", i, status)
+			}
+		}
+		if reads := httpReadFacts(t, server); len(reads) != 0 {
+			t.Fatalf("audit.event.read rows=%d, want 0; %+v", len(reads), reads)
+		}
+	})
+}
+
+// TestHTTPVerifyIntegrityRejectsOversizedStreamID is the F2 regression test
+// at the HTTP boundary: verify with an over-cap, whitespace or control-char
+// stream_id is rejected 400 and appends no row; a healthy verify still 200s.
+func TestHTTPVerifyIntegrityRejectsOversizedStreamID(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	token := mintRestoreJWT(t, "auditor", "tenant-a", []string{"compliance"})
+	verify := func(body string) int {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/integrity/verify", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := verify(`{"stream_id":"` + strings.Repeat("s", 257) + `"}`); status != http.StatusBadRequest {
+		t.Fatalf("oversized stream_id status=%d, want 400", status)
+	}
+	if status := verify(`{"stream_id":"stream with space"}`); status != http.StatusBadRequest {
+		t.Fatalf("whitespace stream_id status=%d, want 400", status)
+	}
+	if status := verify(`{"stream_id":"stream\u001fid"}`); status != http.StatusBadRequest {
+		t.Fatalf("control-char stream_id status=%d, want 400", status)
+	}
+	if reads := httpReadFacts(t, server); len(reads) != 0 {
+		t.Fatalf("audit.event.read rows=%d, want 0 (rejected verifies append nothing); %+v", len(reads), reads)
+	}
+	if status := verify(`{"stream_id":""}`); status != http.StatusOK {
+		t.Fatalf("healthy verify status=%d, want 200", status)
+	}
+}
+
 func TestTenantForBoundaryGuard(t *testing.T) {
 	src, err := os.ReadFile("server.go")
 	if err != nil {

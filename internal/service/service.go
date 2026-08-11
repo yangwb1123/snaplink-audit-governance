@@ -620,7 +620,7 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 	return receipt, nil
 }
 
-func (s *Service) GetReceipt(tenantID, eventID string) (domain.EventReceipt, error) {
+func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventReceipt, error) {
 	var receipt domain.EventReceipt
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.Receipts[store.EventKey(tenantID, eventID)]
@@ -630,7 +630,17 @@ func (s *Service) GetReceipt(tenantID, eventID string) (domain.EventReceipt, err
 		receipt = value
 		return nil
 	})
-	return receipt, err
+	if err != nil {
+		return domain.EventReceipt{}, err
+	}
+	// Read self-audit (F-06): a receipt lookup exposes event content, so it
+	// appends one audit.event.read fact in the service layer (no transport
+	// can bypass it); a failed append fails the read closed, mirroring
+	// GetEvent/QueryEvents.
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
+		return domain.EventReceipt{}, err
+	}
+	return receipt, nil
 }
 
 func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error) {
@@ -761,7 +771,10 @@ func (s *Service) Operation(tenantID, operationID string) (domain.OperationSumma
 	return domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[len(events)-1].OccurredAt, Outcomes: outcomes}, nil
 }
 
-func (s *Service) OperationTimeline(tenantID, operationID string) ([]domain.Event, error) {
+// operationTimelineNoAudit is the un-audited core shared by OperationTimeline
+// and ReplayOperation, so a single replay call appends exactly one fact
+// (FR-3: no delegation path may append twice).
+func (s *Service) operationTimelineNoAudit(tenantID, operationID string) ([]domain.Event, error) {
 	events, err := s.eventsFor(tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
 	if err != nil {
 		return nil, err
@@ -773,7 +786,9 @@ func (s *Service) OperationTimeline(tenantID, operationID string) ([]domain.Even
 	return events, nil
 }
 
-func (s *Service) AggregateTimeline(tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
+// aggregateTimelineNoAudit mirrors operationTimelineNoAudit for aggregates
+// (aggregate-version ordering preserved verbatim).
+func (s *Service) aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
 	events, err := s.eventsFor(tenantID, func(event domain.Event) bool {
 		return event.AggregateType == aggregateType && event.AggregateID == aggregateID
 	})
@@ -792,20 +807,55 @@ func (s *Service) AggregateTimeline(tenantID, aggregateType, aggregateID string)
 	return events, nil
 }
 
-func (s *Service) ReplayOperation(tenantID, operationID string) (domain.ReplayResult, error) {
-	events, err := s.OperationTimeline(tenantID, operationID)
+func (s *Service) OperationTimeline(tenantID, actor, operationID string) ([]domain.Event, error) {
+	events, err := s.operationTimelineNoAudit(tenantID, operationID)
 	if err != nil {
-		return domain.ReplayResult{}, err
+		return nil, err
 	}
-	return replay(events, tenantID, operationID, ""), nil
+	// Read self-audit (F-06): append-before-serve, fail-closed — a timeline
+	// read that cannot leave its governance fact is not served.
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
-func (s *Service) ReplayAggregate(tenantID, aggregateType, aggregateID string) (domain.ReplayResult, error) {
-	events, err := s.AggregateTimeline(tenantID, aggregateType, aggregateID)
+func (s *Service) AggregateTimeline(tenantID, actor, aggregateType, aggregateID string) ([]domain.Event, error) {
+	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (s *Service) ReplayOperation(tenantID, actor, operationID string) (domain.ReplayResult, error) {
+	events, err := s.operationTimelineNoAudit(tenantID, operationID)
 	if err != nil {
 		return domain.ReplayResult{}, err
 	}
-	return replay(events, tenantID, "", aggregateID), nil
+	result := replay(events, tenantID, operationID, "")
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "replay"); err != nil {
+		return domain.ReplayResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) ReplayAggregate(tenantID, actor, aggregateType, aggregateID string) (domain.ReplayResult, error) {
+	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
+	if err != nil {
+		return domain.ReplayResult{}, err
+	}
+	result := replay(events, tenantID, "", aggregateID)
+	// D-ReplayAggregate: zero production callers today; appends exactly one
+	// fact so the "every event-content read leaves exactly one fact"
+	// invariant holds for this method too (pinned by T-D1).
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, "replay"); err != nil {
+		return domain.ReplayResult{}, err
+	}
+	return result, nil
 }
 
 func (s *Service) checkTenantAndQuota(tenantID string) error {

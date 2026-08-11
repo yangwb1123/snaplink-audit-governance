@@ -477,7 +477,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	// append path are not counted.
 	counting := &countingSigner{Signer: svc.Config.Signer}
 	svc.Config.Signer = counting
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "")
+	result, err = svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

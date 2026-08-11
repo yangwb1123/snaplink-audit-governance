@@ -95,7 +95,7 @@ func TestIngestIdempotencyConflictAndIntegrity(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestQueryReplayAndExport(t *testing.T) {
 	if err != nil || len(page2.Items) != 1 {
 		t.Fatalf("unexpected second page: %+v %v", page2, err)
 	}
-	replay, err := svc.ReplayOperation("tenant-a", "op-query")
+	replay, err := svc.ReplayOperation("tenant-a", "", "op-query")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestIntegrityChecksStreamsIndependently(t *testing.T) {
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("independent streams should validate: %+v %v", result, err)
 	}
@@ -551,7 +551,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 	if len(dirs) != 1 || dirs[0].Name() != safeName(derived) {
 		t.Fatalf("archive dirs=%v want exactly one %s", dirs, safeName(derived))
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil || !result.Valid || result.EventCount != n {
 		t.Fatalf("collapsed-stream integrity failed: %+v %v", result, err)
 	}
@@ -632,7 +632,7 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err := svc.GetReceipt("tenant-a", event.EventID)
+	receipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}
@@ -683,7 +683,7 @@ func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
+	receipt, err = svc.GetReceipt("tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived after retry: %+v %v", receipt, err)
 	}
@@ -737,7 +737,7 @@ func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err = svc.GetReceipt("tenant-a", event.EventID)
+	receipt, err = svc.GetReceipt("tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}
@@ -1180,7 +1180,7 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "")
+	result, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("aggregate verify failed: %+v %v", result, err)
 	}
@@ -1194,7 +1194,7 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "")
+	result, err = svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1232,7 +1232,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 		t.Fatalf("event query must follow ledger sequence order: %+v", result.Items)
 	}
 	// 操作时间线按业务时间排序：earlier 在前（与账本序解耦）。
-	timeline, err := svc.OperationTimeline("tenant-a", "op-ooo")
+	timeline, err := svc.OperationTimeline("tenant-a", "", "op-ooo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1240,7 +1240,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 		t.Fatalf("timeline must order by occurred_at: %+v", timeline)
 	}
 	// 哈希链按 sequence 链接，不受业务时间乱序影响。
-	integrity, err := svc.VerifyIntegrity("tenant-a", "")
+	integrity, err := svc.VerifyIntegrity("tenant-a", "", "")
 	if err != nil || !integrity.Valid {
 		t.Fatalf("integrity after out-of-order ingest: %+v %v", integrity, err)
 	}

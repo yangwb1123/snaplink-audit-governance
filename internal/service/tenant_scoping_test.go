@@ -94,7 +94,7 @@ func TestVerifyIntegrityExactTenantAndStreamScoping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full, err := svc.VerifyIntegrity("a", "")
+	full, err := svc.VerifyIntegrity("a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestVerifyIntegrityExactTenantAndStreamScoping(t *testing.T) {
 		t.Fatalf("VerifyIntegrity(\"a\",\"\").SegmentCount = %d, want 2 (s1 + empty-rest; leak and b excluded)", full.SegmentCount)
 	}
 
-	scoped, err := svc.VerifyIntegrity("a", "s1")
+	scoped, err := svc.VerifyIntegrity("a", "", "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestVerifyIntegrityExactTenantAndStreamScoping(t *testing.T) {
 		t.Fatalf("VerifyIntegrity(\"a\",\"s1\").SegmentCount = %d, want 1", scoped.SegmentCount)
 	}
 
-	foreign, err := svc.VerifyIntegrity("b", "")
+	foreign, err := svc.VerifyIntegrity("b", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

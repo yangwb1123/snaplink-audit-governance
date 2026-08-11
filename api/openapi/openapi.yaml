@@ -157,7 +157,7 @@ paths:
   /api/v1/admin/actions:
     get:
       operationId: listAdminActions
-      description: Append-only self-audit trail of control-plane management actions and read-path governance facts (tenants, sources, schemas, retention policies, exports, legal holds, restore approvals, event reads and export downloads). A tenant-scoped token sees its own tenant; a platform token may filter with tenant_id.
+      description: Append-only self-audit trail of control-plane management actions and read-path governance facts (tenants, sources, schemas, retention policies, exports, legal holds, restore approvals, export downloads, and audit.event.read facts covering direct event reads, event queries, operation/aggregate timelines, operation replay, receipt lookups and integrity verification). A tenant-scoped token sees its own tenant; a platform token may filter with tenant_id.
       parameters:
         - { name: tenant_id, in: query, required: false, schema: { type: string, pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$' } }
         - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100, default: 100 } }

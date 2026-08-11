@@ -1,0 +1,1590 @@
+07:26:22 [INFO] 
+07:26:22 [INFO] ========== CAMPAIGN ROUND 1/1 ==========
+07:26:23 [INFO] PARALLEL x4  (23 tasks)
+07:26:23 [INFO] >>  pi -p Analyze module 'cmd/audit-api' at cmd/audit-api/ and its related interfaces in t...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:26:23 [INFO] >>  pi -p Analyze module 'api/asyncapi' at api/asyncapi/ and its related interfaces in the...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:26:23 [INFO] >>  pi -p Analyze module 'api/openapi' at api/openapi/ and its related interfaces in the r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:26:23 [INFO] >>  pi -p Analyze module 'api/proto' at api/proto/ and its related interfaces in the repos...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:30:38 [INFO] OK  done  [255.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-asyncapi-cabfafd7.json]
+07:30:38 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-asyncapi-cabfafd7.json  (8927 bytes)
+07:30:38 [INFO] PROGRESS: 1/23 done
+07:30:38 [INFO] >>  pi -p Analyze module 'cmd/audit-governance-worker' at cmd/audit-governance-worker/ and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:31:14 [WARNING] agent output REJECTED: agent reported provider failure (quota_?exceeded) | Warning: No project session found with id 'pb-20260810152623-3891880-4-campaign-analysis-70f86063'; creating a new session with that id.
+07:31:14 [WARNING] FAIL  [code=0]  [291.8s]
+  stderr: Warning: No project session found with id 'pb-20260810152623-3891880-4-campaign-analysis-70f86063'; creating a new session with that id.
+07:31:15 [INFO] PROGRESS: 2/23 done
+07:31:15 [INFO] >>  pi -p Analyze module 'cmd/audit-kafka-consumer' at cmd/audit-kafka-consumer/ and its r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:31:22
+07:31:23 [INFO] OK  done  [300.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-api-ffe949d3.json]
+07:31:23 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-api-ffe949d3.json  (6865 bytes)
+07:31:23 [INFO] PROGRESS: 3/23 done
+07:31:23 [INFO] >>  pi -p Analyze module 'cmd/audit-kafka-dlq-replay' at cmd/audit-kafka-dlq-replay/ and i...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:34:32 [INFO] OK  done  [234.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-governance-worker-4416b934.json]
+07:34:32 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-governance-worker-4416b934.json  (7929 bytes)
+07:34:32 [INFO] PROGRESS: 4/23 done
+07:34:32 [INFO] >>  pi -p Analyze module 'cmd/audit-outbox-relay' at cmd/audit-outbox-relay/ and its relat...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:35:30 [INFO] OK  done  [547.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-openapi-390f37dc.json]
+07:35:30 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-openapi-390f37dc.json  (8638 bytes)
+07:35:30 [INFO] PROGRESS: 5/23 done
+07:35:30 [INFO] >>  pi -p Analyze module 'cmd/audit-projector' at cmd/audit-projector/ and its related int...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:36:22
+07:36:33 [INFO] OK  done  [318.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-kafka-consumer-18e00b71.json]
+07:36:33 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-kafka-consumer-18e00b71.json  (7023 bytes)
+07:36:33 [INFO] PROGRESS: 6/23 done
+07:36:33 [INFO] >>  pi -p Analyze module 'internal/archive' at internal/archive/ and its related interface...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:38:37 [INFO] OK  done  [433.5s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-kafka-dlq-replay-fb7721f6.json]
+07:38:37 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-kafka-dlq-replay-fb7721f6.json  (10341 bytes)
+07:38:37 [INFO] PROGRESS: 7/23 done
+07:38:37 [INFO] >>  pi -p Analyze module 'internal/auth' at internal/auth/ and its related interfaces in t...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:39:50 [INFO] OK  done  [259.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-projector-a3bf1114.json]
+07:39:50 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-projector-a3bf1114.json  (8847 bytes)
+07:39:50 [INFO] PROGRESS: 8/23 done
+07:39:50 [INFO] >>  pi -p Analyze module 'internal/domain' at internal/domain/ and its related interfaces ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:40:16 [INFO] OK  done  [343.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-outbox-relay-48944744.json]
+07:40:16 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/cmd-audit-outbox-relay-48944744.json  (7666 bytes)
+07:40:16 [INFO] PROGRESS: 9/23 done
+07:40:16 [INFO] >>  pi -p Analyze module 'internal/fsutil' at internal/fsutil/ and its related interfaces ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:41:22
+07:43:12 [INFO] OK  done  [398.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-archive-b9e968b8.json]
+07:43:12 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-archive-b9e968b8.json  (8424 bytes)
+07:43:12 [INFO] PROGRESS: 10/23 done
+07:43:12 [INFO] >>  pi -p Analyze module 'internal/grpcapi' at internal/grpcapi/ and its related interface...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:43:33 [INFO] OK  done  [197.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-fsutil-b694e48c.json]
+07:43:33 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-fsutil-b694e48c.json  (6898 bytes)
+07:43:33 [INFO] PROGRESS: 11/23 done
+07:43:33 [INFO] >>  pi -p Analyze module 'internal/httpapi' at internal/httpapi/ and its related interface...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:44:10 [INFO] OK  done  [333.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-auth-ae3d8e54.json]
+07:44:10 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-auth-ae3d8e54.json  (6268 bytes)
+07:44:10 [INFO] PROGRESS: 12/23 done
+07:44:10 [INFO] >>  pi -p Analyze module 'internal/kafka' at internal/kafka/ and its related interfaces in...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:45:57 [INFO] OK  done  [367.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-domain-6c1ab500.json]
+07:45:57 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-domain-6c1ab500.json  (6463 bytes)
+07:45:57 [INFO] PROGRESS: 13/23 done
+07:45:57 [INFO] >>  pi -p Analyze module 'internal/outbox' at internal/outbox/ and its related interfaces ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:46:22
+07:46:42 [INFO] OK  done  [151.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-kafka-7ff0bf6a.json]
+07:46:42 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-kafka-7ff0bf6a.json  (7946 bytes)
+07:46:42 [INFO] PROGRESS: 14/23 done
+07:46:42 [INFO] >>  pi -p Analyze module 'internal/projection' at internal/projection/ and its related int...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:47:39 [INFO] OK  done  [246.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-httpapi-3e9090b0.json]
+07:47:39 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-httpapi-3e9090b0.json  (7147 bytes)
+07:47:39 [INFO] PROGRESS: 15/23 done
+07:47:39 [INFO] >>  pi -p Analyze module 'internal/runtimeconfig' at internal/runtimeconfig/ and its relat...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:48:40 [INFO] OK  done  [328.5s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-grpcapi-f182eff9.json]
+07:48:40 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-grpcapi-f182eff9.json  (7314 bytes)
+07:48:40 [INFO] PROGRESS: 16/23 done
+07:48:40 [INFO] >>  pi -p Analyze module 'internal/security' at internal/security/ and its related interfa...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:49:40 [INFO] OK  done  [177.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-projection-5f0ab996.json]
+07:49:40 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-projection-5f0ab996.json  (7160 bytes)
+07:49:40 [INFO] PROGRESS: 17/23 done
+07:49:40 [INFO] >>  pi -p Analyze module 'internal/service' at internal/service/ and its related interface...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:50:14 [INFO] OK  done  [257.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-outbox-f6bb61c6.json]
+07:50:14 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-outbox-f6bb61c6.json  (7729 bytes)
+07:50:14 [INFO] PROGRESS: 18/23 done
+07:50:14 [INFO] >>  pi -p Analyze module 'internal/store' at internal/store/ and its related interfaces in...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:51:22
+07:51:25 [INFO] OK  done  [226.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-runtimeconfig-f5301195.json]
+07:51:25 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-runtimeconfig-f5301195.json  (7907 bytes)
+07:51:25 [INFO] PROGRESS: 19/23 done
+07:51:25 [INFO] >>  pi -p Analyze module 'internal/telemetry' at internal/telemetry/ and its related inter...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+07:54:17 [INFO] OK  done  [336.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-security-2cd39427.json]
+07:54:17 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-security-2cd39427.json  (7778 bytes)
+07:54:17 [INFO] PROGRESS: 20/23 done
+07:55:09 [INFO] OK  done  [329.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-service-2bd58324.json]
+07:55:09 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-service-2bd58324.json  (7462 bytes)
+07:55:09 [INFO] PROGRESS: 21/23 done
+07:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 07:56:22
+07:56:45 [INFO] OK  done  [319.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-telemetry-10f29665.json]
+07:56:45 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-telemetry-10f29665.json  (8717 bytes)
+07:56:45 [INFO] PROGRESS: 22/23 done
+07:56:45 [INFO] OK  done  [391.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-store-c7524028.json]
+07:56:45 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/internal-store-c7524028.json  (8809 bytes)
+07:56:45 [INFO] PROGRESS: 23/23 done
+07:56:55 [INFO] PARALLEL x4  (1 tasks)
+07:56:55 [INFO] >>  pi -p Analyze module 'api/proto' at api/proto/ and its related interfaces in the repos...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:01:22
+08:02:11 [INFO] OK  done  [315.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-proto-100f2866.json]
+08:02:11 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-proto-100f2866.json  (7063 bytes)
+08:02:11 [INFO] PROGRESS: 1/1 done
+08:02:31 [INFO] PARALLEL x4  (1 tasks)
+08:02:31 [INFO] >>  pi -p Analyze module 'api/proto' at api/proto/ and its related interfaces in the repos...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:06:22
+08:08:20 [INFO] OK  done  [349.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-proto-100f2866.json]
+08:08:20 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/analyses/api-proto-100f2866.json  (7950 bytes)
+08:08:20 [INFO] PROGRESS: 1/1 done
+08:08:21 [INFO] PREFLIGHT: no repo-scoped validators in pipeline template — skipped
+08:08:21 [INFO] 
+08:08:21 [INFO] ============================================================
+08:08:21 [INFO] PIPELINE START (6 stages)
+08:08:21 [INFO] Mode: FORCE regeneration
+08:08:21 [INFO] ============================================================
+08:08:21 [INFO] 
+08:08:21 [INFO] ============================================================
+08:08:21 [INFO] STAGE: requirements
+08:08:21 [INFO] ============================================================
+08:08:21 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+08:08:21 [INFO] -- [1/1] --
+08:08:21 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/asyncapi'....  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:11:22
+08:11:45 [INFO] OK  done  [203.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/requirements-10762e10/requirements.md]
+08:11:45 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/requirements-10762e10/requirements.md  (25662 bytes)
+08:11:45 [INFO] 
+08:11:45 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+08:11:45 [INFO] GIT COMMIT: no stage-owned changes — skipping
+08:11:45 [INFO] 
+08:11:45 [INFO] ============================================================
+08:11:45 [INFO] STAGE: design
+08:11:45 [INFO] ============================================================
+08:11:45 [INFO] -- [1/1] --
+08:11:45 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:16:22
+08:19:52 [INFO] OK  done  [487.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/design-a77de8a6/task-1-design.md]
+08:19:52 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/design-a77de8a6/task-1-design.md  (18699 bytes)
+08:19:52 [INFO] 
+08:19:52 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+08:19:52 [INFO] GIT COMMIT: no stage-owned changes — skipping
+08:19:52 [INFO] 
+08:19:52 [INFO] ============================================================
+08:19:52 [INFO] STAGE: adversarial_review
+08:19:52 [INFO] ============================================================
+08:19:52 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+08:19:52 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:20:05 [INFO] OK  done  [12.9s]  [output=(stdout)]
+08:20:05 [INFO] META orchestrator selected 3 role(s)
+08:20:05 [INFO] >>  pi -p # Database Architect Prompt Read and apply `.pi-batch/tool/prompts/README.md`. V...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:20:05 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:20:05 [INFO] >>  pi -p # Async & Data Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:21:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:21:22
+08:25:40 [INFO] OK  done  [335.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md]
+08:25:40 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md  (13059 bytes)
+08:26:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:26:22
+08:28:52 [INFO] OK  done  [527.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+08:28:52 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (3337 bytes)
+08:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:31:22
+08:32:35 [INFO] OK  done  [749.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+08:32:35 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (3657 bytes)
+08:32:35 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+08:32:35 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:33:42 [INFO] OK  done  [66.7s]  [output=(stdout)]
+08:33:42 [INFO] META orchestrator selected 3 role(s)
+08:33:42 [INFO] >>  pi -p # Compliance Officer Prompt Read and apply `.pi-batch/tool/prompts/README.md`. I...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:33:42 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:33:42 [INFO] >>  pi -p # Principal Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`. T...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:36:22
+08:38:38 [INFO] OK  done  [296.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/compliance_officer.md]
+08:38:38 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/compliance_officer.md  (3387 bytes)
+08:39:02 [INFO] OK  done  [319.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/principal_reviewer.md]
+08:39:02 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/principal_reviewer.md  (6804 bytes)
+08:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:41:22
+08:42:24 [INFO] OK  done  [522.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+08:42:24 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (4366 bytes)
+08:42:24 [INFO] GIT COMMIT: no stage-owned changes — skipping
+08:42:24 [INFO] 
+08:42:24 [INFO] ============================================================
+08:42:24 [INFO] STAGE: design_gate
+08:42:24 [INFO] ============================================================
+08:42:24 [INFO] -- [1/1] --
+08:42:24 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:43:52 [INFO] OK  done  [88.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+08:43:52 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-dead-letter-evidence-durable-dlq-publish-fa-50da856c/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (4175 bytes)
+08:43:52 [INFO] 
+08:43:52 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+08:43:52 [ERROR] GATE REJECTED at stage 'design_gate' (verdict: FAIL) — later stages blocked
+08:43:52 [ERROR] Pipeline halted: design_gate (FAIL)
+08:43:52 [INFO] 
+08:43:52 [INFO] ============================================================
+08:43:52 [INFO] PIPELINE START (6 stages)
+08:43:52 [INFO] Mode: FORCE regeneration
+08:43:52 [INFO] ============================================================
+08:43:52 [INFO] 
+08:43:52 [INFO] ============================================================
+08:43:52 [INFO] STAGE: requirements
+08:43:52 [INFO] ============================================================
+08:43:52 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+08:43:52 [INFO] -- [1/1] --
+08:43:52 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/asyncapi'....  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:46:22
+08:47:58 [INFO] OK  done  [246.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/requirements-10762e10/requirements.md]
+08:47:58 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/requirements-10762e10/requirements.md  (17898 bytes)
+08:47:58 [INFO] 
+08:47:58 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+08:47:58 [INFO] GIT COMMIT: no stage-owned changes — skipping
+08:47:58 [INFO] 
+08:47:58 [INFO] ============================================================
+08:47:58 [INFO] STAGE: design
+08:47:58 [INFO] ============================================================
+08:47:58 [INFO] -- [1/1] --
+08:47:58 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:51:22
+08:54:35 [INFO] OK  done  [396.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/design-a77de8a6/task-1-design.md]
+08:54:35 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/design-a77de8a6/task-1-design.md  (2301 bytes)
+08:54:35 [INFO] 
+08:54:35 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+08:54:35 [INFO] GIT COMMIT: no stage-owned changes — skipping
+08:54:35 [INFO] 
+08:54:35 [INFO] ============================================================
+08:54:35 [INFO] STAGE: adversarial_review
+08:54:35 [INFO] ============================================================
+08:54:35 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+08:54:35 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:55:07 [INFO] OK  done  [32.1s]  [output=(stdout)]
+08:55:07 [WARNING] META role plan constrained; dropped: async_reviewer
+08:55:07 [INFO] META orchestrator selected 2 role(s)
+08:55:07 [INFO] >>  pi -p # DevOps Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Veri...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:55:07 [INFO] >>  pi -p # Database Architect Prompt Read and apply `.pi-batch/tool/prompts/README.md`. V...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+08:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 08:56:22
+09:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:01:22
+09:01:57 [INFO] OK  done  [410.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/devops_engineer.md]
+09:01:57 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/devops_engineer.md  (17216 bytes)
+09:02:40 [INFO] OK  done  [453.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+09:02:40 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (19044 bytes)
+09:02:40 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+09:02:40 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:03:11 [INFO] OK  done  [31.4s]  [output=(stdout)]
+09:03:11 [INFO] META orchestrator selected 3 role(s)
+09:03:11 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:03:11 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:03:11 [INFO] >>  pi -p # Async & Data Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:06:22
+09:10:13 [INFO] OK  done  [421.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md]
+09:10:13 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md  (11243 bytes)
+09:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:11:22
+09:12:02 [INFO] OK  done  [531.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+09:12:02 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (19137 bytes)
+09:13:36 [INFO] OK  done  [624.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+09:13:36 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (9703 bytes)
+09:13:36 [INFO] GIT COMMIT: no stage-owned changes — skipping
+09:13:36 [INFO] 
+09:13:36 [INFO] ============================================================
+09:13:36 [INFO] STAGE: design_gate
+09:13:36 [INFO] ============================================================
+09:13:36 [INFO] -- [1/1] --
+09:13:36 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:16:22
+09:16:39 [INFO] OK  done  [183.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+09:16:39 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/publish-ledgered-projection-facts-and-feed-the-c-65eec9ae/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (6836 bytes)
+09:16:39 [INFO] 
+09:16:39 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+09:16:39 [ERROR] GATE REJECTED at stage 'design_gate' (verdict: FAIL) — later stages blocked
+09:16:39 [ERROR] Pipeline halted: design_gate (FAIL)
+09:16:39 [INFO] 
+09:16:39 [INFO] ============================================================
+09:16:39 [INFO] PIPELINE START (6 stages)
+09:16:39 [INFO] Mode: FORCE regeneration
+09:16:39 [INFO] ============================================================
+09:16:39 [INFO] 
+09:16:39 [INFO] ============================================================
+09:16:39 [INFO] STAGE: requirements
+09:16:39 [INFO] ============================================================
+09:16:39 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+09:16:39 [INFO] -- [1/1] --
+09:16:39 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/openapi'. ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:20:58 [INFO] OK  done  [259.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/requirements-10762e10/requirements.md]
+09:20:58 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/requirements-10762e10/requirements.md  (22129 bytes)
+09:20:58 [INFO] 
+09:20:58 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+09:20:58 [INFO] GIT COMMIT: no stage-owned changes — skipping
+09:20:58 [INFO] 
+09:20:58 [INFO] ============================================================
+09:20:58 [INFO] STAGE: design
+09:20:58 [INFO] ============================================================
+09:20:58 [INFO] -- [1/1] --
+09:20:58 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:21:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:21:22
+09:26:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:26:22
+09:26:29 [INFO] OK  done  [330.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/design-a77de8a6/task-1-design.md]
+09:26:29 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/design-a77de8a6/task-1-design.md  (2574 bytes)
+09:26:29 [INFO] 
+09:26:29 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+09:26:29 [INFO] GIT COMMIT: no stage-owned changes — skipping
+09:26:29 [INFO] 
+09:26:29 [INFO] ============================================================
+09:26:29 [INFO] STAGE: adversarial_review
+09:26:29 [INFO] ============================================================
+09:26:29 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+09:26:29 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:27:24 [INFO] OK  done  [55.0s]  [output=(stdout)]
+09:27:24 [WARNING] META role plan constrained; dropped: protocol_expert
+09:27:24 [INFO] META orchestrator selected 2 role(s)
+09:27:24 [INFO] >>  pi -p # Testing Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:27:24 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:31:22
+09:31:51 [INFO] OK  done  [267.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md]
+09:31:51 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md  (10829 bytes)
+09:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:36:22
+09:38:55 [INFO] OK  done  [691.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+09:38:55 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (4578 bytes)
+09:38:55 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+09:38:55 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:39:31 [INFO] OK  done  [35.7s]  [output=(stdout)]
+09:39:31 [INFO] META orchestrator selected 3 role(s)
+09:39:31 [INFO] >>  pi -p # Code Implementer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:39:31 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:39:31 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:41:22
+09:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:46:22
+09:50:59 [INFO] OK  done  [687.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+09:50:59 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (20549 bytes)
+09:51:00 [INFO] OK  done  [688.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md]
+09:51:00 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md  (5270 bytes)
+09:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:51:22
+09:51:45 [INFO] OK  done  [734.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+09:51:45 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (3875 bytes)
+09:51:45 [INFO] GIT COMMIT: [pi-batch] Stage: adversarial_review - 5 tasks completed (files: 13)
+09:51:45 [INFO] 
+09:51:45 [INFO] ============================================================
+09:51:45 [INFO] STAGE: design_gate
+09:51:45 [INFO] ============================================================
+09:51:45 [INFO] -- [1/1] --
+09:51:46 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:54:36 [INFO] OK  done  [170.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+09:54:36 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (3344 bytes)
+09:54:36 [INFO] 
+09:54:36 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+09:54:36 [INFO] GATE PASSED at stage 'design_gate'
+09:54:36 [INFO] GIT COMMIT: no stage-owned changes — skipping
+09:54:36 [INFO] 
+09:54:36 [INFO] ============================================================
+09:54:36 [INFO] STAGE: implement
+09:54:36 [INFO] ============================================================
+09:54:36 [INFO] -- [1/1] --
+09:54:36 [INFO] >>  pi -p Read the repository's AGENTS.md and the approved evidence below. FIRST run the r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+09:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 09:56:22
+10:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:01:22
+10:03:01 [INFO] OK  done  [505.5s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/implement-f9bb818d/task-1-implementation.md]
+10:03:01 [INFO] VALIDATE: go build ./... && go vet ./...
+10:03:03 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/implement-f9bb818d/task-1-implementation.md (validated)
+10:03:03 [INFO] 
+10:03:03 [INFO] Stage 'implement' completed: 1/1 tasks succeeded
+10:03:03 [INFO] GIT COMMIT: no stage-owned changes — skipping
+10:03:03 [INFO] 
+10:03:03 [INFO] ============================================================
+10:03:03 [INFO] STAGE: acceptance
+10:03:03 [INFO] ============================================================
+10:03:03 [INFO] -- [1/1] --
+10:03:03 [INFO] >>  pi -p Verify the implementation against every acceptance check using repository files ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:06:22
+10:07:09 [INFO] OK  done  [246.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/acceptance-c1514c6c/task-1-acceptance.md]
+10:07:09 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/artifacts/acceptance-c1514c6c/task-1-acceptance.md  (2814 bytes)
+10:07:09 [INFO] 
+10:07:09 [INFO] Stage 'acceptance' completed: 1/1 tasks succeeded
+10:07:09 [INFO] GATE PASSED at stage 'acceptance'
+10:07:09 [INFO] GIT COMMIT: no stage-owned changes — skipping
+10:07:09 [INFO] ARCHIVED 9 deliverable(s) -> /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/reject-or-strip-client-supplied-stream-id-on-ing-b5b443f6/archive/pipeline-20260810-100709
+10:07:09 [INFO] 
+10:07:09 [INFO] ============================================================
+10:07:09 [INFO] PIPELINE START (6 stages)
+10:07:09 [INFO] Mode: FORCE regeneration
+10:07:09 [INFO] ============================================================
+10:07:09 [INFO] 
+10:07:09 [INFO] ============================================================
+10:07:09 [INFO] STAGE: requirements
+10:07:09 [INFO] ============================================================
+10:07:09 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+10:07:09 [INFO] -- [1/1] --
+10:07:09 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/openapi'. ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:11:00 [WARNING] agent output REJECTED: agent reported provider failure (quota_?exceeded) | Warning: No project session found with id 'pb-20260810180709-3891880-59-campaign-wait-for-archiv-d81fbc53'; creating a new session with that id.
+10:11:00 [WARNING] FAIL  [code=0]  [230.1s]
+  stderr: Warning: No project session found with id 'pb-20260810180709-3891880-59-campaign-wait-for-archiv-d81fbc53'; creating a new session with that id.
+10:11:00 [INFO] 
+10:11:00 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+10:11:00 [ERROR] Pipeline halted: requirements (stage failed)
+10:11:00 [INFO] 
+10:11:00 [INFO] ============================================================
+10:11:00 [INFO] PIPELINE START (6 stages)
+10:11:00 [INFO] Mode: FORCE regeneration
+10:11:00 [INFO] ============================================================
+10:11:00 [INFO] 
+10:11:00 [INFO] ============================================================
+10:11:00 [INFO] STAGE: requirements
+10:11:00 [INFO] ============================================================
+10:11:00 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+10:11:00 [INFO] -- [1/1] --
+10:11:00 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/proto'. Se...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:11:22
+10:15:49 [WARNING] agent output REJECTED: agent reported provider failure (quota_?exceeded) | Warning: No project session found with id 'pb-20260810181100-3891880-60-campaign-writebatch-part-45c4c986'; creating a new session with that id.
+10:15:49 [WARNING] FAIL  [code=0]  [288.8s]
+  stderr: Warning: No project session found with id 'pb-20260810181100-3891880-60-campaign-writebatch-part-45c4c986'; creating a new session with that id.
+10:15:49 [INFO] 
+10:15:49 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+10:15:49 [ERROR] Pipeline halted: requirements (stage failed)
+10:15:49 [INFO] 
+10:15:49 [INFO] ============================================================
+10:15:49 [INFO] PIPELINE START (6 stages)
+10:15:49 [INFO] Mode: FORCE regeneration
+10:15:49 [INFO] ============================================================
+10:15:49 [INFO] 
+10:15:49 [INFO] ============================================================
+10:15:49 [INFO] STAGE: requirements
+10:15:49 [INFO] ============================================================
+10:15:49 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+10:15:50 [INFO] -- [1/1] --
+10:15:50 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'api/proto'. Se...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:16:22
+10:19:30 [INFO] OK  done  [220.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/requirements-10762e10/requirements.md]
+10:19:30 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/requirements-10762e10/requirements.md  (19791 bytes)
+10:19:30 [INFO] 
+10:19:30 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+10:19:30 [INFO] GIT COMMIT: no stage-owned changes — skipping
+10:19:30 [INFO] 
+10:19:30 [INFO] ============================================================
+10:19:30 [INFO] STAGE: design
+10:19:30 [INFO] ============================================================
+10:19:30 [INFO] -- [1/1] --
+10:19:30 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:21:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:21:22
+10:26:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:26:22
+10:31:12 [INFO] OK  done  [702.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/design-a77de8a6/task-1-design.md]
+10:31:12 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/design-a77de8a6/task-1-design.md  (2923 bytes)
+10:31:13 [INFO] 
+10:31:13 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+10:31:13 [INFO] GIT COMMIT: no stage-owned changes — skipping
+10:31:13 [INFO] 
+10:31:13 [INFO] ============================================================
+10:31:13 [INFO] STAGE: adversarial_review
+10:31:13 [INFO] ============================================================
+10:31:13 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+10:31:13 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:31:22
+10:31:39 [INFO] OK  done  [26.6s]  [output=(stdout)]
+10:31:40 [INFO] META orchestrator selected 3 role(s)
+10:31:40 [INFO] >>  pi -p # Identity Protocol Expert Prompt Read and apply `.pi-batch/tool/prompts/README....  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:31:40 [INFO] >>  pi -p # DevOps Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Veri...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:31:40 [INFO] >>  pi -p # Testing Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:36:22
+10:37:03 [INFO] OK  done  [322.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/devops_engineer.md]
+10:37:03 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/devops_engineer.md  (19034 bytes)
+10:37:50 [INFO] OK  done  [369.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md]
+10:37:50 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md  (10262 bytes)
+10:38:19 [INFO] OK  done  [398.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/protocol_expert.md]
+10:38:19 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/protocol_expert.md  (17309 bytes)
+10:38:19 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+10:38:19 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:39:43 [INFO] OK  done  [83.6s]  [output=(stdout)]
+10:39:43 [INFO] META orchestrator selected 3 role(s)
+10:39:43 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:39:43 [INFO] >>  pi -p # Code Implementer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:39:43 [INFO] >>  pi -p # Code Architecture Reviewer Prompt Read and apply `.pi-batch/tool/prompts/READM...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+10:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:41:22
+10:42:29 [INFO] OK  done  [166.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md]
+10:42:30 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md  (10051 bytes)
+10:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:46:22
+10:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:51:22
+10:52:26 [INFO] OK  done  [763.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+10:52:26 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (3462 bytes)
+10:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 10:56:22
+11:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:01:22
+11:04:43 [ERROR] TIMEOUT  [1500.0s]  [limit=1500s]
+11:04:43 [INFO] META retry 1/1 role '/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md' after task timed out
+11:04:43 [INFO] >>  pi -p # Code Implementer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:06:22
+11:10:21 [INFO] OK  done  [338.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md]
+11:10:22 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md  (6343 bytes)
+11:10:22 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:10:22 [INFO] 
+11:10:22 [INFO] ============================================================
+11:10:22 [INFO] STAGE: design_gate
+11:10:22 [INFO] ============================================================
+11:10:22 [INFO] -- [1/1] --
+11:10:22 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:11:22
+11:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:16:22
+11:16:34 [INFO] OK  done  [371.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+11:16:34 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (2663 bytes)
+11:16:34 [INFO] 
+11:16:34 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+11:16:34 [INFO] GATE PASSED at stage 'design_gate'
+11:16:34 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:16:34 [INFO] 
+11:16:34 [INFO] ============================================================
+11:16:34 [INFO] STAGE: implement
+11:16:34 [INFO] ============================================================
+11:16:34 [INFO] -- [1/1] --
+11:16:34 [INFO] >>  pi -p Read the repository's AGENTS.md and the approved evidence below. FIRST run the r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:21:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:21:22
+11:22:13 [INFO] OK  done  [338.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/implement-f9bb818d/task-1-implementation.md]
+11:22:13 [INFO] VALIDATE: go build ./... && go vet ./...
+11:22:14 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/implement-f9bb818d/task-1-implementation.md (validated)
+11:22:14 [INFO] 
+11:22:14 [INFO] Stage 'implement' completed: 1/1 tasks succeeded
+11:22:14 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:22:14 [INFO] 
+11:22:14 [INFO] ============================================================
+11:22:14 [INFO] STAGE: acceptance
+11:22:14 [INFO] ============================================================
+11:22:14 [INFO] -- [1/1] --
+11:22:14 [INFO] >>  pi -p Verify the implementation against every acceptance check using repository files ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:26:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:26:22
+11:28:10 [INFO] OK  done  [355.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/acceptance-c1514c6c/task-1-acceptance.md]
+11:28:10 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/artifacts/acceptance-c1514c6c/task-1-acceptance.md  (4075 bytes)
+11:28:10 [INFO] 
+11:28:10 [INFO] Stage 'acceptance' completed: 1/1 tasks succeeded
+11:28:10 [INFO] GATE PASSED at stage 'acceptance'
+11:28:10 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:28:10 [INFO] ARCHIVED 11 deliverable(s) -> /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/checked-in-generated-pb-go-can-drift-from-audit--53d51b64/archive/pipeline-20260810-112810
+11:28:11 [INFO] 
+11:28:11 [INFO] ============================================================
+11:28:11 [INFO] PIPELINE START (6 stages)
+11:28:11 [INFO] Mode: FORCE regeneration
+11:28:11 [INFO] ============================================================
+11:28:11 [INFO] 
+11:28:11 [INFO] ============================================================
+11:28:11 [INFO] STAGE: requirements
+11:28:11 [INFO] ============================================================
+11:28:11 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+11:28:11 [INFO] -- [1/1] --
+11:28:11 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-api'...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:31:22
+11:31:37 [INFO] OK  done  [206.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/requirements-10762e10/requirements.md]
+11:31:37 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/requirements-10762e10/requirements.md  (22336 bytes)
+11:31:37 [INFO] 
+11:31:37 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+11:31:37 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:31:37 [INFO] 
+11:31:37 [INFO] ============================================================
+11:31:37 [INFO] STAGE: design
+11:31:37 [INFO] ============================================================
+11:31:37 [INFO] -- [1/1] --
+11:31:38 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:36:22
+11:36:47 [INFO] OK  done  [309.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/design-a77de8a6/task-1-design.md]
+11:36:47 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/design-a77de8a6/task-1-design.md  (19611 bytes)
+11:36:47 [INFO] 
+11:36:47 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+11:36:47 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:36:47 [INFO] 
+11:36:47 [INFO] ============================================================
+11:36:47 [INFO] STAGE: adversarial_review
+11:36:47 [INFO] ============================================================
+11:36:47 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+11:36:47 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:37:20 [INFO] OK  done  [33.1s]  [output=(stdout)]
+11:37:20 [INFO] META orchestrator selected 3 role(s)
+11:37:20 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:37:20 [INFO] >>  pi -p # Code Architecture Reviewer Prompt Read and apply `.pi-batch/tool/prompts/READM...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:37:20 [INFO] >>  pi -p # Testing Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:38:33 [INFO] OK  done  [72.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md]
+11:38:33 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md  (3752 bytes)
+11:41:13 [INFO] OK  done  [232.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md]
+11:41:13 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md  (9849 bytes)
+11:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:41:22
+11:45:44 [INFO] OK  done  [503.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+11:45:44 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (2910 bytes)
+11:45:45 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+11:45:45 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:46:22
+11:46:30 [INFO] OK  done  [45.4s]  [output=(stdout)]
+11:46:30 [INFO] META orchestrator selected 3 role(s)
+11:46:30 [INFO] >>  pi -p # Code Implementer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:46:30 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:46:30 [INFO] >>  pi -p # Testing Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:50:02 [INFO] OK  done  [212.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md]
+11:50:02 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md  (14321 bytes)
+11:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:51:22
+11:53:17 [INFO] OK  done  [406.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md]
+11:53:17 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/code-implementer.md  (4506 bytes)
+11:53:58 [INFO] OK  done  [447.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+11:53:58 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (3076 bytes)
+11:53:58 [INFO] GIT COMMIT: [pi-batch] Stage: adversarial_review - 6 tasks completed (files: 3)
+11:53:58 [INFO] 
+11:53:58 [INFO] ============================================================
+11:53:58 [INFO] STAGE: design_gate
+11:53:58 [INFO] ============================================================
+11:53:58 [INFO] -- [1/1] --
+11:53:58 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+11:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 11:56:22
+11:56:29 [INFO] OK  done  [151.2s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+11:56:29 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (2687 bytes)
+11:56:30 [INFO] 
+11:56:30 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+11:56:30 [INFO] GATE PASSED at stage 'design_gate'
+11:56:30 [INFO] GIT COMMIT: no stage-owned changes — skipping
+11:56:30 [INFO] 
+11:56:30 [INFO] ============================================================
+11:56:30 [INFO] STAGE: implement
+11:56:30 [INFO] ============================================================
+11:56:30 [INFO] -- [1/1] --
+11:56:30 [INFO] >>  pi -p Read the repository's AGENTS.md and the approved evidence below. FIRST run the r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:01:22
+12:02:06 [INFO] OK  done  [336.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/implement-f9bb818d/task-1-implementation.md]
+12:02:06 [INFO] VALIDATE: go build ./... && go vet ./...
+12:02:08 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/implement-f9bb818d/task-1-implementation.md (validated)
+12:02:08 [INFO] 
+12:02:08 [INFO] Stage 'implement' completed: 1/1 tasks succeeded
+12:02:08 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:02:08 [INFO] 
+12:02:08 [INFO] ============================================================
+12:02:08 [INFO] STAGE: acceptance
+12:02:08 [INFO] ============================================================
+12:02:08 [INFO] -- [1/1] --
+12:02:08 [INFO] >>  pi -p Verify the implementation against every acceptance check using repository files ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:05:40 [INFO] OK  done  [212.7s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/acceptance-c1514c6c/task-1-acceptance.md]
+12:05:41 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/artifacts/acceptance-c1514c6c/task-1-acceptance.md  (2655 bytes)
+12:05:41 [INFO] 
+12:05:41 [INFO] Stage 'acceptance' completed: 1/1 tasks succeeded
+12:05:41 [INFO] GATE PASSED at stage 'acceptance'
+12:05:41 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:05:41 [INFO] ARCHIVED 9 deliverable(s) -> /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/strip-search-digests-from-operation-aggregate-ti-2c545f24/archive/pipeline-20260810-120541
+12:05:41 [INFO] 
+12:05:41 [INFO] ============================================================
+12:05:41 [INFO] PIPELINE START (6 stages)
+12:05:41 [INFO] Mode: FORCE regeneration
+12:05:41 [INFO] ============================================================
+12:05:41 [INFO] 
+12:05:41 [INFO] ============================================================
+12:05:41 [INFO] STAGE: requirements
+12:05:41 [INFO] ============================================================
+12:05:41 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+12:05:41 [INFO] -- [1/1] --
+12:05:41 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-api'...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:06:22
+12:08:17 [INFO] OK  done  [156.1s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/requirements-10762e10/requirements.md]
+12:08:17 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/requirements-10762e10/requirements.md  (15402 bytes)
+12:08:17 [INFO] 
+12:08:17 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+12:08:17 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:08:17 [INFO] 
+12:08:17 [INFO] ============================================================
+12:08:17 [INFO] STAGE: design
+12:08:17 [INFO] ============================================================
+12:08:17 [INFO] -- [1/1] --
+12:08:18 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:11:22
+12:14:53 [INFO] OK  done  [394.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/design-a77de8a6/task-1-design.md]
+12:14:53 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/design-a77de8a6/task-1-design.md  (3362 bytes)
+12:14:53 [INFO] 
+12:14:53 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+12:14:53 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:14:53 [INFO] 
+12:14:53 [INFO] ============================================================
+12:14:53 [INFO] STAGE: adversarial_review
+12:14:53 [INFO] ============================================================
+12:14:53 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+12:14:53 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:15:17 [INFO] OK  done  [23.4s]  [output=(stdout)]
+12:15:17 [INFO] META orchestrator selected 3 role(s)
+12:15:17 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:15:17 [INFO] >>  pi -p # Database Architect Prompt Read and apply `.pi-batch/tool/prompts/README.md`. V...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:15:17 [INFO] >>  pi -p # Async & Data Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:16:22
+12:19:09 [INFO] OK  done  [232.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md]
+12:19:09 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md  (9843 bytes)
+12:21:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:21:22
+12:23:42 [INFO] OK  done  [504.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+12:23:42 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (2530 bytes)
+12:24:22 [INFO] OK  done  [544.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+12:24:22 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (10900 bytes)
+12:24:22 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+12:24:22 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:25:07 [INFO] OK  done  [45.1s]  [output=(stdout)]
+12:25:07 [INFO] META orchestrator selected 3 role(s)
+12:25:07 [INFO] >>  pi -p # Code Architecture Reviewer Prompt Read and apply `.pi-batch/tool/prompts/READM...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:25:07 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:25:07 [INFO] >>  pi -p # SRE Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Review ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:26:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:26:22
+12:27:16 [INFO] OK  done  [128.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md]
+12:27:16 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/code_architecture_reviewer.md  (2591 bytes)
+12:30:21 [INFO] OK  done  [313.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/sre_engineer.md]
+12:30:21 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/sre_engineer.md  (13952 bytes)
+12:31:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:31:22
+12:36:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:36:22
+12:40:32 [INFO] OK  done  [924.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md]
+12:40:32 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md  (11858 bytes)
+12:40:32 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:40:32 [INFO] 
+12:40:32 [INFO] ============================================================
+12:40:32 [INFO] STAGE: design_gate
+12:40:32 [INFO] ============================================================
+12:40:32 [INFO] -- [1/1] --
+12:40:32 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:41:14 [INFO] OK  done  [41.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+12:41:14 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/make-export-jobs-crash-safe-reconcile-pending-ru-ade09f36/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (2298 bytes)
+12:41:14 [INFO] 
+12:41:14 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+12:41:14 [ERROR] GATE REJECTED at stage 'design_gate' (verdict: FAIL) — later stages blocked
+12:41:14 [ERROR] Pipeline halted: design_gate (FAIL)
+12:41:14 [INFO] 
+12:41:14 [INFO] ============================================================
+12:41:14 [INFO] PIPELINE START (6 stages)
+12:41:14 [INFO] Mode: FORCE regeneration
+12:41:14 [INFO] ============================================================
+12:41:14 [INFO] 
+12:41:14 [INFO] ============================================================
+12:41:14 [INFO] STAGE: requirements
+12:41:14 [INFO] ============================================================
+12:41:14 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+12:41:14 [INFO] -- [1/1] --
+12:41:14 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-gove...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:41:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:41:22
+12:44:00 [INFO] OK  done  [165.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/requirements-10762e10/requirements.md]
+12:44:00 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/requirements-10762e10/requirements.md  (17886 bytes)
+12:44:00 [INFO] 
+12:44:00 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+12:44:00 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:44:00 [INFO] 
+12:44:00 [INFO] ============================================================
+12:44:00 [INFO] STAGE: design
+12:44:00 [INFO] ============================================================
+12:44:00 [INFO] -- [1/1] --
+12:44:01 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:46:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:46:22
+12:47:06 [INFO] OK  done  [185.6s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/design-a77de8a6/task-1-design.md]
+12:47:06 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/design-a77de8a6/task-1-design.md  (2880 bytes)
+12:47:06 [INFO] 
+12:47:06 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+12:47:06 [INFO] GIT COMMIT: no stage-owned changes — skipping
+12:47:06 [INFO] 
+12:47:06 [INFO] ============================================================
+12:47:06 [INFO] STAGE: adversarial_review
+12:47:06 [INFO] ============================================================
+12:47:06 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+12:47:06 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:47:21 [INFO] OK  done  [14.7s]  [output=(stdout)]
+12:47:21 [INFO] META orchestrator selected 3 role(s)
+12:47:21 [INFO] >>  pi -p # QA Lead Prompt Read and apply `.pi-batch/tool/prompts/README.md`. Distinguish ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:47:21 [INFO] >>  pi -p # Backend Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:47:21 [INFO] >>  pi -p # Database Architect Prompt Read and apply `.pi-batch/tool/prompts/README.md`. V...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+12:51:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:51:22
+12:52:49 [INFO] OK  done  [327.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+12:52:49 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (2908 bytes)
+12:55:26 [INFO] OK  done  [484.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/backend_engineer.md]
+12:55:26 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/backend_engineer.md  (7061 bytes)
+12:56:22 [INFO] CAMPAIGN HEARTBEAT: alive after 12:56:22
+13:01:22 [INFO] CAMPAIGN HEARTBEAT: alive after 13:01:22
+13:06:10 [INFO] OK  done  [1129.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md]
+13:06:10 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/qa_lead.md  (13424 bytes)
+13:06:10 [INFO] META iteration 2/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+13:06:10 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:06:22 [INFO] CAMPAIGN HEARTBEAT: alive after 13:06:22
+13:06:57 [INFO] OK  done  [46.8s]  [output=(stdout)]
+13:06:57 [INFO] META orchestrator selected 3 role(s)
+13:06:57 [INFO] >>  pi -p # Testing Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:06:57 [INFO] >>  pi -p Follow-up pass against the landed implementation (not the design): re-verify F1–...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:06:57 [INFO] >>  pi -p # Async & Data Reviewer Prompt Read and apply `.pi-batch/tool/prompts/README.md`...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:10:22 [INFO] OK  done  [204.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+13:10:22 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (2846 bytes)
+13:11:22 [INFO] CAMPAIGN HEARTBEAT: alive after 13:11:22
+13:11:36 [INFO] OK  done  [279.0s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md]
+13:11:36 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/async_reviewer.md  (3967 bytes)
+13:15:04 [INFO] OK  done  [486.4s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md]
+13:15:04 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/adversarial_review-9c87f3a7/meta/testing_reviewer.md  (8166 bytes)
+13:15:04 [INFO] GIT COMMIT: [pi-batch] Stage: adversarial_review - 6 tasks completed (files: 4)
+13:15:04 [INFO] 
+13:15:04 [INFO] ============================================================
+13:15:04 [INFO] STAGE: design_gate
+13:15:04 [INFO] ============================================================
+13:15:04 [INFO] -- [1/1] --
+13:15:04 [INFO] >>  pi -p Independently verify that blocking review findings are resolved or explicitly re...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:16:22 [INFO] CAMPAIGN HEARTBEAT: alive after 13:16:22
+13:18:41 [INFO] OK  done  [217.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/design_gate-6a76b0dd/task-1-design-gate.md]
+13:18:41 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/design_gate-6a76b0dd/task-1-design-gate.md  (3407 bytes)
+13:18:41 [INFO] 
+13:18:41 [INFO] Stage 'design_gate' completed: 1/1 tasks succeeded
+13:18:41 [INFO] GATE PASSED at stage 'design_gate'
+13:18:41 [INFO] GIT COMMIT: no stage-owned changes — skipping
+13:18:41 [INFO] 
+13:18:41 [INFO] ============================================================
+13:18:41 [INFO] STAGE: implement
+13:18:41 [INFO] ============================================================
+13:18:41 [INFO] -- [1/1] --
+13:18:41 [INFO] >>  pi -p Read the repository's AGENTS.md and the approved evidence below. FIRST run the r...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:21:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:21:23
+13:25:58 [INFO] OK  done  [436.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/implement-f9bb818d/task-1-implementation.md]
+13:25:59 [INFO] VALIDATE: go build ./... && go vet ./...
+13:26:00 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/implement-f9bb818d/task-1-implementation.md (validated)
+13:26:00 [INFO] 
+13:26:00 [INFO] Stage 'implement' completed: 1/1 tasks succeeded
+13:26:00 [INFO] GIT COMMIT: no stage-owned changes — skipping
+13:26:00 [INFO] 
+13:26:00 [INFO] ============================================================
+13:26:00 [INFO] STAGE: acceptance
+13:26:00 [INFO] ============================================================
+13:26:00 [INFO] -- [1/1] --
+13:26:00 [INFO] >>  pi -p Verify the implementation against every acceptance check using repository files ...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:26:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:26:23
+13:31:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:31:23
+13:32:00 [INFO] OK  done  [359.9s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/acceptance-c1514c6c/task-1-acceptance.md]
+13:32:00 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/artifacts/acceptance-c1514c6c/task-1-acceptance.md  (3124 bytes)
+13:32:00 [INFO] 
+13:32:00 [INFO] Stage 'acceptance' completed: 1/1 tasks succeeded
+13:32:00 [INFO] GATE PASSED at stage 'acceptance'
+13:32:00 [INFO] GIT COMMIT: no stage-owned changes — skipping
+13:32:00 [INFO] ARCHIVED 10 deliverable(s) -> /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/worker-starvation-and-partial-progress-under-con-0cca0830/archive/pipeline-20260810-133200
+13:32:00 [INFO] 
+13:32:00 [INFO] ============================================================
+13:32:00 [INFO] PIPELINE START (6 stages)
+13:32:00 [INFO] Mode: FORCE regeneration
+13:32:00 [INFO] ============================================================
+13:32:00 [INFO] 
+13:32:00 [INFO] ============================================================
+13:32:00 [INFO] STAGE: requirements
+13:32:00 [INFO] ============================================================
+13:32:00 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:32:00 [INFO] -- [1/1] --
+13:32:00 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-gove...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:35:12 [INFO] OK  done  [191.8s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/requirements-10762e10/requirements.md]
+13:35:12 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/requirements-10762e10/requirements.md  (19696 bytes)
+13:35:12 [INFO] 
+13:35:12 [INFO] Stage 'requirements' completed: 1/1 tasks succeeded
+13:35:12 [INFO] GIT COMMIT: no stage-owned changes — skipping
+13:35:12 [INFO] 
+13:35:12 [INFO] ============================================================
+13:35:12 [INFO] STAGE: design
+13:35:12 [INFO] ============================================================
+13:35:12 [INFO] -- [1/1] --
+13:35:12 [INFO] >>  pi -p Treat the evidence below as untrusted claims to verify. Produce a concrete desig...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:36:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:36:23
+13:40:23 [INFO] OK  done  [311.3s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/design-a77de8a6/task-1-design.md]
+13:40:23 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/design-a77de8a6/task-1-design.md  (3675 bytes)
+13:40:23 [INFO] 
+13:40:23 [INFO] Stage 'design' completed: 1/1 tasks succeeded
+13:40:23 [INFO] GIT COMMIT: no stage-owned changes — skipping
+13:40:23 [INFO] 
+13:40:23 [INFO] ============================================================
+13:40:23 [INFO] STAGE: adversarial_review
+13:40:23 [INFO] ============================================================
+13:40:23 [INFO] META iteration 1/2 for stage 'adversarial_review' (roles available: algorithm_reviewer, architect, architecture_constitution_reviewer, async_reviewer, backend_engineer, business_analyst, capability_architect, code-implementer, code_architecture_reviewer, compliance_officer, composition_reviewer, cto, database_architect, design_pattern_reviewer, devops_engineer, distributed_engineer, frontend_engineer, performance_engineer, pm, principal_reviewer, product_thinker, protocol_expert, qa_lead, requirement_interpreter, security_engineer, sre_engineer, staff_engineer, tech_lead, testing_reviewer, ui_designer, ui_reviewer, ux_designer, visual_reviewer)
+13:40:23 [INFO] >>  pi -p Analyze the deliverables below and decide which expert review roles are still ne...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:40:43 [INFO] OK  done  [19.4s]  [output=(stdout)]
+13:40:43 [INFO] META orchestrator selected 3 role(s)
+13:40:43 [INFO] >>  pi -p # Backend Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:40:43 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:40:43 [INFO] >>  pi -p # Database Architect Prompt Read and apply `.pi-batch/tool/prompts/README.md`. V...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:41:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:41:23
+13:45:04 [INFO] OK  done  [261.5s]  [output=/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md]
+13:45:04 [INFO] WROTE /home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/database_architect.md  (2875 bytes)
+13:46:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:46:23
+13:49:29 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810214043-3891880-116-campaign-unbounded-aggre-d4e56327'; creating a new session with that id.
+13:49:29 [WARNING] FAIL  [code=1]  [526.8s]
+  stderr: Warning: No project session found with id 'pb-20260810214043-3891880-116-campaign-unbounded-aggre-d4e56327'; creating a new session with that id.
+Request timed out.
+13:49:34 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810214043-3891880-115-campaign-unbounded-aggre-9ddf37ea'; creating a new session with that id.
+13:49:34 [WARNING] FAIL  [code=1]  [530.9s]
+  stderr: Warning: No project session found with id 'pb-20260810214043-3891880-115-campaign-unbounded-aggre-9ddf37ea'; creating a new session with that id.
+Request timed out.
+13:49:34 [INFO] META retry 1/1 role '/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md' after agent exited 1
+13:49:34 [INFO] >>  pi -p # Security Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md` and...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:50:30 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810214934-3891880-118-campaign-unbounded-aggre-d4e56327'; creating a new session with that id.
+13:50:30 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810214934-3891880-118-campaign-unbounded-aggre-d4e56327'; creating a new session with that id.
+Request timed out.
+13:50:30 [WARNING] META retry for '/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/security_engineer.md' failed again: agent exited 1
+13:50:30 [INFO] META retry 1/1 role '/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/backend_engineer.md' after agent exited 1
+13:50:30 [INFO] >>  pi -p # Backend Engineer Prompt Read and apply `.pi-batch/tool/prompts/README.md`, `AG...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:51:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:51:23
+13:51:27 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215030-3891880-119-campaign-unbounded-aggre-9ddf37ea'; creating a new session with that id.
+13:51:27 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215030-3891880-119-campaign-unbounded-aggre-9ddf37ea'; creating a new session with that id.
+Request timed out.
+13:51:27 [WARNING] META retry for '/home/u1/workspace/demo/snaplink-audit-governance/docs/auto/runs/unbounded-aggregate-checkpoint-growth-createaggr-685fa12e/artifacts/adversarial_review-9c87f3a7/meta/backend_engineer.md' failed again: agent exited 1
+13:51:27 [WARNING] META stage 'adversarial_review': some role tasks failed in iteration 1
+13:51:27 [ERROR] META stage 'adversarial_review': 2 role task(s) failed (limit 0)
+13:51:27 [ERROR] Pipeline halted: adversarial_review (stage failed)
+13:51:27 [INFO] 
+13:51:27 [INFO] ============================================================
+13:51:27 [INFO] PIPELINE START (6 stages)
+13:51:27 [INFO] Mode: FORCE regeneration
+13:51:27 [INFO] ============================================================
+13:51:27 [INFO] 
+13:51:27 [INFO] ============================================================
+13:51:27 [INFO] STAGE: requirements
+13:51:27 [INFO] ============================================================
+13:51:27 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:51:27 [INFO] -- [1/1] --
+13:51:27 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-kafk...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:52:24 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215127-3891880-120-campaign-fail-fast-on-au-427f3a36'; creating a new session with that id.
+13:52:24 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215127-3891880-120-campaign-fail-fast-on-au-427f3a36'; creating a new session with that id.
+Request timed out.
+13:52:24 [INFO] 
+13:52:24 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:52:24 [ERROR] Pipeline halted: requirements (stage failed)
+13:52:24 [INFO] 
+13:52:24 [INFO] ============================================================
+13:52:24 [INFO] PIPELINE START (6 stages)
+13:52:24 [INFO] Mode: FORCE regeneration
+13:52:24 [INFO] ============================================================
+13:52:24 [INFO] 
+13:52:24 [INFO] ============================================================
+13:52:24 [INFO] STAGE: requirements
+13:52:24 [INFO] ============================================================
+13:52:24 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:52:24 [INFO] -- [1/1] --
+13:52:24 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-kafk...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:53:21 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215224-3891880-121-campaign-tenant-scoped-v-76f03140'; creating a new session with that id.
+13:53:21 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215224-3891880-121-campaign-tenant-scoped-v-76f03140'; creating a new session with that id.
+Request timed out.
+13:53:21 [INFO] 
+13:53:21 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:53:21 [ERROR] Pipeline halted: requirements (stage failed)
+13:53:21 [INFO] 
+13:53:21 [INFO] ============================================================
+13:53:21 [INFO] PIPELINE START (6 stages)
+13:53:21 [INFO] Mode: FORCE regeneration
+13:53:21 [INFO] ============================================================
+13:53:21 [INFO] 
+13:53:21 [INFO] ============================================================
+13:53:21 [INFO] STAGE: requirements
+13:53:21 [INFO] ============================================================
+13:53:21 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:53:21 [INFO] -- [1/1] --
+13:53:21 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-kafk...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:54:17 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215321-3891880-122-campaign-dlq-transient-f-cd74a672'; creating a new session with that id.
+13:54:17 [WARNING] FAIL  [code=1]  [56.8s]
+  stderr: Warning: No project session found with id 'pb-20260810215321-3891880-122-campaign-dlq-transient-f-cd74a672'; creating a new session with that id.
+Request timed out.
+13:54:17 [INFO] 
+13:54:17 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:54:17 [ERROR] Pipeline halted: requirements (stage failed)
+13:54:17 [INFO] 
+13:54:17 [INFO] ============================================================
+13:54:17 [INFO] PIPELINE START (6 stages)
+13:54:17 [INFO] Mode: FORCE regeneration
+13:54:17 [INFO] ============================================================
+13:54:17 [INFO] 
+13:54:17 [INFO] ============================================================
+13:54:17 [INFO] STAGE: requirements
+13:54:17 [INFO] ============================================================
+13:54:17 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:54:17 [INFO] -- [1/1] --
+13:54:17 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-kafk...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:55:14 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215417-3891880-123-campaign-api-mode-replay-b431d72a'; creating a new session with that id.
+13:55:14 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215417-3891880-123-campaign-api-mode-replay-b431d72a'; creating a new session with that id.
+Request timed out.
+13:55:14 [INFO] 
+13:55:14 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:55:14 [ERROR] Pipeline halted: requirements (stage failed)
+13:55:14 [INFO] 
+13:55:14 [INFO] ============================================================
+13:55:14 [INFO] PIPELINE START (6 stages)
+13:55:14 [INFO] Mode: FORCE regeneration
+13:55:14 [INFO] ============================================================
+13:55:14 [INFO] 
+13:55:14 [INFO] ============================================================
+13:55:14 [INFO] STAGE: requirements
+13:55:14 [INFO] ============================================================
+13:55:14 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:55:14 [INFO] -- [1/1] --
+13:55:14 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-outb...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:56:11 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215514-3891880-124-campaign-reclassify-401--1b6aa49d'; creating a new session with that id.
+13:56:11 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215514-3891880-124-campaign-reclassify-401--1b6aa49d'; creating a new session with that id.
+Request timed out.
+13:56:11 [INFO] 
+13:56:11 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:56:11 [ERROR] Pipeline halted: requirements (stage failed)
+13:56:11 [INFO] 
+13:56:11 [INFO] ============================================================
+13:56:11 [INFO] PIPELINE START (6 stages)
+13:56:11 [INFO] Mode: FORCE regeneration
+13:56:11 [INFO] ============================================================
+13:56:11 [INFO] 
+13:56:11 [INFO] ============================================================
+13:56:11 [INFO] STAGE: requirements
+13:56:11 [INFO] ============================================================
+13:56:11 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:56:11 [INFO] -- [1/1] --
+13:56:11 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-outb...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:56:23 [INFO] CAMPAIGN HEARTBEAT: alive after 13:56:23
+13:57:08 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215611-3891880-125-campaign-add-a-redeliver-527253c6'; creating a new session with that id.
+13:57:08 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215611-3891880-125-campaign-add-a-redeliver-527253c6'; creating a new session with that id.
+Request timed out.
+13:57:08 [INFO] 
+13:57:08 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:57:08 [ERROR] Pipeline halted: requirements (stage failed)
+13:57:08 [INFO] 
+13:57:08 [INFO] ============================================================
+13:57:08 [INFO] PIPELINE START (6 stages)
+13:57:08 [INFO] Mode: FORCE regeneration
+13:57:08 [INFO] ============================================================
+13:57:08 [INFO] 
+13:57:08 [INFO] ============================================================
+13:57:08 [INFO] STAGE: requirements
+13:57:08 [INFO] ============================================================
+13:57:08 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:57:08 [INFO] -- [1/1] --
+13:57:08 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-proj...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:58:04 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215708-3891880-126-campaign-wire-the-projec-b5ad96be'; creating a new session with that id.
+13:58:04 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215708-3891880-126-campaign-wire-the-projec-b5ad96be'; creating a new session with that id.
+Request timed out.
+13:58:04 [INFO] 
+13:58:04 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:58:04 [ERROR] Pipeline halted: requirements (stage failed)
+13:58:04 [INFO] 
+13:58:04 [INFO] ============================================================
+13:58:04 [INFO] PIPELINE START (6 stages)
+13:58:04 [INFO] Mode: FORCE regeneration
+13:58:04 [INFO] ============================================================
+13:58:04 [INFO] 
+13:58:04 [INFO] ============================================================
+13:58:04 [INFO] STAGE: requirements
+13:58:04 [INFO] ============================================================
+13:58:04 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:58:04 [INFO] -- [1/1] --
+13:58:04 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'cmd/audit-proj...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:59:01 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215804-3891880-127-campaign-fail-closed-at--babcdcc1'; creating a new session with that id.
+13:59:01 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215804-3891880-127-campaign-fail-closed-at--babcdcc1'; creating a new session with that id.
+Request timed out.
+13:59:01 [INFO] 
+13:59:01 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:59:01 [ERROR] Pipeline halted: requirements (stage failed)
+13:59:01 [INFO] 
+13:59:01 [INFO] ============================================================
+13:59:01 [INFO] PIPELINE START (6 stages)
+13:59:01 [INFO] Mode: FORCE regeneration
+13:59:01 [INFO] ============================================================
+13:59:01 [INFO] 
+13:59:01 [INFO] ============================================================
+13:59:01 [INFO] STAGE: requirements
+13:59:01 [INFO] ============================================================
+13:59:01 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:59:01 [INFO] -- [1/1] --
+13:59:01 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/archi...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+13:59:58 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215901-3891880-128-campaign-s3-archive-worm-e394998e'; creating a new session with that id.
+13:59:58 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215901-3891880-128-campaign-s3-archive-worm-e394998e'; creating a new session with that id.
+Request timed out.
+13:59:58 [INFO] 
+13:59:58 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+13:59:58 [ERROR] Pipeline halted: requirements (stage failed)
+13:59:58 [INFO] 
+13:59:58 [INFO] ============================================================
+13:59:58 [INFO] PIPELINE START (6 stages)
+13:59:58 [INFO] Mode: FORCE regeneration
+13:59:58 [INFO] ============================================================
+13:59:58 [INFO] 
+13:59:58 [INFO] ============================================================
+13:59:58 [INFO] STAGE: requirements
+13:59:58 [INFO] ============================================================
+13:59:58 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+13:59:58 [INFO] -- [1/1] --
+13:59:58 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/archi...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:00:55 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810215958-3891880-129-campaign-filestore-archi-21c31e7f'; creating a new session with that id.
+14:00:55 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810215958-3891880-129-campaign-filestore-archi-21c31e7f'; creating a new session with that id.
+Request timed out.
+14:00:55 [INFO] 
+14:00:55 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:00:55 [ERROR] Pipeline halted: requirements (stage failed)
+14:00:55 [INFO] 
+14:00:55 [INFO] ============================================================
+14:00:55 [INFO] PIPELINE START (6 stages)
+14:00:55 [INFO] Mode: FORCE regeneration
+14:00:55 [INFO] ============================================================
+14:00:55 [INFO] 
+14:00:55 [INFO] ============================================================
+14:00:55 [INFO] STAGE: requirements
+14:00:55 [INFO] ============================================================
+14:00:55 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:00:55 [INFO] -- [1/1] --
+14:00:55 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/auth'...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:01:23 [INFO] CAMPAIGN HEARTBEAT: alive after 14:01:23
+14:01:51 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220055-3891880-130-campaign-bound-jwks-refe-d6f1bdaf'; creating a new session with that id.
+14:01:51 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220055-3891880-130-campaign-bound-jwks-refe-d6f1bdaf'; creating a new session with that id.
+Request timed out.
+14:01:51 [INFO] 
+14:01:51 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:01:51 [ERROR] Pipeline halted: requirements (stage failed)
+14:01:51 [INFO] 
+14:01:51 [INFO] ============================================================
+14:01:51 [INFO] PIPELINE START (6 stages)
+14:01:51 [INFO] Mode: FORCE regeneration
+14:01:51 [INFO] ============================================================
+14:01:51 [INFO] 
+14:01:51 [INFO] ============================================================
+14:01:51 [INFO] STAGE: requirements
+14:01:51 [INFO] ============================================================
+14:01:51 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:01:51 [INFO] -- [1/1] --
+14:01:51 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/auth'...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:02:48 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220151-3891880-131-campaign-require-issuer--21ee3395'; creating a new session with that id.
+14:02:48 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220151-3891880-131-campaign-require-issuer--21ee3395'; creating a new session with that id.
+Request timed out.
+14:02:48 [INFO] 
+14:02:48 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:02:48 [ERROR] Pipeline halted: requirements (stage failed)
+14:02:48 [INFO] 
+14:02:48 [INFO] ============================================================
+14:02:48 [INFO] PIPELINE START (6 stages)
+14:02:48 [INFO] Mode: FORCE regeneration
+14:02:48 [INFO] ============================================================
+14:02:48 [INFO] 
+14:02:48 [INFO] ============================================================
+14:02:48 [INFO] STAGE: requirements
+14:02:48 [INFO] ============================================================
+14:02:48 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:02:48 [INFO] -- [1/1] --
+14:02:48 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/domai...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:03:45 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220248-3891880-132-campaign-validate-stream-9d74f621'; creating a new session with that id.
+14:03:45 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220248-3891880-132-campaign-validate-stream-9d74f621'; creating a new session with that id.
+Request timed out.
+14:03:45 [INFO] 
+14:03:45 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:03:45 [ERROR] Pipeline halted: requirements (stage failed)
+14:03:45 [INFO] 
+14:03:45 [INFO] ============================================================
+14:03:45 [INFO] PIPELINE START (6 stages)
+14:03:45 [INFO] Mode: FORCE regeneration
+14:03:45 [INFO] ============================================================
+14:03:45 [INFO] 
+14:03:45 [INFO] ============================================================
+14:03:45 [INFO] STAGE: requirements
+14:03:45 [INFO] ============================================================
+14:03:45 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:03:45 [INFO] -- [1/1] --
+14:03:45 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/domai...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:04:42 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220345-3891880-133-campaign-legal-hold-filt-9bbd7fe2'; creating a new session with that id.
+14:04:42 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220345-3891880-133-campaign-legal-hold-filt-9bbd7fe2'; creating a new session with that id.
+Request timed out.
+14:04:42 [INFO] 
+14:04:42 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:04:42 [ERROR] Pipeline halted: requirements (stage failed)
+14:04:42 [INFO] 
+14:04:42 [INFO] ============================================================
+14:04:42 [INFO] PIPELINE START (6 stages)
+14:04:42 [INFO] Mode: FORCE regeneration
+14:04:42 [INFO] ============================================================
+14:04:42 [INFO] 
+14:04:42 [INFO] ============================================================
+14:04:42 [INFO] STAGE: requirements
+14:04:42 [INFO] ============================================================
+14:04:42 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:04:42 [INFO] -- [1/1] --
+14:04:42 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/fsuti...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:05:38 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220442-3891880-134-campaign-persist-replay--acdfc0f8'; creating a new session with that id.
+14:05:38 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220442-3891880-134-campaign-persist-replay--acdfc0f8'; creating a new session with that id.
+Request timed out.
+14:05:38 [INFO] 
+14:05:38 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:05:38 [ERROR] Pipeline halted: requirements (stage failed)
+14:05:38 [INFO] 
+14:05:38 [INFO] ============================================================
+14:05:38 [INFO] PIPELINE START (6 stages)
+14:05:38 [INFO] Mode: FORCE regeneration
+14:05:38 [INFO] ============================================================
+14:05:38 [INFO] 
+14:05:38 [INFO] ============================================================
+14:05:38 [INFO] STAGE: requirements
+14:05:38 [INFO] ============================================================
+14:05:38 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:05:38 [INFO] -- [1/1] --
+14:05:38 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/fsuti...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:06:23 [INFO] CAMPAIGN HEARTBEAT: alive after 14:06:23
+14:06:35 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220538-3891880-135-campaign-fix-fsutil-cont-f8d5cc40'; creating a new session with that id.
+14:06:35 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220538-3891880-135-campaign-fix-fsutil-cont-f8d5cc40'; creating a new session with that id.
+Request timed out.
+14:06:35 [INFO] 
+14:06:35 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:06:35 [ERROR] Pipeline halted: requirements (stage failed)
+14:06:35 [INFO] 
+14:06:35 [INFO] ============================================================
+14:06:35 [INFO] PIPELINE START (6 stages)
+14:06:35 [INFO] Mode: FORCE regeneration
+14:06:35 [INFO] ============================================================
+14:06:35 [INFO] 
+14:06:35 [INFO] ============================================================
+14:06:35 [INFO] STAGE: requirements
+14:06:35 [INFO] ============================================================
+14:06:35 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:06:35 [INFO] -- [1/1] --
+14:06:35 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/grpca...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:07:32 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220635-3891880-136-campaign-add-unary-strea-e01e8639'; creating a new session with that id.
+14:07:32 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220635-3891880-136-campaign-add-unary-strea-e01e8639'; creating a new session with that id.
+Request timed out.
+14:07:32 [INFO] 
+14:07:32 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:07:32 [ERROR] Pipeline halted: requirements (stage failed)
+14:07:32 [INFO] 
+14:07:32 [INFO] ============================================================
+14:07:32 [INFO] PIPELINE START (6 stages)
+14:07:32 [INFO] Mode: FORCE regeneration
+14:07:32 [INFO] ============================================================
+14:07:32 [INFO] 
+14:07:32 [INFO] ============================================================
+14:07:32 [INFO] STAGE: requirements
+14:07:32 [INFO] ============================================================
+14:07:32 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:07:32 [INFO] -- [1/1] --
+14:07:32 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/grpca...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:08:29 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220732-3891880-137-campaign-batch-stream-in-a4d67582'; creating a new session with that id.
+14:08:29 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220732-3891880-137-campaign-batch-stream-in-a4d67582'; creating a new session with that id.
+Request timed out.
+14:08:29 [INFO] 
+14:08:29 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:08:29 [ERROR] Pipeline halted: requirements (stage failed)
+14:08:29 [INFO] 
+14:08:29 [INFO] ============================================================
+14:08:29 [INFO] PIPELINE START (6 stages)
+14:08:29 [INFO] Mode: FORCE regeneration
+14:08:29 [INFO] ============================================================
+14:08:29 [INFO] 
+14:08:29 [INFO] ============================================================
+14:08:29 [INFO] STAGE: requirements
+14:08:29 [INFO] ============================================================
+14:08:29 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:08:29 [INFO] -- [1/1] --
+14:08:29 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/httpa...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:09:25 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220829-3891880-138-campaign-operation-aggre-a6644afc'; creating a new session with that id.
+14:09:25 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220829-3891880-138-campaign-operation-aggre-a6644afc'; creating a new session with that id.
+Request timed out.
+14:09:25 [INFO] 
+14:09:25 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:09:25 [ERROR] Pipeline halted: requirements (stage failed)
+14:09:26 [INFO] 
+14:09:26 [INFO] ============================================================
+14:09:26 [INFO] PIPELINE START (6 stages)
+14:09:26 [INFO] Mode: FORCE regeneration
+14:09:26 [INFO] ============================================================
+14:09:26 [INFO] 
+14:09:26 [INFO] ============================================================
+14:09:26 [INFO] STAGE: requirements
+14:09:26 [INFO] ============================================================
+14:09:26 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:09:26 [INFO] -- [1/1] --
+14:09:26 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/httpa...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:10:22 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810220926-3891880-139-campaign-platform-tenant-0a143532'; creating a new session with that id.
+14:10:22 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810220926-3891880-139-campaign-platform-tenant-0a143532'; creating a new session with that id.
+Request timed out.
+14:10:22 [INFO] 
+14:10:22 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:10:22 [ERROR] Pipeline halted: requirements (stage failed)
+14:10:22 [INFO] 
+14:10:22 [INFO] ============================================================
+14:10:22 [INFO] PIPELINE START (6 stages)
+14:10:22 [INFO] Mode: FORCE regeneration
+14:10:22 [INFO] ============================================================
+14:10:22 [INFO] 
+14:10:22 [INFO] ============================================================
+14:10:22 [INFO] STAGE: requirements
+14:10:22 [INFO] ============================================================
+14:10:22 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:10:22 [INFO] -- [1/1] --
+14:10:22 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/kafka...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:11:19 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221022-3891880-140-campaign-dead-letter-pub-3f67ddc4'; creating a new session with that id.
+14:11:19 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221022-3891880-140-campaign-dead-letter-pub-3f67ddc4'; creating a new session with that id.
+Request timed out.
+14:11:19 [INFO] 
+14:11:19 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:11:19 [ERROR] Pipeline halted: requirements (stage failed)
+14:11:19 [INFO] 
+14:11:19 [INFO] ============================================================
+14:11:19 [INFO] PIPELINE START (6 stages)
+14:11:19 [INFO] Mode: FORCE regeneration
+14:11:19 [INFO] ============================================================
+14:11:19 [INFO] 
+14:11:19 [INFO] ============================================================
+14:11:19 [INFO] STAGE: requirements
+14:11:19 [INFO] ============================================================
+14:11:19 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:11:19 [INFO] -- [1/1] --
+14:11:19 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/kafka...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:11:23 [INFO] CAMPAIGN HEARTBEAT: alive after 14:11:23
+14:12:16 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221119-3891880-141-campaign-replay-never-co-fa9df69c'; creating a new session with that id.
+14:12:16 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221119-3891880-141-campaign-replay-never-co-fa9df69c'; creating a new session with that id.
+Request timed out.
+14:12:16 [INFO] 
+14:12:16 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:12:16 [ERROR] Pipeline halted: requirements (stage failed)
+14:12:16 [INFO] 
+14:12:16 [INFO] ============================================================
+14:12:16 [INFO] PIPELINE START (6 stages)
+14:12:16 [INFO] Mode: FORCE regeneration
+14:12:16 [INFO] ============================================================
+14:12:16 [INFO] 
+14:12:16 [INFO] ============================================================
+14:12:16 [INFO] STAGE: requirements
+14:12:16 [INFO] ============================================================
+14:12:16 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:12:16 [INFO] -- [1/1] --
+14:12:16 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/outbo...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:13:12 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221216-3891880-142-campaign-httpdeliverer-f-f01ee92d'; creating a new session with that id.
+14:13:12 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221216-3891880-142-campaign-httpdeliverer-f-f01ee92d'; creating a new session with that id.
+Request timed out.
+14:13:12 [INFO] 
+14:13:12 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:13:12 [ERROR] Pipeline halted: requirements (stage failed)
+14:13:13 [INFO] 
+14:13:13 [INFO] ============================================================
+14:13:13 [INFO] PIPELINE START (6 stages)
+14:13:13 [INFO] Mode: FORCE regeneration
+14:13:13 [INFO] ============================================================
+14:13:13 [INFO] 
+14:13:13 [INFO] ============================================================
+14:13:13 [INFO] STAGE: requirements
+14:13:13 [INFO] ============================================================
+14:13:13 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:13:13 [INFO] -- [1/1] --
+14:13:13 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/outbo...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:14:09 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221313-3891880-143-campaign-relay-has-no-cl-461b9ba2'; creating a new session with that id.
+14:14:09 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221313-3891880-143-campaign-relay-has-no-cl-461b9ba2'; creating a new session with that id.
+Request timed out.
+14:14:09 [INFO] 
+14:14:09 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:14:09 [ERROR] Pipeline halted: requirements (stage failed)
+14:14:09 [INFO] 
+14:14:09 [INFO] ============================================================
+14:14:09 [INFO] PIPELINE START (6 stages)
+14:14:09 [INFO] Mode: FORCE regeneration
+14:14:09 [INFO] ============================================================
+14:14:09 [INFO] 
+14:14:09 [INFO] ============================================================
+14:14:09 [INFO] STAGE: requirements
+14:14:09 [INFO] ============================================================
+14:14:09 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:14:09 [INFO] -- [1/1] --
+14:14:09 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/proje...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:15:06 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221409-3891880-144-campaign-attach-a-dlq-fa-98537b3b'; creating a new session with that id.
+14:15:06 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221409-3891880-144-campaign-attach-a-dlq-fa-98537b3b'; creating a new session with that id.
+Request timed out.
+14:15:06 [INFO] 
+14:15:06 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:15:06 [ERROR] Pipeline halted: requirements (stage failed)
+14:15:06 [INFO] 
+14:15:06 [INFO] ============================================================
+14:15:06 [INFO] PIPELINE START (6 stages)
+14:15:06 [INFO] Mode: FORCE regeneration
+14:15:06 [INFO] ============================================================
+14:15:06 [INFO] 
+14:15:06 [INFO] ============================================================
+14:15:06 [INFO] STAGE: requirements
+14:15:06 [INFO] ============================================================
+14:15:06 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:15:06 [INFO] -- [1/1] --
+14:15:06 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/proje...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:16:03 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221506-3891880-145-campaign-make-counttenan-ab15c495'; creating a new session with that id.
+14:16:03 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221506-3891880-145-campaign-make-counttenan-ab15c495'; creating a new session with that id.
+Request timed out.
+14:16:03 [INFO] 
+14:16:03 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:16:03 [ERROR] Pipeline halted: requirements (stage failed)
+14:16:03 [INFO] 
+14:16:03 [INFO] ============================================================
+14:16:03 [INFO] PIPELINE START (6 stages)
+14:16:03 [INFO] Mode: FORCE regeneration
+14:16:03 [INFO] ============================================================
+14:16:03 [INFO] 
+14:16:03 [INFO] ============================================================
+14:16:03 [INFO] STAGE: requirements
+14:16:03 [INFO] ============================================================
+14:16:03 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:16:03 [INFO] -- [1/1] --
+14:16:03 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/runti...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:16:23 [INFO] CAMPAIGN HEARTBEAT: alive after 14:16:23
+14:16:59 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221603-3891880-146-campaign-s3-compliance-a-52dcb749'; creating a new session with that id.
+14:16:59 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221603-3891880-146-campaign-s3-compliance-a-52dcb749'; creating a new session with that id.
+Request timed out.
+14:16:59 [INFO] 
+14:16:59 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:17:00 [ERROR] Pipeline halted: requirements (stage failed)
+14:17:00 [INFO] 
+14:17:00 [INFO] ============================================================
+14:17:00 [INFO] PIPELINE START (6 stages)
+14:17:00 [INFO] Mode: FORCE regeneration
+14:17:00 [INFO] ============================================================
+14:17:00 [INFO] 
+14:17:00 [INFO] ============================================================
+14:17:00 [INFO] STAGE: requirements
+14:17:00 [INFO] ============================================================
+14:17:00 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:17:00 [INFO] -- [1/1] --
+14:17:00 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/runti...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:17:56 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221700-3891880-147-campaign-cross-process-s-d92eb302'; creating a new session with that id.
+14:17:56 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221700-3891880-147-campaign-cross-process-s-d92eb302'; creating a new session with that id.
+Request timed out.
+14:17:56 [INFO] 
+14:17:56 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:17:56 [ERROR] Pipeline halted: requirements (stage failed)
+14:17:56 [INFO] 
+14:17:56 [INFO] ============================================================
+14:17:56 [INFO] PIPELINE START (6 stages)
+14:17:56 [INFO] Mode: FORCE regeneration
+14:17:56 [INFO] ============================================================
+14:17:56 [INFO] 
+14:17:56 [INFO] ============================================================
+14:17:56 [INFO] STAGE: requirements
+14:17:56 [INFO] ============================================================
+14:17:56 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:17:56 [INFO] -- [1/1] --
+14:17:56 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/secur...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:18:53 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221756-3891880-148-campaign-export-download-40fff755'; creating a new session with that id.
+14:18:53 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221756-3891880-148-campaign-export-download-40fff755'; creating a new session with that id.
+Request timed out.
+14:18:53 [INFO] 
+14:18:53 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:18:53 [ERROR] Pipeline halted: requirements (stage failed)
+14:18:53 [INFO] 
+14:18:53 [INFO] ============================================================
+14:18:53 [INFO] PIPELINE START (6 stages)
+14:18:53 [INFO] Mode: FORCE regeneration
+14:18:53 [INFO] ============================================================
+14:18:53 [INFO] 
+14:18:53 [INFO] ============================================================
+14:18:53 [INFO] STAGE: requirements
+14:18:53 [INFO] ============================================================
+14:18:53 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:18:53 [INFO] -- [1/1] --
+14:18:53 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/secur...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:19:50 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221853-3891880-149-campaign-no-minimum-stre-e4a50a77'; creating a new session with that id.
+14:19:50 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221853-3891880-149-campaign-no-minimum-stre-e4a50a77'; creating a new session with that id.
+Request timed out.
+14:19:50 [INFO] 
+14:19:50 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:19:50 [ERROR] Pipeline halted: requirements (stage failed)
+14:19:50 [INFO] 
+14:19:50 [INFO] ============================================================
+14:19:50 [INFO] PIPELINE START (6 stages)
+14:19:50 [INFO] Mode: FORCE regeneration
+14:19:50 [INFO] ============================================================
+14:19:50 [INFO] 
+14:19:50 [INFO] ============================================================
+14:19:50 [INFO] STAGE: requirements
+14:19:50 [INFO] ============================================================
+14:19:50 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:19:50 [INFO] -- [1/1] --
+14:19:50 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/servi...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:20:46 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810221950-3891880-150-campaign-add-encryption--848a1646'; creating a new session with that id.
+14:20:46 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810221950-3891880-150-campaign-add-encryption--848a1646'; creating a new session with that id.
+Request timed out.
+14:20:46 [INFO] 
+14:20:46 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:20:47 [ERROR] Pipeline halted: requirements (stage failed)
+14:20:47 [INFO] 
+14:20:47 [INFO] ============================================================
+14:20:47 [INFO] PIPELINE START (6 stages)
+14:20:47 [INFO] Mode: FORCE regeneration
+14:20:47 [INFO] ============================================================
+14:20:47 [INFO] 
+14:20:47 [INFO] ============================================================
+14:20:47 [INFO] STAGE: requirements
+14:20:47 [INFO] ============================================================
+14:20:47 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:20:47 [INFO] -- [1/1] --
+14:20:47 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/servi...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:21:23 [INFO] CAMPAIGN HEARTBEAT: alive after 14:21:23
+14:21:43 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810222047-3891880-151-campaign-bound-export-jo-872211da'; creating a new session with that id.
+14:21:43 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810222047-3891880-151-campaign-bound-export-jo-872211da'; creating a new session with that id.
+Request timed out.
+14:21:43 [INFO] 
+14:21:43 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:21:43 [ERROR] Pipeline halted: requirements (stage failed)
+14:21:43 [INFO] 
+14:21:43 [INFO] ============================================================
+14:21:43 [INFO] PIPELINE START (6 stages)
+14:21:43 [INFO] Mode: FORCE regeneration
+14:21:43 [INFO] ============================================================
+14:21:43 [INFO] 
+14:21:43 [INFO] ============================================================
+14:21:43 [INFO] STAGE: requirements
+14:21:43 [INFO] ============================================================
+14:21:43 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:21:43 [INFO] -- [1/1] --
+14:21:43 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/store...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:22:40 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810222143-3891880-152-campaign-filebackend-sav-66654a92'; creating a new session with that id.
+14:22:40 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810222143-3891880-152-campaign-filebackend-sav-66654a92'; creating a new session with that id.
+Request timed out.
+14:22:40 [INFO] 
+14:22:40 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:22:40 [ERROR] Pipeline halted: requirements (stage failed)
+14:22:40 [INFO] 
+14:22:40 [INFO] ============================================================
+14:22:40 [INFO] PIPELINE START (6 stages)
+14:22:40 [INFO] Mode: FORCE regeneration
+14:22:40 [INFO] ============================================================
+14:22:40 [INFO] 
+14:22:40 [INFO] ============================================================
+14:22:40 [INFO] STAGE: requirements
+14:22:40 [INFO] ============================================================
+14:22:40 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:22:40 [INFO] -- [1/1] --
+14:22:40 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/store...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:23:37 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810222240-3891880-153-campaign-the-key-framing-03331843'; creating a new session with that id.
+14:23:37 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810222240-3891880-153-campaign-the-key-framing-03331843'; creating a new session with that id.
+Request timed out.
+14:23:37 [INFO] 
+14:23:37 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:23:37 [ERROR] Pipeline halted: requirements (stage failed)
+14:23:37 [INFO] 
+14:23:37 [INFO] ============================================================
+14:23:37 [INFO] PIPELINE START (6 stages)
+14:23:37 [INFO] Mode: FORCE regeneration
+14:23:37 [INFO] ============================================================
+14:23:37 [INFO] 
+14:23:37 [INFO] ============================================================
+14:23:37 [INFO] STAGE: requirements
+14:23:37 [INFO] ============================================================
+14:23:37 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:23:37 [INFO] -- [1/1] --
+14:23:37 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/telem...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:24:34 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810222337-3891880-154-campaign-fix-server-span-6f831b05'; creating a new session with that id.
+14:24:34 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810222337-3891880-154-campaign-fix-server-span-6f831b05'; creating a new session with that id.
+Request timed out.
+14:24:34 [INFO] 
+14:24:34 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:24:34 [ERROR] Pipeline halted: requirements (stage failed)
+14:24:34 [INFO] 
+14:24:34 [INFO] ============================================================
+14:24:34 [INFO] PIPELINE START (6 stages)
+14:24:34 [INFO] Mode: FORCE regeneration
+14:24:34 [INFO] ============================================================
+14:24:34 [INFO] 
+14:24:34 [INFO] ============================================================
+14:24:34 [INFO] STAGE: requirements
+14:24:34 [INFO] ============================================================
+14:24:34 [INFO] Loaded 1 task from from_prompt for stage 'requirements'
+14:24:34 [INFO] -- [1/1] --
+14:24:34 [INFO] >>  pi -p Produce an evidence-backed requirements specification for module 'internal/telem...  [model=default]  [timeout=1500s]  [dir=/home/u1/workspace/demo/snaplink-audit-governance]
+14:25:30 [WARNING] agent output REJECTED: agent exited 1 | Warning: No project session found with id 'pb-20260810222434-3891880-155-campaign-make-optional-t-0f40a3e1'; creating a new session with that id.
+14:25:30 [WARNING] FAIL  [code=1]  [56.7s]
+  stderr: Warning: No project session found with id 'pb-20260810222434-3891880-155-campaign-make-optional-t-0f40a3e1'; creating a new session with that id.
+Request timed out.
+14:25:30 [INFO] 
+14:25:30 [INFO] Stage 'requirements' completed: 0/1 tasks succeeded
+14:25:30 [ERROR] Pipeline halted: requirements (stage failed)
+14:25:31 [WARNING] WORKTREE: 109 uncommitted file(s) left by pipeline stages (37 modified, 72 untracked, 0 staged) — triage before merging; gated-out pipelines still leave verified code in the tree
+14:25:31 [WARNING] WORKTREE:    M .gitignore
+14:25:31 [WARNING] WORKTREE:    M cmd/audit-governance-worker/main.go
+14:25:31 [WARNING] WORKTREE:    M docs/campaigns/audit-batch.out
+14:25:31 [WARNING] WORKTREE:    M internal/service/governance.go
+14:25:31 [WARNING] WORKTREE:    M internal/service/service.go
+14:25:31 [WARNING] WORKTREE:    M internal/store/conflict_retry_test.go
+14:25:31 [WARNING] WORKTREE:    M internal/store/postgres_test.go
+14:25:31 [WARNING] WORKTREE:    M internal/store/store.go
+14:25:31 [WARNING] WORKTREE:    M pbatch/advance.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/assessor.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/campaign.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/campaign_analysis.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/campaign_pipeline.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/campaign_state.py
+14:25:31 [WARNING] WORKTREE:    M pbatch/classifier.py
+14:25:31 [WARNING] WORKTREE:   ... and 94 more
+14:25:31 [INFO] CAMPAIGN complete: 4 passed, 42 failed

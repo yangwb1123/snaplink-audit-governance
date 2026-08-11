@@ -338,7 +338,7 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	receipt, err := s.Service.GetReceipt(tenantID, r.PathValue("eventID"))
+	receipt, err := s.Service.GetReceipt(tenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -410,7 +410,7 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.OperationTimeline(tenantID, r.PathValue("operationID"))
+	result, err := s.Service.OperationTimeline(tenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -439,7 +439,7 @@ func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ReplayOperation(tenantID, r.PathValue("operationID"))
+	result, err := s.Service.ReplayOperation(tenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -458,7 +458,7 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.AggregateTimeline(tenantID, r.PathValue("aggregateType"), r.PathValue("aggregateID"))
+	items, err := s.Service.AggregateTimeline(tenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -592,7 +592,7 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.VerifyIntegrity(tenantID, request.StreamID)
+	result, err := s.Service.VerifyIntegrity(tenantID, claims.Subject, request.StreamID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
