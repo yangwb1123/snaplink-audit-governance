@@ -122,6 +122,7 @@ def acquire_lock(cwd: str = "", no_lock: bool = False,
         try:
             os.unlink(tmp_name)
         except OSError:
+        # best-effort I/O：失败不阻塞主流程（已验证有意）
             pass
     os.chmod(str(lock_path), 0o600)
     _OWNED[str(lock_path)] = payload["token"]
@@ -207,6 +208,7 @@ def release_lock(lock_path: Optional[Path]) -> None:
         else:
             log.warning("Not removing %s: lock is not owned by this instance", lock_path)
     except OSError:
+    # best-effort I/O：失败不阻塞主流程（已验证有意）
         pass
     finally:
         _OWNED.pop(str(lock_path), None)

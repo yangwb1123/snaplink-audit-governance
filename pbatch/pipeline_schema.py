@@ -7,7 +7,7 @@ _STRING_FIELDS = ("model", "provider", "from_dir", "suffix", "output_suffix",
                   "meta_prompt", "role_dir", "role_keywords", "output_dir",
                   "from_prompt", "output", "cwd", "commit_message")
 _BOOL_FIELDS = ("aggregate", "meta", "relevance_enabled", "gate", "approval",
-                "commands_parallel", "git_commit")
+                "commands_parallel", "git_commit", "or_tasks")
 _TASK_STRING_FIELDS = ("prompt", "prompt_template", "output", "model", "provider",
                        "thinking", "tools", "exclude_tools", "cwd")
 _NULLABLE_TASK_STRINGS = ("model", "provider", "thinking", "tools", "exclude_tools")
@@ -65,7 +65,8 @@ def _field_errors(stage: dict, prefix: str) -> list[str]:
     for key, minimum in (("workers", 1), ("max_iterations", 1),
                          ("max_roles_per_iteration", 1), ("relevance_min_score", 0),
                          ("command_timeout", 1), ("command_output_max_bytes", 1),
-                         ("meta_timeout", 1)):
+                         ("meta_timeout", 1), ("meta_max_failed_roles", 0),
+                         ("meta_role_retries", 0), ("gate_fix_rounds", 0)):
         value = stage.get(key, minimum)
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             errors.append(f"{prefix}.{key} must be an integer >= {minimum}")
@@ -103,6 +104,9 @@ def _source_contract(stage: dict, prefix: str, from_outputs) -> list[str]:
         sources = sum(bool(stage.get(key)) for key in ("from_prompt", "from_dir", "from_outputs"))
         if sources != 1:
             errors.append(f"{prefix} requires exactly one input source")
+        if stage.get("or_tasks") and not stage.get("tasks"):
+            errors.append(f"{prefix} or_tasks stage requires a 'tasks' "
+                          "candidate list")
         if stage.get("from_prompt") and not stage.get("output"):
             errors.append(f"{prefix} from_prompt requires output")
         if from_outputs and not stage.get("tasks"):

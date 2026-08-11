@@ -9,10 +9,10 @@ Deferred here, they run once at stage end and observe the finished tree.
 from __future__ import annotations
 
 import os
-import shlex
 from pathlib import Path
 
 from .config import _resolve_validator_specs, log
+from .cmd_expand import expand_cmd
 from .runner import judge_verdict, run_validation
 
 
@@ -28,8 +28,7 @@ def run_stage_repo_validators(stage, results: list, outputs: list) -> tuple[bool
     wd = stage.cwd or os.getcwd()
     output_dir = str(Path(outputs[0]).parent) if outputs else wd
     for spec in specs:
-        cmd = spec.cmd.replace("{output}", shlex.quote(output_dir))
-        cmd = cmd.replace("{cwd}", shlex.quote(wd))
+        cmd = expand_cmd(spec.cmd, output_dir, wd)
         ok, detail = _run_stage_repo_spec(spec, cmd, wd, stage.name)
         if not ok:
             return False, detail

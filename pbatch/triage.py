@@ -65,7 +65,7 @@ def clear_marker(key: str, cwd: str = "") -> None:
     try:
         marker_path(key, cwd).unlink(missing_ok=True)
     except OSError:
-        pass
+        pass  # state dir unwritable: marker best-effort
 
 
 def residue_markers(cwd: str = "") -> list:
@@ -89,17 +89,17 @@ def marker_info(path: Path) -> dict:
     try:
         info["runner_pid"] = int(lines[0])
     except ValueError:
-        pass
+            pass  # malformed marker line: skip entry
     if len(lines) >= 2 and lines[1].strip():
         try:
             info["agent_pid"] = int(lines[1])
         except ValueError:
-            pass
+            pass  # malformed marker line: skip entry
     if len(lines) >= 3 and lines[2].strip():
         try:
             info["started"] = int(lines[2])
         except ValueError:
-            pass
+            pass  # malformed marker line: skip entry
     return info
 
 
@@ -125,7 +125,7 @@ def kill_orphan(pid: int) -> None:
         try:
             os.kill(pid, 9)
         except (ProcessLookupError, PermissionError, OSError):
-            pass
+            pass  # process already gone: best-effort kill
 
 
 def classify_reason(reason: str) -> str:

@@ -92,7 +92,7 @@ def _fenced(path: Path, size: int, allowance: int) -> str:
         with path.open("rb") as handle:
             shown = handle.read(max(0, allowance))
     except OSError:
-        pass
+        pass  # artifact unreadable: evidence degrades silently
     content = shown.decode("utf-8", errors="ignore")
     if len(shown) < size:
         content += (f"\n[evidence truncated: showing {len(shown)} of {size} bytes; "

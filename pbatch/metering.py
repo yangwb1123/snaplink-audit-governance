@@ -222,9 +222,11 @@ def _save_daily(count: int) -> None:
             try:
                 os.unlink(tmp_name)
             except OSError:
+            # best-effort I/O：失败不阻塞主流程（已验证有意）
                 pass
             raise
     except OSError:
+    # best-effort I/O：失败不阻塞主流程（已验证有意）
         pass
 
 

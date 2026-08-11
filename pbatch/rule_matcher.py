@@ -41,6 +41,7 @@ DEFAULT_TIER = "standard"
 DOMAIN_REGISTRIES = {
     "backend": ["backend-specs/rules.yaml"],
     "frontend_ui": ["ui-specs/rules.yaml"],
+    "product": ["product-specs/rules.yaml"],
     "generic": [],
 }
 DEFAULT_DOMAIN = "generic"
@@ -65,6 +66,7 @@ _DEFAULT_REGISTRY = {
     "rules": {
         "visual-core": {"files": ["ui-specs/spacing.md", "ui-specs/anti-patterns.md"],
                         "min_tier": "demo", "required": True,
+                        "level": "invariant",
                         "description": "8pt 间距 token 与反例清单"},
         "component-spec": {"files": ["ui-specs/component-spec.md"], "min_tier": "demo",
                            "description": "组件尺寸/状态/行为规范"},
@@ -76,12 +78,18 @@ _DEFAULT_REGISTRY = {
 
 def domain_for(text: str, classification: Optional[TaskClassification] = None) -> str:
     """Which spec domain a task belongs to (backend / frontend_ui /
-    generic — code-maintenance and analysis tasks get NO domain specs)."""
+    product / generic — code-maintenance and analysis tasks get NO domain
+    specs; L0 local-feature tasks also stay generic (restraint))."""
     cls = classification or classify_text(text)
     if cls.task_type == "backend":
         return "backend"
     if cls.task_type == "frontend_ui":
         return "frontend_ui"
+    # Lazy import: pbatch.product imports this module at module level
+    # (specs derivation); a module-level import here would be a cycle.
+    from .product import productization_level
+    if productization_level(text)[0] != "L0_local_feature":
+        return "product"
     return DEFAULT_DOMAIN
 
 
@@ -96,7 +104,7 @@ def load_registry(path: str = "", domain: str = "") -> dict:
     sections extend the built-in defaults; a missing backend registry
     degrades to an empty rule set (fail closed, never the frontend rules)."""
     merged = {section: dict(value) for section, value in _DEFAULT_REGISTRY.items()}
-    if domain in ("backend", "generic"):
+    if domain in ("backend", "generic", "product"):
         merged = {"scale": {}, "signals": {}, "signal_weights": {},
                   "page_types": {}, "use_case_types": {},
                   "risk": {}, "rules": {}}
@@ -138,9 +146,40 @@ def detect_scale(text: str, registry: dict) -> tuple:
     return DEFAULT_TIER, ()
 
 
-def _rule_skip_reason(rule: dict, tier_rank: int, page_types: list,
+LEVELS = ("invariant", "contract", "policy", "heuristic", "suggestion")
+
+
+def _rule_item(rule_id: str, rule: dict, tier: str, tier_evidence: tuple,
+                page_types: list, high_risk: bool, profile: str) -> dict:
+    """规则清单条目：层级 + 激活度（AADM §14 的确定性简化）。"""
+    files = _resolve_files(rule, profile)
+    level = str(rule.get("level", "policy"))
+    if level not in LEVELS:
+        level = "policy"
+    is_invariant = level == "invariant"
+    required = (bool(rule.get("required", False)) or is_invariant
+                or (high_risk and bool(rule.get("required_when_risk"))))
+    return {
+        "id": rule_id, "tier": rule.get("min_tier", "standard"),
+        "required": required,
+        "level": level,
+        # 宪法 1.0 > 必选 0.9 > 选用 0.7
+        "activation": 1.0 if is_invariant else (0.9 if required else 0.7),
+        "description": rule.get("description", ""),
+        "files": files, "evidence": {
+            "scale": list(tier_evidence), "page_types": page_types,
+            "risk": "high" if high_risk else "low",
+            "profile": profile,
+        },
+    }
+
+
+def _rule_skip_reason(rule: dict, tier: str, tier_rank: int, page_types: list,
                       high_risk: bool, profile: str) -> str:
-    """Why a rule does NOT apply (empty string = it applies)."""
+    """Why a rule does NOT apply (empty string = it applies).
+    Invariant（宪法层）永不跳过；suppress_on 命中 → 显式抑制（AADM §14）。"""
+    if rule.get("level") == "invariant":
+        return ""
     min_rank = TIER_ORDER.get(rule.get("min_tier", "standard"), 1)
     if tier_rank < min_rank:
         return f"tier below required {rule.get('min_tier')}"
@@ -150,7 +189,21 @@ def _rule_skip_reason(rule: dict, tier_rank: int, page_types: list,
         return f"profile '{profile or 'unknown'}' not in {rule.get('profiles')}"
     if rule.get("required_when_risk") and not high_risk:
         return "not high-risk"
+    if rule.get("required"):
+        return ""  # 必选规则不受显式抑制（fail closed）
+    suppressed_on = rule.get("suppress_on") or []
+    matched_signals = {tier} | set(page_types)
+    if high_risk:
+        matched_signals.add("high")
+    if profile:
+        matched_signals.add(profile)
+    hit = sorted(matched_signals & set(suppressed_on))
+    if hit:
+        return f"suppressed on {hit[0]}"
     return ""
+
+
+from pbatch.system_type_methodology import SYSTEM_TYPE_METHODOLOGY
 
 
 def match_rules(text: str, classification: Optional[TaskClassification] = None,
@@ -179,26 +232,41 @@ def match_rules(text: str, classification: Optional[TaskClassification] = None,
 
     rules, skipped = [], []
     for rule_id, rule in registry.get("rules", {}).items():
-        reason = _rule_skip_reason(rule, tier_rank, page_types, high_risk, profile)
+        reason = _rule_skip_reason(rule, tier, tier_rank, page_types,
+                                   high_risk, profile)
         if reason:
             skipped.append({"id": rule_id, "reason": reason})
             continue
-        files = _resolve_files(rule, profile)
-        rules.append({
-            "id": rule_id, "tier": rule.get("min_tier", "standard"),
-            "required": bool(rule.get("required", False)) or (
-                high_risk and bool(rule.get("required_when_risk"))),
-            "description": rule.get("description", ""),
-            "files": files, "evidence": {
-                "scale": list(tier_evidence), "page_types": page_types,
-                "risk": "high" if high_risk else "low",
-                "profile": profile,
-            },
-        })
+        rules.append(_rule_item(rule_id, rule, tier, tier_evidence,
+                                page_types, high_risk, profile))
+    _inject_system_type_methodology(cls, rules)
     rules.sort(key=lambda item: (0 if item["required"] else 1, item["tier"]))
     return {"tier": tier, "page_types": page_types, "risk": "high" if high_risk else "low",
             "profile": profile, "rules": rules, "skipped": skipped,
-            "domain": domain_for(text, cls)}
+            "domain": domain_for(text, cls),
+            "system_type": getattr(cls, "system_type", "") or "deterministic"}
+
+
+def _inject_system_type_methodology(cls, rules: list) -> None:
+    """哥德尔分类学路由：system_type 命中的方法论规范进入规则清单。"""
+    system_type = getattr(cls, "system_type", "") or "deterministic"
+    methodology_files = SYSTEM_TYPE_METHODOLOGY.get(system_type, [])
+    if not methodology_files:
+        return
+    rules.append({
+        "id": f"system-type-{system_type}",
+        "tier": "standard",
+        "required": True,
+        "description": (
+            f"问题系统分类学方法论（{system_type}）：先判定问题属于哪类"
+            "系统，再套用该类系统的方法论"
+        ),
+        "files": methodology_files,
+        "evidence": {
+            "system_type": system_type,
+            "system_evidence": list(getattr(cls, "system_evidence", ())),
+        },
+    })
 
 
 def _resolve_files(rule: dict, profile: str) -> list:
@@ -313,6 +381,15 @@ def format_manifest(matched: dict, limit: int = 8) -> str:
     """Human/markdown manifest for prompt injection (bounded)."""
     lines = [f"## Applicable UI rules (deterministic manifest, tier={matched['tier']}, "
              f"risk={matched['risk']}, profile={matched['profile'] or 'generic'})"]
+    # 信任感：system_type 证据透明（AI 建议带依据——认知负担 §7）
+    system_type = matched.get("system_type", "")
+    if system_type and system_type != "deterministic":
+        evidence = matched.get("rules", [])
+        src = next((x.get("evidence", {}).get("system_evidence", ())
+                    for x in evidence
+                    if x.get("id") == f"system-type-{system_type}"), ())
+        lines.append(f"System type: {system_type}"
+                     + (f" (evidence: {', '.join(src)})" if src else ""))
     lines.append("Apply ONLY these rules; load the listed files, do not load unrelated specs:")
     rules = matched["rules"]
     shown = rules[:limit]
@@ -335,130 +412,3 @@ def format_manifest(matched: dict, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-def _reconcile_cli(text: str, llm_json: str, registry: dict, want_json: bool) -> None:
-    """--llm-json branch: parse the LLM selection (fail closed on bad
-    JSON), reconcile with the algorithm manifest, and print the result."""
-    try:
-        selection = json.loads(llm_json)
-    except Exception as exc:
-        log.error("Invalid --llm-json: %s", exc)
-        sys.exit(2)
-    matched = reconcile(match_rules(text, registry=registry),
-                        selection.get("apply", []),
-                        selection.get("skip", []), registry)
-    if want_json:
-        print(json.dumps(matched, ensure_ascii=False, indent=2))
-        return
-    print(format_manifest(matched))
-    dropped = matched.get("dropped", [])
-    if dropped:
-        print("Dropped (LLM skipped optional): " +
-              ", ".join(item["id"] for item in dropped))
-
-
-def _check_rule(rule_id: str, rule, violations: list) -> None:
-    """One rule's schema: required fields, tier, referenced files."""
-    if not isinstance(rule, dict):
-        violations.append(f"rule '{rule_id}': must be a mapping")
-        return
-    for key in ("description", "min_tier"):
-        if not str(rule.get(key, "")).strip():
-            violations.append(f"rule '{rule_id}': missing '{key}'")
-    if rule.get("min_tier") not in TIER_ORDER:
-        violations.append(f"rule '{rule_id}': invalid min_tier "
-                          f"{rule.get('min_tier')!r}")
-    files = rule.get("files", [])
-    template = rule.get("files_template")
-    if not files and not template:
-        violations.append(f"rule '{rule_id}': missing 'files' or "
-                          f"'files_template'")
-    for file in files:
-        if not Path(str(file)).exists():
-            violations.append(f"rule '{rule_id}': missing file {file}")
-    if template:
-        for profile in rule.get("profiles", []):
-            target = str(template).replace("{profile}", str(profile))
-            if not Path(target).exists():
-                violations.append(f"rule '{rule_id}': missing profile file "
-                                  f"{target}")
-
-
-def check_registry(registry: dict) -> list:
-    """Schema integrity of one rule registry: rule fields, tiers, files."""
-    rules = registry.get("rules", {})
-    if not isinstance(rules, dict):
-        return ["'rules' section must be a mapping"]
-    violations = []
-    for rule_id, rule in rules.items():
-        _check_rule(rule_id, rule, violations)
-    for section in ("scale", "risk", "page_types", "use_case_types",
-                    "signals", "signal_weights"):
-        value = registry.get(section)
-        if value is not None and not isinstance(value, dict):
-            violations.append(f"section '{section}' must be a mapping")
-    return violations
-
-
-def _check_registries_cli() -> None:
-    """--check: validate schema integrity of both domain registries."""
-    for domain, path in (("frontend", "ui-specs/rules.yaml"),
-                         ("backend", "backend-specs/rules.yaml")):
-        if not Path(path).exists():
-            log.error("registry not found: %s", path)
-            sys.exit(1)
-        violations = check_registry(load_registry(domain=domain))
-        if violations:
-            for item in violations:
-                log.error("%s registry: %s", domain, item)
-            sys.exit(1)
-        log.info("%s registry: OK", domain)
-
-
-def rules_main(argv: list) -> None:
-    """`pi-batch rules "<task>"` — deterministic rule manifest;
-    `--summary` prints the compressed requirement for the LLM side;
-    `--llm-prompt FILE` writes the two-sided-check prompt;
-    `--llm-json '{...}'` reconciles the LLM selection with the algorithm
-    (agreed rules stay; REQUIRED rules are veto-protected; LLM additions
-    are admitted with provenance)."""
-    import argparse
-    parser = argparse.ArgumentParser(
-        prog="pi-batch.py rules",
-        description="Match ui-spec rules to a task (algorithm) and reconcile "
-                    "the LLM's independent selection (two-sided check).")
-    parser.add_argument("task", nargs="*", default=[], help="task prompt text")
-    parser.add_argument("--json", action="store_true", help="machine-readable output")
-    parser.add_argument("--summary", action="store_true",
-                        help="print the compressed requirement (LLM input)")
-    parser.add_argument("--llm-prompt", default="",
-                        help="write the two-sided-check prompt to FILE")
-    parser.add_argument("--llm-json", default="",
-                        help='LLM selection JSON {"apply":[],"skip":[]} to reconcile')
-    parser.add_argument("--registry", default="", help="rule registry YAML override")
-    parser.add_argument("--check", action="store_true",
-                        help="validate registry schema integrity (both domains)")
-    args = parser.parse_args(argv)
-    if args.check:
-        _check_registries_cli()
-        return
-    text = " ".join(args.task)
-    if not text.strip():
-        parser.error("Provide a task (positional text) or --check")
-    registry = load_registry(args.registry) if args.registry else None
-    if args.summary:
-        print(summarize_task(text, registry))
-        return
-    if args.llm_prompt:
-        Path(args.llm_prompt).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.llm_prompt).write_text(
-            format_llm_prompt(text, registry), encoding="utf-8")
-        print(f"LLM check prompt written to {args.llm_prompt}")
-        return
-    if args.llm_json:
-        _reconcile_cli(text, args.llm_json, registry, args.json)
-        return
-    matched = match_rules(text, registry=registry)
-    if args.json:
-        print(json.dumps(matched, ensure_ascii=False, indent=2))
-        return
-    print(format_manifest(matched))

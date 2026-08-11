@@ -22,6 +22,9 @@ validators:
   gobuild:
     cmd: "go build ./... && go vet ./..."
     scope: repo
+  build:
+    cmd: "go build ./... && go vet ./..."
+    scope: repo
   gotest:
     cmd: "go test ./... -count=1"
     scope: repo

@@ -130,6 +130,117 @@ def _filter_failures(counts: Counter, evidence: dict, durations: list):
     return counts, evidence, []
 
 
+# 失败模式 → 自动改进动作（规则升级/配置修复/流程建议）。
+ACTION_RULES = {
+    "agent_rejected": ("AGENT-REJECT", "agent 输出被失败签名拒绝",
+                       "检查 provider 配置/额度/error_patterns 是否过严"),
+    "validation_failed": ("VALIDATE-REPEAT", "验证器反复拦截",
+                          "检查验证器规则与产物稳定性；学习失败模式后 "
+                          "learn draft"),
+    "gate_rejected": ("GATE-REPEAT", "gate 反复 REJECTED",
+                      "实现前先固定验收标准（racing 统一验收）"),
+    "gate_no_verdict": ("GATE-NO-VERDICT", "gate 无 VERDICT",
+                        "检查审查 prompt 是否要求输出 VERDICT: PASS|FAIL"),
+    "timeout": ("TASK-TIMEOUT", "任务超时",
+                "拆分长任务或提高超时预算；检查是否死循环"),
+    "lock_refused": ("LOCK-CONTENTION", "锁竞争",
+                     "错峰运行或 --wait-lock 排队"),
+    "circuit_isolate": ("CIRCUIT-ISOLATE", "熔断隔离",
+                        "检查失败原因是否系统性（provider/环境）"),
+    "environment_stall": ("ENV-STALL", "环境停滞",
+                          "检查外部服务/网络依赖"),
+}
+
+
+def _reflection_actions() -> list:
+    """聚合 .pi-batch/reflections.jsonl：重复发现 → 动作（闭环）。"""
+    path = Path(".pi-batch") / "reflections.jsonl"
+    if not path.exists():
+        return []
+    counts = {}
+    critical = 0
+    total = 0
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError:
+        return []
+    with handle:
+        for line in handle:
+            if len(line) > 256 * 1024:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            total += 1
+            for finding in record.get("findings", []):
+                ftype = finding.get("type", "?")
+                counts[ftype] = counts.get(ftype, 0) + 1
+                if finding.get("severity") == "critical":
+                    critical += 1
+    actions = []
+    if critical:
+        actions.append({"type": "reflection_critical",
+                        "count": critical,
+                        "action": f"{critical} 个 critical 反思发现未修复"
+                                  "——先修复再进入下一任务"})
+    for ftype, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if count >= 2:  # 重复出现 → 升级为规则
+            actions.append({
+                "type": "repeat_finding", "finding": ftype, "count": count,
+                "action": f"发现 '{ftype}' 重复 {count} 次——learn draft 后"
+                          " shadow 验证并 promote",
+                "learn_command": ("pi-batch learn draft "
+                                 f"'{{ftype}} 重复出现' --category backend "
+                                 f"--rule-id REFLECT-{ftype.upper()[:20]}")})
+    if not actions and total:
+        actions.append({"type": "reflection_ok", "count": total,
+                        "action": f"{total} 次反思无重复发现，继续观察"})
+    return actions
+
+
+def _generate_actions(counts: Counter) -> list:
+    """从失败模式生成动作；叠加反思账本聚合。"""
+    actions = []
+    for name, count in counts.items():
+        rule = ACTION_RULES.get(name)
+        if rule and count > 0:
+            actions.append({"type": name, "count": count,
+                            "rule_id": rule[0], "title": rule[1],
+                            "action": rule[2]})
+    actions.extend(_reflection_actions())
+    return actions
+
+
+def _render_actions(actions: list) -> str:
+    """改进动作文本段。"""
+    if not actions:
+        return ""
+    lines = ["== 改进动作 =="]
+    for action in actions:
+        lines.append(f"  [{action['type']} x{action['count']}] "
+                     f"{action.get('title', '')} {action['action']}")
+        if action.get("learn_command"):
+            lines.append(f"    → {action['learn_command']}")
+    return "\n".join(lines)
+
+
+def _scan_all(targets: list) -> tuple:
+    """扫描全部目标，聚合 counts/evidence/durations。"""
+    all_counts: Counter = Counter()
+    all_evidence: dict = defaultdict(list)
+    all_durations: list = []
+    for target in targets:
+        counts, evidence, durations = scan_target(target)
+        all_counts.update(counts)
+        for k, v in evidence.items():
+            all_evidence[k].extend(v)
+        all_durations.extend(durations)
+    return all_counts, all_evidence, all_durations
+
+
 def retro_main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pi-batch.py retro", description=__doc__)
     parser.add_argument("targets", nargs="+", help="log files or directories")
@@ -138,17 +249,11 @@ def retro_main(argv: list | None = None) -> int:
                         help="max evidence lines per category (default: 6)")
     parser.add_argument("--failures-only", action="store_true",
                         help="only failure categories (feed to pi-batch learn)")
+    parser.add_argument("--actions", action="store_true",
+                        help="自动生成改进动作（learn draft/配置修复建议）")
     args = parser.parse_args(argv)
 
-    all_counts: Counter = Counter()
-    all_evidence: dict = defaultdict(list)
-    all_durations: list = []
-    for target in args.targets:
-        counts, evidence, durations = scan_target(target)
-        all_counts.update(counts)
-        for k, v in evidence.items():
-            all_evidence[k].extend(v)
-        all_durations.extend(durations)
+    all_counts, all_evidence, all_durations = _scan_all(args.targets)
 
     if args.failures_only:
         all_counts, all_evidence, all_durations = _filter_failures(
@@ -160,6 +265,8 @@ def retro_main(argv: list | None = None) -> int:
         "durations": fmt_durations(all_durations),
         "evidence": {k: v[:args.top_evidence] for k, v in all_evidence.items()},
     }
+    if args.actions or args.failures_only:
+        report["actions"] = _generate_actions(all_counts)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
         return 0
@@ -167,6 +274,8 @@ def retro_main(argv: list | None = None) -> int:
     for name, count in sorted(all_counts.items(), key=lambda kv: -kv[1]):
         if count:
             print(f"  {name:<18} {count}")
+    if report.get("actions"):
+        print(_render_actions(report["actions"]))
     print(f"  {'task_durations':<18} {report['durations']}")
     print("\n== evidence (first lines per category) ==")
     for name, lines in sorted(all_evidence.items()):

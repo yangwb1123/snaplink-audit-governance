@@ -43,6 +43,9 @@ def _find_batch_config() -> Optional[dict]:
             return data
     return None
 
+# 工具根目录：pi-batch 包所在仓库根（validator/stage 命令里可用
+# {tool_root} 占位符引用随仓库分发的脚本，替代硬编码绝对路径）。
+TOOL_ROOT = str(Path(__file__).resolve().parent.parent)
 
 def _load_batch_config(path: str = "pi-batch.yaml") -> dict:
     """Optional defaults for pi-batch. Missing file -> {} (built-in defaults
@@ -52,9 +55,34 @@ def _load_batch_config(path: str = "pi-batch.yaml") -> dict:
     data = _find_batch_config()
     return data if data is not None else {}
 
+def _find_user_config() -> dict:
+    """用户级配置（分层低优先层；项目 pi-batch.yaml 覆盖之）。"""
+    from . import user_dirs
+    if not yaml:
+        return {}
+    path = user_dirs.user_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        log.warning("User settings %s unreadable; ignoring", path)
+        return {}
+    return data if isinstance(data, dict) else {}
 
-_BATCH_CFG = _load_batch_config()
+def _merge_config(project: dict, user: dict) -> dict:
+    """项目配置覆盖用户配置（节内键级合并）。"""
+    merged: dict = {}
+    for section_name in set(project) | set(user):
+        proj = project.get(section_name, {})
+        usr = user.get(section_name, {})
+        if isinstance(proj, dict) and isinstance(usr, dict):
+            merged[section_name] = {**usr, **proj}
+        else:
+            merged[section_name] = proj if section_name in project else usr
+    return merged
 
+_BATCH_CFG = _merge_config(_load_batch_config(), _find_user_config())
 
 def _section(name: str) -> dict:
     """Return a mapping config section, falling back on malformed input."""
@@ -63,7 +91,6 @@ def _section(name: str) -> dict:
         return value
     log.warning("Config section '%s' must be a mapping; using defaults", name)
     return {}
-
 
 def _int_setting(section: dict, key: str, default: int,
                  minimum: Optional[int] = None) -> int:
@@ -81,7 +108,6 @@ def _int_setting(section: dict, key: str, default: int,
         return default
     return parsed
 
-
 def _choice_setting(section: dict, key: str, default: str,
                     choices: tuple[str, ...]) -> str:
     """Normalize a small string enum, with a usable argparse-safe default."""
@@ -92,7 +118,6 @@ def _choice_setting(section: dict, key: str, default: str,
                 key, ", ".join(choices), default)
     return default
 
-
 def _string_setting(section: dict, key: str, default: str,
                     allow_empty: bool = True) -> str:
     """Read a scalar string and reject YAML null/collection surprises."""
@@ -102,7 +127,6 @@ def _string_setting(section: dict, key: str, default: str,
     kind = "a string" if allow_empty else "a non-empty string"
     log.warning("Config value '%s' must be %s; using %s", key, kind, default)
     return default
-
 
 def _float_setting(section: dict, key: str, default: float,
                    minimum: Optional[float] = None,
@@ -122,6 +146,20 @@ def _float_setting(section: dict, key: str, default: float,
         return default
     return parsed
 
+def _bool_setting(section: dict, key: str, default: bool) -> bool:
+    """Read a boolean without letting YAML string/number surprises abort
+    import; malformed values fall back to the default (fail closed)."""
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "yes", "on", "1"):
+            return True
+        if normalized in ("false", "no", "off", "0"):
+            return False
+    log.warning("Config value '%s' must be a boolean; using %s", key, default)
+    return default
 
 _AGENT_CFG = _section("agent")
 # Optional per-agent override sections: agent.agents.<bin>.* win over the
@@ -131,7 +169,6 @@ _AGENTS_CFG = _AGENT_CFG.get("agents")
 if not isinstance(_AGENTS_CFG, dict):
     _AGENTS_CFG = {}
 
-
 def _agent_section(bin_name: str) -> dict:
     """Per-agent config section for a binary name (agent.agents.<bin>),
     or {} when the section is absent/malformed."""
@@ -139,7 +176,6 @@ def _agent_section(bin_name: str) -> dict:
         return {}
     section = _AGENTS_CFG.get(bin_name)
     return section if isinstance(section, dict) else {}
-
 
 # Default provider/CLI failure signatures (G line). Per-agent overrides:
 #   agent.error_patterns: [...]      (all agents)
@@ -190,11 +226,9 @@ _DEFAULT_ERROR_PATTERNS = (
     r"(?im)^fatal:",
 )
 
-
 @lru_cache(maxsize=16)
 def _compile_patterns(patterns: tuple) -> tuple:
     return tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns)
-
 
 def agent_error_patterns(bin_name: str = "") -> tuple:
     """Failure-signature patterns for the current agent binary: per-agent
@@ -230,18 +264,13 @@ _MEMORY_CFG = _section("memory")
 _CLASSIFIER_CFG = _section("classifier")
 _LIMITS_CFG = _section("limits")
 
-
 AGENT_BIN = _string_setting(_AGENT_CFG, "bin", "pi", allow_empty=False)
-
 
 AGENT_DEFAULT_MODEL = _string_setting(_AGENT_CFG, "default_model", "")
 
-
 AGENT_DEFAULT_TIMEOUT = _int_setting(_AGENT_CFG, "default_timeout", 900, 1)
 
-
 AGENT_DEFAULT_WORKERS = _int_setting(_AGENT_CFG, "default_workers", 4, 1)
-
 
 COMMIT_PREFIX_DEFAULT = _string_setting(_COMMIT_CFG, "prefix", "[pi-batch]")
 
@@ -327,6 +356,38 @@ RATE_LIMIT_PROVIDERS = {
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 }
 
+# Device-Aware Execution Fabric (AADM-D, docs/AADM_DEVICE.md): an optional,
+# OFF-by-default execution plane. `enabled` only loads the fabric module — it
+# never implies network scanning, remote execution, migration or sensitive
+# data distribution (AADM-D §4: one flag must not enable everything).
+_DEVICE_CFG = _section("device_fabric")
+DEVICE_FABRIC_ENABLED = _bool_setting(_DEVICE_CFG, "enabled", False)
+DEVICE_FABRIC_MODE = _choice_setting(
+    _DEVICE_CFG, "mode", "off",
+    ("off", "inventory", "observe", "execute", "migrate", "federate"))
+# 主动扫描默认关闭（安全/隐私/企业策略）；设备主动注册优于网络扫描。
+DEVICE_FABRIC_LAN_SCAN = _bool_setting(_DEVICE_CFG, "lan_active_scan", False)
+# 性能探测占用设备资源，单独启用；探测与修复必须分离。
+DEVICE_FABRIC_BENCHMARK = _bool_setting(_DEVICE_CFG, "benchmark", False)
+DEVICE_FABRIC_AUTO_INSTALL = _bool_setting(_DEVICE_CFG, "auto_install", False)
+DEVICE_FABRIC_APPROVAL_REQUIRED = _bool_setting(
+    _DEVICE_CFG, "approval_required_for_new_device", True)
+_DEVICE_INVENTORY = _DEVICE_CFG.get("inventory")
+if not isinstance(_DEVICE_INVENTORY, dict):
+    _DEVICE_INVENTORY = {}
+_DEVICE_STATIC = _DEVICE_INVENTORY.get("static")
+if not isinstance(_DEVICE_STATIC, list):
+    _DEVICE_STATIC = []
+DEVICE_FABRIC_STATIC = tuple(
+    entry for entry in _DEVICE_STATIC if isinstance(entry, dict))
+_DEVICE_CLUSTERS = _DEVICE_CFG.get("clusters")
+if not isinstance(_DEVICE_CLUSTERS, dict):
+    _DEVICE_CLUSTERS = {}
+DEVICE_FABRIC_CLUSTERS = {
+    str(name): [str(item) for item in members]
+    for name, members in _DEVICE_CLUSTERS.items()
+    if isinstance(members, list)
+}
 
 # Task type classifier (pbatch/classifier.py): deterministic keyword gate
 # that runs BEFORE execution and routes frontend UI tasks to the UI
@@ -344,13 +405,11 @@ CLASSIFIER_MIN_SCORE = _int_setting(_CLASSIFIER_CFG, "min_score", 2, 1)
 CLASSIFIER_FRONTEND_RATIO = _float_setting(
     _CLASSIFIER_CFG, "frontend_ratio", 0.5, 0.0, 1.0)
 
-
 _DEFAULT_SESSION_FLAGS = {
     "start": ["--session-id", "{session}", "--name", "{name}"],
     "continue": ["--session-id", "{session}"],
     "fork": ["--fork", "{session}"],
 }
-
 
 def agent_session_flags(key: str, session_id: str, session_name: str,
                         bin_name: str = "") -> list:
@@ -371,11 +430,9 @@ def agent_session_flags(key: str, session_id: str, session_name: str,
         flags = _DEFAULT_SESSION_FLAGS[key]
     return [f.replace("{session}", session_id).replace("{name}", session_name) for f in flags]
 
-
 def _session_flags(key: str, session_id: str, session_name: str) -> list:
     """Backward-compatible alias resolving flags for the configured bin."""
     return agent_session_flags(key, session_id, session_name)
-
 
 def _load_validators() -> dict:
     """Read the named validators registry from pi-batch.yaml (like the
@@ -387,9 +444,7 @@ def _load_validators() -> dict:
     v = data.get("validators")
     return dict(v) if isinstance(v, dict) else {}
 
-
 VALIDATORS = _load_validators()
-
 
 class ValidatorSpec(NamedTuple):
     """One resolved validator entry.
@@ -405,7 +460,6 @@ class ValidatorSpec(NamedTuple):
     cmd: str
     judge: bool = False
     scope: str = "file"
-
 
 def _validator_spec(entry) -> Optional[ValidatorSpec]:
     """Normalize one registry entry: a string command, or a mapping with
@@ -426,10 +480,8 @@ def _validator_spec(entry) -> Optional[ValidatorSpec]:
                 "mapping; skipping %r", entry)
     return None
 
-
 VALIDATOR_SPECS: dict = {name: spec for name, entry in VALIDATORS.items()
                          if (spec := _validator_spec(entry)) is not None}
-
 
 def _resolve_validator_specs(value: str) -> list:
     """Expand a comma-separated list into ValidatorSpecs: registry names are
@@ -440,7 +492,6 @@ def _resolve_validator_specs(value: str) -> list:
         spec = VALIDATOR_SPECS.get(item)
         out.append(spec if spec is not None else ValidatorSpec(cmd=item))
     return out
-
 
 def _resolve_validators(value: str) -> list:
     """Backward-compatible alias: command strings only (judge/scope ignored)."""

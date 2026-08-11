@@ -22,17 +22,3 @@ logs/
 docs/archive/
 docs/auto/
 docs/requirements/runs/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/
-
-# ai-batch-runner runtime artifacts
-.pi-batch/
-logs/
-docs/archive/
-docs/auto/
-docs/requirements/runs/

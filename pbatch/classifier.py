@@ -35,6 +35,29 @@ PLATFORM_BOOST = 2
 
 # Built-in defaults so the classifier works standalone (no YAML, no PyYAML);
 # pbatch/task_keywords.yaml overrides sections wholesale when present.
+# 问题系统类型关键词（哥德尔启发：先分类再求解）。
+_SYSTEM_TYPE_TERMS = {
+    "state-machine": ["状态机", "状态流转", "状态迁移", "审批流", "workflow",
+                      "状态变更", "审核", "审批", "生命周期"],
+    "event-driven": ["事件", "消息队列", "事件驱动", "kafka", "mq", "pub/sub",
+                     "event", "webhook", "通知"],
+    "realtime": ["实时", "websocket", "推送", "监控大屏", "告警", "alert",
+                 "realtime", "live", "流式"],
+    "search": ["搜索", "检索", "推荐", "查询优化", "索引", "search",
+               "autocomplete", "模糊匹配"],
+    "optimization": ["优化", "排程", "调度", "路径规划", "资源分配",
+                     "optimize", "scheduling", "成本最小"],
+    "knowledge": ["知识库", "文档检索", "问答", "rag", "知识图谱", "faq",
+                  "知识管理", "chat"],
+    "batch": ["批量", "定时任务", "批处理", "cron", "导入导出", "etl",
+              "batch", "job"],
+    "adaptive": ["自适应", "智能推荐", "预测", "风险评估", "机器学习",
+                 "ai", "模型", "agent", "智能"],
+    "collaboration": ["协作", "多人", "团队", "权限", "角色", "组织",
+                      "collaboration", "分配"],
+    "deterministic": ["crud", "增删改查", "表单", "台账", "记录", "报表"],
+}
+
 _DEFAULT_KEYWORDS: dict = {
     "task_types": {
         "frontend_ui": [
@@ -74,6 +97,7 @@ _DEFAULT_KEYWORDS: dict = {
         "marketing": ["官网", "落地页", "营销", "转化", "landing"],
         "mobile": ["移动端", "app", "mobile"],
     },
+    "system_types": _SYSTEM_TYPE_TERMS,
 }
 
 
@@ -89,6 +113,12 @@ class TaskClassification:
     profile: str = UNKNOWN
     confident: bool = False
 
+    # 问题系统分类学（哥德尔启发）：prompt 归为哪类系统 → 方法论路由。
+    # state-machine / event-driven / realtime / search / optimization /
+    # knowledge / batch / adaptive / collaboration / deterministic
+    system_type: str = "deterministic"
+    system_evidence: tuple = ()
+
     def to_dict(self) -> dict:
         return {
             "task_type": self.task_type,
@@ -97,6 +127,8 @@ class TaskClassification:
             "platform": self.platform,
             "profile": self.profile,
             "confident": self.confident,
+            "system_type": self.system_type,
+            "system_evidence": list(self.system_evidence),
         }
 
 
@@ -155,6 +187,22 @@ def _frontend_boost(platform: str, platform_hits: tuple,
     return boost
 
 
+def _detect_system_type(text: str, keywords: Optional[dict] = None) -> tuple:
+    """哥德尔启发：先判定问题属于哪类系统，再选方法论。零 LLM 成本。"""
+    lowered = (text or "").lower()
+    best_name = "deterministic"
+    best_score = 0
+    best_hits: list[str] = []
+    terms = (keywords or {}).get("system_types", _SYSTEM_TYPE_TERMS)
+    for name, wordlist in terms.items():
+        hits = [str(t) for t in wordlist if _keyword_hit(lowered, str(t))]
+        if len(hits) > best_score:
+            best_score = len(hits)
+            best_name = name
+            best_hits = hits
+    return best_name, tuple(best_hits[:5])
+
+
 def classify_text(text: str, keywords: Optional[dict] = None) -> TaskClassification:
     """Classify one prompt/task text into a task type (with frontend
     platform/profile detail). confident = top score >= the configured
@@ -179,8 +227,10 @@ def classify_text(text: str, keywords: Optional[dict] = None) -> TaskClassificat
                   for n, s, h in scored]
     scored.sort(key=lambda item: (-item[1], 0 if item[0] == FRONTEND else 1, item[0]))
     best_type, best_score, best_hits = scored[0]
+    system_type, system_evidence = _detect_system_type(text, kw)
     if best_score <= 0:
-        return TaskClassification(UNKNOWN, 0)
+        return TaskClassification(UNKNOWN, 0, system_type=system_type,
+                                   system_evidence=system_evidence)
 
     matched = best_hits
     if best_type == FRONTEND:
@@ -194,6 +244,8 @@ def classify_text(text: str, keywords: Optional[dict] = None) -> TaskClassificat
         platform=platform if best_type == FRONTEND else UNKNOWN,
         profile=profile if best_type == FRONTEND else UNKNOWN,
         confident=best_score >= config.CLASSIFIER_MIN_SCORE,
+        system_type=system_type,
+        system_evidence=system_evidence,
     )
 
 

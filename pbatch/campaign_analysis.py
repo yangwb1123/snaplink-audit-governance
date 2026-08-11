@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .campaign_models import CampaignSettings, Direction
-from .campaign_state import digest, tree_digest
+from .campaign_state import digest, tool_digest, tree_digest
 from .meta import _extract_json_array
 from .models import Task, TaskResult
 from .runner import run_parallel
@@ -36,11 +36,17 @@ def discover_modules(root: Path, settings: CampaignSettings, explicit: str = "")
 
 def _safe_module(root: Path, value: str) -> str:
     candidate = root / value
-    if candidate.is_symlink():
-        raise ValueError(f"module is not a real directory: {value}")
-    path = _inside(root, candidate)
-    if not path.is_dir():
-        raise ValueError(f"module is not a real directory: {value}")
+    try:
+        if candidate.is_symlink():
+            raise ValueError(f"module is not a real directory: {value}")
+        path = _inside(root, candidate)
+        if not path.is_dir():
+            raise ValueError(f"module is not a real directory: {value}")
+    except OSError as exc:
+        # robustness: paths longer than the FS limit (or otherwise
+        # unstat-able) must fail as invalid modules, not crash the
+        # whole campaign (live finding: File name too long)
+        raise ValueError(f"module not accessible: {value} ({exc})") from exc
     return path.relative_to(root).as_posix()
 
 
@@ -73,10 +79,19 @@ def _fallback_modules(root: Path, settings: CampaignSettings) -> list[str]:
             not _excluded(path.relative_to(root), settings.excludes) and _contains_files(path)]
 
 
+# 打包/缓存产物目录：永远不是分析目标（campaign 实战：ai_batch_runner.egg-info
+# 被当作模块分析浪费一轮流水线；其方向多是打包/版本噪音）。
+_PACKAGE_ARTIFACT_DIRS = ("egg-info", "__pycache__", "dist", "build",
+                          "node_modules", ".venv", "venv")
+
+
 def _excluded(path: Path, excludes: tuple[str, ...]) -> bool:
     lowered = {item.lower() for item in path.parts}
     hidden = any(item.startswith(".") for item in path.parts)
-    return hidden or any(term.lower() in lowered for term in excludes)
+    artifact = any(term in item or item.endswith(term)
+                   for item in lowered for term in _PACKAGE_ARTIFACT_DIRS)
+    return hidden or artifact or any(term.lower() in lowered
+                                     for term in excludes)
 
 
 def _contains_files(path: Path) -> bool:
@@ -121,6 +136,7 @@ def analysis_fingerprint(root: Path, settings: CampaignSettings, module: str,
         "model": task.model,
         "provider": task.provider,
         "planning_history": _planning_history(root),
+        "tool": tool_digest(),
     })
 
 
@@ -175,25 +191,89 @@ def parse_directions(module: str, text: str) -> list[Direction]:
 
 
 def evidence_exists(root: Path, direction: Direction) -> bool:
+    """True when any evidence path exists under the repo root.
+
+    Real-world lesson (forge-os campaign): the analysis model cited evidence
+    WITHOUT the module prefix — `internal/statefs/statefs.go:276` for a
+    repository where the file lives at `forge-core/internal/statefs/statefs.go`.
+    Every candidate is therefore probed bare first (models that DO include the
+    prefix keep working), then with the direction's module prefixed. `_inside`
+    rejects anything escaping the root either way.
+    """
+    module = direction.module
     for evidence in direction.evidence:
-        candidate = evidence.split("#", 1)[0]
-        candidate = re.sub(r":\d+(?::\d+)?$", "", candidate)
-        if ":" in candidate:
-            prefix = candidate.split(":", 1)[0]
-            if (root / prefix).exists():
-                candidate = prefix
-        try:
-            path = _inside(root, root / candidate)
-        except ValueError:
-            continue
-        if path.exists():
-            return True
+        for candidate in _evidence_candidates(evidence):
+            if not candidate:
+                continue
+            for probe in (candidate, f"{module}/{candidate}"):
+                try:
+                    path = _inside(root, root / probe)
+                except ValueError:
+                    continue
+                try:
+                    if path.exists():
+                        return True
+                except OSError:
+                    # untrusted evidence paths may exceed the FS limit
+                    # (live finding: File name too long) — skip, never crash
+                    continue
     return False
 
 
+_EVIDENCE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+")
+_EVIDENCE_EXT = (".go", ".py", ".js", ".ts", ".tsx", ".md", ".yaml", ".yml",
+                 ".json", ".mod", ".sum", ".toml", ".sh", ".sql", ".html", ".css")
+
+
+def _evidence_candidates(evidence: str) -> list[str]:
+    """Path-like candidates from one evidence string.
+
+    Real-world lesson (aero-vault campaign): LLMs mix formats —
+    "path/file.go:12 description", "path/file.go returns X on missing"
+    (no colon) and prose without any path. Extract path tokens first
+    (colon/file:line suffixes stripped), then fall back to the legacy
+    whole-string prefix so old behaviour is preserved.
+    """
+    candidates: list[str] = []
+    for token in _EVIDENCE_TOKEN.findall(evidence):
+        token = re.sub(r":\d+(?::\d+)?$", "", token)
+        token = token.strip("./")
+        if not token or token in (".", ".."):
+            continue
+        if "/" in token or token.endswith(_EVIDENCE_EXT):
+            candidates.append(token)
+    prefix = evidence.split("#", 1)[0].strip()
+    if prefix and prefix not in candidates:
+        candidates.append(prefix)
+    return candidates
+
+
+def rejection_reason(root: Path, direction: Direction, minimum_score: float,
+                     seen: list[Direction]) -> str:
+    """Precise reason a direction was not selected (real-world lesson:
+    a conflated "duplicate, low score, missing evidence..." string made
+    a 9-direction rejection impossible to diagnose)."""
+    if any(_similar_direction(direction, previous) for previous in seen):
+        return ("duplicate of a higher-ranked direction "
+                "(title overlap >= 0.75 or evidence overlap >= 0.8)")
+    if direction.score < minimum_score:
+        return f"score {direction.score:.1f} below minimum {minimum_score:g}"
+    missing = [name for name, value in (
+        ("title", direction.title), ("problem", direction.problem),
+        ("evidence", direction.evidence), ("acceptance", direction.acceptance))
+        if not value]
+    if missing:
+        return "missing required field(s): " + ", ".join(missing)
+    if not evidence_exists(root, direction):
+        shown = " | ".join(direction.evidence[:2])
+        return f"no evidence path exists in the repository (evidence: {shown})"
+    return "rejected because the selection quota was already filled"
+
+
 def select_directions(root: Path, directions: list[Direction], maximum: int,
-                      minimum_score: float) -> tuple[list[Direction], list[Direction]]:
-    """Dedupe, score, and reject candidates without implementable evidence."""
+                      minimum_score: float) -> tuple[list[Direction], list[tuple[Direction, str]]]:
+    """Dedupe, score, and reject candidates without implementable evidence.
+    Rejected items carry their precise reason (see rejection_reason)."""
     ordered = sorted(enumerate(directions), key=lambda item: (-item[1].score, item[0]))
     selected = []
     rejected = []
@@ -206,7 +286,7 @@ def select_directions(root: Path, directions: list[Direction], maximum: int,
         if valid and len(selected) < maximum:
             selected.append(direction)
         else:
-            rejected.append(direction)
+            rejected.append((direction, rejection_reason(root, direction, minimum_score, seen[:-1])))
     return selected, rejected
 
 

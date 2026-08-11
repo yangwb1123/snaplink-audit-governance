@@ -192,3 +192,99 @@ profiles:
     - 移动端
     - app
     - mobile
+
+# 问题系统分类学（哥德尔启发）：prompt 归为哪类系统 → 方法论路由。
+# 低优先级判定（1 命中即可，取最高分）；不匹配默认 deterministic。
+system_types:
+  state-machine:
+    - 状态机
+    - 状态流转
+    - 状态迁移
+    - 审批流
+    - workflow
+    - 状态变更
+    - 审核
+    - 审批
+    - 生命周期
+  event-driven:
+    - 事件
+    - 消息队列
+    - 事件驱动
+    - kafka
+    - mq
+    - pub/sub
+    - event
+    - webhook
+    - 通知
+  realtime:
+    - 实时
+    - websocket
+    - 推送
+    - 监控大屏
+    - 告警
+    - alert
+    - realtime
+    - live
+    - 流式
+  search:
+    - 搜索
+    - 检索
+    - 推荐
+    - 查询优化
+    - 索引
+    - search
+    - autocomplete
+    - 模糊匹配
+  optimization:
+    - 优化
+    - 排程
+    - 调度
+    - 路径规划
+    - 资源分配
+    - optimize
+    - scheduling
+    - 成本最小
+  knowledge:
+    - 知识库
+    - 文档检索
+    - 问答
+    - rag
+    - 知识图谱
+    - faq
+    - 知识管理
+    - chat
+  batch:
+    - 批量
+    - 定时任务
+    - 批处理
+    - cron
+    - 导入导出
+    - etl
+    - batch
+    - job
+  adaptive:
+    - 自适应
+    - 智能推荐
+    - 预测
+    - 风险评估
+    - 机器学习
+    - ai
+    - 模型
+    - agent
+    - 智能
+  collaboration:
+    - 协作
+    - 多人
+    - 团队
+    - 权限
+    - 角色
+    - 组织
+    - collaboration
+    - 分配
+  deterministic:
+    - crud
+    - 增删改查
+    - 表单
+    - 台账
+    - 记录
+    - 报表

@@ -349,6 +349,7 @@ def _session_entry(path: Path, size: int, mtime_ns: int) -> dict:
             if line is not None:
                 _fold_session_line(summary, line)
     except OSError:
+    # best-effort I/O：失败不阻塞主流程（已验证有意）
         pass
     profile = classify_prompt(summary["user_text"])
     verdict = summary["observed_verdict"]

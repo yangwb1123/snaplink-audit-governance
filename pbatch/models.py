@@ -41,8 +41,15 @@ class Stage:
                            # 0 = inherit CLI/global timeout)
     relevance_enabled: bool = True  # inject keyword-based role suggestions
     relevance_min_score: int = 0  # 0 keeps backward-compatible advisory-only scoring
+    meta_max_failed_roles: int = 0  # meta 角色允许失败数（0 = 任一失败即阶段失败）
+    meta_role_retries: int = 1  # 角色任务失败/超时自动重试次数
     gate: bool = False  # verdict gate: output must contain VERDICT: PASS/FAIL/REJECT; FAIL/REJECT blocks later stages
+    gate_fix_rounds: int = 0  # gate FAIL 后自动修复轮数（0 = 关闭，保持 fail-closed halt）
+    gate_fix_prompt: str = ""  # 修复指令模板（{reason}/{findings} 占位符；空 = 默认指令）
+    gate_fix_validate: Optional[str] = None  # 修复任务验证器（None = 继承 gate 阶段 validate_cmd）
     approval: bool = False  # T12c: human approval point after the stage (D5)
+    or_tasks: bool = False  # P7: 任务模板是 OR 候选——按序执行，第一个通过
+                           # （含验证器）者胜出，其余跳过；全部失败则阶段失败
     from_prompt: str = ""  # one-sentence starting prompt instead of from_dir files
     output: str = ""  # output file for the from_prompt task (required with from_prompt)
     tasks: list = field(default_factory=list)

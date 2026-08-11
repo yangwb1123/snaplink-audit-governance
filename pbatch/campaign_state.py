@@ -64,6 +64,34 @@ def git_snapshot(root: Path, excludes: tuple[str, ...] = ()) -> dict:
     return {"head": head.strip(), "dirty": digest([status, diff])}
 
 
+def tool_digest() -> str:
+    """Digest of the tool's own code (pbatch package + entry script + config).
+
+    Real-world lesson (aero-vault round 1): the tool repo was fixed
+    mid-campaign; the running process kept the old parser and rejected all
+    9 directions, but no fingerprint recorded which tool version produced
+    them. Including the tool digest makes reuse decisions invalidate when
+    the tool itself changes and makes the drift visible in state events.
+    """
+    pkg = Path(__file__).resolve().parent
+    root = pkg.parent
+    records: list[tuple[str, str]] = [(pkg.name, tree_digest(pkg, excludes=("__pycache__",)))]
+    entry = root / "pi-batch.py"
+    if entry.is_file():
+        records.append((entry.name, file_digest(entry)))
+    for candidate in (root / "pi-batch.yaml", pkg / "pi-batch.yaml"):
+        if candidate.is_file():
+            records.append((candidate.name, file_digest(candidate)))
+            break
+    return digest(records)
+
+
+def tool_head() -> str:
+    """Git HEAD of the tool's own repository ('' when not a git checkout)."""
+    root = Path(__file__).resolve().parent.parent
+    return (_git_output(root, ["rev-parse", "HEAD"]) or "not-a-git-repository").strip()
+
+
 def _filtered_status(status: str, excludes: tuple[str, ...]) -> str:
     lines = []
     prefixes = tuple(item.rstrip("/") + "/" for item in excludes)
@@ -184,9 +212,13 @@ def write_summary(store: StateStore, path: Path, campaign_name: str) -> None:
         elif event.get("status") == "ANALYSIS_FAILED":
             rows.append(dict(event, direction="(module analysis)"))
     counts = {}
+    per_campaign: dict[str, dict] = {}
     for event in rows:
         status = str(event.get("status", "UNKNOWN"))
         counts[status] = counts.get(status, 0) + 1
+        campaign = str(event.get("campaign", "?"))
+        bucket = per_campaign.setdefault(campaign, {})
+        bucket[status] = bucket.get(status, 0) + 1
     lines = [f"# Campaign summary: {campaign_name}", "",
              f"Generated: {utc_now()}", "",
              "| Module | Direction | Status | Reason | Evidence |",
@@ -198,6 +230,14 @@ def write_summary(store: StateStore, path: Path, campaign_name: str) -> None:
             _cell(event.get("status", "")), _cell(event.get("reason", "")), _cell(evidence)))
     lines.extend(["", "## Counts", ""])
     lines.extend(f"- {key}: {counts[key]}" for key in sorted(counts))
+    # Per-campaign breakdown: multiple campaigns share one state file
+    # (real-world lesson: my round loop and the user's compose queue
+    # interleave events in docs/auto/state.jsonl).
+    if len(per_campaign) > 1:
+        for campaign in sorted(per_campaign):
+            bucket = per_campaign[campaign]
+            lines.extend(["", f"### {campaign}", ""])
+            lines.extend(f"- {key}: {bucket[key]}" for key in sorted(bucket))
     _atomic_text(path, "\n".join(lines) + "\n")
 
 
@@ -216,4 +256,5 @@ def _atomic_text(path: Path, text: str) -> None:
         try:
             os.unlink(name)
         except OSError:
+        # best-effort I/O：失败不阻塞主流程（已验证有意）
             pass

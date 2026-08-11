@@ -64,6 +64,18 @@ DIMENSIONS = [
     {"id": "be_architecture", "checker": "check-backend-quality.py", "mode": "strict",
      "priority": 2, "label": "上帝服务/单实现接口/复杂度",
      "fix": "组合优于继承、去无意义抽象（design-patterns 决策表）"},
+    {"id": "knowledge", "checker": "check-knowledge-freshness.py", "mode": "doc",
+     "priority": 2, "label": "知识维护（模块文档/ADR/关键字段审计）",
+     "fix": "补 README/ADR（docs 决策记录）；关键金额字段加审计信号"
+            "（maintenance-intelligence 六层维护第 6 层）"},
+    {"id": "design_intelligence", "checker": "check-design-intelligence.py", "mode": "kpi",
+     "priority": 1, "label": "设计智能（KPI 强调/空状态教学/状态双编码）",
+     "fix": "按 design-intelligence 规范：大数字强调样式、空状态带动作、"
+            "状态色+图标双编码"},
+    {"id": "backend_experience", "checker": "check-backend-experience.py", "mode": "state",
+     "priority": 2, "label": "业务闭环（状态机/审计/异步生命周期/聚合上下文）",
+     "fix": "状态集中为枚举/常量集；写操作带审计；长任务异步化；搜索端点"
+            "返回聚合上下文（design-intelligence 后端 01/02）"},
 ]
 
 _PRIORITY_LABEL = {0: "P0", 1: "P1", 2: "P2"}
@@ -97,30 +109,35 @@ def _run_checker(script: str, target: str) -> dict:
         return {"files_scanned": 0, "violations": []}
 
 
+# detail 关键词 → 维度（数据驱动，避免大 if 链）。
+_DETAIL_DIMENSIONS: list = [
+    ("fe_errors", ["swallowed exception", "unsafe innerHTML", ".skip/.only"]),
+    ("be_errors", ["without assertions", "DDL", "dependency direction",
+                   "status assignment", "swallow"]),
+    ("fe_n1", ["N+1", "loop body"]),
+    ("fe_complexity", ["nesting depth", "god-file", "decision points",
+                       "state hooks", "event handlers", "api calls",
+                       "constructor deps", "public methods",
+                       "single-implementation", "Base class"]),
+    ("ui_spacing", ["spacing"]),
+    ("ui_color", ["color"]),
+    ("ui_style", ["style"]),
+    ("knowledge", ["module_without_docs", "no_decision_records",
+                   "critical_number_without_audit"]),
+    ("design_intelligence", ["semantic_color_literal", "kpi_emphasis_missing",
+                             "empty_state_no_action", "status_not_dual_encoded"]),
+    ("backend_experience", ["status_literals_without_state_set",
+                            "write_without_audit_signal",
+                            "long_op_without_async_lifecycle",
+                            "search_endpoint_without_context"]),
+]
+
+
 def classify_violation(detail: str) -> str:
     """Map one violation detail line to a dimension id."""
-    if "swallowed exception" in detail or "unsafe innerHTML" in detail \
-            or ".skip/.only" in detail:
-        return "fe_errors"
-    if "without assertions" in detail:
-        return "be_errors"
-    if "N+1" in detail or "loop body" in detail:
-        return "fe_n1"
-    if "nesting depth" in detail or "god-file" in detail \
-            or "decision points" in detail or "state hooks" in detail \
-            or "event handlers" in detail or "api calls" in detail \
-            or "constructor deps" in detail or "public methods" in detail \
-            or "single-implementation" in detail or "Base class" in detail:
-        return "fe_complexity"
-    if "spacing" in detail:
-        return "ui_spacing"
-    if "color" in detail:
-        return "ui_color"
-    if "style" in detail:
-        return "ui_style"
-    if "swallow" in detail or "DDL" in detail or "dependency direction" in detail \
-            or "status assignment" in detail:
-        return "be_errors"
+    for dimension, markers in _DETAIL_DIMENSIONS:
+        if any(marker in detail for marker in markers):
+            return dimension
     return "be_architecture"
 
 
@@ -184,6 +201,14 @@ def record_round(scan: dict, round_no: int) -> None:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _density_bar(count: int, total: int, width: int = 12) -> str:
+    """剩余占比条形（数据表达：健康度式，一眼看懂各维度占比）。"""
+    if total <= 0:
+        return ""
+    filled = max(1, round(count / total * width))
+    return "█" * filled + "░" * (width - filled)
+
+
 def format_plan(batches: list, total: int) -> str:
     """Human-readable iteration plan (per-dimension batches, prioritized)."""
     lines = [f"## 迭代计划（共 {total} 项，按维度分批）"]
@@ -191,7 +216,8 @@ def format_plan(batches: list, total: int) -> str:
         lines.append("全部维度干净——无需推进。")
         return "\n".join(lines)
     for batch in batches:
-        lines.append(f"\n[{batch['priority']}] {batch['label']}（{batch['count']} 项）")
+        lines.append(f"\n[{batch['priority']}] {batch['label']}（{batch['count']} 项）"
+                     f" {_density_bar(batch['count'], total)}")
         lines.append(f"  建议: {batch['fix']}")
         for sample in batch["samples"]:
             lines.append(f"  示例: {sample}")
