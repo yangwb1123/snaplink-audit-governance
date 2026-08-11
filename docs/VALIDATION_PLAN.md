@@ -66,7 +66,10 @@ checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
 须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，
 独立于 `AUDIT_ALLOW_DEV_AUTH`）才恢复旧默认行为。
 
-部署预检（不打开存储、不发起网络；预检与启动使用相同的认证校验规则）：
+部署预检（不打开状态存储、不绑定监听器；API 的 `-check-config` 不发起网络，
+worker 的会做一次有界归档目的地探测——S3 触网且要求桶已启用 Object Lock
+与 versioning，本地归档做可写性探测，失败退出码 1；预检与启动使用相同的
+认证校验规则）：
 
 ```sh
 AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... \

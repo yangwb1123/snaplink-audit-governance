@@ -149,10 +149,13 @@ func (f *FileStore) Ready(_ context.Context) error {
 	return os.Remove(probe)
 }
 
-// s3Client is the subset of the minio client used by S3Store. The interface
+// S3Client is the subset of the minio client used by S3Store. The interface
 // exists so the WORM contract (byte-identical idempotent Put, Object Lock
-// readiness probe) is testable with a fake client; *minio.Client satisfies it.
-type s3Client interface {
+// readiness probe) is testable with a fake client; *minio.Client satisfies it
+// via minioS3Client. It is exported (together with NewS3StoreWithClient) so
+// callers outside this package — the governance worker's tests — can inject a
+// scripted client; production callers keep using NewS3Store.
+type S3Client interface {
 	StatObject(ctx context.Context, bucketName, objectName string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
 	PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 	GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (io.ReadCloser, error)
@@ -160,6 +163,11 @@ type s3Client interface {
 	GetObjectLockConfig(ctx context.Context, bucketName string) (objectLock string, mode *minio.RetentionMode, validity *uint, unit *minio.ValidityUnit, err error)
 	GetBucketVersioning(ctx context.Context, bucketName string) (minio.BucketVersioningConfiguration, error)
 }
+
+// s3Client is the historical unexported name, aliased so existing internal
+// references (S3Store.client, minioS3Client) and same-package tests compile
+// unchanged. The alias adds no runtime branch.
+type s3Client = S3Client
 
 // S3Store writes to an Object Lock enabled bucket. Put is idempotent only
 // for byte-identical retries: an existing object is read back and compared
@@ -172,7 +180,7 @@ type S3Store struct {
 	bucket string
 }
 
-// minioS3Client adapts *minio.Client to s3Client. The concrete GetObject
+// minioS3Client adapts *minio.Client to S3Client. The concrete GetObject
 // returns *minio.Object (an io.ReadCloser); Go interfaces require exact
 // return types, so the adapter narrows the return and forwards the rest.
 type minioS3Client struct {
@@ -201,6 +209,13 @@ func (m *minioS3Client) GetObjectLockConfig(ctx context.Context, bucketName stri
 
 func (m *minioS3Client) GetBucketVersioning(ctx context.Context, bucketName string) (minio.BucketVersioningConfiguration, error) {
 	return m.client.GetBucketVersioning(ctx, bucketName)
+}
+
+// NewS3StoreWithClient builds an S3Store over an already-constructed client.
+// It exists so tests can inject a scripted client (see S3Client); production
+// callers use NewS3Store, whose signature and behavior are unchanged.
+func NewS3StoreWithClient(client S3Client, bucket string) *S3Store {
+	return &S3Store{client: client, bucket: bucket}
 }
 
 // NewS3Store builds the Object Lock archive backed by an S3-compatible

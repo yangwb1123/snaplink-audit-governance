@@ -105,12 +105,9 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
 
-log "starting applications (audit-api/relay/consumer/projector/worker/idp)"
-$COMPOSE up -d audit-api audit-outbox-relay audit-kafka-consumer \
-  audit-projector audit-kafka-dlq-replay audit-governance-worker audit-idp
-
-# 自举归档依赖：S3Store.Ready 要求 bucket 存在且启用 Object Lock（WORM），
-# 因此 MinIO bucket 必须在等待 /readyz 之前创建。
+# 自举归档依赖：S3Store.Ready 要求 bucket 存在且启用 Object Lock（WORM）。
+# worker 启动即探测归档就绪（REQ-1，失败 fatal），因此 bucket 必须在任何
+# 应用启动之前创建，否则新栈的 worker 首次启动必然失败并进入重启退避。
 log "bootstrapping MinIO Object Lock bucket"
 for _ in $(seq 1 30); do
   if $COMPOSE exec -T minio mc alias set "$MINIO_ALIAS" http://localhost:9000 \
@@ -123,8 +120,27 @@ done
 $COMPOSE exec -T minio mc mb --with-lock "$MINIO_ALIAS/worm-audit" >/dev/null 2>&1 || true
 $COMPOSE exec -T minio mc version enable "$MINIO_ALIAS/worm-audit" >/dev/null 2>&1 || true
 
+log "starting applications (audit-api/relay/consumer/projector/worker/idp)"
+$COMPOSE up -d audit-api audit-outbox-relay audit-kafka-consumer \
+  audit-projector audit-kafka-dlq-replay audit-governance-worker audit-idp
+
 wait_http "$API/readyz" || { log "audit-api not ready"; exit 1; }
 log "audit-api ready"
+
+log "asserting worker archive readiness probe"
+for _ in $(seq 1 30); do
+  if $COMPOSE logs audit-governance-worker 2>/dev/null | grep -q "archive_ready=ok"; then
+    break
+  fi
+  sleep 2
+  log "waiting for worker archive_ready=ok"
+done
+if ! $COMPOSE logs audit-governance-worker 2>/dev/null | grep -q "archive_ready=ok"; then
+  $COMPOSE logs audit-governance-worker | tail -5
+  log "FAIL: worker archive readiness probe did not pass"
+  exit 1
+fi
+log "PASS: worker archive readiness probe passed"
 
 log "checking gRPC ingest (B1-6 topology: listener + real Write over socket)"
 if (exec 3<>/dev/tcp/localhost/19051) 2>/dev/null; then

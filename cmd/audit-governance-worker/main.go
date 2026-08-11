@@ -20,6 +20,21 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
+// archiveReadyTimeout bounds every archive readiness probe (startup,
+// -check-config and each evaluate pass) so a hung or black-holed S3 endpoint
+// can never block startup or a pass indefinitely. Single named constant for
+// all probe sites (REQ-7), mirroring openStore's 10 s ping precedent.
+const archiveReadyTimeout = 5 * time.Second
+
+// newArchiveStore builds the configured archive store. Package-level seam for
+// tests: worker tests substitute a store built on a scripted S3 client
+// (archive.NewS3StoreWithClient) to drive runCheckConfig and the startup
+// probe without a real endpoint. Production behavior is exactly
+// runtimeconfig.SigningArchive.Archive.
+var newArchiveStore = func(external runtimeconfig.SigningArchive) (archive.Store, error) {
+	return external.Archive()
+}
+
 func main() {
 	statePath := flag.String("state", envOr("AUDIT_STATE_PATH", "./data/state.json"), "state snapshot path")
 	postgresDSN := flag.String("postgres-dsn", os.Getenv("AUDIT_POSTGRES_DSN"), "PostgreSQL DSN for the control-plane state snapshot; overrides -state")
@@ -32,7 +47,7 @@ func main() {
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
 	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
-	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, then exit without opening the store or network")
+	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, probe the archive destination (bounded; S3 touches the network), then exit without opening the state store or binding listeners")
 	interval := flag.Duration("interval", durationEnv("AUDIT_GOVERNANCE_INTERVAL", 5*time.Minute), "retention evaluation interval")
 	once := flag.Bool("once", false, "evaluate once and exit")
 	flag.Parse()
@@ -76,39 +91,22 @@ func main() {
 		svc.Config.Signer = signer
 		logger.Printf("signer=vault-transit key=%s", *vaultTransitKey)
 	}
-	if archiveStore, archiveErr := external.Archive(); archiveErr != nil {
+	archiveStore, archiveErr := newArchiveStore(external)
+	if archiveErr != nil {
 		logger.Fatalf("archive: %v", archiveErr)
-	} else {
-		svc.Config.Archive = archiveStore
-		if *s3Endpoint != "" {
-			logger.Printf("archive=s3 bucket=%s", *s3Bucket)
-		}
 	}
-	evaluate := func() {
-		tenants, listErr := svc.ListTenants()
-		if listErr != nil {
-			logger.Printf("list tenants: %v", listErr)
-			return
-		}
-		for _, tenant := range tenants {
-			if err := svc.SealPendingSegments(tenant.ID); err != nil {
-				logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
-			}
-			if err := svc.CreateAggregateCheckpoint(tenant.ID); err != nil {
-				logger.Printf("tenant=%s aggregate_checkpoint_error=%v", tenant.ID, err)
-			}
-			archived, archiveErr := svc.ArchivePending(tenant.ID)
-			if archiveErr != nil {
-				handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
-			}
-			report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
-			if reportErr != nil {
-				logger.Printf("tenant=%s retention_error=%v", tenant.ID, reportErr)
-				continue
-			}
-			logger.Printf("tenant=%s eligible=%d protected=%d action=%s", tenant.ID, report.EligibleEvents, report.ProtectedEvents, report.Action)
-		}
+	svc.Config.Archive = archiveStore
+	if *s3Endpoint != "" {
+		logger.Printf("archive=s3 bucket=%s", *s3Bucket)
 	}
+	// REQ-1: probe the archive destination before the first pass (also in
+	// -once mode). A misconfigured destination is a boot error, not a
+	// per-pass surprise: with S3 the bucket must exist with Object Lock and
+	// versioning enabled; with a local archive the dir must be writable.
+	if err := probeArchiveReady(svc.Config.Archive, logger); err != nil {
+		logger.Fatalf("archive ready: %v", err)
+	}
+	evaluate := func() { runEvaluatePass(logger, svc) }
 	evaluate()
 	if *once {
 		return
@@ -126,6 +124,63 @@ func main() {
 			return
 		}
 	}
+}
+
+// runEvaluatePass executes one governance pass over all tenants. The archive
+// readiness probe runs once per pass (never per tenant), before any archiving:
+// when the configured destination is not WORM-ready, the archiving step is
+// skipped for every tenant — no receipt is marked StatusArchived, no
+// Store.Update window is opened and the tenant's conflict counter is not
+// reset — while SealPendingSegments, CreateAggregateCheckpoint and
+// EvaluateRetention proceed unchanged. The failure is surfaced once per pass
+// (the probe line) and once per tenant (the skip line). When the probe
+// passes, the pass is byte-identical to the pre-probe behavior.
+func runEvaluatePass(logger *log.Logger, svc *service.Service) {
+	tenants, listErr := svc.ListTenants()
+	if listErr != nil {
+		logger.Printf("list tenants: %v", listErr)
+		return
+	}
+	archiveReady := probeArchiveReady(svc.Config.Archive, logger) == nil
+	for _, tenant := range tenants {
+		if err := svc.SealPendingSegments(tenant.ID); err != nil {
+			logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
+		}
+		if err := svc.CreateAggregateCheckpoint(tenant.ID); err != nil {
+			logger.Printf("tenant=%s aggregate_checkpoint_error=%v", tenant.ID, err)
+		}
+		if !archiveReady {
+			logger.Printf("tenant=%s archive_skipped=ready_probe_failed", tenant.ID)
+		} else if archived, archiveErr := svc.ArchivePending(tenant.ID); archiveErr != nil {
+			handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
+		}
+		report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
+		if reportErr != nil {
+			logger.Printf("tenant=%s retention_error=%v", tenant.ID, reportErr)
+			continue
+		}
+		logger.Printf("tenant=%s eligible=%d protected=%d action=%s", tenant.ID, report.EligibleEvents, report.ProtectedEvents, report.Action)
+	}
+}
+
+// probeArchiveReady probes a configured archive destination under
+// archiveReadyTimeout and logs the outcome. Unconfigured destinations (nil or
+// an empty-dir FileStore) are skipped, mirroring /readyz via archive.Configured
+// (OQ-1). The caller decides the failure handling: main fails fast at startup,
+// runCheckConfig exits non-zero, runEvaluatePass skips archiving for the pass.
+func probeArchiveReady(store archive.Store, logger *log.Logger) error {
+	if !archive.Configured(store) {
+		logger.Printf("archive_ready=skipped")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), archiveReadyTimeout)
+	defer cancel()
+	if err := store.Ready(ctx); err != nil {
+		logger.Printf("archive_ready=failed store=%T error=%v", store, err)
+		return err
+	}
+	logger.Printf("archive_ready=ok")
+	return nil
 }
 
 // handleArchiveError logs a failed archive pass and persists the per-tenant
@@ -197,10 +252,13 @@ func boolEnv(name string, fallback bool) bool {
 }
 
 // runCheckConfig validates the resolved configuration without opening the
-// store or touching the network: service.New performs the secret fail-fast
+// state store or binding listeners. service.New performs the secret fail-fast
 // checks (and resolves dev defaults), then the external signer/archive
-// configuration is validated. Output prints names and lengths only, never
-// secret values, so CI can compare API and worker outputs.
+// configuration is validated; finally the configured archive destination is
+// probed with Ready under a bounded timeout (archiveReadyTimeout) — for S3
+// this touches the network, for a local archive the filesystem. Output prints
+// names and lengths only, never secret values, so CI can compare API and
+// worker outputs.
 func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive) int {
 	svc, err := service.New(nil, cfg)
 	if err != nil {
@@ -215,9 +273,14 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 		logger.Printf("signer: %v", signErr)
 		return 1
 	}
-	archiveStore, archiveErr := external.Archive()
+	archiveStore, archiveErr := newArchiveStore(external)
 	if archiveErr != nil {
 		logger.Printf("archive: %v", archiveErr)
+		return 1
+	}
+	// REQ-2: probe the destination before reporting ok; check_config=ok is
+	// printed only when the configured archive is WORM-ready.
+	if err := probeArchiveReady(archiveStore, logger); err != nil {
 		return 1
 	}
 	signerName := "hmac-sha256"

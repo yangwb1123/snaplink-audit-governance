@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-08-11 — worker 启动/`-check-config`/每轮 evaluate 前探测归档 WORM 就绪
+
+**写给运营（行为变化）：**
+
+- **audit-governance-worker 启动时探测归档目的地**：S3 桶缺少 Object Lock
+  或 versioning、桶不存在，或本地归档目录不可写/被占用时，worker 拒绝启动
+  （fatal，退出码非 0）；此前只在每轮 Put 失败时记日志。`-once` 模式同样
+  生效。探测有 5 秒超时（`archiveReadyTimeout`），健康时仅新增一行
+  `archive_ready=ok`。
+- **`-check-config` 现在探测归档目的地**：S3 配置会做一次有界网络探测，
+  本地归档会做可写性探测；失败时退出码 1 且不打印 `check_config=ok`（此前
+  桶配置错误也打印 ok）。该 flag 的"不触网"契约已变更——依赖离线执行
+  `-check-config` 的 CI 需更新（`audit-api` 的 `-check-config` 不受影响，
+  仍不发起网络）。健康配置的退出码与输出格式不变。
+- **每轮 evaluate 前探测一次**：失败时该轮跳过归档（不标记任何 receipt 为
+  archived、不开 Store.Update 窗口、不重置冲突计数），每租户记录
+  `archive_skipped=ready_probe_failed`；封段/聚合检查点/保留评估照常执行。
+  探测按轮一次、与租户数无关，默认 5 分钟一轮。
+- **升级前置条件**：S3 部署须先启用桶 versioning 与 Object Lock
+  （`put-bucket-versioning` + `put-object-lock-configuration`），本地归档须
+  确保目录对 worker UID 可写；否则新 worker 启动即失败（这是预期行为，
+  可用 `-check-config` 预检）。回滚只需部署旧二进制，无需数据迁移。
+
+**写给开发（实现变化）：**
+
+- `internal/archive`：导出 `S3Client` 接口并新增
+  `NewS3StoreWithClient(client, bucket)`（`s3Client` 保留为别名）；
+  `NewS3Store`/`Ready`/`Put` 对既有调用者逐字节不变。
+- `cmd/audit-governance-worker`：新增 `archiveReadyTimeout` 常量、
+  `probeArchiveReady`/`runEvaluatePass` 助手与 `newArchiveStore` 测试缝；
+  启动（含 `-once`）与 `-check-config` 在归档前探测，`runEvaluatePass`
+  按轮探测一次、失败跳过归档；`ArchivePending` 及其原子批量语义未改动。
+- 回归测试：T1–T4 + T7（`-check-config` 探测、启动探测、轮内门控与逐轮
+  日志、5 秒超时）、子进程级 T1e/T2e（真实二进制的退出码），
+  `test/e2e/fullstack.sh` 的 MinIO WORM 桶自举提前到应用启动之前并断言
+  `archive_ready=ok`；`python3 cli.py check`/`quality` 通过。
+
 ## 2026-08-11 — Server span 命名与 `http.route` 改为取自匹配到的 ServeMux pattern
 
 **写给运营（行为变化）：**
