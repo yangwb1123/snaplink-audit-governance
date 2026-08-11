@@ -45,7 +45,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - 接入、幂等、租户隔离、Schema 校验、分段哈希链、查询、操作回放、导出、Legal Hold、完整性验证和恢复申请已实现。
 - 哈希链证据链分三层：事件 prev_hash 链 → 段 Merkle Root + 签名 checkpoint → 跨段聚合 Merkle（governance worker 周期生成，`VerifyIntegrity` 逐层验证）。
 - 导出文件在归档前整体 AES-GCM 密封（独立加密），下载时解密，`job.Digest` 覆盖解密后内容。
-- 设置 `AUDIT_OTLP_ENDPOINT`（如 `http://jaeger:4318`）后启用 OpenTelemetry tracing：HTTP 中间件提取/注入 W3C `traceparent`、为每个请求创建 server span 并导出到 Jaeger；未配置时自动降级为 no-op tracer。
+- 设置 `AUDIT_OTLP_ENDPOINT`（如 `http://jaeger:4318`）后启用 OpenTelemetry tracing：HTTP 中间件提取/注入 W3C `traceparent`；server span 在路由匹配后按模式创建（`span name`/`http.route` 取自匹配到的 ServeMux pattern，如 `GET /api/v1/events/{eventID}`，不包含原始路径中的 ID 值，基数有界），未匹配任何路由的请求不产生 span、`X-Trace-ID` 回退为请求 ID；未配置时自动降级为 no-op tracer。
 - 查询支持按 `operation_id`、`causation_id`、`correlation_id`、`trace_id` 等关联维度筛选（与操作时间线/聚合历史配合还原业务链路）。
 - 控制面管理操作全部自审计：租户/来源/Schema/留存策略变更、导出、Legal Hold、恢复申请与审批与对应变更原子写入 append-only 审计轨迹；读路径同样自审计（`GET /api/v1/events`、`GET /api/v1/events/{id}` 追加 `audit.event.read`，导出下载追加 `audit.event.export`，追加失败读请求失败关闭），可通过 `GET /api/v1/admin/actions` 查询（租户 token 仅见本租户，平台 token 可跨租户）。
 - 恢复申请支持审批流程：`POST /api/v1/restores/{runId}/approve` 与 `reject` 记录审批事实（approval 与业务执行分离），状态机 `pending_approval → approved/rejected`。

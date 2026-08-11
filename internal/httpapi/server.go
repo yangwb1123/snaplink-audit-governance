@@ -71,44 +71,51 @@ func NewServer(svc *service.Service, authenticator auth.Authenticator, logger *l
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.healthz)
-	mux.HandleFunc("GET /readyz", s.readyz)
-	mux.HandleFunc("GET /metrics", s.metrics)
-	mux.HandleFunc("POST /api/v1/events", s.postEvent)
-	mux.HandleFunc("POST /api/v1/events:batch", s.postBatch)
-	mux.HandleFunc("GET /api/v1/events/{eventID}", s.getEvent)
-	mux.HandleFunc("GET /api/v1/events/{eventID}/receipt", s.getReceipt)
-	mux.HandleFunc("GET /api/v1/events", s.queryEvents)
-	mux.HandleFunc("GET /api/v1/operations/{operationID}", s.getOperation)
-	mux.HandleFunc("GET /api/v1/operations/{operationID}/timeline", s.getOperationTimeline)
-	mux.HandleFunc("GET /api/v1/operations/{operationID}/replay", s.replayOperation)
-	mux.HandleFunc("GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline", s.getAggregateTimeline)
-	mux.HandleFunc("POST /api/v1/exports", s.createExport)
-	mux.HandleFunc("GET /api/v1/exports/{jobID}", s.getExport)
-	mux.HandleFunc("GET /api/v1/exports/{jobID}/download", s.downloadExport)
-	mux.HandleFunc("POST /api/v1/integrity/verify", s.verifyIntegrity)
-	mux.HandleFunc("POST /api/v1/legal-holds", s.createLegalHold)
-	mux.HandleFunc("GET /api/v1/legal-holds", s.listLegalHolds)
-	mux.HandleFunc("POST /api/v1/legal-holds/{holdID}/release", s.releaseLegalHold)
-	mux.HandleFunc("POST /api/v1/restores/preview", s.previewRestore)
-	mux.HandleFunc("POST /api/v1/restores", s.createRestore)
-	mux.HandleFunc("GET /api/v1/restores/{runID}", s.getRestore)
-	mux.HandleFunc("POST /api/v1/restores/{runID}/approve", s.approveRestore)
-	mux.HandleFunc("POST /api/v1/restores/{runID}/reject", s.rejectRestore)
-	mux.HandleFunc("POST /api/v1/tenants", s.createTenant)
-	mux.HandleFunc("GET /api/v1/tenants", s.listTenants)
-	mux.HandleFunc("POST /api/v1/sources", s.createSource)
-	mux.HandleFunc("GET /api/v1/sources", s.listSources)
-	mux.HandleFunc("PUT /api/v1/sources/{sourceID}", s.updateSource)
-	mux.HandleFunc("POST /api/v1/schemas", s.createSchema)
-	mux.HandleFunc("GET /api/v1/schemas", s.listSchemas)
-	mux.HandleFunc("PUT /api/v1/policies/retention", s.setRetention)
-	mux.HandleFunc("GET /api/v1/policies/retention", s.getRetention)
-	mux.HandleFunc("POST /api/v1/retention/evaluate", s.evaluateRetention)
-	mux.HandleFunc("GET /api/v1/admin/actions", s.listAdminActions)
+	// Every registration goes through spanWrap: it runs inside ServeMux after
+	// pattern matching, so r.Pattern holds the matched route. A route
+	// registered without spanWrap would be silently untraced (and fail the
+	// route-coverage acceptance test), so keep the wrapper on every line.
+	mux.HandleFunc("GET /healthz", s.spanWrap(s.healthz))
+	mux.HandleFunc("GET /readyz", s.spanWrap(s.readyz))
+	mux.HandleFunc("GET /metrics", s.spanWrap(s.metrics))
+	mux.HandleFunc("POST /api/v1/events", s.spanWrap(s.postEvent))
+	mux.HandleFunc("POST /api/v1/events:batch", s.spanWrap(s.postBatch))
+	mux.HandleFunc("GET /api/v1/events/{eventID}", s.spanWrap(s.getEvent))
+	mux.HandleFunc("GET /api/v1/events/{eventID}/receipt", s.spanWrap(s.getReceipt))
+	mux.HandleFunc("GET /api/v1/events", s.spanWrap(s.queryEvents))
+	mux.HandleFunc("GET /api/v1/operations/{operationID}", s.spanWrap(s.getOperation))
+	mux.HandleFunc("GET /api/v1/operations/{operationID}/timeline", s.spanWrap(s.getOperationTimeline))
+	mux.HandleFunc("GET /api/v1/operations/{operationID}/replay", s.spanWrap(s.replayOperation))
+	mux.HandleFunc("GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline", s.spanWrap(s.getAggregateTimeline))
+	mux.HandleFunc("POST /api/v1/exports", s.spanWrap(s.createExport))
+	mux.HandleFunc("GET /api/v1/exports/{jobID}", s.spanWrap(s.getExport))
+	mux.HandleFunc("GET /api/v1/exports/{jobID}/download", s.spanWrap(s.downloadExport))
+	mux.HandleFunc("POST /api/v1/integrity/verify", s.spanWrap(s.verifyIntegrity))
+	mux.HandleFunc("POST /api/v1/legal-holds", s.spanWrap(s.createLegalHold))
+	mux.HandleFunc("GET /api/v1/legal-holds", s.spanWrap(s.listLegalHolds))
+	mux.HandleFunc("POST /api/v1/legal-holds/{holdID}/release", s.spanWrap(s.releaseLegalHold))
+	mux.HandleFunc("POST /api/v1/restores/preview", s.spanWrap(s.previewRestore))
+	mux.HandleFunc("POST /api/v1/restores", s.spanWrap(s.createRestore))
+	mux.HandleFunc("GET /api/v1/restores/{runID}", s.spanWrap(s.getRestore))
+	mux.HandleFunc("POST /api/v1/restores/{runID}/approve", s.spanWrap(s.approveRestore))
+	mux.HandleFunc("POST /api/v1/restores/{runID}/reject", s.spanWrap(s.rejectRestore))
+	mux.HandleFunc("POST /api/v1/tenants", s.spanWrap(s.createTenant))
+	mux.HandleFunc("GET /api/v1/tenants", s.spanWrap(s.listTenants))
+	mux.HandleFunc("POST /api/v1/sources", s.spanWrap(s.createSource))
+	mux.HandleFunc("GET /api/v1/sources", s.spanWrap(s.listSources))
+	mux.HandleFunc("PUT /api/v1/sources/{sourceID}", s.spanWrap(s.updateSource))
+	mux.HandleFunc("POST /api/v1/schemas", s.spanWrap(s.createSchema))
+	mux.HandleFunc("GET /api/v1/schemas", s.spanWrap(s.listSchemas))
+	mux.HandleFunc("PUT /api/v1/policies/retention", s.spanWrap(s.setRetention))
+	mux.HandleFunc("GET /api/v1/policies/retention", s.spanWrap(s.getRetention))
+	mux.HandleFunc("POST /api/v1/retention/evaluate", s.spanWrap(s.evaluateRetention))
+	mux.HandleFunc("GET /api/v1/admin/actions", s.spanWrap(s.listAdminActions))
 	return s.middleware(mux)
 }
 
+// middleware runs before ServeMux matching, so r.Pattern is not yet set and
+// no span can be created here. It handles request identity and metrics only;
+// the server span is created per-route in spanWrap, after pattern matching.
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
@@ -116,31 +123,44 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		if requestID == "" {
 			requestID = newRequestID()
 		}
-		// W3C trace context: extract an incoming traceparent, create a server
-		// span for the route and inject the new context back into the
-		// response headers. Falls back to the no-op tracer when tracing is
-		// disabled (AUDIT_OTLP_ENDPOINT unset).
+		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+		// X-Trace-ID fallback for requests that match no route (no span is
+		// created for them); spanWrap overwrites it for matched routes.
+		w.Header().Set("X-Request-ID", requestID)
+		w.Header().Set("X-Trace-ID", requestID)
+		defer func() {
+			s.requestCount.Add(1)
+			s.recordLatency(time.Since(started))
+		}()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// spanWrap is registered per-route inside ServeMux, so r.Pattern is populated
+// with the matched pattern before it runs. It creates exactly one server span
+// per matched request, injects W3C trace context into the response, and owns
+// panic recovery so RecordError lands on a live span: recovery and span.End
+// live in the same deferred function, preserving today's LIFO ordering (an
+// outer-frame recovery would run after span.End during unwinding and would
+// silently drop the panic event).
+func (s *Server) spanWrap(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		propagator := otel.GetTextMapPropagator()
 		ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-		route := r.URL.Path
+		route := routeFromPattern(r.Pattern)
 		spanName := r.Method + " " + route
+		requestID, _ := r.Context().Value(requestIDKey).(string)
 		ctx, span := otel.Tracer("audit-api").Start(ctx, spanName,
 			trace.WithAttributes(
 				attribute.String("http.method", r.Method),
 				attribute.String("http.route", route),
 				attribute.String("request_id", requestID),
 			))
-		defer span.End()
 		propagator.Inject(ctx, propagation.HeaderCarrier(w.Header()))
-		traceID := requestID
-		if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
-			traceID = spanContext.TraceID().String()
+		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+			w.Header().Set("X-Trace-ID", sc.TraceID().String())
 		}
-
-		ctx = context.WithValue(ctx, requestIDKey, requestID)
 		r = r.WithContext(ctx)
-		w.Header().Set("X-Request-ID", requestID)
-		w.Header().Set("X-Trace-ID", traceID)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				// writeError counts the 500: the panic is one error response.
@@ -148,11 +168,22 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				s.Logger.Printf("request_id=%s panic=%v", requestID, recovered)
 				s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
 			}
-			s.requestCount.Add(1)
-			s.recordLatency(time.Since(started))
+			span.End()
 		}()
-		next.ServeHTTP(w, r)
-	})
+		handler(w, r)
+	}
+}
+
+// routeFromPattern strips the leading method token from a ServeMux pattern
+// ("GET /api/v1/events/{eventID}" -> "/api/v1/events/{eventID}"). The cut
+// uses the pattern's own method token, not r.Method, because "GET" patterns
+// also match HEAD requests and r.Pattern retains the registered "GET …" form.
+// The fallback keeps naming bounded even for a non-mux caller.
+func routeFromPattern(pattern string) string {
+	if _, route, ok := strings.Cut(pattern, " "); ok {
+		return route
+	}
+	return "/unmatched"
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

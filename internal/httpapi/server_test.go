@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
@@ -980,6 +981,353 @@ func (n *noopProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
 func (n *noopProcessor) ForceFlush(context.Context) error                { return nil }
 func (n *noopProcessor) Shutdown(context.Context) error                  { return nil }
 
+// spanCapture is an in-memory sdktrace.SpanProcessor that records ended
+// spans (the same pattern as internal/telemetry/telemetry_test.go, whose
+// type is unexported, so a copy lives here).
+type spanCapture struct {
+	spans []sdktrace.ReadOnlySpan
+}
+
+func (c *spanCapture) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (c *spanCapture) OnEnd(span sdktrace.ReadOnlySpan) {
+	c.spans = append(c.spans, span)
+}
+func (c *spanCapture) ForceFlush(context.Context) error { return nil }
+func (c *spanCapture) Shutdown(context.Context) error   { return nil }
+
+// captureSpans installs a global tracer provider backed by a capturing
+// processor plus a W3C TraceContext propagator, and restores the previous
+// globals when the test finishes.
+func captureSpans(t *testing.T) *spanCapture {
+	t.Helper()
+	capture := &spanCapture{}
+	prevProvider := otel.GetTracerProvider()
+	prevPropagator := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(capture)))
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}))
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevProvider)
+		otel.SetTextMapPropagator(prevPropagator)
+	})
+	return capture
+}
+
+// spanAttribute returns the value of the named attribute on a recorded span.
+func spanAttribute(span sdktrace.ReadOnlySpan, key string) (attribute.Value, bool) {
+	for _, kv := range span.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value, true
+		}
+	}
+	return attribute.Value{}, false
+}
+
+// patternToPath substitutes every {segment} of a ServeMux pattern with a
+// marker value, producing a concrete request path.
+func patternToPath(pattern string) string {
+	var b strings.Builder
+	for i := 0; i < len(pattern); {
+		if pattern[i] == '{' {
+			end := strings.IndexByte(pattern[i:], '}')
+			b.WriteString("MKR-val")
+			i += end + 1
+			continue
+		}
+		b.WriteByte(pattern[i])
+		i++
+	}
+	return b.String()
+}
+
+// AC-1: the server span is named from the matched pattern and http.route
+// carries the pattern route; X-Trace-ID matches the span trace ID.
+func TestHTTPSpanUsesMatchedPattern(t *testing.T) {
+	capture := captureSpans(t)
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/v1/events/evt-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	if len(capture.spans) != 1 {
+		t.Fatalf("captured %d spans, want exactly 1", len(capture.spans))
+	}
+	span := capture.spans[0]
+	if name := span.Name(); name != "GET /api/v1/events/{eventID}" {
+		t.Errorf("span name=%q, want %q", name, "GET /api/v1/events/{eventID}")
+	}
+	if value, ok := spanAttribute(span, "http.route"); !ok || value.AsString() != "/api/v1/events/{eventID}" {
+		t.Errorf("http.route=%q (present=%v), want %q", value.AsString(), ok, "/api/v1/events/{eventID}")
+	}
+	if value, ok := spanAttribute(span, "http.method"); !ok || value.AsString() != http.MethodGet {
+		t.Errorf("http.method=%q (present=%v), want GET", value.AsString(), ok)
+	}
+	if got, want := response.Header.Get("X-Trace-ID"), span.SpanContext().TraceID().String(); got != want {
+		t.Errorf("X-Trace-ID=%q, want span trace ID %q", got, want)
+	}
+}
+
+// AC-2: no raw path-segment or query value ever appears in a span name or
+// any span attribute, across all parameterized route families.
+func TestHTTPSpanNeverContainsRawIDs(t *testing.T) {
+	capture := captureSpans(t)
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	requests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/events/MKR-evt/receipt"},
+		{http.MethodGet, "/api/v1/exports/MKR-job"},
+		{http.MethodGet, "/api/v1/exports/MKR-job/download"},
+		{http.MethodGet, "/api/v1/operations/MKR-op"},
+		{http.MethodGet, "/api/v1/aggregates/MKR-aggregate-type/MKR-aggregate-id/timeline"},
+		{http.MethodPost, "/api/v1/legal-holds/MKR-hold/release"},
+		{http.MethodGet, "/api/v1/restores/MKR-run"},
+		{http.MethodPut, "/api/v1/sources/MKR-src"},
+		{http.MethodGet, "/api/v1/events/MKR-query-evt?tenant_id=MKR-tenant"},
+	}
+	for _, tc := range requests {
+		before := len(capture.spans)
+		request, err := http.NewRequest(tc.method, server.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+
+		if len(capture.spans) != before+1 {
+			t.Fatalf("%s %s: captured %d spans total (want exactly 1 more than %d)", tc.method, tc.path, len(capture.spans), before)
+		}
+		span := capture.spans[before]
+		if strings.Contains(span.Name(), "MKR-") {
+			t.Errorf("%s %s: marker leaked into span name %q", tc.method, tc.path, span.Name())
+		}
+		for _, kv := range span.Attributes() {
+			if strings.Contains(kv.Value.AsString(), "MKR-") {
+				t.Errorf("%s %s: marker leaked into attribute %s=%q", tc.method, tc.path, kv.Key, kv.Value.AsString())
+			}
+		}
+	}
+}
+
+// AC-3: span-name cardinality is bounded — 1000 distinct raw IDs on one
+// route yield exactly one span name.
+func TestHTTPSpanNameCardinalityBounded(t *testing.T) {
+	capture := captureSpans(t)
+	server, _ := testHTTPServerWithStore(t)
+	defer server.Close()
+	handler := server.Config.Handler
+
+	for i := 0; i < 1000; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/events/evt-%d", i), nil))
+	}
+
+	if len(capture.spans) != 1000 {
+		t.Fatalf("captured %d spans, want 1000", len(capture.spans))
+	}
+	names := make(map[string]bool)
+	for _, span := range capture.spans {
+		names[span.Name()] = true
+	}
+	if len(names) != 1 || !names["GET /api/v1/events/{eventID}"] {
+		t.Errorf("span-name set over 1000 requests = %v, want exactly {GET /api/v1/events/{eventID}}", names)
+	}
+}
+
+// AC-5 (REQ-4): unmatched requests create no span, emit no traceparent, and
+// X-Trace-ID falls back to the request ID.
+func TestHTTPUnmatchedNoSpan(t *testing.T) {
+	capture := captureSpans(t)
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/v1/definitely-not-a-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	if len(capture.spans) != 0 {
+		t.Fatalf("captured %d spans for unmatched request, want 0", len(capture.spans))
+	}
+	if got := response.Header.Get("traceparent"); got != "" {
+		t.Errorf("traceparent=%q on unmatched request, want none", got)
+	}
+	requestID := response.Header.Get("X-Request-ID")
+	if got := response.Header.Get("X-Trace-ID"); got != requestID {
+		t.Errorf("X-Trace-ID=%q, want request ID %q", got, requestID)
+	}
+}
+
+// AC-6 (REQ-6): a handler panic is recovered, returned as the standard 500
+// error body, counted in audit_http_errors_total, and recorded on a live
+// span (recovery and span.End share one deferred function).
+func TestHTTPSpanWrapPanicRecovered(t *testing.T) {
+	capture := captureSpans(t)
+	s := &Server{Logger: log.New(io.Discard, "", 0)}
+	h := s.spanWrap(func(w http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	})
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/api/v1/events/evt-1", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", rec.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	errorObj, ok := body["error"].(map[string]any)
+	if !ok || errorObj["code"] != "internal_error" || errorObj["message"] != "internal server error" {
+		t.Errorf("error body=%v, want code=internal_error message=internal server error", body)
+	}
+	if got := s.errorCount.Load(); got != 1 {
+		t.Errorf("errorCount=%d, want 1", got)
+	}
+	if len(capture.spans) != 1 {
+		t.Fatalf("captured %d spans, want exactly 1", len(capture.spans))
+	}
+	span := capture.spans[0]
+	if name := span.Name(); name != "GET /unmatched" {
+		t.Errorf("span name=%q, want bounded fallback %q", name, "GET /unmatched")
+	}
+	found := false
+	for _, event := range span.Events() {
+		if event.Name != "exception" {
+			continue
+		}
+		for _, kv := range event.Attributes {
+			if string(kv.Key) == "exception.message" && strings.Contains(kv.Value.AsString(), "boom") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("span has no exception event carrying the panic message (RecordError did not land on a live span)")
+	}
+}
+
+// AC-7 (F4): HEAD requests match "GET" patterns; the span is named from the
+// pattern's own method token, never "HEAD GET …".
+func TestHTTPSpanHeadUsesPatternMethod(t *testing.T) {
+	capture := captureSpans(t)
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	request, _ := http.NewRequest(http.MethodHead, server.URL+"/api/v1/events/evt-1", nil)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	if len(capture.spans) != 1 {
+		t.Fatalf("captured %d spans, want exactly 1", len(capture.spans))
+	}
+	span := capture.spans[0]
+	if name := span.Name(); name != "HEAD /api/v1/events/{eventID}" {
+		t.Errorf("span name=%q, want %q", name, "HEAD /api/v1/events/{eventID}")
+	}
+	if value, ok := spanAttribute(span, "http.route"); !ok || value.AsString() != "/api/v1/events/{eventID}" {
+		t.Errorf("http.route=%q (present=%v), want %q", value.AsString(), ok, "/api/v1/events/{eventID}")
+	}
+}
+
+// AC-8 (F10): every registered pattern produces a span named from its own
+// pattern; an unwrapped future registration fails this table.
+func TestHTTPSpanRouteCoverageAllPatterns(t *testing.T) {
+	capture := captureSpans(t)
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	routes := []struct {
+		method  string
+		pattern string
+	}{
+		{http.MethodGet, "/healthz"},
+		{http.MethodGet, "/readyz"},
+		{http.MethodGet, "/metrics"},
+		{http.MethodPost, "/api/v1/events"},
+		{http.MethodPost, "/api/v1/events:batch"},
+		{http.MethodGet, "/api/v1/events/{eventID}"},
+		{http.MethodGet, "/api/v1/events/{eventID}/receipt"},
+		{http.MethodGet, "/api/v1/events"},
+		{http.MethodGet, "/api/v1/operations/{operationID}"},
+		{http.MethodGet, "/api/v1/operations/{operationID}/timeline"},
+		{http.MethodGet, "/api/v1/operations/{operationID}/replay"},
+		{http.MethodGet, "/api/v1/aggregates/{aggregateType}/{aggregateID}/timeline"},
+		{http.MethodPost, "/api/v1/exports"},
+		{http.MethodGet, "/api/v1/exports/{jobID}"},
+		{http.MethodGet, "/api/v1/exports/{jobID}/download"},
+		{http.MethodPost, "/api/v1/integrity/verify"},
+		{http.MethodPost, "/api/v1/legal-holds"},
+		{http.MethodGet, "/api/v1/legal-holds"},
+		{http.MethodPost, "/api/v1/legal-holds/{holdID}/release"},
+		{http.MethodPost, "/api/v1/restores/preview"},
+		{http.MethodPost, "/api/v1/restores"},
+		{http.MethodGet, "/api/v1/restores/{runID}"},
+		{http.MethodPost, "/api/v1/restores/{runID}/approve"},
+		{http.MethodPost, "/api/v1/restores/{runID}/reject"},
+		{http.MethodPost, "/api/v1/tenants"},
+		{http.MethodGet, "/api/v1/tenants"},
+		{http.MethodPost, "/api/v1/sources"},
+		{http.MethodGet, "/api/v1/sources"},
+		{http.MethodPut, "/api/v1/sources/{sourceID}"},
+		{http.MethodPost, "/api/v1/schemas"},
+		{http.MethodGet, "/api/v1/schemas"},
+		{http.MethodPut, "/api/v1/policies/retention"},
+		{http.MethodGet, "/api/v1/policies/retention"},
+		{http.MethodPost, "/api/v1/retention/evaluate"},
+		{http.MethodGet, "/api/v1/admin/actions"},
+	}
+	for _, route := range routes {
+		before := len(capture.spans)
+		request, err := http.NewRequest(route.method, server.URL+patternToPath(route.pattern), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+
+		if len(capture.spans) != before+1 {
+			t.Fatalf("%s %s: captured %d spans (want exactly 1 more than %d)", route.method, route.pattern, len(capture.spans), before)
+		}
+		span := capture.spans[before]
+		want := route.method + " " + route.pattern
+		if name := span.Name(); name != want {
+			t.Errorf("%s %s: span name=%q, want %q", route.method, route.pattern, name, want)
+		}
+	}
+}
+
+// AC-9 (F1/F2): routeFromPattern strips the method token and falls back to
+// a bounded route for method-less or empty patterns.
+func TestRouteFromPatternFallback(t *testing.T) {
+	cases := []struct{ pattern, want string }{
+		{"GET /api/v1/events/{eventID}", "/api/v1/events/{eventID}"},
+		{"/no-method", "/unmatched"},
+		{"", "/unmatched"},
+	}
+	for _, tc := range cases {
+		if got := routeFromPattern(tc.pattern); got != tc.want {
+			t.Errorf("routeFromPattern(%q)=%q, want %q", tc.pattern, got, tc.want)
+		}
+	}
+}
+
 func TestHTTPLatencyHistogramExposed(t *testing.T) {
 	server := testHTTPServer(t)
 	defer server.Close()
@@ -1587,6 +1935,8 @@ var eventReturningServiceMethods = map[string]bool{
 // security.StripSearchDigests BEFORE writeJSON. Route inventory walks
 // (s *Server).Handler() — where all mux.HandleFunc registrations live — and
 // must equal the declared route table, so any new route fails until declared.
+// Every registration must use the s.spanWrap(s.<handler>) form: an unwrapped
+// handler would be silently untraced (spanWrap creates the per-route span).
 //
 // Mutation checks (verified during development): commenting out either
 // timeline strip loop fails this test; adding an unstripped event-returning
@@ -1641,9 +1991,21 @@ func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
 		if err != nil || !strings.Contains(pattern, " ") {
 			t.Fatalf("HandleFunc pattern %q must be \"METHOD /path\": %s", lit.Value, fset.Position(call.Pos()))
 		}
-		handlerArg, ok := call.Args[1].(*ast.SelectorExpr)
+		// Every registration must be wrapped per-route:
+		// mux.HandleFunc(pattern, s.spanWrap(s.handler)). Unwrap spanWrap so
+		// the handler identity below stays the direct s.<handler> selector; an
+		// unwrapped registration is silently untraced and fails here.
+		wrap, ok := call.Args[1].(*ast.CallExpr)
+		if !ok || len(wrap.Args) != 1 {
+			t.Fatalf("HandleFunc %q second arg must be s.spanWrap(s.<handler>): %s", pattern, fset.Position(call.Pos()))
+		}
+		wrapSel, ok := wrap.Fun.(*ast.SelectorExpr)
+		if !ok || wrapSel.Sel.Name != "spanWrap" {
+			t.Fatalf("HandleFunc %q second arg must be s.spanWrap(s.<handler>): %s", pattern, fset.Position(call.Pos()))
+		}
+		handlerArg, ok := wrap.Args[0].(*ast.SelectorExpr)
 		if !ok {
-			t.Fatalf("HandleFunc %q second arg must be s.<handler>: %s", pattern, fset.Position(call.Pos()))
+			t.Fatalf("HandleFunc %q second arg must be s.spanWrap(s.<handler>): %s", pattern, fset.Position(call.Pos()))
 		}
 		found = append(found, route{pattern: pattern, handler: handlerArg.Sel.Name})
 		return true

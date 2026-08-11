@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-11 — Server span 命名与 `http.route` 改为取自匹配到的 ServeMux pattern
+
+**写给运营（行为变化）：**
+
+- **span name 与 `http.route` 不再包含原始路径中的 ID 值**：命名改为
+  `<method> <pattern>`（如 `GET /api/v1/events/{eventID}`），基数从无界
+  收敛为 ≤ 35 个固定名。此前导出到 OTLP 的事件 ID、导出 job ID、操作 ID、
+  聚合 ID、hold ID、run ID、source ID 等敏感标识不再离开服务边界；依赖原始
+  ID 形状的 span 名/`http.route` 的看板与告警将停止收到这些值。
+- **未匹配任何路由的请求（ServeMux 404）不再产生 span、不再输出
+  `traceparent`**，`X-Trace-ID` 回退为请求 ID——与未配置 OTLP 时的既有行为
+  一致。匹配路由的请求行为不变：`traceparent` 延续/注入、`X-Trace-ID` =
+  span trace ID、`X-Request-ID`、指标与错误契约全部不变。
+
+**写给开发（实现变化）：**
+
+- `internal/httpapi/server.go` 内部重构，外部 API 面零变化（零路由/零
+  OpenAPI/零 metrics/零配置变更）：外层 `middleware` 只保留 request ID 与
+  指标；新增 per-route `spanWrap`（35 条 `mux.HandleFunc` 全部包装），在
+  ServeMux 匹配后从 `r.Pattern` 创建唯一 server span、注入 `traceparent`、
+  设置 `X-Trace-ID`，并独占 panic 恢复——恢复与 `span.End()` 同在一个
+  defer 函数中，保住 `RecordError` 落在活 span 上的既有顺序（F3 陷阱）。
+- 新增 `routeFromPattern`：按 pattern 自身的方法 token 截断（`HEAD` 命中
+  `GET` pattern 时 `r.Pattern` 仍是 `"GET …"`），无方法/空 pattern 回退
+  `/unmatched`（有界）。未匹配请求按 REQ-4 选项 (a) 不建 span。
+
+**回归测试：** `TestHTTPSpanUsesMatchedPattern`、
+`TestHTTPSpanNeverContainsRawIDs`、`TestHTTPSpanNameCardinalityBounded`、
+`TestHTTPUnmatchedNoSpan`、`TestHTTPSpanWrapPanicRecovered`、
+`TestHTTPSpanHeadUsesPatternMethod`、`TestHTTPSpanRouteCoverageAllPatterns`
+（35 条 pattern 全覆盖，未来未包装注册即失败）、
+`TestRouteFromPatternFallback`（`internal/httpapi/server_test.go`）；
+`TestEventReturningHandlersStripSearchDigests` 的 AST 巡检更新为要求
+`s.spanWrap(s.<handler>)` 包装形态。
+
 ## 2026-08-11 — JWT 租户声明收紧：tenant_id/tenant 声明委托 canonical key-framing 字符集规则
 
 **写给运营（行为变化）：**
