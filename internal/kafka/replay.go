@@ -84,6 +84,12 @@ func (s *ReplayState) Mark(eventID string) error {
 // message arrives within this window".
 const defaultDrainTimeout = 5 * time.Second
 
+// maxScanWindows bounds one scanAccepted round under sustained ingest: a
+// topic that never goes quiet must not hold the round open. Two windows
+// give a slow topic at least one full quiet-window chance to signal
+// "end of retained topic" before the round is cut off.
+const maxScanWindows = 2
+
 // Replayer redelivers dead-lettered events. DLQ records carry only failure
 // metadata (event_id, error_code, error_message), so the original event is
 // recovered from the accepted topic by key and re-published (or re-ingested
@@ -145,7 +151,14 @@ func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, stat
 // newReplayerWithReaders is the test seam: the same messageReader contract
 // as Consumer, so replay behavior is exercised without a broker.
 func newReplayerWithReaders(dlq, accepted messageReader, state *ReplayState, republish RepublishFunc) *Replayer {
-	return &Replayer{dlqReader: dlq, accepted: accepted, republish: republish, state: state, logger: log.New(io.Discard, "", 0), drainTimeout: defaultDrainTimeout}
+	return newReplayerWithReadersAndLogger(dlq, accepted, state, republish, log.New(io.Discard, "", 0))
+}
+
+// newReplayerWithReadersAndLogger is the test seam for acceptance tests that
+// capture the durable log lines (e.g. the unresolvable mark) in addition to
+// reader-level behavior.
+func newReplayerWithReadersAndLogger(dlq, accepted messageReader, state *ReplayState, republish RepublishFunc, logger *log.Logger) *Replayer {
+	return &Replayer{dlqReader: dlq, accepted: accepted, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
 // Metrics returns (dlqRecords, acceptedScanned, replayed, republishFailures,
@@ -282,32 +295,59 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 }
 
 // scanAccepted walks the accepted topic from its first retained offset and
-// re-publishes every message whose key matches a wanted event ID. Replay is
-// idempotent: events already in the state file are skipped. An unparsable
-// accepted message is skipped with a log line, mirroring the consumer. The
-// scan ends when the drain window expires. Returns the number of events
-// replayed and the set of event IDs that reached a durable decision this
-// round (replayed, permanently rejected, or unparsable — NOT transiently
-// failed).
+// re-publishes every message whose payload event_id (authoritative) or key
+// (fallback for unparsable values) matches a wanted event ID. Replay is
+// idempotent: events already in the state file are skipped. A key-matched
+// but value-unparsable message is marked replayed with a log line, mirroring
+// the consumer's anti-loop rule.
+//
+// The scan ends when (a) one full drain window passes with no message
+// (drained=true: the reader is caught up to the high watermark, so the
+// retained topic was fully scanned) or (b) the round reaches
+// maxScanWindows x drainTimeout (drained=false: sustained ingest cut the
+// round off — nothing is marked unresolvable and everything unresolved
+// stays pending for the next round). A transport error sets scanErr and
+// leaves everything pending. Returns the number of events replayed and the
+// set of event IDs that reached a durable decision this round (replayed,
+// permanently rejected, unparsable, or converged-as-unresolvable — NOT
+// transiently failed).
 func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (int, map[string]bool, error) {
-	drainCtx, cancel := context.WithTimeout(ctx, r.drainWindow())
+	window := r.drainWindow()
+	scanCtx, cancel := context.WithTimeout(ctx, maxScanWindows*window)
 	defer cancel()
 	replayed := 0
 	resolved := map[string]bool{}
+	found := map[string]bool{} // wanted IDs whose message was matched this round
+	drained := false           // true only after a full quiet window with no message
+	var scanErr error
+	lastMessage := time.Now()
 	for {
-		message, err := r.accepted.FetchMessage(drainCtx)
+		fetchCtx, fetchCancel := context.WithTimeout(scanCtx, window)
+		message, err := r.accepted.FetchMessage(fetchCtx)
+		fetchCancel()
 		if err != nil {
-			return replayed, resolved, err
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && time.Since(lastMessage) >= window {
+				drained = true // topic quiet: the retained topic was fully scanned
+			} else if ctx.Err() == nil {
+				scanErr = err // transport failure: leave everything pending
+			}
+			break
 		}
+		lastMessage = time.Now()
 		r.acceptedSeen.Add(1)
-		eventID := string(message.Key)
-		if !wanted[eventID] || r.state.Replayed[eventID] {
+		payloadID := eventIDFromValue(message.Value) // decode once per message
+		eventID := ""
+		if payloadID != "" && wanted[payloadID] && !r.state.Replayed[payloadID] {
+			eventID = payloadID // payload event_id is authoritative
+		} else if keyID := string(message.Key); wanted[keyID] && !r.state.Replayed[keyID] {
+			eventID = keyID // fallback: unparsable values whose only signal is the key
+		}
+		if eventID == "" {
 			continue
 		}
-		// A message whose key is wanted but whose value is not a canonical
-		// event cannot be replayed: log and mark it replayed to avoid an
-		// infinite loop across rounds.
-		if !looksLikeCanonicalEvent(message.Value) {
+		found[eventID] = true
+		if payloadID == "" {
+			// Key-matched, value not canonical: existing anti-loop mark + log.
 			r.logger.Printf("accepted message unparsable topic=%s partition=%d offset=%d event_id=%s; marking replayed to avoid loop", r.accepted.Config().Topic, message.Partition, message.Offset, eventID)
 			if err := r.state.Mark(eventID); err != nil {
 				return replayed, resolved, err
@@ -335,7 +375,7 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 			}
 			r.republishFail.Add(1)
 			r.logger.Printf("republish failed event_id=%s error=%v; will retry next round", eventID, err)
-			continue
+			continue // found => stays pending, never marked unresolvable
 		}
 		if err := r.state.Mark(eventID); err != nil {
 			return replayed, resolved, err
@@ -345,18 +385,26 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 		replayed++
 		r.logger.Printf("replayed event_id=%s", eventID)
 	}
-}
-
-// looksLikeCanonicalEvent cheaply verifies a recovered accepted message is a
-// JSON object carrying an event_id before it is re-published.
-func looksLikeCanonicalEvent(value []byte) bool {
-	var probe struct {
-		EventID string `json:"event_id"`
+	if drained {
+		// REQ-2: a quiet-topic scan from the first retained offset without a
+		// match is definitive (the consumer published the Failure only after
+		// fetching the original). Mark unresolvable this round so
+		// commitResolved commits the DLQ offset — no attempt cap needed.
+		// Found-but-failed events (transient republish error) stay pending.
+		for eventID := range wanted {
+			if resolved[eventID] || found[eventID] {
+				continue
+			}
+			r.logger.Printf("unresolvable event_id=%s reason=original-not-found-in-accepted-topic round=%s", eventID, time.Now().Format(time.RFC3339))
+			if err := r.state.Mark(eventID); err != nil {
+				return replayed, resolved, err
+			}
+			resolved[eventID] = true
+			r.replayed.Add(1)
+			replayed++
+		}
 	}
-	if err := json.Unmarshal(value, &probe); err != nil {
-		return false
-	}
-	return probe.EventID != ""
+	return replayed, resolved, scanErr
 }
 
 // ReplayScheduler loops RunOnce with backoff until ctx is cancelled. A

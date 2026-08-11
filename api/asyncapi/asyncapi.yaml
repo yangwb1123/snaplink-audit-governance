@@ -7,9 +7,20 @@ defaultContentType: application/json
 channels:
   accepted:
     address: audit.events.accepted.v1
+    description: >-
+      Accepted, normalized audit events. Producers MUST set the Kafka message
+      key to the payload's canonical event_id; the replay recovery path also
+      matches by payload event_id, so an absent or mismatched key never blocks
+      recovery, but key alignment keeps dead-letter evidence and partitioning
+      correct.
     messages:
       auditEvent:
         $ref: '#/components/messages/AuditEvent'
+        bindings:
+          kafka:
+            key:
+              type: string
+              description: MUST equal the AuditEvent payload's event_id.
   ledgered:
     address: audit.events.ledgered.v1
     messages:
@@ -61,7 +72,7 @@ components:
         type: object
         required: [event_id, error_code, error_message]
         properties:
-          event_id: { type: string }
+          event_id: { type: string, minLength: 1 }
           error_code: { type: string }
           error_message: { type: string }
   schemas:

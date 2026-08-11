@@ -114,6 +114,20 @@ func (p *Producer) Close() error { return p.writer.Close() }
 // API is idempotent per event_id, so redelivery after a crash is safe.
 type IngestFunc func(ctx context.Context, event domain.Event) error
 
+// eventIDFromValue probes a message value for a canonical event_id without
+// full event validation. Shared by the consumer (REQ-3) and the replayer
+// (REQ-1/REQ-2); "" means the value carries no usable event_id (not JSON,
+// not an object, or blank).
+func eventIDFromValue(value []byte) string {
+	var probe struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(value, &probe); err != nil {
+		return ""
+	}
+	return probe.EventID
+}
+
 // messageReader is the minimal Kafka surface Consumer needs; kafka.Reader
 // implements it and tests use a fake to exercise the backpressure/dead-letter
 // state machine without a broker.
@@ -260,10 +274,19 @@ func (c *Consumer) Run(ctx context.Context) error {
 		decoder.UseNumber()
 		if err := decoder.Decode(&event); err != nil {
 			// 不可解析的消息没有重试价值：先记录死信证据（DLQ 有挂载时），
-			// 再提交；绝不静默丢弃。
+			// 再提交；绝不静默丢弃。event_id 优先取 payload 探针，key 仅作
+			// 回退；两者皆空时只提交+记日志，避免发布空 event_id 的 Failure
+			//（replay 无法路由它，只会制造噪音）。
 			c.deadLettered.Add(1)
-			failure := Failure{EventID: string(message.Key), ErrorCode: ErrorCodeUnparsable, ErrorMessage: err.Error()}
-			if c.dlq != nil {
+			failure := Failure{ErrorCode: ErrorCodeUnparsable, ErrorMessage: err.Error()}
+			if id := eventIDFromValue(message.Value); id != "" {
+				failure.EventID = id
+			} else {
+				failure.EventID = string(message.Key)
+			}
+			if failure.EventID == "" {
+				c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=no-event-id-recoverable (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset)
+			} else if c.dlq != nil {
 				if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
 					c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
 				} else {
@@ -325,10 +348,15 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 
 // deadLetter publishes the Failure to the DLQ (when one is attached), then
 // commits the message so the partition advances. A publish failure degrades
-// to commit + log: the DLQ must never block ledger progress.
+// to commit + log: the DLQ must never block ledger progress. A blank payload
+// event_id never yields a Failure record: the payload was parsed and is
+// authoritative, and an empty-ID record cannot be routed by replay — commit
+// + durable log instead (the key is an untrusted producer hint).
 func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event domain.Event, code string, cause error) error {
 	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error()}
-	if c.dlq != nil {
+	if failure.EventID == "" {
+		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=empty-event-id code=%s (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, code)
+	} else if c.dlq != nil {
 		if err := c.dlq.PublishFailure(ctx, failure); err != nil {
 			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
 		} else {

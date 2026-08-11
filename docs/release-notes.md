@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-11 — DLQ replay: payload event_id 匹配 + 缺席原事件一轮收敛 + 空 event_id 不再发布 Failure
+
+**写给运营（行为变化）：**
+
+- **匹配口径改为 payload `event_id` 优先、key 兜底**：accepted topic 的
+  消息 key 缺失或与 payload 不一致时，replay 仍能按 payload 恢复原事件并
+  字节级原样重发；旧实现只按 key 匹配，这类记录会无限循环重扫。
+- **原事件已过期/不存在的记录一轮收敛**：当一次完整扫描确认 accepted
+  topic 中不存在原事件时（quiet window 判定，见下），该 DLQ 记录被标记
+  `unresolvable` 并提交，不再每轮重试；每次标记都有持久日志行
+  `unresolvable event_id=<id> reason=original-not-found-in-accepted-topic`。
+- **`audit_dlq_replayed_total` 语义扩展**：该计数器现在也包含
+  converged-unresolvable 事件（与既有的 unparsable/permanent-failure
+  收敛路径一致）；其余四个计数器不变。可对该日志模式加告警。
+- **持续灌入下扫描有界**：一轮扫描最多持续 2×drainTimeout（默认 10 秒）；
+  若 topic 一直不安静，轮次被截断（cut-off），未确认的记录保持 pending、
+  绝不误标记，下一轮重试。只有“整整一个安静窗口内无消息”才算扫描完成。
+
+**写给开发（API 契约变化）：**
+
+- 消费端不再发布空 `event_id` 的 `Failure` 记录：unparsable 路径取 payload
+  探针、key 兜底，两者皆空时降级为 commit+log；`deadLetter` 对空 payload
+  `event_id` 同样跳过发布。`Failure.event_id` 在 AsyncAPI 契约中收紧为
+  `minLength: 1`，accepted channel 声明 Kafka key 必须等于 payload
+  `event_id`（binding），且描述补充了 payload 匹配语义。
+- 旧 DLQ 记录（含空 `event_id`）无需迁移：replay 对它们的现有行为不变。
+- `Replayer.Metrics()` 签名与五个计数器不变；`RunOnce`/提交纪律不变
+  （transport 错误仍不提交任何偏移，已解析记录也留到下一轮）。
+
+**回归测试：** `internal/kafka/replay_test.go` 与 `kafka_test.go` 新增
+AC-1..AC-7：空 key/错 key 按 payload 匹配、缺席原事件一轮收敛、空
+`event_id` 不发布、持续灌入 cut-off（不标记、记录 pending、下一轮重试）、
+transport 错误零提交、drained-vs-cutoff 边界（整窗口安静=标记、窗口内仍
+有消息=截断、外层取消=不标记、已找到但瞬态失败=保持 pending）。
+
 ## 2026-08-10 — worker: 聚合 checkpoint 去重、空闲不写快照 + 每租户保留上限
 
 **写给运营（新配置项）：** `audit-governance-worker` 新增环境变量

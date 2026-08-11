@@ -339,3 +339,55 @@ func TestConsumerDeadLettersWithoutPublisherCommitsAndLogs(t *testing.T) {
 		t.Fatalf("no publisher attached, want zero publish activity, calls=%d published=%v", reader.publishCalls, reader.published)
 	}
 }
+
+// AC-3 (REQ-3/REQ-4): the consumer never publishes a DLQ Failure with an
+// empty event_id. On the unparsable path the payload event_id wins over the
+// key; when neither yields an ID the message degrades to commit + log. A
+// blank payload event_id on the dead-letter path (decoded event) also
+// degrades to commit + log instead of publishing an empty-ID record.
+func TestConsumerNeverPublishesEmptyEventID(t *testing.T) {
+	t.Run("unparsable with empty key skips publish", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{{Key: nil, Value: []byte("not-json"), Partition: 0, Offset: 1}}}
+		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+			t.Fatal("unparsable message must not reach ingest")
+			return nil
+		}, WithDLQ(reader))
+		if reader.publishCalls != 0 || len(reader.published) != 0 {
+			t.Fatalf("publishCalls=%d published=%v, want 0/none (no empty event_id Failure)", reader.publishCalls, reader.published)
+		}
+		if len(reader.commits) != 1 {
+			t.Fatalf("commits=%d, want 1 (commit + log degradation)", len(reader.commits))
+		}
+	})
+	t.Run("payload event_id wins over empty key on unparsable", func(t *testing.T) {
+		// schema_version "bad" is not an int, so the consumer's event decode
+		// fails — but the event_id probe succeeds and must be used instead of
+		// the empty key.
+		reader := &fakeReader{messages: []kafka.Message{{Key: nil, Value: []byte(`{"event_id":"evt-v","schema_version":"bad"}`), Partition: 0, Offset: 1}}}
+		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+			t.Fatal("unparsable message must not reach ingest")
+			return nil
+		}, WithDLQ(reader))
+		if reader.publishCalls != 1 || len(reader.published) != 1 {
+			t.Fatalf("publishCalls=%d published=%v, want 1 record", reader.publishCalls, reader.published)
+		}
+		if reader.published[0].EventID != "evt-v" {
+			t.Fatalf("published event_id=%q, want evt-v (payload probe, not the empty key)", reader.published[0].EventID)
+		}
+		if len(reader.commits) != 1 {
+			t.Fatalf("commits=%d, want 1", len(reader.commits))
+		}
+	})
+	t.Run("blank payload event_id on permanent dead-letter skips publish", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{validMessage("", 1)}}
+		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+			return &outbox.DeliveryError{Permanent: true, Err: errors.New("audit api rejected")}
+		}, WithDLQ(reader))
+		if reader.publishCalls != 0 || len(reader.published) != 0 {
+			t.Fatalf("publishCalls=%d published=%v, want 0/none (blank event_id must not be published)", reader.publishCalls, reader.published)
+		}
+		if len(reader.commits) != 1 {
+			t.Fatalf("commits=%d, want 1 (commit + log degradation)", len(reader.commits))
+		}
+	})
+}
