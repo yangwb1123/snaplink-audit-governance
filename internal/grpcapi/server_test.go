@@ -187,6 +187,143 @@ func TestStatusErrorLogsDetailServerSide(t *testing.T) {
 	}
 }
 
+// newGRPCHarness builds the bufconn-based ingest harness used by the
+// key-framing rejection test (mirrors TestWriteAndBatchOverGRPC's setup).
+func newGRPCHarness(t *testing.T) (*store.Store, auditv1.IngestClient, context.Context) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer()
+	Register(grpcServer, svc, auth.Authenticator{AllowDev: true})
+	go func() { _ = grpcServer.Serve(listener) }()
+	t.Cleanup(grpcServer.Stop)
+	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:tenant-a:service:crm"))
+	return st, auditv1.NewIngestClient(connection), ctx
+}
+
+// assertNoFramedKeys walks the snapshot asserting no composite-key map
+// holds a key with more than one KeySeparator, and that the rejected
+// event/source ids were never persisted.
+func assertNoFramedKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
+	t.Helper()
+	if err := st.Read(func(data *store.Snapshot) error {
+		for name, keys := range map[string][]string{
+			"Events":      keysOf(data.Events),
+			"Streams":     keysOf(data.Streams),
+			"Segments":    keysOf(data.Segments),
+			"Checkpoints": keysOf(data.Checkpoints),
+			"Receipts":    keysOf(data.Receipts),
+		} {
+			for _, key := range keys {
+				if strings.Count(key, "\x1f") > 1 {
+					t.Errorf("%s holds multi-separator key %q", name, key)
+				}
+			}
+		}
+		for _, id := range rejectedIDs {
+			if _, exists := data.Events[store.EventKey("tenant-a", id)]; exists {
+				t.Errorf("rejected event %q was persisted", id)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// TestGRPCRejectsKeyFramingEventInvalidArgument is F-1: the gRPC ingest
+// surface (Write, WriteBatch, WriteStream) funnels through Service.Ingest →
+// ValidateBasic, so key-framing violations map to codes.InvalidArgument and
+// nothing reaches the snapshot; WriteBatch keeps its partial-receipt
+// contract over gRPC.
+func TestGRPCRejectsKeyFramingEventInvalidArgument(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	bad := testProtoEvent("grpc-bad-1", "crm")
+	bad.EventId = "a\x1fb"
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: bad}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Write with 0x1F event_id: code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	// WriteBatch partial-acceptance contract: the valid prefix is committed
+	// to the ledger before the invalid tail aborts the batch. Unlike HTTP
+	// (which returns {receipts, error} in the body), gRPC error responses
+	// carry no message, so the prefix receipt is not delivered on the wire —
+	// the ledger side is identical: valid prefix in, invalid tail out.
+	valid := testProtoEvent("grpc-bad-valid-1", "crm")
+	valid.EventId = "grpc-ok-1"
+	invalid := testProtoEvent("grpc-bad-2", "crm")
+	invalid.SourceSystem = "x\x1fy"
+	response, batchErr := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{valid, invalid}})
+	if status.Code(batchErr) != codes.InvalidArgument {
+		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(batchErr))
+	}
+	if len(response.GetReceipts()) != 0 {
+		t.Fatalf("WriteBatch wire receipts=%d, want 0 (gRPC error responses carry no message)", len(response.GetReceipts()))
+	}
+
+	// WriteStream: prefix receipt is delivered, the invalid event terminates
+	// the stream with InvalidArgument.
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&auditv1.WriteRequest{Event: testProtoEvent("grpc-bad-stream-ok", "crm")}); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := stream.Recv()
+	if err != nil || prefix.GetEventId() != "grpc-bad-stream-ok" {
+		t.Fatalf("stream prefix receipt: %v %v", prefix, err)
+	}
+	if err := stream.Send(&auditv1.WriteRequest{Event: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("stream termination code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	assertNoFramedKeys(t, st, "a\x1fb", "x\x1fy", "grpc-bad-2")
+	// The valid prefix from the aborted batch IS in the ledger (committed
+	// before the invalid tail aborted the loop) — partial acceptance, same
+	// as HTTP's partial-status semantics.
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-ok-1")]; !exists {
+			t.Fatal("valid batch prefix was not ledgered before the abort")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestWriteRedactsStoreFailureEndToEnd drives a real Write through a service
 // whose snapshot file is unwritable, so the store Save fails with an error
 // carrying the state path. The gRPC client must see codes.Internal with the

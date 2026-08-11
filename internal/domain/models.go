@@ -375,6 +375,30 @@ func (e Event) ValidateBasic() error {
 			return fmt.Errorf("%w: %s is required", ErrInvalid, name)
 		}
 	}
+	// Key-framing charset rule: these five identifiers become composite-key
+	// components (EventKey/StreamKey via Event.Stream), so an embedded
+	// KeySeparator (0x1F) would create multi-separator keys that
+	// SplitTenantKey fail-closes on — permanently invisible to
+	// VerifyIntegrity and aggregate checkpointing. The ordered slice keeps
+	// error precedence deterministic; the three optional stream components
+	// are validated only when non-empty (an absent optional component never
+	// derives a key segment).
+	for _, pair := range [][2]string{
+		{"event id", e.EventID}, {"source system", e.SourceSystem},
+	} {
+		if err := ValidKeyComponent(pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
+	for _, pair := range [][2]string{
+		{"aggregate type", e.AggregateType}, {"aggregate id", e.AggregateID}, {"operation id", e.OperationID},
+	} {
+		if pair[1] != "" {
+			if err := ValidKeyComponent(pair[0], pair[1]); err != nil {
+				return err
+			}
+		}
+	}
 	if e.SchemaVersion <= 0 {
 		return fmt.Errorf("%w: schema_version must be positive", ErrInvalid)
 	}

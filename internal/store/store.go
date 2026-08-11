@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
@@ -469,19 +468,11 @@ func StreamKey(tenantID, streamID string) string { return tenantID + KeySeparato
 // ID containing it makes composite keys ambiguous with another tenant's keys
 // (StreamKey("a\x1fb","s") == StreamKey("a","b\x1fs")). Control
 // characters, whitespace and path separators are rejected as hygiene (URLs,
-// logs, archive paths). Returns a domain.ErrInvalid-wrapped error, or nil.
+// logs, archive paths). Delegates to domain.ValidKeyComponent so the charset
+// rule has exactly one implementation across every untrusted API boundary.
+// Returns a domain.ErrInvalid-wrapped error, or nil.
 func ValidTenantID(id string) error {
-	for _, r := range id {
-		switch {
-		case unicode.IsControl(r): // includes 0x1F, NUL, CR, LF, TAB, ...
-			return fmt.Errorf("%w: tenant id must not contain control characters", domain.ErrInvalid)
-		case unicode.IsSpace(r): // \t \n \v \f \r, ' ', U+0085, U+00A0
-			return fmt.Errorf("%w: tenant id must not contain whitespace", domain.ErrInvalid)
-		case r == '/' || r == '\\':
-			return fmt.Errorf("%w: tenant id must not contain path separators", domain.ErrInvalid)
-		}
-	}
-	return nil
+	return domain.ValidKeyComponent("tenant id", id)
 }
 
 // SplitTenantKey splits a composite key into its tenant prefix and the

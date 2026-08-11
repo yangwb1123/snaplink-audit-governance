@@ -305,7 +305,11 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID := s.tenantFor(r, claims)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
 	event, err := s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -329,7 +333,12 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	receipt, err := s.Service.GetReceipt(s.tenantFor(r, claims), r.PathValue("eventID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	receipt, err := s.Service.GetReceipt(tenantID, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -349,7 +358,12 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.queryCount.Add(1)
-	result, err := s.Service.QueryEvents(s.tenantFor(r, claims), claims.Subject, query)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.QueryEvents(tenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -372,7 +386,12 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.Operation(s.tenantFor(r, claims), r.PathValue("operationID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.Operation(tenantID, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -386,7 +405,12 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.OperationTimeline(s.tenantFor(r, claims), r.PathValue("operationID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.OperationTimeline(tenantID, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -410,7 +434,12 @@ func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ReplayOperation(s.tenantFor(r, claims), r.PathValue("operationID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.ReplayOperation(tenantID, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -424,7 +453,12 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.AggregateTimeline(s.tenantFor(r, claims), r.PathValue("aggregateType"), r.PathValue("aggregateID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	items, err := s.Service.AggregateTimeline(tenantID, r.PathValue("aggregateType"), r.PathValue("aggregateID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -453,7 +487,12 @@ func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.Service.CreateExport(s.tenantFor(r, claims), claims.Subject, query)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	job, err := s.Service.CreateExport(tenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -467,7 +506,12 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(s.tenantFor(r, claims), r.PathValue("jobID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	job, err := s.Service.GetExport(tenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -488,7 +532,12 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(s.tenantFor(r, claims), r.PathValue("jobID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	job, err := s.Service.GetExport(tenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -538,7 +587,12 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.VerifyIntegrity(s.tenantFor(r, claims), request.StreamID)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.VerifyIntegrity(tenantID, request.StreamID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -562,7 +616,12 @@ func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	hold.TenantID = s.tenantFor(r, claims)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	hold.TenantID = tenantID
 	hold.CreatedBy = claims.Subject
 	result, err := s.Service.CreateLegalHold(hold)
 	if err != nil {
@@ -578,7 +637,12 @@ func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListLegalHolds(s.tenantFor(r, claims))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	items, err := s.Service.ListLegalHolds(tenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -592,7 +656,12 @@ func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	hold, err := s.Service.ReleaseLegalHold(s.tenantFor(r, claims), r.PathValue("holdID"), claims.Subject)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	hold, err := s.Service.ReleaseLegalHold(tenantID, r.PathValue("holdID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -611,7 +680,12 @@ func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.PreviewRestore(s.tenantFor(r, claims), request)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.PreviewRestore(tenantID, request)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -630,7 +704,12 @@ func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.CreateRestore(s.tenantFor(r, claims), request, claims.Subject)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.CreateRestore(tenantID, request, claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -644,7 +723,12 @@ func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ApproveRestore(s.tenantFor(r, claims), r.PathValue("runID"), claims.Subject)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.ApproveRestore(tenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -658,7 +742,12 @@ func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.RejectRestore(s.tenantFor(r, claims), r.PathValue("runID"), claims.Subject)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.RejectRestore(tenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -672,7 +761,12 @@ func (s *Server) getRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.GetRestore(s.tenantFor(r, claims), r.PathValue("runID"))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.GetRestore(tenantID, r.PathValue("runID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -757,7 +851,12 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSources(s.tenantFor(r, claims))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	items, err := s.Service.ListSources(tenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -777,7 +876,12 @@ func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source.ID = r.PathValue("sourceID")
-	source.TenantID = s.tenantFor(r, claims)
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	source.TenantID = tenantID
 	updated, err := s.Service.UpdateSource(claims.Subject, source)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -819,7 +923,12 @@ func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSchemas(s.tenantFor(r, claims))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	items, err := s.Service.ListSchemas(tenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -854,7 +963,12 @@ func (s *Server) getRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	policy, err := s.Service.GetRetentionPolicy(s.tenantFor(r, claims))
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	policy, err := s.Service.GetRetentionPolicy(tenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -868,7 +982,12 @@ func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.EvaluateRetention(s.tenantFor(r, claims), time.Time{})
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	result, err := s.Service.EvaluateRetention(tenantID, time.Time{})
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -882,11 +1001,10 @@ func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID := ""
-	if !claims.Platform {
-		tenantID = claims.TenantID
-	} else {
-		tenantID = r.URL.Query().Get("tenant_id")
+	tenantID, err := s.tenantFor(r, claims)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
 	}
 	limit := 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -918,13 +1036,21 @@ func (s *Server) require(r *http.Request, permission string) (auth.Claims, error
 	return claims, nil
 }
 
-func (s *Server) tenantFor(r *http.Request, claims auth.Claims) string {
+func (s *Server) tenantFor(r *http.Request, claims auth.Claims) (string, error) {
 	if claims.Platform {
 		if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" {
-			return tenantID
+			// Key-framing charset rule: the escape-hatch tenant becomes a
+			// composite-key component in every downstream read, so an embedded
+			// KeySeparator (0x1F) would forge another tenant's keys (cross-tenant
+			// read, forged self-audit record). Reject before any service or
+			// store access. Empty stays legal (all-tenants read).
+			if err := store.ValidTenantID(tenantID); err != nil {
+				return "", err
+			}
+			return tenantID, nil
 		}
 	}
-	return claims.TenantID
+	return claims.TenantID, nil
 }
 
 func parseQuery(r *http.Request) (domain.Query, error) {

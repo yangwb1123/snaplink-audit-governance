@@ -1,5 +1,53 @@
 # Release Notes
 
+## 2026-08-11 — key-framing 字符集不变量：所有非受信 API 边界拒绝控制字符/空白/路径分隔符标识符
+
+**写给运营（行为变化，破坏性类）：**
+
+- **事件/来源/模式标识符收紧**：`POST /api/v1/events`、`events:batch`、
+  `POST/PUT /api/v1/sources`、`POST /api/v1/schemas`、`POST /api/v1/tenants`
+  现在拒绝包含控制字符（含 0x1F）、空白、`/`、`\` 的 `event_id`、
+  `source_system`、`aggregate_type`、`aggregate_id`、`operation_id`、
+  source `id`、`schema_id`、tenant `id`，返回 400，且**不落任何数据**。
+  此前这类标识符会被接受，并可能产生 `SplitTenantKey` 无法解析的多分隔符
+  复合键，导致对应流在完整性校验与聚合 checkpoint 中被静默跳过。
+- **平台 `?tenant_id=` 逃生口同步收紧**：`%1F` 等编码注入返回 400，发生在
+  任何服务/存储访问之前——不再可能发生跨租户读取或在伪造租户名下追加
+  自审计记录。空 `?tenant_id=`（全租户读取）语义不变。
+- **dev token 主题收紧**：`dev:<subject>:<role>` 的 subject 含上述字符时
+  认证失败（401），与畸形 token 同文案（无 oracle 区分）。合法 subject
+  （`tenant-a`、`platform`、`crm` 等）行为不变。
+- **gRPC 面同步生效**：`Write`/`WriteBatch`/`WriteStream` 中非法事件映射
+  `InvalidArgument`；批次保持既有的部分接收语义（前缀合法事件仍入账）。
+- **outbox/Kafka 无需变更**：`outbox.Insert` 在任何 SQL 之前校验，非法
+  事件永不进入 outbox 表；API 的 400 被 `HTTPDeliverer` 分类为永久失败
+  → 直接进 DLQ（`Failure` 记录），DLQ 是既定的处置面。
+
+**写给开发（API 契约变化）：**
+
+- 唯一实现 `domain.ValidKeyComponent(name, value)`（stdlib-only），
+  `store.ValidTenantID` 委托之；`Event.ValidateBasic`、`normalizeSource`、
+  `RegisterSchema`、`parseDevToken`、`tenantFor` 五处边界全部走同一规则，
+  错误消息按组件命名（`"event id must not contain control characters"` 等），
+  `errors.Is(err, domain.ErrInvalid)` 语义不变。
+- `tenantFor` 签名改为 `(string, error)`，`server.go` 中
+  `r.URL.Query().Get("tenant_id")` 仅存在于 `tenantFor` 一处（AST 守卫测试
+  固化）。
+- `PUT /api/v1/sources/{sourceId}` 增加防御性检查：目标租户记录不存在时
+  返回 404（手改快照场景下防键碰撞；API 可达路径下不可达）。
+- OpenAPI 契约在 8 个 body 字段与 3 个 `tenant_id` query 参数上补充
+  pattern（query 形允许空串），并有存在性断言测试防漂移。
+- 存量多分隔符键（如有）行为不变：完整性循环仍跳过（fail-closed）；
+  修复不在本次范围，建议部署前跑一次只读清单扫描。
+- 回滚：纯校验变更，无数据迁移；被拒事件从未入账，DLQ 保留证据。
+
+**回归测试：** AC-1（HTTP 单发/批次拒绝 + 快照无多分隔符键 + 拒绝事件未
+落库 + 无自审计记录）、AC-2（source/schema 拒绝且零副作用）、AC-3（平台
+逃生口 5 端点 400 + 无伪造自审计）、AC-4（dev token 401 单元 + HTTP）、
+AC-5（服务层五字段拒绝、快照全键可解析、密封流完整性全覆盖）、gRPC
+`InvalidArgument` 三分支、outbox `Insert` 拒绝零 SQL、OpenAPI pattern 断言、
+`tenantFor` 边界守卫。
+
 ## 2026-08-11 — DLQ replay: payload event_id 匹配 + 缺席原事件一轮收敛 + 空 event_id 不再发布 Failure
 
 **写给运营（行为变化）：**

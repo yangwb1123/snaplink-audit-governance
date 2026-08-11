@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/snaplink/audit-governance/internal/domain"
 )
 
 type Claims struct {
@@ -65,6 +67,17 @@ func (a Authenticator) AuthenticateTokenContext(ctx context.Context, token strin
 func parseDevToken(token string) (Claims, error) {
 	parts := strings.Split(token, ":")
 	if len(parts) < 3 || len(parts) > 4 || parts[1] == "" || parts[2] == "" {
+		return Claims{}, fmt.Errorf("invalid development token")
+	}
+	// Key-framing charset rule: the dev-token subject becomes the tenant
+	// context (TenantID), which is a composite-key component. A subject
+	// embedding KeySeparator (0x1F) would collide with another tenant's keys
+	// (EventKey("a\x1fb","evt") == EventKey("a","b\x1fevt")); control
+	// characters, whitespace and path separators are rejected for the same
+	// hygiene reasons as JWT tenant claims. The rejection reuses the exact
+	// malformed-token error text so a valid-vs-invalid subject is never an
+	// oracle for token format.
+	if err := domain.ValidKeyComponent("tenant id", parts[1]); err != nil {
 		return Claims{}, fmt.Errorf("invalid development token")
 	}
 	roles := strings.Split(parts[2], ",")

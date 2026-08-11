@@ -39,6 +39,34 @@ func TestInsertUsesCallerTransaction(t *testing.T) {
 	}
 }
 
+// TestInsertRejectsKeyFramingFields is F-2: the outbox SDK validates via
+// Event.ValidateBasic before any SQL (sdk.go:81), so events whose key
+// components embed KeySeparator (0x1F) or the other rejected classes are
+// never written to the outbox table — the Kafka/DLQ chain never sees them
+// and the API's 400 stays the only disposal surface.
+func TestInsertRejectsKeyFramingFields(t *testing.T) {
+	base := domain.Event{EventID: "outbox-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "outbox-idem-1", Payload: map[string]any{"value": 1}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.Event)
+	}{
+		{"event_id", func(e *domain.Event) { e.EventID = "a\x1fb" }},
+		{"source_system", func(e *domain.Event) { e.SourceSystem = "x\x1fy" }},
+		{"source_system space", func(e *domain.Event) { e.SourceSystem = "x y" }},
+	} {
+		event := base
+		tc.mutate(&event)
+		fake := &fakeExecer{}
+		err := Insert(context.Background(), fake, event)
+		if !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("%s: Insert = %v, want ErrInvalid", tc.name, err)
+		}
+		if fake.query != "" || len(fake.args) != 0 {
+			t.Errorf("%s: Insert touched the DB for an invalid event: %q %#v", tc.name, fake.query, fake.args)
+		}
+	}
+}
+
 // --- conflict-path fakes ---
 
 // fakeZeroResult reports a conflict-absorbed insert (0 rows).

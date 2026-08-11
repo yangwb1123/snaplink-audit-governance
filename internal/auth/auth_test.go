@@ -185,6 +185,48 @@ func TestDevAuthRejectedDespiteConfiguredTrustSource(t *testing.T) {
 	}
 }
 
+// TestDevAuthRejectsKeyFramingSubjects is AC-4: the dev-token subject
+// becomes the tenant context, a composite-key component, so a subject
+// embedding KeySeparator (0x1F) — or other control characters, whitespace
+// or path separators — is rejected with the exact malformed-token error
+// text (no oracle distinguishing valid-format from invalid-charset).
+func TestDevAuthRejectsKeyFramingSubjects(t *testing.T) {
+	authenticator := Authenticator{AllowDev: true}
+	for _, token := range []string{
+		"dev:a\x1fb:auditor",
+		"dev:a b:auditor",
+		"dev:a/b:auditor",
+		"dev:a\\b:auditor",
+		"dev:\x00:auditor",
+		"dev:\n:auditor",
+	} {
+		if _, err := authenticator.AuthenticateToken(token); err == nil {
+			t.Errorf("dev token %q must be rejected", token)
+		} else if err.Error() != "invalid development token" {
+			t.Errorf("dev token %q error = %q, want the canonical malformed-token text", token, err.Error())
+		}
+	}
+	// Positive controls: valid subjects keep authenticating with intact
+	// tenant/platform flags, including the service-client form.
+	claims, err := authenticator.AuthenticateToken("dev:tenant-a:auditor")
+	if err != nil {
+		t.Fatalf("valid dev token rejected: %v", err)
+	}
+	if claims.TenantID != "tenant-a" || claims.Platform {
+		t.Fatalf("unexpected tenant claims: %+v", claims)
+	}
+	platform, err := authenticator.AuthenticateToken("dev:platform:platform-admin")
+	if err != nil {
+		t.Fatalf("valid platform dev token rejected: %v", err)
+	}
+	if !platform.Platform || platform.TenantID != "platform" {
+		t.Fatalf("unexpected platform claims: %+v", platform)
+	}
+	if _, err := authenticator.AuthenticateToken("dev:tenant-a:service:crm"); err != nil {
+		t.Fatalf("valid service dev token rejected: %v", err)
+	}
+}
+
 func TestDevAuthAcceptedWhenAllowlisted(t *testing.T) {
 	// D4 companion: AllowDev stays a complete runtime trust source (the
 	// fail-closed flip changes only the default and the check-config gate),

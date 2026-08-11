@@ -224,6 +224,14 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 	if schema.SchemaID == "" || schema.Version <= 0 || schema.EventType == "" {
 		return fmt.Errorf("%w: schema_id, version and event_type are required", domain.ErrInvalid)
 	}
+	// Key-framing charset rule: schema.SchemaID becomes a SchemaKey component,
+	// so an embedded KeySeparator (0x1F) would create a multi-separator key
+	// that SplitTenantKey fail-closes on (invisible to VerifyIntegrity's
+	// schema lookups). Reject before the snapshot closure: no schema key and
+	// no admin action for invalid IDs.
+	if err := domain.ValidKeyComponent("schema id", schema.SchemaID); err != nil {
+		return err
+	}
 	if schema.CreatedAt.IsZero() {
 		schema.CreatedAt = s.Now()
 	}

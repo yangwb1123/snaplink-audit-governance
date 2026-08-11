@@ -42,6 +42,15 @@ func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain
 		return domain.SourceSystem{}, err
 	}
 	err = s.Store.Update(func(data *store.Snapshot) error {
+		// Defense-in-depth (mirrors AddSource): the source key can only be
+		// reached for an existing tenant; a source row without its tenant
+		// record (hand-edited snapshot) must never be reachable by key
+		// alone. With key-framing validation at every boundary this is
+		// unreachable via the API, but fail-closed stays cheaper than a
+		// collision.
+		if _, ok := data.Tenants[source.TenantID]; !ok {
+			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
+		}
 		key := store.SourceKey(source.TenantID, source.ID)
 		existing, ok := data.Sources[key]
 		if !ok {
@@ -58,6 +67,15 @@ func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain
 func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 	if source.TenantID == "" || source.ID == "" || source.Name == "" {
 		return domain.SourceSystem{}, fmt.Errorf("%w: source tenant_id, id and name are required", domain.ErrInvalid)
+	}
+	// Key-framing charset rule: source.ID becomes the second component of
+	// SourceKey and the source branch of Event.Stream-derived StreamKeys, so
+	// an embedded KeySeparator (0x1F) would create multi-separator keys that
+	// SplitTenantKey fail-closes on — invisible to VerifyIntegrity and
+	// aggregate checkpointing. This single check covers AddSource (body ID)
+	// and UpdateSource (path ID) before any store access.
+	if err := domain.ValidKeyComponent("source id", source.ID); err != nil {
+		return domain.SourceSystem{}, err
 	}
 	source.AllowedClientIDs = append([]string(nil), source.AllowedClientIDs...)
 	seen := make(map[string]struct{}, len(source.AllowedClientIDs))
