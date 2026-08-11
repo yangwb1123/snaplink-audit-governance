@@ -107,3 +107,92 @@ func TestStreamKeyPrefixInjectiveForValidTenantIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestCompositeKeyInjectivityForValidTenantIDs is AC-5's injectivity
+// property extended from StreamKey to SourceKey and EventKey: for
+// ValidTenantID-passing tenant IDs, no two distinct (tenant, component)
+// pairs produce the same composite key, and SplitTenantKey round-trips
+// every well-formed key. This is exactly what the canonical charset rule
+// guarantees: without the separator in tenant IDs, the first KeySeparator
+// splits deterministically.
+func TestCompositeKeyInjectivityForValidTenantIDs(t *testing.T) {
+	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a:b", "123"}
+	allIDs := []string{"", "s", "s1", "x\x1f y-invalid-but-distinct"}
+	wellFormed := []string{"", "s", "s1"}
+	for _, tenantID := range tenantIDs {
+		if err := ValidTenantID(tenantID); err != nil {
+			t.Fatalf("test fixture %q must be valid: %v", tenantID, err)
+		}
+	}
+	for _, build := range []struct {
+		name string
+		key  func(tenantID, id string) string
+	}{
+		{"SourceKey", SourceKey},
+		{"EventKey", EventKey},
+		{"StreamKey", StreamKey},
+	} {
+		// Injectivity holds for every component ID: without a separator in
+		// the tenant ID, the first KeySeparator splits deterministically.
+		seen := map[string]string{}
+		for _, tenantID := range tenantIDs {
+			for _, id := range allIDs {
+				key := build.key(tenantID, id)
+				if other, exists := seen[key]; exists {
+					t.Fatalf("%s collision: %s(%q,%q) == %s(%q,...) == %q", build.name, build.name, tenantID, id, build.name, other, key)
+				}
+				seen[key] = tenantID
+			}
+		}
+		// Round-trip holds for well-formed component IDs (no separator).
+		for _, tenantID := range tenantIDs {
+			for _, id := range wellFormed {
+				if tid, rest, ok := SplitTenantKey(build.key(tenantID, id)); !ok || tid != tenantID || rest != id {
+					t.Fatalf("%s round-trip failed for (%q,%q): got (%q,%q,%v)", build.name, tenantID, id, tid, rest, ok)
+				}
+			}
+		}
+	}
+}
+
+// TestSchemaKeyInjectivityForValidTenantIDs is AC-5's SchemaKey extension:
+// the three-component key stays injective over distinct (tenant, schema,
+// version) triples for ValidTenantID-passing tenants. Round-trip is
+// intentionally excluded: a two-separator key fails closed in
+// SplitTenantKey (ok=false) by design, and the schema-id component is
+// validated separately by RegisterSchema's ValidKeyComponent rule.
+func TestSchemaKeyInjectivityForValidTenantIDs(t *testing.T) {
+	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a:b", "123"}
+	schemaIDs := []string{"audit.event", "s", "x\x1f y-invalid-but-distinct"}
+	versions := []int{0, 1, 42}
+	seen := map[string]string{}
+	for _, tenantID := range tenantIDs {
+		for _, schemaID := range schemaIDs {
+			for _, version := range versions {
+				key := SchemaKey(tenantID, schemaID, version)
+				if other, exists := seen[key]; exists {
+					t.Fatalf("SchemaKey collision: (%q,%q,%d) == (%q,...) == %q", tenantID, schemaID, version, other, key)
+				}
+				seen[key] = tenantID
+			}
+		}
+	}
+}
+
+// TestFramingDemonstration is AC-5's hazard illustration, quarantined from
+// the injectivity tests on purpose: it asserts the *unvalidated* collision
+// that the canonical charset rule exists to make unreachable.
+// SourceKey("a\x1fb","s") and SourceKey("a","b\x1fs") are literally the
+// same string "a\x1fb\x1fs" — two distinct (tenant, source) pairs framing
+// one key. This is not a defect in the key format (REQ-3 keeps raw
+// concatenation); it is the exact hazard ValidKeyComponent prevents: no
+// accepted component may contain 0x1F, so no two accepted pairs can ever
+// collide.
+func TestFramingDemonstration(t *testing.T) {
+	if got, want := SourceKey("a\x1fb", "s"), SourceKey("a", "b\x1fs"); got != want {
+		t.Fatalf("framing demonstration mismatch: %q != %q", got, want)
+	}
+	if got := SourceKey("a\x1fb", "s"); got != "a\x1fb\x1fs" {
+		t.Fatalf("framing key = %q, want %q", got, "a\x1fb\x1fs")
+	}
+}

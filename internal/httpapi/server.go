@@ -1050,6 +1050,16 @@ func (s *Server) tenantFor(r *http.Request, claims auth.Claims) (string, error) 
 			return tenantID, nil
 		}
 	}
+	if claims.TenantID != "" {
+		// Key-framing charset rule, non-platform branch: claims.TenantID is
+		// canonical-safe by construction today (tenantClaim and parseDevToken
+		// both validate), so this is defense-in-depth — the boundary must
+		// re-check the same rule any future claim producer bypasses. Empty
+		// stays legal (all-tenants read; client-id-resolved ingest).
+		if err := store.ValidTenantID(claims.TenantID); err != nil {
+			return "", err
+		}
+	}
 	return claims.TenantID, nil
 }
 

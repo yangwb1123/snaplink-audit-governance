@@ -1,5 +1,43 @@
 # Release Notes
 
+## 2026-08-11 — JWT 租户声明收紧：tenant_id/tenant 声明委托 canonical key-framing 字符集规则
+
+**写给运营（行为变化）：**
+
+- **JWT `tenant_id`/`tenant` 声明包含 `/` 或 `\` 时认证失败**（HTTP 401
+  `unauthorized`；gRPC `Unauthenticated`），错误文案与既有字符集违规完全
+  相同（无 oracle 区分）。此前这类声明能通过认证，但因 `CreateTenant` 早已
+  拒绝此类 ID，它们永远无法解析到任何租户，只会得到 404/空结果——因此**没有
+  合法租户受影响**，只是失败点从下游 404 前移到认证阶段。控制字符（含
+  0x1F）、空白、两侧填充的拒绝行为与之前完全一致。
+- **非平台 `tenantFor` 边界防御加深**：token 解析出的租户上下文在每次读取/操作
+  前用同一字符集规则复核（防御纵深；若未来出现绕过声明的 token 方言，返回
+  400 `invalid_request`）。空租户上下文（全租户读取）语义不变。
+
+**写给开发（API 契约变化）：**
+
+- `tenantClaim`（`internal/auth/auth.go`）删除自有的 `IsControl/IsSpace` 循环与
+  `TrimSpace` 检查，改为委托 `domain.ValidKeyComponent`——与 `CreateTenant`、
+  dev token、`?tenant_id=` 逃生口完全同一实现。拒绝集合仅新增 `/` 与 `\`
+  （`unicode.IsSpace` 覆盖 `TrimSpace` 的全部裁剪字符，填充检查被完全包含）；
+  错误文本 `"token %s claim is invalid"` 逐字节保留（单一日志串，无字符集
+  oracle）。
+- `tenantFor`（`internal/httpapi/server.go`）非平台分支对非空 `claims.TenantID`
+  执行 `store.ValidTenantID`，返回原始 `ErrInvalid`（与平台分支同一 400 路径）；
+  变更后 `auth.go` 不再导入 `unicode`。
+- 无 wire/OpenAPI/存储变更：零路由、零 proto、零 key-format 变化；`exp` 等
+  既有声明校验不变。
+
+**回归测试：** `TestJWTRejectsKeyFramingTenantClaims`（两个声明别名 × 7 类
+非法值 + 精确串/空串正向对照，`internal/auth/auth_test.go`）、
+`TestHTTPJWTRejectsKeyFramingTenantClaim`（签名 JWT → 401 `unauthorized` +
+零自审计副作用 + 404 正向对照）、`TestHTTPTenantForRechecksClaimTenantID`
+（白盒 `errors.Is(domain.ErrInvalid)`）、
+`TestGRPCRejectsKeyFramingTenantClaimUnauthenticated`（两个别名 × 3 非法值 →
+`Unauthenticated` + 快照无多分隔符键 + 正向 ingest）、AC-5 注入性扩展
+`TestCompositeKeyInjectivityForValidTenantIDs`/`TestSchemaKeyInjectivityForValidTenantIDs`
+与 `TestFramingDemonstration`（`internal/store/tenantkey_test.go`）。
+
 ## 2026-08-11 — 读路径自审计闭环：timeline/replay/receipt/verify 全部追加 audit.event.read 事实
 
 **写给运营（行为变化，观察类）：**

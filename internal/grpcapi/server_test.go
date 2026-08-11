@@ -2,6 +2,10 @@ package grpcapi
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -131,6 +135,98 @@ func assertPermissionDenied(t *testing.T, err error) {
 	t.Helper()
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+}
+
+// mintGRPCJWT mints a locally-signable HS256 JWT for the gRPC ingest
+// harness, mirroring httpapi's mintRestoreJWT (fixed far-future exp because
+// the harness clock is pinned at time.Unix(1_700_000_000, 0)).
+func mintGRPCJWT(t *testing.T, subject, tenantID string, roles []string) string {
+	t.Helper()
+	return signGRPCJWT(t, map[string]any{"sub": subject, "tenant_id": tenantID, "roles": roles, "exp": 4_100_000_000})
+}
+
+// signGRPCJWT signs an arbitrary claim payload with the harness's shared
+// test-secret (HS256, at+jwt header), so tests can mint tokens with the
+// claim under either alias (tenant_id or tenant).
+func signGRPCJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]any{"alg": "HS256", "typ": "at+jwt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	_, _ = mac.Write([]byte(signed))
+	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// newGRPCJWTHarness is newGRPCHarness with a JWT-capable authenticator
+// ({AllowDev, JWTSecret, AllowLocalHS256} — the exact tuple the HTTP harness
+// uses), so signed-JWT tenant-claim rejection can be exercised on the gRPC
+// surface end-to-end. The per-call metadata context is caller-supplied.
+func newGRPCJWTHarness(t *testing.T) (*store.Store, auditv1.IngestClient) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer()
+	Register(grpcServer, svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true})
+	go func() { _ = grpcServer.Serve(listener) }()
+	t.Cleanup(grpcServer.Stop)
+	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	return st, auditv1.NewIngestClient(connection)
+}
+
+// TestGRPCRejectsKeyFramingTenantClaimUnauthenticated is REQ-6's gRPC
+// surface: a signed JWT whose tenant_id/tenant claim violates the canonical
+// key-framing rule fails authentication with codes.Unauthenticated on
+// Write before any ingest — nothing reaches the snapshot. The positive
+// control proves the fixture verifies end-to-end (an exact-string tenant
+// claim ingests normally).
+func TestGRPCRejectsKeyFramingTenantClaimUnauthenticated(t *testing.T) {
+	st, client := newGRPCJWTHarness(t)
+	for _, claimName := range []string{"tenant_id", "tenant"} {
+		for _, bad := range []string{"a/b", `a\b`, "a\x1fb"} {
+			token := signGRPCJWT(t, map[string]any{"sub": "service-subject", claimName: bad, "roles": []string{"service"}, "exp": 4_100_000_000})
+			ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+			if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: testProtoEvent("grpc-jwt-bad", "crm")}); status.Code(err) != codes.Unauthenticated {
+				t.Errorf("%s claim %q err=%v, want codes.Unauthenticated", claimName, bad, err)
+			}
+		}
+	}
+	assertNoFramedKeys(t, st)
+	// Positive control: an exact-string tenant claim authenticates and the
+	// event ingests with a receipt. The JWT must carry client_id matching
+	// the source ID (fail-closed (client_id, source_system) binding), so the
+	// fixture also proves the claim path verifies end-to-end.
+	token := signGRPCJWT(t, map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "client_id": "crm", "roles": []string{"service"}, "exp": 4_100_000_000})
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: testProtoEvent("grpc-jwt-ok", "crm")}); err != nil {
+		t.Fatalf("valid tenant claim Write failed: %v", err)
 	}
 }
 

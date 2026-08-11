@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -224,6 +225,51 @@ func TestDevAuthRejectsKeyFramingSubjects(t *testing.T) {
 	}
 	if _, err := authenticator.AuthenticateToken("dev:tenant-a:service:crm"); err != nil {
 		t.Fatalf("valid service dev token rejected: %v", err)
+	}
+}
+
+// TestJWTRejectsKeyFramingTenantClaims is REQ-6's acceptance: the JWT
+// tenant_id/tenant claim path delegates to the canonical key-framing rule,
+// so the same corpus AC-4 applies to dev tokens rejects here too — control
+// characters (incl. KeySeparator 0x1F), whitespace and '/'/'\\', with the
+// exact generic claim-invalid text for every class (no charset oracle).
+// Empty claims stay legal (platform escape-hatch: TenantID == "").
+func TestJWTRejectsKeyFramingTenantClaims(t *testing.T) {
+	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	for _, name := range []string{"tenant_id", "tenant"} {
+		for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b", "\x00", "\n", " a"} {
+			payload := map[string]any{"sub": "service-subject", name: bad, "exp": time.Now().Add(time.Hour).Unix()}
+			_, err := authenticator.AuthenticateToken(signJWT(t, payload))
+			if err == nil {
+				t.Errorf("%s claim %q must be rejected", name, bad)
+				continue
+			}
+			if want := fmt.Sprintf("token %s claim is invalid", name); err.Error() != want {
+				t.Errorf("%s claim %q error = %q, want the canonical generic text %q", name, bad, err.Error(), want)
+			}
+		}
+	}
+	// Positive controls: exact-string claims authenticate with the expected
+	// tenant context, and empty claims keep TenantID == "" (platform
+	// escape-hatch preserved by the early return).
+	for _, tc := range []struct {
+		claimName string
+		value     string
+		wantID    string
+	}{
+		{"tenant_id", "tenant-a", "tenant-a"},
+		{"tenant", "tenant-a", "tenant-a"},
+		{"tenant_id", "", ""},
+		{"tenant", "", ""},
+	} {
+		payload := map[string]any{"sub": "service-subject", tc.claimName: tc.value, "exp": time.Now().Add(time.Hour).Unix()}
+		claims, err := authenticator.AuthenticateToken(signJWT(t, payload))
+		if err != nil {
+			t.Fatalf("%s=%q must authenticate: %v", tc.claimName, tc.value, err)
+		}
+		if claims.TenantID != tc.wantID {
+			t.Fatalf("%s=%q → TenantID %q, want %q", tc.claimName, tc.value, claims.TenantID, tc.wantID)
+		}
 	}
 }
 

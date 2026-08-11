@@ -2174,6 +2174,103 @@ func TestHTTPDevTokenRejectsKeyFramingTenant(t *testing.T) {
 	}
 }
 
+// TestHTTPJWTRejectsKeyFramingTenantClaim is REQ-6's HTTP surface: a signed
+// JWT whose tenant_id claim violates the canonical key-framing rule fails
+// authentication with 401 and error.code == "unauthorized" before any
+// handler logic — no admin action is appended. The positive control uses a
+// read-capable role (auditor) so the exact-string claim provably reaches
+// the handler (404 for a missing event, never 401).
+func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0))
+	// Auth rejection happens before any handler logic: the rejected claims
+	// appended nothing to the self-audit trail (count unchanged from the
+	// CreateTenant seed action).
+	var before int
+	if err := st.Read(func(data *store.Snapshot) error {
+		before = len(data.AdminActions)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tenantID := range []string{"a/b", `a\b`, "a\x1fb"} {
+		token := mintRestoreJWT(t, "auditor-1", tenantID, []string{"auditor"})
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/events/nonexistent", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("tenant claim %q status=%d, want 401", tenantID, recorder.Code)
+			continue
+		}
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Error.Code != "unauthorized" {
+			t.Errorf("tenant claim %q error.code=%q, want unauthorized", tenantID, body.Error.Code)
+		}
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if len(data.AdminActions) != before {
+			t.Errorf("rejected claims appended %d admin actions, want %d", len(data.AdminActions), before)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: an exact-string tenant claim authenticates and
+	// reaches the handler (404 for a missing event, never 401).
+	token := mintRestoreJWT(t, "auditor-1", "tenant-a", []string{"auditor"})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events/nonexistent", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("valid tenant claim status=%d, want 404 (authenticated, event missing)", recorder.Code)
+	}
+}
+
+// TestHTTPTenantForRechecksClaimTenantID is REQ-6b / FM-4: the non-platform
+// tenantFor branch re-checks claims.TenantID against the canonical
+// key-framing rule (store.ValidTenantID) before returning it, surfacing the
+// raw domain.ErrInvalid-wrapped error — identical status semantics (400
+// invalid_request) to the platform escape-hatch branch. Empty tenant
+// context stays legal (all-tenants reads; client-id-resolved ingest).
+func TestHTTPTenantForRechecksClaimTenantID(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events/x", nil)
+	for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b"} {
+		if _, err := (&Server{}).tenantFor(request, auth.Claims{TenantID: bad}); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("tenantFor with claim %q err=%v, want domain.ErrInvalid", bad, err)
+		}
+	}
+	for _, good := range []string{"", "tenant-a"} {
+		tenantID, err := (&Server{}).tenantFor(request, auth.Claims{TenantID: good})
+		if err != nil || tenantID != good {
+			t.Errorf("tenantFor with claim %q = (%q,%v), want (%q,nil)", good, tenantID, err, good)
+		}
+	}
+	// Platform branch unaffected: the escape-hatch query wins over a claim.
+	query := httptest.NewRequest(http.MethodGet, "/api/v1/events/x?tenant_id=tenant-a", nil)
+	if tenantID, err := (&Server{}).tenantFor(query, auth.Claims{Platform: true, TenantID: "a/b"}); err != nil || tenantID != "tenant-a" {
+		t.Errorf("platform tenantFor = (%q,%v), want (tenant-a,nil)", tenantID, err)
+	}
+}
+
 // TestTenantForBoundaryGuard is G4: the raw query read
 // r.URL.Query().Get("tenant_id") exists in server.go exactly once — inside
 // tenantFor — and tenantFor returns two values (compile-forced error

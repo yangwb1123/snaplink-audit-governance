@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
@@ -187,11 +186,13 @@ func clientIdentity(payload map[string]any) (string, error) {
 }
 
 // tenantClaim extracts the tenant context claim under the same strictness as
-// sub/client_id, plus a charset rule: control characters and whitespace are
-// rejected so a padded or separator-embedding tenant_id can never reach the
-// tenant consistency comparison (where " a" vs "a" would surface as a
-// confusing 422 instead of an authentication failure) or collide with
-// composite snapshot keys.
+// sub/client_id, delegating the charset rule to domain.ValidKeyComponent —
+// the canonical key-framing rule every other tenant input uses. Control
+// characters (incl. KeySeparator 0x1F), whitespace and '/'/'\\' are rejected
+// so a padded or separator-embedding tenant_id can never reach the tenant
+// consistency comparison (where " a" vs "a" would surface as a confusing 422
+// instead of an authentication failure) or collide with composite snapshot
+// keys.
 func tenantClaim(payload map[string]any, name string) (string, bool, error) {
 	value, present := payload[name]
 	if !present {
@@ -205,17 +206,17 @@ func tenantClaim(payload map[string]any, name string) (string, bool, error) {
 		// Empty tenant scope is equivalent to absent: platform tokens
 		// legitimately carry tenant_id: "" and select the tenant via the
 		// ?tenant_id= query parameter (documented escape hatch for restore
-		// approval). Strictness (whitespace/control rejection) still applies
-		// to any non-empty value below.
+		// approval). Strictness still applies to any non-empty value below.
 		return "", false, nil
 	}
-	if identity != strings.TrimSpace(identity) {
+	// Delegation to the canonical key-framing rule — the same rejection set
+	// as every other tenant input (control chars incl. KeySeparator 0x1F,
+	// whitespace, '/' and '\\'). The previous ad-hoc IsControl/IsSpace loop
+	// is fully subsumed: unicode.IsSpace covers every rune TrimSpace trims,
+	// so the padding rejection is unchanged. The error text is preserved
+	// exactly so token rejection stays a single non-oracular string.
+	if err := domain.ValidKeyComponent(name, identity); err != nil {
 		return "", false, fmt.Errorf("token %s claim is invalid", name)
-	}
-	for _, r := range identity {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return "", false, fmt.Errorf("token %s claim is invalid", name)
-		}
 	}
 	return identity, true, nil
 }
