@@ -43,7 +43,17 @@ func main() {
 	if *allowDevSecrets {
 		logger.Printf("warning=development_secrets_enabled")
 	}
-	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets}
+	// AUDIT_AGGREGATE_CHECKPOINT_HISTORY caps retained aggregate-checkpoint
+	// history per tenant (drop-oldest; default 1000, floor 1). Invalid or
+	// non-positive values fall back to the default with a warning so a typo
+	// never disables retention or kills the worker.
+	aggregateRetention := intEnv("AUDIT_AGGREGATE_CHECKPOINT_HISTORY", service.DefaultAggregateCheckpointRetention)
+	if raw := os.Getenv("AUDIT_AGGREGATE_CHECKPOINT_HISTORY"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err != nil || parsed <= 0 {
+			logger.Printf("warning=invalid_aggregate_checkpoint_history value=%q using_default=%d", raw, aggregateRetention)
+		}
+	}
+	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention}
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external))
@@ -242,6 +252,22 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+// intEnv parses an integer environment variable, falling back to the given
+// default when the value is missing, not an integer, or non-positive. It
+// mirrors durationEnv/boolEnv: a malformed value must never kill the worker
+// or disable a guard.
+func intEnv(name string, fallback int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed

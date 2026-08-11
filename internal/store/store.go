@@ -236,6 +236,47 @@ func (s *Store) Update(fn func(*Snapshot) error) error {
 	return lastErr
 }
 
+// UpdateChecked is Update with explicit mutation reporting. The closure
+// returns (mutated, error); the snapshot is persisted ONLY when mutated is
+// true. Optimistic-lock semantics are identical to Update: on
+// ErrSnapshotConflict the closure is re-run against the fresh snapshot (up
+// to snapshotConflictRetries times, same jittered backoff), and the mutated
+// flag of the run that commits decides persistence. Closures must return
+// true exactly when they changed the snapshot — returning false after
+// mutating silently discards the change. Intended for idempotent worker
+// passes that can cheaply prove a no-op (no writes on an idle tick);
+// ordinary mutations should keep using Update.
+func (s *Store) UpdateChecked(fn func(*Snapshot) (bool, error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var lastErr error
+	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
+		data, err := s.backend.LoadForUpdate()
+		if err != nil {
+			return err
+		}
+		mutated, err := fn(data)
+		if err != nil {
+			return err
+		}
+		if !mutated {
+			// No-op pass: no Save, no version bump, no updated_at, no byte
+			// change. An idle worker tick must not rewrite the snapshot row.
+			return nil
+		}
+		if err := s.backend.Save(data); err != nil {
+			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
+				lastErr = err
+				time.Sleep(snapshotConflictBackoff(attempt))
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return lastErr
+}
+
 // Ready probes the persistence backend. File-backed stores are always ready;
 // the Postgres backend pings its connection so /readyz can surface an
 // unavailable control plane before requests start failing.

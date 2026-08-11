@@ -14,6 +14,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -386,5 +387,51 @@ func TestPostgresBackendReadyProbeFailsWhenUnavailable(t *testing.T) {
 	}
 	if err := backend.Ready(context.Background()); err == nil {
 		t.Fatal("Ready on closed db must fail")
+	}
+}
+
+// rowMetrics captures the parts of the snapshot row that an idle pass must
+// not touch: the optimistic-lock version, the updated_at timestamp and the
+// serialized snapshot byte size.
+func rowMetrics(t *testing.T, db *sql.DB) (version int64, updatedAt time.Time, bytes int) {
+	t.Helper()
+	if err := db.QueryRow(`SELECT version, updated_at, pg_column_size(snapshot) FROM audit_state_snapshot WHERE id = 1`).Scan(&version, &updatedAt, &bytes); err != nil {
+		t.Fatalf("read row metrics: %v", err)
+	}
+	return version, updatedAt, bytes
+}
+
+// TestPostgresUpdateCheckedNoWriteOnCleanClosure is AC-3 store leg: the
+// checked primitive must not persist a no-op closure against the real
+// PostgreSQL row — version, updated_at and byte size stay identical across
+// repeated clean closures, and a mutating closure still advances the version.
+func TestPostgresUpdateCheckedNoWriteOnCleanClosure(t *testing.T) {
+	db := newPostgresTestDB(t)
+	st := seedTenant(t, db)
+
+	version, updatedAt, size := rowMetrics(t, db)
+	for i := 0; i < 10; i++ {
+		if err := st.UpdateChecked(func(data *Snapshot) (bool, error) {
+			data.Tenants["ghost"] = domain.Tenant{ID: "ghost", Name: "Ghost", Active: true}
+			return false, nil
+		}); err != nil {
+			t.Fatalf("clean closure %d: %v", i, err)
+		}
+	}
+	gotVersion, gotUpdatedAt, gotSize := rowMetrics(t, db)
+	if gotVersion != version || !gotUpdatedAt.Equal(updatedAt) || gotSize != size {
+		t.Fatalf("clean closures changed the row: version %d->%d, updated_at %v->%v, size %d->%d", version, gotVersion, updatedAt, gotUpdatedAt, size, gotSize)
+	}
+
+	// A mutating closure still writes exactly once.
+	if err := st.UpdateChecked(func(data *Snapshot) (bool, error) {
+		data.Tenants["real"] = domain.Tenant{ID: "real", Name: "Real", Active: true}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("mutating closure: %v", err)
+	}
+	gotVersion, _, _ = rowMetrics(t, db)
+	if gotVersion != version+1 {
+		t.Fatalf("version after mutating closure=%d, want %d", gotVersion, version+1)
 	}
 }

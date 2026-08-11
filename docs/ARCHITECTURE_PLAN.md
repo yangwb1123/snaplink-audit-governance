@@ -358,6 +358,23 @@ wait_for=ledgered，但必须设置有限超时，超时返回处理中状态而
   last_hash、事件数量和对象摘要。
 - 定时对多个 segment root 构造 Merkle Root。
 - checkpoint 由 KMS、Vault Transit 或 HSM 中的签名密钥签名。
+
+聚合 checkpoint 的生成与保留规则（governance worker 周期执行）：
+
+- **变更去重**：候选记录（排序后的 stream roots → Merkle Root → 签名）与租户
+  最近一条记录相同（root 与签名均一致）时不追加新记录；比较在乐观锁闭包内
+  进行，并发写入者追加的事件会在重试后的新鲜快照上被观察到（FR-1/FR-3）。
+- **空闲不写**：一个周期内没有待封段且聚合根未变化时，不触发快照保存——
+  不序列化、不 bump version/updated_at（FR-2）。
+- **保留上限（FR-4）**：每租户最多保留最近 `N` 条聚合 checkpoint，超出后
+  丢弃最旧记录（drop-oldest）；`N` 默认 1000，可用环境变量
+  `AUDIT_AGGREGATE_CHECKPOINT_HISTORY` 覆盖（非正整数回退默认值并告警），
+  下限 1（最近一条记录永远保留，作为当前账本状态的锚）。上限在追加的
+  同一原子写中应用；历史已超限的存量快照在下次写入时收敛（无需迁移）。
+  WORM 归档仍是深层证据链，保留上限只裁剪共享快照行内的近期副本。
+- **验证工作量有界（FR-5）**：`VerifyIntegrity` 对全部保留记录做完整重推导
+  与签名校验（不弱化篡改检测），但只验证保留的记录，因此聚合校验工作量
+  由 `N` 界定，与系统运行时长无关。
 - segment、manifest 和 checkpoint 写入 WORM 存储。
 - 密钥只有签名权限，应用实例不能导出私钥。
 

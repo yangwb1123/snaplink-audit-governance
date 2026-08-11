@@ -104,6 +104,103 @@ func TestUpdateDoesNotRetryClosureErrors(t *testing.T) {
 	}
 }
 
+// TestUpdateCheckedNoSaveOnCleanClosure pins the FR-2 primitive contract: a
+// closure reporting no mutation must not reach the backend Save at all (no
+// version bump, no updated_at, no byte change).
+func TestUpdateCheckedNoSaveOnCleanClosure(t *testing.T) {
+	backend := &conflictBackend{}
+	s := &Store{backend: backend}
+	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true} // must be discarded
+		return false, nil
+	}); err != nil {
+		t.Fatalf("UpdateChecked clean closure = %v, want nil", err)
+	}
+	if backend.saves != 0 {
+		t.Fatalf("saves=%d, want 0 (clean closure must not persist)", backend.saves)
+	}
+	if backend.loads != 1 {
+		t.Fatalf("loads=%d, want 1", backend.loads)
+	}
+}
+
+// TestUpdateCheckedSavesOnMutation pins the mutating branch: a closure
+// reporting mutation persists exactly once.
+func TestUpdateCheckedSavesOnMutation(t *testing.T) {
+	backend := &conflictBackend{}
+	s := &Store{backend: backend}
+	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("UpdateChecked mutation = %v, want nil", err)
+	}
+	if backend.saves != 1 {
+		t.Fatalf("saves=%d, want 1", backend.saves)
+	}
+}
+
+// TestUpdateCheckedRetriesConflicts pins that UpdateChecked keeps Update's
+// optimistic-lock semantics: conflicts re-run the closure on fresh snapshots
+// with the same bounded budget.
+func TestUpdateCheckedRetriesConflicts(t *testing.T) {
+	backend := &conflictBackend{conflicts: 2}
+	s := &Store{backend: backend}
+	var runs int
+	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+		runs++
+		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("UpdateChecked after transient conflicts = %v, want nil", err)
+	}
+	if runs != 3 || backend.saves != 3 {
+		t.Fatalf("runs=%d saves=%d, want 3/3 (initial + 2 retries)", runs, backend.saves)
+	}
+}
+
+// TestUpdateCheckedCommittingRunDecidesPersistence pins the contract that
+// the mutated flag of the run that commits decides persistence: a mutating
+// first attempt that loses the race is discarded when the retried closure
+// reports no mutation.
+func TestUpdateCheckedCommittingRunDecidesPersistence(t *testing.T) {
+	backend := &conflictBackend{conflicts: 1}
+	s := &Store{backend: backend}
+	var runs int
+	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+		runs++
+		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
+		return runs == 1, nil // first attempt mutates, retry reports a no-op
+	}); err != nil {
+		t.Fatalf("UpdateChecked = %v, want nil", err)
+	}
+	if backend.saves != 1 {
+		t.Fatalf("saves=%d, want 1 (only the failed attempt; retry skipped the Save)", backend.saves)
+	}
+	if runs != 2 {
+		t.Fatalf("runs=%d, want 2", runs)
+	}
+}
+
+// TestUpdateCheckedDoesNotRetryClosureErrors pins the retry boundary for the
+// checked variant: closure errors surface immediately and never retry.
+func TestUpdateCheckedDoesNotRetryClosureErrors(t *testing.T) {
+	backend := &conflictBackend{}
+	s := &Store{backend: backend}
+	sentinel := errors.New("closure failed")
+	var runs int
+	err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+		runs++
+		return false, sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("UpdateChecked closure err=%v, want sentinel", err)
+	}
+	if runs != 1 || backend.saves != 0 {
+		t.Fatalf("closure retried: runs=%d saves=%d, want 1/0", runs, backend.saves)
+	}
+}
+
 // TestSnapshotConflictBackoffBounded pins the jitter envelope: every retry
 // delay stays within [5ms, 30ms] so concurrent replicas cannot stampede and
 // the total retry budget is small.

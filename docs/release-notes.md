@@ -1,5 +1,35 @@
 # Release Notes
 
+## 2026-08-10 — worker: 聚合 checkpoint 去重、空闲不写快照 + 每租户保留上限
+
+**写给运营（新配置项）：** `audit-governance-worker` 新增环境变量
+`AUDIT_AGGREGATE_CHECKPOINT_HISTORY`（默认 1000），覆盖每租户保留的聚合
+checkpoint 上限；非法/非正数值回退默认值并打印
+`warning=invalid_aggregate_checkpoint_history`，绝不因配置笔误禁用保留或杀死
+worker。存量快照无需迁移：超限历史在下次写入时收敛（drop-oldest），下限 1
+（最近一条记录永远保留）。
+
+**写给开发（行为变化）：**
+
+- **去重（FR-1）**：`CreateAggregateCheckpoint` 在候选记录（root 与签名）与
+  租户最近一条记录相同时不再追加；比较在乐观锁闭包内进行，并发写入者
+  追加的事件在重试后的新鲜快照上被观察到，绝不产生重复记录。
+- **空闲不写（FR-2）**：`Store.UpdateChecked` 只在实际变更快照时 Save；
+  无待封段且聚合根未变化的周期不序列化、不 bump version/updated_at，
+  PG 行字节数保持不变（AC-3 断言）。
+- **保留上限（FR-4）**：每租户最多保留 `N` 条聚合 checkpoint，与追加同窗
+  裁剪；`VerifyIntegrity` 只验证保留记录（FR-5），聚合校验工作量由 `N`
+  界定、与运行时长无关。
+- 签名方案、`Signer` 接口、worker CLI/默认间隔、OpenAPI 路由与快照既有
+  字段布局均不变；保留记录的篡改检测不弱化（C4）。
+
+**回归测试：** `internal/service/aggregate_checkpoint_test.go`（AC-1 去重/控制
+leg/租户隔离、空闲零 Save、封段安静零写、签名失败上抛、冲突重试下去重
+语义、并发赢家后追加、trim 边界、AC-2 保留上限内验证 + 计数 Signer 证明
+工作量有界 + 篡改保留记录仍失败）与 `internal/service/postgres_idle_test.go`
+（AC-3：真实 PG 行上 M 轮空闲 pass 后 version/updated_at/字节数/记录数不变；
+`AUDIT_TEST_POSTGRES_DSN` 未设置时干净跳过）。
+
 ## 2026-08-10 — worker: archive pass 一次乐观锁窗口提交 + 持久化冲突计数
 
 **写给运营（worker 日志行形状变化）：** `audit-governance-worker` 的

@@ -130,10 +130,24 @@ func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.
 // checkpoint of every stream of a tenant and appends it to the evidence
 // trail (architecture plan section 10). A tenant without any checkpoint
 // yields no record.
-
+//
+// Change dedup (FR-1): when the candidate record (root AND signature) is
+// identical to the tenant's most recent record, nothing is appended and the
+// pass persists nothing (Store.UpdateChecked skips the Save). The
+// comparison runs inside the optimistic-lock closure, so it always sees the
+// snapshot that will be written: a concurrent writer's append is observed
+// on the retried run instead of producing a duplicate (FR-3).
+//
+// Retention (FR-4): per-tenant history is capped (drop-oldest,
+// Config.AggregateCheckpointRetention, default
+// DefaultAggregateCheckpointRetention). The cap is applied in the same
+// atomic write as the append, and legacy over-cap histories are trimmed
+// even on a dedup skip (one-time write after deploy), so VerifyIntegrity's
+// aggregate work is bounded by the cap (FR-5). Retained records keep
+// today's layout and stay individually verifiable (C4).
 func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 	now := s.Now()
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		roots := make([]string, 0, len(data.Checkpoints))
 		for key, checkpoints := range data.Checkpoints {
 			if len(checkpoints) == 0 {
@@ -150,20 +164,38 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 			roots = append(roots, checkpoints[len(checkpoints)-1].MerkleRoot)
 		}
 		if len(roots) == 0 {
-			return nil
+			// Tenant has no stream checkpoints: no record, no Save (FR-2).
+			return false, nil
 		}
 		sort.Strings(roots)
 		root := merkleRoot(roots)
 		signature, err := s.Config.Signer.Sign([]byte(root))
 		if err != nil {
-			return fmt.Errorf("sign aggregate checkpoint: %w", err)
+			return false, fmt.Errorf("sign aggregate checkpoint: %w", err)
 		}
-		data.AggregateCheckpoints = append(data.AggregateCheckpoints, domain.AggregateCheckpoint{
+		candidate := domain.AggregateCheckpoint{
 			ID: newID("aggregate"), TenantID: tenantID, StreamCount: len(roots),
 			Root: root, Signature: signature, Algorithm: s.Config.Signer.Algorithm(),
 			CreatedAt: now, StreamRoots: roots,
-		})
-		return nil
+		}
+		// FR-1 dedup identity: root AND signature vs the tenant's most recent
+		// record. CreatedAt/ID/Algorithm are not compared — a changed
+		// signature (key rotation, non-deterministic signer) appends a new
+		// record, which is the correct new evidence; identical root+signature
+		// means identical evidence content, so skipping is sound.
+		if last := lastAggregateCheckpoint(data.AggregateCheckpoints, tenantID); last != nil &&
+			last.Root == candidate.Root && last.Signature == candidate.Signature {
+			// Trim-on-skip: legacy over-cap histories converge on the first
+			// pass even when the root never changes again (at most one Save
+			// per tenant ever; afterwards this path is write-free).
+			trimmed, changed := trimAggregateCheckpoints(data.AggregateCheckpoints, tenantID, s.retentionCap())
+			data.AggregateCheckpoints = trimmed
+			return changed, nil
+		}
+		data.AggregateCheckpoints = append(data.AggregateCheckpoints, candidate)
+		// FR-4 cap applied in the same atomic write as the append.
+		data.AggregateCheckpoints, _ = trimAggregateCheckpoints(data.AggregateCheckpoints, tenantID, s.retentionCap())
+		return true, nil
 	})
 }
 
@@ -293,17 +325,20 @@ func (s *Service) VerifyIntegrity(tenantID, streamID string) (IntegrityResult, e
 // SealPendingSegments creates a checkpoint for each non-empty partial stream.
 // The ingest path seals full segments; the governance worker calls this method
 // periodically so low-volume streams also receive a durable checkpoint.
-
+//
+// A pass that seals nothing (no pending hashes for the tenant) persists
+// nothing: Store.UpdateChecked skips the Save on an idle tick (FR-2).
 func (s *Service) SealPendingSegments(tenantID string) error {
 	now := s.Now()
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+		mutated := false
 		for key, stream := range data.Streams {
 			if stream.TenantID != tenantID || len(stream.PendingHashes) == 0 {
 				continue
 			}
 			segment, checkpoint, err := s.sealSegment(stream, now)
 			if err != nil {
-				return err
+				return false, err
 			}
 			data.Segments[key] = append(data.Segments[key], segment)
 			data.Checkpoints[key] = append(data.Checkpoints[key], checkpoint)
@@ -311,8 +346,9 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 			stream.PendingEvents = nil
 			stream.PendingPrevHash = ""
 			data.Streams[key] = stream
+			mutated = true
 		}
-		return nil
+		return mutated, nil
 	})
 }
 

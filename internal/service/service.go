@@ -43,6 +43,12 @@ type Config struct {
 	// Archive persists WORM-compatible compliance objects. Defaults to the
 	// local read-only directory; an S3 Object Lock store can be injected.
 	Archive archive.Store
+	// AggregateCheckpointRetention caps retained aggregate-checkpoint
+	// history per tenant (drop-oldest; floor 1 — the most recent record is
+	// always retained). Values <= 0 select the documented default
+	// (DefaultAggregateCheckpointRetention). The worker reads the override
+	// from AUDIT_AGGREGATE_CHECKPOINT_HISTORY.
+	AggregateCheckpointRetention int
 }
 
 // Signer creates and verifies checkpoint signatures. Implementations must be
@@ -108,6 +114,9 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	}
 	if cfg.MaxEventBytes <= 0 {
 		cfg.MaxEventBytes = domain.MaxEventBytes
+	}
+	if cfg.AggregateCheckpointRetention <= 0 {
+		cfg.AggregateCheckpointRetention = DefaultAggregateCheckpointRetention
 	}
 	if err := resolveSecrets(&cfg); err != nil {
 		return nil, err
