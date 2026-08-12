@@ -358,7 +358,11 @@ const (
 	// AdminActionExportRecovered records a governance-worker recovery: an
 	// export job stuck in "running" past the worker's stuck-age threshold was
 	// failed by the worker pass (atomic with the status change it audits).
-	AdminActionExportRecovered   = "export.recovered"
+	AdminActionExportRecovered = "export.recovered"
+	// AdminActionExportBlocked records a legal-hold gate denial: a create,
+	// run-time or download attempt for an export whose query overlaps an
+	// active legal hold. TargetID carries the blocking hold ID.
+	AdminActionExportBlocked     = "export.blocked"
 	AdminActionLegalHoldCreated  = "legal_hold.created"
 	AdminActionLegalHoldReleased = "legal_hold.released"
 	AdminActionRestoreCreated    = "restore.created"

@@ -18,6 +18,28 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	if _, err := s.QueryEvents(tenantID, requestedBy, query); err != nil {
 		return domain.ExportJob{}, err
 	}
+	// R2 (legal-hold gate): fail closed before any job exists. The check is a
+	// read; the block fact commits in its own Update (a closure returning an
+	// error discards its mutations, so check-and-abort cannot share the
+	// job-creating closure). No job, no export.created, no goroutine on the
+	// block path.
+	var hold domain.LegalHold
+	blocked := false
+	if err := s.Store.Read(func(data *store.Snapshot) error {
+		hold, blocked = s.holdBlockingExport(data, tenantID, query)
+		return nil
+	}); err != nil {
+		return domain.ExportJob{}, err
+	}
+	if blocked {
+		if err := s.Store.Update(func(data *store.Snapshot) error {
+			data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, requestedBy, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+			return nil
+		}); err != nil {
+			return domain.ExportJob{}, err
+		}
+		return domain.ExportJob{}, fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
+	}
 	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
 	if err := s.Store.Update(func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
@@ -37,6 +59,12 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
 		}
+		// R4 (legal-hold gate): fail closed while any active hold covers the
+		// job's query, regardless of job status (covers exports completed
+		// before the hold). Read-only denial: no block fact is appended.
+		if hold, blocked := s.holdBlockingExport(data, tenantID, value.Query); blocked {
+			return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
+		}
 		job = value
 		return nil
 	})
@@ -50,6 +78,34 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("%w: job id is required", domain.ErrInvalid)
+	}
+	// R4 (legal-hold gate): defense in depth — never stream a sealed object
+	// while any matching hold is active, even if a caller bypassed GetExport.
+	// Tenant-scoped job lookup + gate run in one read; on block the
+	// export.blocked fact replaces the audit.event.export fact (empty actor
+	// keeps the recordReadAction no-fact convention).
+	var hold domain.LegalHold
+	blocked := false
+	if err := s.Store.Read(func(data *store.Snapshot) error {
+		value, ok := data.Exports[jobID]
+		if !ok || value.TenantID != tenantID {
+			return domain.ErrNotFound
+		}
+		hold, blocked = s.holdBlockingExport(data, tenantID, value.Query)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if blocked {
+		if actor != "" {
+			if err := s.Store.Update(func(data *store.Snapshot) error {
+				data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
 	}
 	return s.recordReadAction(tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
 }
@@ -642,6 +698,73 @@ func (s *Service) RecoverStuckExports(tenantID string) (int, error) {
 	return recovered, err
 }
 
+// exportBlockedError is the legal-hold gate denial error. Its text is the
+// stable operator-visible message ("export blocked by active legal hold
+// <id>") — the exact bytes surfaced in 403 bodies and job.Error — while
+// Unwrap reports ErrForbidden so statusForError/errorBody map it to 403
+// "forbidden" (AC-1, R3, R4: the error carries only the hold ID, never
+// tenant or event details).
+type exportBlockedError struct {
+	holdID string
+}
+
+func (e exportBlockedError) Error() string {
+	return "export blocked by active legal hold " + e.holdID
+}
+
+func (e exportBlockedError) Unwrap() error { return domain.ErrForbidden }
+
+// holdBlockingExport reports whether an export of tenantID matching query is
+// blocked by an active legal hold (ReleasedAt == nil), returning the blocking
+// hold with the lowest ID (deterministic over the map-ordered snapshot). A
+// hold blocks iff at least one tenant event matches the export query AND is
+// covered by the hold under the existing holdMatchesEvent semantics. An
+// export selecting zero events is never blocked.
+func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool) {
+	schemas := map[string]domain.EventSchema{}
+	for key, schema := range data.Schemas {
+		schemas[key] = schema
+	}
+	var holds []domain.LegalHold
+	for _, hold := range data.LegalHolds {
+		if hold.TenantID == tenantID && hold.ReleasedAt == nil {
+			holds = append(holds, hold)
+		}
+	}
+	sort.Slice(holds, func(i, j int) bool { return holds[i].ID < holds[j].ID })
+	for _, hold := range holds {
+		for _, event := range data.Events {
+			if event.TenantID != tenantID {
+				continue
+			}
+			if !s.matches(event, query, schemas) {
+				continue
+			}
+			if s.holdMatchesEvent(hold, event, schemas) {
+				return hold, true
+			}
+		}
+	}
+	return domain.LegalHold{}, false
+}
+
+// failExportBlocked transitions a job to failed because an active legal hold
+// covers its query, and appends the export.blocked fact (actor
+// "governance-worker"). No archive object is written on this path. Errors
+// are ignored to mirror finishExport's convention; access-time gate R4
+// remains authoritative.
+func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
+	_ = s.Store.Update(func(data *store.Snapshot) error {
+		job := data.Exports[jobID]
+		now := s.Now()
+		job.Status, job.FinishedAt, job.ObjectPath, job.Digest, job.EventCount = "failed", &now, "", "", 0
+		job.Error = fmt.Sprintf("export blocked by active legal hold %s", hold.ID)
+		data.Exports[jobID] = job
+		data.AdminActions = append(data.AdminActions, s.adminAction(job.TenantID, "governance-worker", domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+		return nil
+	})
+}
+
 func (s *Service) runExport(jobID string) {
 	var job domain.ExportJob
 	if err := s.Store.Read(func(data *store.Snapshot) error {
@@ -662,9 +785,19 @@ func (s *Service) runExport(jobID string) {
 	})
 	var events []domain.Event
 	schemas := map[string]domain.EventSchema{}
+	var blockedHold domain.LegalHold
+	blocked := false
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
+		}
+		// R3 (legal-hold gate): re-check at the start of the selection pass; a
+		// hold created after CreateExport's gate blocks the seal (no archive
+		// write). The block is reported after the read returns — an Update
+		// inside a Read closure would self-deadlock on the store RWMutex.
+		if hold, ok := s.holdBlockingExport(data, job.TenantID, job.Query); ok {
+			blockedHold, blocked = hold, true
+			return nil
 		}
 		for _, event := range data.Events {
 			if event.TenantID == job.TenantID && s.matches(event, job.Query, schemas) {
@@ -675,6 +808,10 @@ func (s *Service) runExport(jobID string) {
 	})
 	if err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())
+		return
+	}
+	if blocked {
+		s.failExportBlocked(jobID, blockedHold)
 		return
 	}
 	sortEvents(events)
