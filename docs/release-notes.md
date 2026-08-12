@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-08-12 — DLQ 回放状态改为追加式日志 + flock 串行化（ReplayState.Mark 跨实例竞态与 O(n²) 重写修复）
+
+**写给运营（行为变化）：**
+
+- **`AUDIT_DLQ_REPLAY_STATE` 文件格式变为 JSONL 追加日志**：首行 `{"format":"replay-log-v1"}`，之后每行一个 `{"event_id":"<id>"}` 标记；旧版单对象 `{"replayed":{...}}` 文件继续正常加载，并在下一次 `Mark` 时就地转换为新格式（零数据迁移、惰性逐文件转换）。常驻守护进程与 cron `-once` 现在通过 `<state>.lock` 兄弟文件的排他 advisory flock 串行写入，丢失标记（last-writer-wins）与共享 `.tmp` 临时 inode 相互撕裂这两类跨进程竞态被构造性消除；每个标记的落盘成本为 O(1)（不再每标记重写全量集合）。
+- **升级窗口**：同一部署的写方（守护进程 + cron `-once`）应在同一窗口升级——旧二进制仍用确定性 `path+".tmp"` + rename 覆盖目标，会覆盖新格式行（旧代码与自己也会竞态，修复无法防御未修复的同伴）。旧文件转换无需人工操作。
+- **状态文件与锁必须位于本地 POSIX 文件系统**（默认 `./data/` 满足）：flock 与 `O_APPEND` 的原子性在网络文件系统（NFS/SMB）上无保证；撕裂尾部在加载时被跳过、写入前自愈，残余风险有界。
+- **故障语义不变**：加载失败（未知格式、真正损坏）仍 fail-loud 引导退出；`Mark` 失败本轮中止、DLQ 偏移不提交、记录留待下轮重试；崩溃窗口任意位置的文件均可解码（旧状态或新状态）。**新增一条更强的不变式**：`Mark` 仅在持久化成功后更新内存集合——DLQ 偏移永远不会在没有对应持久标记的情况下被提交（记录要么已落账，要么下轮重试）。
+- **上线后验证**：`jq -s '[.[] | .event_id? // empty] | unique | length' <state>` 应等于全部已回放 event_id 的并集大小；状态目录无 `*.tmp` 残留；两个进程日志均无启动 `Fatalf`。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`ReplayState` 新增未导出 `mu`（REQ-8 进程内互斥）、`newTemp`（唯一临时文件工厂，默认 `os.CreateTemp`，AC-2）、`lockWait`（flock 有界等待，默认 2s，防止存活的卡死同伴无限阻塞恢复）。`Mark` 在 flock 临界区内分类目标（缺失/空/日志/撕裂/legacy）后：日志文件走 `O_APPEND` 追加 + 文件 fsync（无 rename、无目录同步）；首写/撕裂修复/legacy 转换走「唯一临时文件 → 写 → 内容 fsync → rename → 父目录 fsync」（REQ-4 顺序逐字保留）。追加前 `repairTornTail` 自愈撕裂尾部（O(1) 窗口探测，罕见时全量重建），保证崩溃撕裂的尾部永远不会变成损坏的非末行。
+- `LoadReplayState` 规则：缺失/零长/空白 → 空集（钉住不变）；首行恰为 v1 头 → 逐行扫描（撕裂末行跳过、损坏非末行包装解码错误 fail-loud）；其余 → legacy 单对象路径逐字节不变。格式判别为 JSON 感知（protocol F-1）：带 `format` 字段但版本未知或头部畸形的内容 fail-loud（`unknown replay state format` / `invalid replay state header`），绝不静默解码为空 legacy 状态。
+- **REQ-7 修正（安全评审 F1）**：内存集合只在持久化成功后更新；fsync-after-append 失败后磁盘为可解码超集、内存不含该标记，下轮重读记录重试（至少一次，被幂等吸收）。
+- 测试（`internal/kafka/replay_test.go`）：AC-1 并发风暴并集（8 写方 × 50 ID + 共享核心，独立实例 + 共享实例 `-race` 清洁）、AC-2 唯一临时文件/无残留/崩溃残留/撕裂尾部自愈、AC-3 O(M+K) 字节界与 `AllocsPerRun` 增长无关性 + `BenchmarkReplayStateMark`（M∈{100,1k,10k} 平坦：~8µs/op、22 allocs/op）、AC-4 双进程集成（helper-process 模式，3 子进程模拟 daemon+`-once`）、REQ-1 锁失败（ENOTDIR 与有界超时）；五个持久化钉（:240/:319/:394/:534/:679）按新写入路径适配，:214/:729 零适配保持全绿。
+- `python3 cli.py quality` 全绿。
+
 ## 2026-08-12 — 读路径自审计闭环补齐：`GET /api/v1/operations/{operationID}` 追加 audit.event.read 事实
 
 **写给运营（行为变化，观察类）：**
