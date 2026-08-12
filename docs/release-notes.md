@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-08-12 — 修复 DLQ 中批记录被后续提交跳跃丢失 + 每轮重建 DLQ reader（audit-kafka-dlq-replay）
+
+**写给运营（行为变化）：**
+
+- **修复一个静默数据丢失缺陷（F1，同模块既有缺陷）**：`audit-kafka-dlq-replay` 之前按记录逐条提交
+  DLQ 偏移，而 Kafka 每个（group, partition）只保存一个已提交偏移，kafka-go `CommitMessages` 提交的是
+  传入消息中最高偏移 +1（`offsetStash.merge` 取分区内最大值）——因此同一分区里，一条瞬时发布失败的
+  DLQ 记录（保持未提交、待下轮重试）会被后续成功记录的一次提交“跳过”：分区已提交偏移越过它，下一轮
+  从新偏移继续，这条记录永不再投递（无状态标记、无日志、无恢复路径）。同时，kafka-go 的 group reader
+  在一次会话内绝不重投已取消息（`FetchMessage` 每次都推进本地位置，与提交无关），所以常驻模式里
+  瞬时失败记录即使未提交，下一轮（同一 reader 会话）也不会重新读到——文档承诺的“瞬态失败留待下轮
+  重试”在常驻模式下实际不成立。
+- **现在每轮开始时重建 DLQ reader（同一 `-dlq` group）**：新会话从 broker 已提交偏移开始拉取，因此
+  未提交的瞬时失败记录会被重新读到并重试（与 `-once` 模式语义一致，常驻 ≡ 一次性）；同时
+  **提交加了分区级屏障**：已提交偏移永远不会越过本分区第一条仍未解决（pending）的记录，已解决但位于
+  pending 之后的记录留待下轮重新提交（状态文件保证不重复重发布）。修复后“瞬态失败留待下轮重试”
+  真正成立。无配置/无新 flag/无状态文件格式变化。
+- 已受影响数据：修复前因中批跳跃而被永久跳过的 DLQ 记录无法自动恢复（其事件未进入状态文件，也
+  没有 unresolvable 日志）；如需人工恢复，在 DLQ topic 中按失败 event_id 查找对应记录并检查其原始
+  事件是否在 accepted topic 保留期内，手动重发布即可。回滚部署旧二进制即可；回滚窗口内缺陷复现。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`Replayer` 新增 `dlqNew func() messageReader` 工厂；`RunOnce` 在
+  `collectFailures` 前调用新的 `resetDLQToCommittedOffset()`（关闭旧 DLQ reader、以相同配置新建），
+  使每轮从 broker 已提交偏移开始拉取；`commitResolved` 增加分区级提交屏障（先求每分区
+  `firstPending` = 第一条 `wanted && !resolved` 记录的偏移，只提交偏移低于它的已解决记录），防止
+  提交越过 pending 记录；`pending` 指标改为仅在扫描进行中置位，两个 reset 失败中止轮次都不会泄漏
+  陈旧读数。文档注释同步修正（REQ-2）。
+- `internal/kafka/replay_test.go`：新增 broker 语义测试缝 `brokerDLQ`/`brokerReplayReader`（提交推进
+  分区已提交偏移、新会话只投递已提交偏移之上的记录）；新增 `TestReplayMidBatchPendingRecordIsNotSkipped`
+  （中批 pending 不被跳跃：第 1 轮 offset 1 失败 + offset 3 成功时屏障保证 0 提交，第 2 轮重读并收敛，
+  提交偏移最终推进到 4）与 `TestReplayResetFailureAbortsRound`（两个 reset 的 Close 失败中止轮次、零
+  重发布/零标记/零提交/`pending==0`）；`TestReplayTransientRepublishFailureRetriesNextRound` 改用工厂
+  缝并修正注释（重投靠的是每轮重建，而非“偏移不推进”）。修复前两项突变（去掉屏障、去掉 DLQ 重建）
+  均使新测试失败，修复后通过；`go test -race` 干净。
+
 ## 2026-08-12 — 常驻 DLQ 回放每轮重建 accepted reader，从首个保留偏移重新扫描（audit-kafka-dlq-replay）
 
 **写给运营（行为变化）：**
@@ -10,8 +47,8 @@
   早于第 1 轮扫描终点 accepted 原消息的旧 DLQ 事件会被 `unresolvable` 标记并从状态文件/ DLQ 提交
   中永久丢弃（DLQ 偏移被提交，失败证据只剩状态文件里的标记）。`-once` 模式因每轮新建 reader 而不受影响。
 - **现在每轮扫描前重建 accepted reader（同一 `-accepted` group、`StartOffset: FirstOffset`、从不提交）**，
-  保证每轮都从首个保留偏移开始扫描；旧事件只要仍在保留期内即可恢复并重新发布。DLQ reader 不变
-  （group 成员、手动提交、“失败只消费一次”语义均保留）。无配置/无新 flag。
+  保证每轮都从首个保留偏移开始扫描；旧事件只要仍在保留期内即可恢复并重新发布。DLQ reader 的每轮
+  重建与提交屏障见同日下一条“修复 DLQ 中批记录被后续提交跳跃”条目。无配置/无新 flag。
 - 已受影响数据：修复前被误标 unresolvable 且 DLQ 偏移已提交的事件无法自动恢复；如需人工恢复，
   从状态文件中提取修复前窗口内的事件 ID，在 accepted topic 中按 event_id 查找原消息后重新发布
   （原消息仍在保留期内）。回滚只需部署旧二进制；回滚窗口内缺陷会复现。
@@ -21,7 +58,7 @@
 - `internal/kafka/replay.go`：`Replayer` 新增 `acceptedNew func() messageReader` 工厂字段（生产路径
   用与 `NewReplayer` 相同的 `kafka.ReaderConfig` 创建）；`RunOnce` 在 `scanAccepted` 前调用新的
   `resetAcceptedToFirstOffset()`（REQ-1），关闭旧 accepted reader 并以相同配置新建（kafka-go 对
-  group reader 的 `SetOffset` 返回 `errNotAvailableWithGroup`，重建是唯一 seek 机制；DLQ reader 不动）。
+  group reader 的 `SetOffset` 返回 `errNotAvailableWithGroup`，重建是唯一 seek 机制）。
   无 wanted 事件的轮次提前返回、不重建不扫描。文档注释改为说明机制（REQ-2）。
 - `internal/kafka/replay_test.go`：新增 T1/T2/T3（两个 `RunOnce` 轮次的旧事件恢复、第 2 轮重取第 1 轮
   已消费消息、daemon ≡ `-once` 结果等价——断言重发布/状态/DLQ 提交结果而非裸计数，因 unresolvable

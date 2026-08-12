@@ -34,6 +34,8 @@ type fakeReplayReader struct {
 	// fetchLog, when non-nil, records every fetched message offset (T2 round
 	// re-fetch proof).
 	fetchLog *[]int64
+	// closeErr, when non-nil, is returned by Close (F4: reset abort path).
+	closeErr error
 }
 
 func (f *fakeReplayReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
@@ -65,7 +67,7 @@ func (f *fakeReplayReader) CommitMessages(_ context.Context, msgs ...kafka.Messa
 }
 
 func (f *fakeReplayReader) Config() kafka.ReaderConfig { return kafka.ReaderConfig{Topic: f.topic} }
-func (f *fakeReplayReader) Close() error               { return nil }
+func (f *fakeReplayReader) Close() error               { return f.closeErr }
 
 // freshAcceptedReader returns a factory that hands out a NEW fake reader per
 // call with the same queue, modeling the production per-round accepted-reader
@@ -79,10 +81,78 @@ func freshAcceptedReader(messages []kafka.Message, fetchLog *[]int64) func() mes
 	}
 }
 
+// brokerDLQ models the broker-side state Kafka keeps for a DLQ partition: ONE
+// committed offset, advanced to max(committed, offset+1) per commit, shared
+// by every reader session. A fresh session only delivers messages at or
+// above the committed offset — so a record committed past a pending record
+// is never re-delivered (the exact mid-batch loss the commit barrier must
+// prevent).
+type brokerDLQ struct {
+	topic     string
+	messages  []kafka.Message // ascending offsets within one partition
+	committed int64           // broker-side committed offset (starts at 0)
+	commits   []kafka.Message
+}
+
+// brokerReplayReader is one DLQ reader session against a brokerDLQ. The
+// session position (index) starts at the committed offset and never rewinds;
+// recreating the reader (a fresh session) is the only way a later round sees
+// records that were fetched-but-uncommitted by an earlier session — the F1
+// per-round DLQ reader recreation the production code performs.
+type brokerReplayReader struct {
+	broker *brokerDLQ
+	index  int
+}
+
+func (b *brokerReplayReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	for b.index < len(b.broker.messages) {
+		message := b.broker.messages[b.index]
+		b.index++
+		if message.Offset < b.broker.committed {
+			continue // already committed: a fresh session would not deliver it
+		}
+		return message, nil
+	}
+	<-ctx.Done()
+	return kafka.Message{}, ctx.Err()
+}
+
+func (b *brokerReplayReader) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
+	b.broker.commits = append(b.broker.commits, msgs...)
+	for _, m := range msgs {
+		if m.Offset+1 > b.broker.committed {
+			b.broker.committed = m.Offset + 1
+		}
+	}
+	return nil
+}
+
+func (b *brokerReplayReader) Config() kafka.ReaderConfig {
+	return kafka.ReaderConfig{Topic: b.broker.topic}
+}
+func (b *brokerReplayReader) Close() error { return nil }
+
+// freshDLQSession returns a factory handing out a NEW DLQ reader session per
+// round against the same broker state (the committed offset persists across
+// sessions, exactly like a real broker), modeling the F1 per-round DLQ
+// reader recreation: each round drains from the committed offset, so pending
+// records are re-delivered and converged records are not.
+func (b *brokerDLQ) freshDLQSession() func() messageReader {
+	return func() messageReader { return &brokerReplayReader{broker: b} }
+}
+
 func dlqMessage(eventID string) kafka.Message {
+	return dlqMessageAt(eventID, 1)
+}
+
+// dlqMessageAt builds a dead-letter Failure record at an explicit offset for
+// broker-semantics tests: offsets are unique per partition, so tests that
+// mix pending and resolved records in one partition must use distinct
+// offsets.
+func dlqMessageAt(eventID string, offset int64) kafka.Message {
 	failure := Failure{EventID: eventID, ErrorCode: ErrorCodeAttemptsExhausted, ErrorMessage: "boom"}
 	encoded, _ := json.Marshal(failure)
-	return kafka.Message{Key: []byte(eventID), Value: encoded, Partition: 0, Offset: 1}
+	return kafka.Message{Key: []byte(eventID), Value: encoded, Partition: 0, Offset: offset}
 }
 
 func acceptedMessage(eventID string) kafka.Message {
@@ -159,23 +229,29 @@ func TestReplayPersistsStateAcrossRestarts(t *testing.T) {
 
 // TestReplayTransientRepublishFailureRetriesNextRound pins convergence: a
 // transient republish error leaves the event pending (DLQ offset NOT
-// committed), and the next round re-reads the same record and retries
-// instead of losing it.
+// committed, and the per-partition barrier keeps the committed offset below
+// it), and the next round re-reads the same record and retries instead of
+// losing it. Re-delivery works because RunOnce recreates the DLQ reader per
+// round (resetDLQToCommittedOffset): kafka-go never re-delivers a fetched
+// record within one group session, so a fresh session starting at the
+// committed offset is the only mechanism that can re-read a pending record.
+// The accepted reader is recreated too (freshAcceptedReader), so the
+// original is re-scanned from the first retained offset.
 func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
-	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-t")}}
-	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-t")}}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-t", 1)}}
+	acceptedQueue := []kafka.Message{acceptedMessage("evt-t")}
 	state, err := LoadReplayState("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	attempts := 0
-	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader(acceptedQueue, nil), state, func(ctx context.Context, key, value []byte) error {
 		attempts++
 		if attempts == 1 {
 			return context.DeadlineExceeded
 		}
 		return nil
-	})
+	}, log.New(io.Discard, "", 0))
 	replayer.drainTimeout = 20 * time.Millisecond
 	if _, err := replayer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -183,14 +259,11 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	if state.Replayed["evt-t"] {
 		t.Fatal("transient failure must not mark the event replayed")
 	}
-	if len(dlq.commits) != 0 {
-		t.Fatalf("DLQ offsets committed after transient failure (%d), want 0: the record must stay pending for the next round", len(dlq.commits))
+	if broker.committed != 0 {
+		t.Fatalf("DLQ committed offset=%d after transient failure, want 0: the record must stay pending for the next round", broker.committed)
 	}
-	// Next round: the uncommitted DLQ record is re-delivered by real broker
-	// group semantics (offsets never advanced), so the fake re-delivers it
-	// the same way and the event converges.
-	dlq.index = 0
-	accepted.index = 0
+	// Next round: the recreated DLQ session re-delivers the uncommitted
+	// record from the committed offset and the event converges.
 	count, err := replayer.RunOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -198,8 +271,11 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	if count != 1 || attempts != 2 {
 		t.Fatalf("second round replayed=%d attempts=%d, want 1/2", count, attempts)
 	}
-	if len(dlq.commits) != 1 {
-		t.Fatalf("DLQ offsets committed=%d after converged round, want 1", len(dlq.commits))
+	if !state.Replayed["evt-t"] {
+		t.Fatal("evt-t must be marked replayed after the converged round")
+	}
+	if broker.committed != 2 {
+		t.Fatalf("DLQ committed offset=%d after converged round, want 2", broker.committed)
 	}
 }
 
@@ -620,8 +696,11 @@ func TestReplayDrainedVsCutoffBoundary(t *testing.T) {
 		// D-2: at drain only never-seen wanted IDs are marked unresolvable.
 		// evt-y was found this round (transient republish failure), so it
 		// stays pending even though the topic went quiet; evt-x was never
-		// seen and converges.
-		dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-x"), dlqMessage("evt-y")}}
+		// seen and converges. Distinct offsets (1 and 2) model real Kafka
+		// offsets (unique per partition); with the commit barrier, evt-x is
+		// committable (offset 1 < pending offset 2) and evt-y stays
+		// uncommitted.
+		dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-x", 1), dlqMessageAt("evt-y", 2)}}
 		accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-y")}}
 		state, err := LoadReplayState("")
 		if err != nil {
@@ -857,4 +936,141 @@ func TestReplayDaemonEqualsOnceOutcomes(t *testing.T) {
 	if strings.Contains(daemonLogs.String(), "unresolvable") || strings.Contains(onceLogs.String(), "unresolvable") {
 		t.Fatalf("neither mode may mark unresolvable:\ndaemon:\n%s\nonce:\n%s", daemonLogs.String(), onceLogs.String())
 	}
+}
+
+// F1 / F-A: a transiently-failed mid-batch DLQ record must never be
+// leapfrogged by a later commit in the same partition. Kafka stores ONE
+// committed offset per (group, partition) and kafka-go's CommitMessages
+// commits offset+1 of the highest message passed, so committing the resolved
+// record at offset 3 would advance the partition to 4 and the next round
+// would never re-deliver the pending record at offset 1 — silent permanent
+// loss. The commitResolved per-partition barrier leaves resolved records at
+// or above the first pending offset uncommitted, so round 2's recreated DLQ
+// session (freshDLQSession) re-reads both records, evt-p converges, and the
+// committed offset only advances once nothing is pending. Fails pre-fix:
+// without the barrier, round 1 commits offset 3 -> committed=4, round 2
+// delivers nothing, and evt-p stays unmarked forever (attempts==1).
+func TestReplayMidBatchPendingRecordIsNotSkipped(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+		dlqMessageAt("evt-p", 1), // transient republish failure in round 1
+		dlqMessageAt("evt-r", 3), // resolved in round 1
+	}}
+	acceptedQueue := []kafka.Message{acceptedMessage("evt-p"), acceptedMessage("evt-r")}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := map[string]int{}
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader(acceptedQueue, nil), state, func(ctx context.Context, key, value []byte) error {
+		attempts[string(key)]++
+		if string(key) == "evt-p" && attempts["evt-p"] == 1 {
+			return context.DeadlineExceeded // transient: retried next round
+		}
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+
+	// Round 1: evt-p fails (pending), evt-r succeeds (resolved). The barrier
+	// keeps BOTH uncommitted — committing evt-r at offset 3 would cross the
+	// pending offset 1 — so the partition's committed offset stays 0.
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("round 1 replayed=%d, want 1 (evt-r)", count)
+	}
+	if !state.Replayed["evt-r"] || state.Replayed["evt-p"] {
+		t.Fatalf("round 1 state=%v, want {evt-r} only (evt-p pending)", state.Replayed)
+	}
+	if broker.committed != 0 {
+		t.Fatalf("round 1 committed offset=%d, want 0: the partition must never commit past a pending record", broker.committed)
+	}
+	if len(broker.commits) != 0 {
+		t.Fatalf("round 1 commits=%d, want 0 (evt-r must stay uncommitted behind the barrier)", len(broker.commits))
+	}
+
+	// Round 2: the recreated DLQ session re-reads both records from the
+	// committed offset; evt-p is retried and converges, evt-r (already
+	// replayed) is re-committed without a re-republish. The committed offset
+	// advances only now that nothing is pending.
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("round 2 replayed=%d, want 1 (evt-p)", count)
+	}
+	if !state.Replayed["evt-p"] {
+		t.Fatal("evt-p must converge in round 2")
+	}
+	if attempts["evt-p"] != 2 || attempts["evt-r"] != 1 {
+		t.Fatalf("attempts evt-p=%d evt-r=%d, want 2/1 (evt-p retried exactly once, evt-r never re-republished)", attempts["evt-p"], attempts["evt-r"])
+	}
+	if broker.committed != 4 {
+		t.Fatalf("committed offset=%d after convergence, want 4 (both records durable)", broker.committed)
+	}
+}
+
+// F4: a reader close failure on either per-round reset aborts the round
+// BEFORE anything is collected, republished, marked, or committed; the
+// pending metric stays 0 (nothing is in flight), and the next round retries.
+// kafka-go Close is idempotent and returns nil, so these paths are
+// defensive — but the abort must not leak a stale audit_dlq_pending reading.
+func TestReplayResetFailureAbortsRound(t *testing.T) {
+	t.Run("dlq reader close failure", func(t *testing.T) {
+		closeErr := errors.New("dlq close failure")
+		dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-a", 1)}, closeErr: closeErr}
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		republishCalled := false
+		replayer := newReplayerWithFactories(func() messageReader { return dlq }, freshAcceptedReader([]kafka.Message{acceptedMessage("evt-a")}, nil), state, func(ctx context.Context, key, value []byte) error {
+			republishCalled = true
+			return nil
+		}, log.New(io.Discard, "", 0))
+		replayer.drainTimeout = 20 * time.Millisecond
+		_, err = replayer.RunOnce(context.Background())
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("err=%v, want the dlq close error", err)
+		}
+		if republishCalled {
+			t.Fatal("republish must never be called after a reset abort")
+		}
+		if len(state.Replayed) != 0 || len(dlq.commits) != 0 {
+			t.Fatalf("aborted round must not mark or commit: state=%v commits=%d", state.Replayed, len(dlq.commits))
+		}
+		if _, _, _, _, pending := replayer.Metrics(); pending != 0 {
+			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", pending)
+		}
+	})
+	t.Run("accepted reader close failure", func(t *testing.T) {
+		closeErr := errors.New("accepted close failure")
+		dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-a", 1)}}
+		accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-a")}, closeErr: closeErr}
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		republishCalled := false
+		replayer := newReplayerWithFactories(func() messageReader { return dlq }, func() messageReader { return accepted }, state, func(ctx context.Context, key, value []byte) error {
+			republishCalled = true
+			return nil
+		}, log.New(io.Discard, "", 0))
+		replayer.drainTimeout = 20 * time.Millisecond
+		_, err = replayer.RunOnce(context.Background())
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("err=%v, want the accepted close error", err)
+		}
+		if republishCalled {
+			t.Fatal("republish must never be called after a reset abort")
+		}
+		if len(state.Replayed) != 0 || len(dlq.commits) != 0 {
+			t.Fatalf("aborted round must not mark or commit: state=%v commits=%d", state.Replayed, len(dlq.commits))
+		}
+		if _, _, _, _, pending := replayer.Metrics(); pending != 0 {
+			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", pending)
+		}
+	})
 }

@@ -97,11 +97,20 @@ const maxScanWindows = 2
 // retained offset: every round recreates the accepted reader with
 // StartOffset: kafka.FirstOffset (kafka-go honors StartOffset only at
 // reader creation and rejects SetOffset for group readers), so no round
-// reuses the previous round's end position. Replayed IDs in the state file
-// make the re-scan idempotent, and committing the scan position would make
+// reuses the previous round's end position. The DLQ topic is always drained
+// from the group's committed offset: every round also recreates the DLQ
+// reader, because kafka-go never re-delivers a fetched record within one
+// group session (the fetch position advances past every FetchMessage,
+// committed or not) — recreation is the only mechanism that lets a
+// transiently-failed record be retried by a later round. The per-partition
+// commit barrier in commitResolved guarantees the group's committed offset
+// never crosses a still-pending record, so a recreated session always
+// re-delivers the pending records. Replayed IDs in the state file make the
+// re-scan idempotent, and committing the accepted scan position would make
 // new DLQ records miss older original messages.
 type Replayer struct {
 	dlqReader     messageReader
+	dlqNew        func() messageReader // per-round DLQ reader recreation (F1)
 	accepted      messageReader
 	acceptedNew   func() messageReader // per-round accepted reader recreation (REQ-1)
 	republish     RepublishFunc
@@ -116,12 +125,15 @@ type Replayer struct {
 }
 
 // NewReplayer creates the DLQ and accepted-topic readers. The DLQ reader
-// commits its offsets (failures are consumed once); the accepted reader
-// never commits and always starts at the first retained offset — because
-// StartOffset is honored only at reader creation, RunOnce recreates the
-// accepted reader at the start of every round (resetAcceptedToFirstOffset),
-// including the first round (the eagerly-created reader is replaced before
-// its first fetch; kafka-go joins the group lazily, so this costs nothing).
+// commits offsets only for durable decisions (committed once resolved, with
+// the commitResolved barrier); the accepted reader never commits and always
+// starts at the first retained offset — because StartOffset is honored only
+// at reader creation, RunOnce recreates the accepted reader at the start of
+// every round (resetAcceptedToFirstOffset), including the first round (the
+// eagerly-created reader is replaced before its first fetch; kafka-go joins
+// the group lazily, so this costs nothing). RunOnce recreates the DLQ reader
+// as well (resetDLQToCommittedOffset), so each round drains from the group's
+// committed offset and transiently-failed records are re-delivered.
 func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, state *ReplayState, republish RepublishFunc, logger *log.Logger) *Replayer {
 	if dlqTopic == "" {
 		dlqTopic = TopicDLQ
@@ -135,7 +147,7 @@ func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, stat
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	dlqReader := kafka.NewReader(kafka.ReaderConfig{
+	dlqConfig := kafka.ReaderConfig{
 		Brokers:        brokers,
 		Topic:          dlqTopic,
 		GroupID:        groupID + "-dlq",
@@ -143,7 +155,8 @@ func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, stat
 		MaxBytes:       1 << 20,
 		CommitInterval: 0, // manual commits only
 		StartOffset:    kafka.FirstOffset,
-	})
+	}
+	dlqReader := kafka.NewReader(dlqConfig)
 	acceptedConfig := kafka.ReaderConfig{
 		Brokers:        brokers,
 		Topic:          acceptedTopic,
@@ -154,7 +167,7 @@ func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, stat
 		StartOffset:    kafka.FirstOffset,
 	}
 	acceptedReader := kafka.NewReader(acceptedConfig)
-	return &Replayer{dlqReader: dlqReader, accepted: acceptedReader, acceptedNew: func() messageReader { return kafka.NewReader(acceptedConfig) }, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
+	return &Replayer{dlqReader: dlqReader, dlqNew: func() messageReader { return kafka.NewReader(dlqConfig) }, accepted: acceptedReader, acceptedNew: func() messageReader { return kafka.NewReader(acceptedConfig) }, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
 // newReplayerWithReaders is the test seam: the same messageReader contract
@@ -167,10 +180,10 @@ func newReplayerWithReaders(dlq, accepted messageReader, state *ReplayState, rep
 // capture the durable log lines (e.g. the unresolvable mark) in addition to
 // reader-level behavior.
 func newReplayerWithReadersAndLogger(dlq, accepted messageReader, state *ReplayState, republish RepublishFunc, logger *log.Logger) *Replayer {
-	// acceptedNew returns the same injected fake: rounds that want events
-	// keep the fake's position unless the test replaces it (existing retry
-	// tests reset dlq.index/accepted.index manually to simulate redelivery).
-	return &Replayer{dlqReader: dlq, accepted: accepted, acceptedNew: func() messageReader { return accepted }, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
+	// dlqNew/acceptedNew return the same injected fakes: rounds keep the
+	// fakes' positions unless a test replaces them (existing retry tests
+	// reset dlq.index/accepted.index manually to simulate redelivery).
+	return &Replayer{dlqReader: dlq, dlqNew: func() messageReader { return dlq }, accepted: accepted, acceptedNew: func() messageReader { return accepted }, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
 // newReplayerWithAcceptedFactory is the REQ-1 test seam: a factory that
@@ -179,7 +192,15 @@ func newReplayerWithReadersAndLogger(dlq, accepted messageReader, state *ReplayS
 // first retained offset), which is the mechanism under test. The initial
 // reader is created eagerly, mirroring NewReplayer.
 func newReplayerWithAcceptedFactory(dlq messageReader, acceptedNew func() messageReader, state *ReplayState, republish RepublishFunc, logger *log.Logger) *Replayer {
-	return &Replayer{dlqReader: dlq, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
+	return &Replayer{dlqReader: dlq, dlqNew: func() messageReader { return dlq }, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
+}
+
+// newReplayerWithFactories is the F1 test seam: factories that hand out a
+// FRESH reader per round for BOTH the DLQ and accepted sides, modeling the
+// production per-round recreation. The initial readers are created eagerly,
+// mirroring NewReplayer.
+func newReplayerWithFactories(dlqNew, acceptedNew func() messageReader, state *ReplayState, republish RepublishFunc, logger *log.Logger) *Replayer {
+	return &Replayer{dlqReader: dlqNew(), dlqNew: dlqNew, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
 // Metrics returns (dlqRecords, acceptedScanned, replayed, republishFailures,
@@ -191,17 +212,34 @@ func (r *Replayer) Metrics() (dlqRecords, acceptedScanned, replayed, republishFa
 // RunOnce performs one replay round: drain the currently available DLQ
 // failures, recover the matching original events from the accepted topic and
 // re-publish them. Draining is time-bounded (drainTimeout of quiet topic
-// time); returns the number of events replayed this round. The accepted
-// reader is recreated at the start of every scan (resetAcceptedToFirstOffset)
-// so the round always begins at the first retained offset, never at the
-// previous round's end position.
+// time); returns the number of events replayed this round. The DLQ reader is
+// recreated at the start of every round (resetDLQToCommittedOffset) so the
+// round starts at the broker's committed offset and transiently-failed
+// records are re-delivered; the accepted reader is recreated before every
+// scan (resetAcceptedToFirstOffset) so the round always begins at the first
+// retained offset, never at the previous round's end position.
 //
-// DLQ offsets are committed per record and only for events that reached a
+// DLQ offsets are committed per record, only for events that reached a
 // durable decision (replayed, permanently rejected, unparsable, or already
-// replayed in an earlier round). A transient republish failure (or a crash
-// mid-round) leaves that record uncommitted, so the next round re-reads it
-// and retries. Replayed IDs in the state file keep re-reads idempotent.
+// replayed in an earlier round), and only below the first still-pending
+// record in each partition (the commitResolved barrier). A transient
+// republish failure (or a crash mid-round) leaves that record uncommitted
+// and never leapfrogged, so the next round's recreated DLQ session re-reads
+// it and retries. Replayed IDs in the state file keep re-reads idempotent.
 func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
+	// F1: recreate the DLQ reader so this round drains from the broker's
+	// committed offset, not from the previous round's session position.
+	// kafka-go never re-delivers a fetched record within one group session
+	// (the fetch position advances past every FetchMessage, committed or
+	// not), so without recreation a transiently-failed record left
+	// uncommitted by round N could never be retried by round N+1. The fresh
+	// session joins the group and resumes at the committed offset, and the
+	// commitResolved barrier guarantees that offset never crossed a pending
+	// record — so every pending record IS re-delivered. A close failure
+	// aborts the round: nothing is collected, marked, or committed.
+	if err := r.resetDLQToCommittedOffset(); err != nil {
+		return 0, err
+	}
 	// Each phase gets its own drain window: a shared window would let
 	// collectFailures burn the whole budget waiting for the DLQ to go quiet,
 	// leaving scanAccepted with an already-expired context (real kafka-go
@@ -220,7 +258,6 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 		}
 		return 0, nil
 	}
-	r.pending.Store(uint64(len(wanted)))
 	// REQ-1: every round re-seeks the accepted scan to the first retained
 	// offset. kafka-go honors StartOffset only at reader creation and
 	// rejects SetOffset for group readers, so the accepted reader is
@@ -229,6 +266,9 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	if err := r.resetAcceptedToFirstOffset(); err != nil {
 		return 0, err
 	}
+	// pending is set only while a scan is actually in flight, so an abort on
+	// either reset path never leaks a stale audit_dlq_pending reading.
+	r.pending.Store(uint64(len(wanted)))
 	replayed, resolved, scanErr := r.scanAccepted(ctx, wanted)
 	r.pending.Store(0)
 	if scanErr != nil && !isDrained(ctx, scanErr) {
@@ -245,6 +285,29 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 		return replayed, commitErr
 	}
 	return replayed, nil
+}
+
+// resetDLQToCommittedOffset replaces the DLQ reader so this round's
+// collectFailures starts at the broker's committed offset for the group.
+// Within one group session kafka-go never re-delivers a fetched message
+// (the fetch position advances past every FetchMessage, committed or not),
+// so a transiently-failed record left uncommitted at round N cannot be
+// re-read by round N+1 unless the reader is recreated: the fresh session
+// joins the group and resumes at the committed offset. The commitResolved
+// barrier guarantees the committed offset never crossed a pending record,
+// so every pending record is re-delivered. The accepted reader is
+// untouched: its StartOffset: FirstOffset re-scan semantics are governed by
+// resetAcceptedToFirstOffset. A close failure aborts the round so nothing
+// is collected, marked, or committed (records stay pending for the next
+// round).
+func (r *Replayer) resetDLQToCommittedOffset() error {
+	if r.dlqReader != nil {
+		if err := r.dlqReader.Close(); err != nil {
+			return fmt.Errorf("reset dlq reader: close: %w", err)
+		}
+	}
+	r.dlqReader = r.dlqNew()
+	return nil
 }
 
 // resetAcceptedToFirstOffset replaces the accepted reader with a fresh one
@@ -296,13 +359,41 @@ func wantedEvents(collected []dlqRecord) map[string]bool {
 }
 
 // commitResolved advances the DLQ reader past every collected record whose
-// event reached a durable decision: already replayed at collect time
-// (record.wanted false, including unparsable records), or resolved this
-// round (present in resolved). Records with pending events stay uncommitted.
+// event reached a durable decision (record.wanted false — already replayed
+// or unparsable at collect time — or present in resolved this round) AND
+// whose offset is below the first still-pending record in its partition.
+//
+// Kafka consumer groups track ONE committed offset per partition, and
+// kafka-go's CommitMessages commits offset+1 of the highest message passed
+// (offsetStash.merge keeps the per-partition max), so committing a later
+// record silently commits past every earlier record in the partition —
+// including a pending one, which the next round would then never re-deliver
+// (permanent loss). The barrier therefore leaves resolved records at or
+// above the first pending offset uncommitted: the next round re-reads them
+// and the state file makes the re-read idempotent (no re-republish).
 func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, resolved map[string]bool) error {
+	type partitionKey struct {
+		topic     string
+		partition int
+	}
+	// firstPending[partition] = lowest offset of a record that must stay
+	// pending; no commit may cross it.
+	firstPending := map[partitionKey]int64{}
+	for _, record := range collected {
+		if record.wanted && !resolved[record.eventID] {
+			key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
+			if offset, ok := firstPending[key]; !ok || record.message.Offset < offset {
+				firstPending[key] = record.message.Offset
+			}
+		}
+	}
 	for _, record := range collected {
 		if record.wanted && !resolved[record.eventID] {
 			continue // transient failure: keep the record pending
+		}
+		key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
+		if pending, ok := firstPending[key]; ok && record.message.Offset >= pending {
+			continue // resolved but at/above the barrier: committing would leapfrog the pending record
 		}
 		if err := r.dlqReader.CommitMessages(ctx, record.message); err != nil {
 			return err
