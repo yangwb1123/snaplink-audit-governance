@@ -1,0 +1,45 @@
+package grpcapi
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestProductionWiringStatic pins AC-3: the production construction path in
+// cmd/audit-api/main.go must compose the exported grpcapi pieces — chain
+// interceptors, keepalive parameters, health registration, SERVING after
+// bootstrap, and health drain before GracefulStop. It fails closed on
+// identifier removal. It is intentionally identifier-level (not
+// line-number-level) so formatting or line moves do not break it; AC-1 and
+// AC-2 exercise the same construction path empirically (AC-3.3 cross-check).
+func TestProductionWiringStatic(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "cmd", "audit-api", "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	text := string(source)
+	for _, want := range []string{
+		"grpc.KeepaliveParams(grpcapi.KeepaliveParams",
+		"grpc.ChainUnaryInterceptor(grpcapi.RecoveryUnaryServerInterceptor",
+		"grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor",
+		"grpcapi.RegisterHealth(",
+		"grpcapi.MarkServing(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("production construction path missing %q", want)
+		}
+	}
+	shutdown := strings.Index(text, "healthServer.Shutdown()")
+	graceful := strings.Index(text, "grpcServer.GracefulStop()")
+	if shutdown < 0 {
+		t.Error("healthServer.Shutdown() missing from shutdown path")
+	}
+	if graceful < 0 {
+		t.Error("grpcServer.GracefulStop() missing from shutdown path")
+	}
+	if shutdown >= 0 && graceful >= 0 && shutdown > graceful {
+		t.Error("healthServer.Shutdown() must precede grpcServer.GracefulStop() (FR-2.3)")
+	}
+}

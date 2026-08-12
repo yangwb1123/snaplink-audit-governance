@@ -28,6 +28,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 	"github.com/snaplink/audit-governance/internal/telemetry"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
 )
 
 // envDevAuth is the environment variable that both sets the -allow-dev-auth
@@ -128,14 +129,29 @@ func main() {
 	}
 	server := &http.Server{Addr: *listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	var grpcServer *grpc.Server
+	var healthServer *health.Server
 	var grpcListener net.Listener
 	if *grpcListen != "" {
 		grpcListener, err = net.Listen("tcp", *grpcListen)
 		if err != nil {
 			logger.Fatalf("listen gRPC: %v", err)
 		}
-		grpcServer = grpc.NewServer()
+		// Panic-recovery interceptors must stay the outermost chain entries so
+		// they also contain panics from any inner interceptors added later.
+		// Keepalive is transport-level only (FR-3.4): RPC semantics,
+		// authentication, and message framing are untouched.
+		grpcServer = grpc.NewServer(
+			grpc.KeepaliveParams(grpcapi.KeepaliveParams()),
+			grpc.KeepaliveEnforcementPolicy(grpcapi.KeepaliveEnforcementPolicy()),
+			grpc.ChainUnaryInterceptor(grpcapi.RecoveryUnaryServerInterceptor(logger)),
+			grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor(logger)),
+		)
 		grpcapi.Register(grpcServer, svc, authenticator)
+		// bootstrap() completed before server construction, so health can report
+		// SERVING immediately (FR-2.2); the handle is kept so the shutdown path
+		// can drain probes to NOT_SERVING first (FR-2.3).
+		healthServer = grpcapi.RegisterHealth(grpcServer)
+		grpcapi.MarkServing(healthServer)
 		go func() {
 			logger.Printf("grpc_listen=%s", *grpcListen)
 			if serveErr := grpcServer.Serve(grpcListener); serveErr != nil {
@@ -159,6 +175,11 @@ func main() {
 		_ = tracer.Shutdown(ctx)
 	}
 	if grpcServer != nil {
+		// Drain the health service before GracefulStop (FR-2.3) so probes and
+		// load balancers observe NOT_SERVING while in-flight RPCs drain.
+		if healthServer != nil {
+			healthServer.Shutdown()
+		}
 		grpcServer.GracefulStop()
 	}
 	_ = st.Close()
