@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"path/filepath"
 	"strings"
@@ -30,12 +31,18 @@ type fakeReplayReader struct {
 	// fetchErr is returned once the queue is exhausted instead of blocking,
 	// simulating a transport failure mid-scan.
 	fetchErr error
+	// fetchLog, when non-nil, records every fetched message offset (T2 round
+	// re-fetch proof).
+	fetchLog *[]int64
 }
 
 func (f *fakeReplayReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
 	if f.index < len(f.messages) {
 		message := f.messages[f.index]
 		f.index++
+		if f.fetchLog != nil {
+			*f.fetchLog = append(*f.fetchLog, message.Offset)
+		}
 		if f.delay > 0 {
 			select {
 			case <-time.After(f.delay):
@@ -59,6 +66,18 @@ func (f *fakeReplayReader) CommitMessages(_ context.Context, msgs ...kafka.Messa
 
 func (f *fakeReplayReader) Config() kafka.ReaderConfig { return kafka.ReaderConfig{Topic: f.topic} }
 func (f *fakeReplayReader) Close() error               { return nil }
+
+// freshAcceptedReader returns a factory that hands out a NEW fake reader per
+// call with the same queue, modeling the production per-round accepted-reader
+// recreation: a fresh reader starts at the first retained offset (index 0)
+// even though the previous round's reader consumed the whole queue. fetchLog,
+// when non-nil, is shared across the readers so a test can prove round N+1
+// re-fetched offsets round N already consumed.
+func freshAcceptedReader(messages []kafka.Message, fetchLog *[]int64) func() messageReader {
+	return func() messageReader {
+		return &fakeReplayReader{topic: TopicAccepted, messages: messages, fetchLog: fetchLog}
+	}
+}
 
 func dlqMessage(eventID string) kafka.Message {
 	failure := Failure{EventID: eventID, ErrorCode: ErrorCodeAttemptsExhausted, ErrorMessage: "boom"}
@@ -638,4 +657,204 @@ func TestReplayDrainedVsCutoffBoundary(t *testing.T) {
 			t.Fatalf("round 2 replayed=%d evt-y=%v commits=%d, want 1/true/3", count, state.Replayed["evt-y"], len(dlq.commits))
 		}
 	})
+}
+
+// T1 / AC-1 (REQ-3): daemon-mode two-round regression. Round 1 resolves
+// evt-a; round 2 collects a NEW DLQ record for evt-b whose accepted original
+// predates round 1's scan end (it was consumed, not wanted, in round 1). The
+// accepted reader must be recreated per round, so round 2 re-scans from the
+// first retained offset and evt-b is actually re-published — NOT logged
+// unresolvable and dropped. Fails pre-fix: without the reset, round 2's scan
+// starts where round 1 ended, evt-b is marked unresolvable, the DLQ offset is
+// committed, and republished stays 1.
+func TestReplayDaemonRound2RepublishesOlderAcceptedOriginal(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-a")}}
+	// evt-b's original is at a higher offset than evt-a's: both are consumed
+	// by round 1's scan, so evt-b predates round 1's scan end.
+	acceptedQueue := []kafka.Message{acceptedMessage("evt-a"), acceptedMessage("evt-b")}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	republished := 0
+	replayer := newReplayerWithAcceptedFactory(dlq, freshAcceptedReader(acceptedQueue, nil), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 1 {
+		t.Fatalf("round 1 replayed=%d republished=%d, want 1/1", count, republished)
+	}
+	if !state.Replayed["evt-a"] {
+		t.Fatal("round 1 must mark evt-a replayed")
+	}
+	if len(dlq.commits) != 1 {
+		t.Fatalf("round 1 DLQ commits=%d, want 1", len(dlq.commits))
+	}
+
+	// Round 2: a NEW DLQ record for evt-b arrives. The DLQ fake's persistent
+	// index models the real reader's advanced position; accepted.index is
+	// deliberately NOT reset — the per-round accepted-reader recreation is
+	// exactly what must make evt-b's older original reachable again.
+	dlq.messages = append(dlq.messages, dlqMessage("evt-b"))
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 2 {
+		t.Fatalf("round 2 replayed=%d republished=%d, want 1/2 (evt-b must be actually re-published, not marked unresolvable)", count, republished)
+	}
+	if !state.Replayed["evt-b"] {
+		t.Fatal("evt-b must be marked replayed")
+	}
+	if len(dlq.commits) != 2 {
+		t.Fatalf("DLQ commits=%d, want 2 (both records reach a durable decision)", len(dlq.commits))
+	}
+	if logged := logs.String(); strings.Contains(logged, "unresolvable") {
+		t.Fatalf("round 2 must not log unresolvable for evt-b, got:\n%s", logged)
+	}
+}
+
+// T2 / AC-2 (REQ-4): round 2 re-fetches every message round 1 already
+// consumed, proving the accepted reader was re-seeked to the first retained
+// offset instead of resuming at round 1's end. Both proofs are asserted:
+// acceptedSeen grows by N again (3 -> 6) and round 2's first fetched offset
+// equals round 1's first fetched offset.
+func TestReplayRound2RefetchesRound1Messages(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-1")}}
+	acceptedQueue := []kafka.Message{
+		{Key: []byte("evt-1"), Value: []byte(`{"event_id":"evt-1","source_system":"crm"}`), Partition: 0, Offset: 1},
+		{Key: []byte("evt-2"), Value: []byte(`{"event_id":"evt-2","source_system":"crm"}`), Partition: 0, Offset: 2},
+		{Key: []byte("other"), Value: []byte(`{"event_id":"other","source_system":"crm"}`), Partition: 0, Offset: 3},
+	}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fetchLog []int64
+	republished := 0
+	replayer := newReplayerWithAcceptedFactory(dlq, freshAcceptedReader(acceptedQueue, &fetchLog), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 1 {
+		t.Fatalf("round 1 replayed=%d republished=%d, want 1/1", count, republished)
+	}
+	if got := replayer.acceptedSeen.Load(); got != 3 {
+		t.Fatalf("round 1 acceptedSeen=%d, want 3", got)
+	}
+
+	// Round 2 wants evt-2, whose original (offset 2) was consumed in round 1.
+	dlq.messages = append(dlq.messages, dlqMessage("evt-2"))
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 2 {
+		t.Fatalf("round 2 replayed=%d republished=%d, want 1/2", count, republished)
+	}
+	if got := replayer.acceptedSeen.Load(); got != 6 {
+		t.Fatalf("round 2 acceptedSeen=%d, want 6 (round 2 must re-fetch all 3 messages from the first retained offset)", got)
+	}
+	if !state.Replayed["evt-2"] {
+		t.Fatal("evt-2 must be replayed")
+	}
+	if len(fetchLog) < 6 {
+		t.Fatalf("fetchLog=%v, want 6 fetches across two rounds", fetchLog)
+	}
+	if fetchLog[0] != fetchLog[3] {
+		t.Fatalf("round 2 first fetched offset=%d, want round 1 first offset %d (re-seek to the first retained offset)", fetchLog[3], fetchLog[0])
+	}
+}
+
+// T3 / AC-3 (REQ-5): daemon mode (one Replayer, consecutive rounds with the
+// per-round reset) and -once mode (a fresh Replayer per round, mirroring
+// main.go's -once fresh-reader pattern) must produce identical OUTCOMES for
+// identical DLQ input referencing older accepted messages. The assertion is
+// on republished outcomes / state marks / DLQ commits / absence of the
+// unresolvable log — NOT the raw replayed count: unresolvable marks inflate
+// the daemon count, so a count-only comparison passes on buggy code.
+func TestReplayDaemonEqualsOnceOutcomes(t *testing.T) {
+	daemonStatePath := filepath.Join(t.TempDir(), "daemon-state.json")
+	onceStatePath := filepath.Join(t.TempDir(), "once-state.json")
+	acceptedQueue := []kafka.Message{acceptedMessage("evt-a"), acceptedMessage("evt-b")}
+
+	// Scenario (a): daemon mode — one Replayer, two consecutive rounds.
+	daemonState, err := LoadReplayState(daemonStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonDLQ := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-a")}}
+	daemonRepublished := 0
+	daemonLogs := &bytes.Buffer{}
+	daemon := newReplayerWithAcceptedFactory(daemonDLQ, freshAcceptedReader(acceptedQueue, nil), daemonState, func(ctx context.Context, key, value []byte) error {
+		daemonRepublished++
+		return nil
+	}, log.New(daemonLogs, "", 0))
+	daemon.drainTimeout = 20 * time.Millisecond
+	if _, err := daemon.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	daemonDLQ.messages = append(daemonDLQ.messages, dlqMessage("evt-b"))
+	if _, err := daemon.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario (b): -once mode — a fresh Replayer (fresh readers) per round,
+	// sharing the -state file across runs exactly like the binary does.
+	onceRepublished := 0
+	onceLogs := &bytes.Buffer{}
+	onceCommits := 0
+	for round, dlqInput := range [][]kafka.Message{{dlqMessage("evt-a")}, {dlqMessage("evt-b")}} {
+		onceState, err := LoadReplayState(onceStatePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		onceDLQ := &fakeReplayReader{topic: TopicDLQ, messages: dlqInput}
+		once := newReplayerWithAcceptedFactory(onceDLQ, freshAcceptedReader(acceptedQueue, nil), onceState, func(ctx context.Context, key, value []byte) error {
+			onceRepublished++
+			return nil
+		}, log.New(onceLogs, "", 0))
+		once.drainTimeout = 20 * time.Millisecond
+		if _, err := once.RunOnce(context.Background()); err != nil {
+			t.Fatalf("once round %d: %v", round+1, err)
+		}
+		onceCommits += len(onceDLQ.commits)
+	}
+
+	// Outcome equivalence — republished deliveries, state marks, DLQ commits,
+	// and the absence of unresolvable marks. These fail on buggy code (the
+	// daemon marks evt-b unresolvable instead of re-publishing it), while the
+	// raw replayed counts (2 == 2) would not.
+	if daemonRepublished != 2 || onceRepublished != 2 {
+		t.Fatalf("republished daemon=%d once=%d, want 2/2 (both events actually delivered in both modes)", daemonRepublished, onceRepublished)
+	}
+	if !daemonState.Replayed["evt-a"] || !daemonState.Replayed["evt-b"] {
+		t.Fatalf("daemon state=%v, want {evt-a, evt-b}", daemonState.Replayed)
+	}
+	onceStateFinal, err := LoadReplayState(onceStatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onceStateFinal.Replayed["evt-a"] || !onceStateFinal.Replayed["evt-b"] {
+		t.Fatalf("once state=%v, want {evt-a, evt-b}", onceStateFinal.Replayed)
+	}
+	if len(daemonDLQ.commits) != 2 || onceCommits != 2 {
+		t.Fatalf("DLQ commits daemon=%d once=%d, want 2/2", len(daemonDLQ.commits), onceCommits)
+	}
+	if strings.Contains(daemonLogs.String(), "unresolvable") || strings.Contains(onceLogs.String(), "unresolvable") {
+		t.Fatalf("neither mode may mark unresolvable:\ndaemon:\n%s\nonce:\n%s", daemonLogs.String(), onceLogs.String())
+	}
 }

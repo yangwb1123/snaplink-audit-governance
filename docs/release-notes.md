@@ -1,5 +1,35 @@
 # Release Notes
 
+## 2026-08-12 — 常驻 DLQ 回放每轮重建 accepted reader，从首个保留偏移重新扫描（audit-kafka-dlq-replay）
+
+**写给运营（行为变化）：**
+
+- **修复一个静默数据丢失缺陷**：常驻（daemon）模式的 `audit-kafka-dlq-replay` 之前复用同一个
+  accepted reader 跨轮扫描，kafka-go 只在 reader 创建时应用 `StartOffset: FirstOffset`，`FetchMessage`
+  每次调用都会推进本地取数位置（与提交无关），因此第 N+1 轮从第 N 轮结束的位置继续扫描——引用
+  早于第 1 轮扫描终点 accepted 原消息的旧 DLQ 事件会被 `unresolvable` 标记并从状态文件/ DLQ 提交
+  中永久丢弃（DLQ 偏移被提交，失败证据只剩状态文件里的标记）。`-once` 模式因每轮新建 reader 而不受影响。
+- **现在每轮扫描前重建 accepted reader（同一 `-accepted` group、`StartOffset: FirstOffset`、从不提交）**，
+  保证每轮都从首个保留偏移开始扫描；旧事件只要仍在保留期内即可恢复并重新发布。DLQ reader 不变
+  （group 成员、手动提交、“失败只消费一次”语义均保留）。无配置/无新 flag。
+- 已受影响数据：修复前被误标 unresolvable 且 DLQ 偏移已提交的事件无法自动恢复；如需人工恢复，
+  从状态文件中提取修复前窗口内的事件 ID，在 accepted topic 中按 event_id 查找原消息后重新发布
+  （原消息仍在保留期内）。回滚只需部署旧二进制；回滚窗口内缺陷会复现。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`Replayer` 新增 `acceptedNew func() messageReader` 工厂字段（生产路径
+  用与 `NewReplayer` 相同的 `kafka.ReaderConfig` 创建）；`RunOnce` 在 `scanAccepted` 前调用新的
+  `resetAcceptedToFirstOffset()`（REQ-1），关闭旧 accepted reader 并以相同配置新建（kafka-go 对
+  group reader 的 `SetOffset` 返回 `errNotAvailableWithGroup`，重建是唯一 seek 机制；DLQ reader 不动）。
+  无 wanted 事件的轮次提前返回、不重建不扫描。文档注释改为说明机制（REQ-2）。
+- `internal/kafka/replay_test.go`：新增 T1/T2/T3（两个 `RunOnce` 轮次的旧事件恢复、第 2 轮重取第 1 轮
+  已消费消息、daemon ≡ `-once` 结果等价——断言重发布/状态/DLQ 提交结果而非裸计数，因 unresolvable
+  标记会虚增 `replayed` 计数）；`fakeReplayReader` 增加可选 fetchLog，新增 fresh-factory 测试缝。
+- `checks/replay_round_reset.py`（新 grep 门，接入 `cli.py` `cmd_quality`）：`RunOnce` 必须在
+  `scanAccepted` 之前包含 `resetAcceptedToFirstOffset`/`seekAcceptedToStart` 调用，结构性防止回归；
+  `checks/test_replay_round_reset.py` 覆盖缺省/顺序/解析失败/当前树。修复前 T1–T3 与门均失败，修复后通过。
+
 ## 2026-08-12 — 消费端拒绝单值外/尾随垃圾 Kafka 消息（audit-kafka-consumer）
 
 **写给运营（行为变化）：**
