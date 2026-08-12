@@ -31,12 +31,23 @@ type Update struct {
 	APIStatus        string
 }
 
+// CorruptRecord reports a scanned row whose payload failed to decode into
+// domain.Event. The relay dead-letters it; it is never delivered.
+type CorruptRecord struct {
+	ID       int64
+	Attempts int
+	Err      error
+}
+
 // Store is the outbox persistence view required by Relay. PostgresStore is
 // the production implementation; tests use an in-memory fake.
 type Store interface {
 	// ListPending returns up to limit due records (status pending and
-	// next_attempt_at reached), ordered by retry time.
-	ListPending(ctx context.Context, limit int) ([]Record, error)
+	// next_attempt_at reached), ordered by retry time, plus a report of
+	// scanned rows whose payloads failed to decode into domain.Event.
+	// Decode failures no longer abort the batch: the corrupt rows are
+	// excluded from records and reported for the relay to dead-letter.
+	ListPending(ctx context.Context, limit int) ([]Record, []CorruptRecord, error)
 	// Update applies one delivery outcome under the optimistic condition
 	// status = 'pending'. It returns false when another Relay instance
 	// already completed the record; the audit API idempotency absorbs the
@@ -116,13 +127,19 @@ func (r *Relay) logf(format string, args ...any) {
 }
 
 // RunOnce processes one batch of due records and returns how many records
-// were handled (successfully or failed).
+// were handled (successfully, failed, or quarantined as corrupt). Corrupt
+// rows are dead-lettered first so they can never wedge the batch; delivery
+// of the decodable records is unchanged.
 func (r *Relay) RunOnce(ctx context.Context) (int, error) {
-	records, err := r.Store.ListPending(ctx, r.batchSize())
+	records, corrupt, err := r.Store.ListPending(ctx, r.batchSize())
 	if err != nil {
 		return 0, err
 	}
 	handled := 0
+	for _, c := range corrupt {
+		r.quarantine(ctx, c)
+		handled++
+	}
 	for _, record := range records {
 		if err := r.Deliver(ctx, record.Event); err != nil {
 			r.fail(ctx, record, err)
@@ -132,6 +149,29 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 		handled++
 	}
 	return handled, nil
+}
+
+// quarantine dead-letters a corrupt payload. A payload that cannot decode
+// is permanently undeliverable regardless of MaxAttempts, so it bypasses
+// the retry classification in fail. Best-effort: a failed or lost Update
+// is logged and the row is re-reported on the next poll.
+func (r *Relay) quarantine(ctx context.Context, corrupt CorruptRecord) {
+	now := r.now()
+	applied, err := r.Store.Update(ctx, corrupt.ID, Update{
+		Status:        StatusFailed,
+		Attempts:      corrupt.Attempts + 1,
+		NextAttemptAt: now,
+		LastError:     corrupt.Err.Error(),
+	})
+	if err != nil {
+		r.logf("outbox id=%d corrupt payload quarantine failed: %v", corrupt.ID, err)
+		return
+	}
+	if applied {
+		r.logf("outbox id=%d corrupt payload quarantined: %v", corrupt.ID, corrupt.Err)
+	} else {
+		r.logf("outbox id=%d corrupt payload already handled by another instance", corrupt.ID)
+	}
 }
 
 func (r *Relay) succeed(ctx context.Context, record Record) {

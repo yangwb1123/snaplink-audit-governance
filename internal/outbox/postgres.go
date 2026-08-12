@@ -1,10 +1,8 @@
 package outbox
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -29,14 +27,19 @@ WHERE status = 'pending' AND next_attempt_at <= now()
 ORDER BY next_attempt_at, id
 LIMIT $1`
 
-// ListPending returns due pending records ordered by retry time.
-func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, error) {
+// ListPending returns due pending records ordered by retry time, plus a
+// report of scanned rows whose payloads failed to decode into domain.Event.
+// Decode failures never abort the batch: the corrupt row is excluded from
+// records and reported (status stays pending; quarantine is the relay's
+// job, REQ-1). Query-level and row-scan errors still abort.
+func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, []CorruptRecord, error) {
 	rows, err := p.db.QueryContext(ctx, listPendingQuery, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list pending outbox: %w", err)
+		return nil, nil, fmt.Errorf("list pending outbox: %w", err)
 	}
 	defer rows.Close()
 	var records []Record
+	var corrupt []CorruptRecord
 	for rows.Next() {
 		var record Record
 		var payload []byte
@@ -45,23 +48,28 @@ func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, e
 			&record.Event.IdempotencyKey, &payload, &record.Event.OccurredAt,
 			&record.Status, &record.Attempts, &record.NextAttemptAt, &lastError,
 			&record.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan outbox record: %w", err)
+			return nil, nil, fmt.Errorf("scan outbox record: %w", err)
 		}
 		record.LastError = lastError.String
-		// UseNumber: the relay re-ingests the event, so payload numbers must
-		// survive as exact json.Number values to keep the derived digest
-		// identical to the original ingest digest.
-		decoder := json.NewDecoder(bytes.NewReader(payload))
-		decoder.UseNumber()
-		if err := decoder.Decode(&record.Event); err != nil {
-			return nil, fmt.Errorf("decode outbox payload id=%d: %w", record.ID, err)
+		// decodeEvent (sdk.go) preserves number literals via UseNumber so
+		// the re-ingested digest matches the original ingest digest; the
+		// decode path is shared with the sdk read-back, never duplicated.
+		event, err := decodeEvent(payload)
+		if err != nil {
+			corrupt = append(corrupt, CorruptRecord{
+				ID:       record.ID,
+				Attempts: record.Attempts,
+				Err:      fmt.Errorf("decode outbox payload id=%d: %w", record.ID, err),
+			})
+			continue
 		}
+		record.Event = event
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return records, nil
+	return records, corrupt, nil
 }
 
 const updateQuery = `

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -47,9 +48,12 @@ VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, now(), 'pending', 0, now() - 
 	}
 
 	store := NewPostgresStore(db)
-	records, err := store.ListPending(ctx, 10)
+	records, corrupt, err := store.ListPending(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListPending: %v", err)
+	}
+	if len(corrupt) != 0 {
+		t.Fatalf("ListPending corrupt=%+v, want none", corrupt)
 	}
 	if len(records) != 1 || records[0].Event.EventID != "pg-relay-1" {
 		t.Fatalf("ListPending records=%+v", records)
@@ -63,9 +67,12 @@ VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, now(), 'pending', 0, now() - 
 	if !applied {
 		t.Fatal("first Update must apply")
 	}
-	again, err := store.ListPending(ctx, 10)
+	again, corrupt, err := store.ListPending(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(corrupt) != 0 {
+		t.Fatalf("ListPending corrupt=%+v, want none", corrupt)
 	}
 	if len(again) != 0 {
 		t.Fatalf("delivered record still pending: %+v", again)
@@ -85,9 +92,9 @@ VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, now(), 'pending', 0, now() - 
 VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, now(), 'pending', 0, now() - interval '1 minute')`, string(payload)); err != nil {
 		t.Fatalf("insert second: %v", err)
 	}
-	records, err = store.ListPending(ctx, 10)
-	if err != nil || len(records) != 1 {
-		t.Fatalf("second ListPending=%d err=%v", len(records), err)
+	records, corrupt, err = store.ListPending(ctx, 10)
+	if err != nil || len(corrupt) != 0 || len(records) != 1 {
+		t.Fatalf("second ListPending=%d corrupt=%d err=%v", len(records), len(corrupt), err)
 	}
 	applied, err = store.Update(ctx, records[0].ID, Update{Status: StatusFailed, Attempts: 1, NextAttemptAt: time.Now().UTC(), LastError: "audit api returned 400"})
 	if err != nil || !applied {
@@ -270,5 +277,113 @@ VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, now(), 'pending', 0, now() 
 	}
 	if n := countOutbox(); n != 1 {
 		t.Fatalf("S8 concurrent inserts must collapse to one row, got %d", n)
+	}
+}
+
+// TestPostgresStoreCorruptPayloadWedgeBreak (T4+T6, AC-1/AC-2) seeds one
+// row with a payload that is valid JSON but fails to unmarshal into
+// domain.Event (REQ-1/F1: '[]'::jsonb) plus valid rows, and verifies the
+// relay dead-letters the corrupt row and keeps delivering. Skipped unless
+// AUDIT_TEST_POSTGRES_DSN points at a disposable database.
+func TestPostgresStoreCorruptPayloadWedgeBreak(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_POSTGRES_DSN to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+		t.Fatalf("reset outbox: %v", err)
+	}
+
+	// One corrupt row ('[]'::jsonb decodes without error into a slice, then
+	// fails Event unmarshal) + two valid rows. Never seed null/{ } payloads:
+	// they decode into a zero Event without error (REQ-7 limitation).
+	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
+VALUES ('corrupt-1', 'demo', 'corrupt-idem-1', '[]'::jsonb, now(), 'pending', 0, now() - interval '1 minute')`); err != nil {
+		t.Fatalf("insert corrupt: %v", err)
+	}
+	validPayload := func(id int) []byte {
+		payload, err := json.Marshal(domain.Event{EventID: fmt.Sprintf("corrupt-valid-%d", id), TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("corrupt-valid-idem-%d", id)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	for id := 1; id <= 2; id++ {
+		if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
+VALUES ($1, 'demo', $2, $3, now(), 'pending', 0, now() - interval '1 minute')`, fmt.Sprintf("corrupt-valid-%d", id), fmt.Sprintf("corrupt-valid-idem-%d", id), string(validPayload(id))); err != nil {
+			t.Fatalf("insert valid %d: %v", id, err)
+		}
+	}
+
+	store := NewPostgresStore(db)
+	records, corrupt, err := store.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(records) != 2 || len(corrupt) != 1 {
+		t.Fatalf("ListPending records=%d corrupt=%d, want 2/1", len(records), len(corrupt))
+	}
+	if corrupt[0].Attempts != 0 {
+		t.Fatalf("corrupt attempts=%d, want 0 as scanned", corrupt[0].Attempts)
+	}
+	if !strings.Contains(corrupt[0].Err.Error(), "decode outbox payload id=") {
+		t.Fatalf("corrupt err=%v, want decode outbox payload error", corrupt[0].Err)
+	}
+
+	// RunOnce must deliver the 2 valid rows and dead-letter the corrupt one.
+	delivered := 0
+	relay := &Relay{
+		Store:     store,
+		BatchSize: 10,
+		Deliver: func(_ context.Context, event domain.Event) error {
+			delivered++
+			return nil
+		},
+	}
+	handled, err := relay.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if handled != 3 || delivered != 2 {
+		t.Fatalf("RunOnce handled=%d delivered=%d, want 3/2", handled, delivered)
+	}
+	var rowStatus, lastError string
+	if err := db.QueryRowContext(ctx, `SELECT status, last_error FROM audit_outbox WHERE event_id='corrupt-1'`).Scan(&rowStatus, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if rowStatus != StatusFailed {
+		t.Fatalf("corrupt row status=%s, want failed", rowStatus)
+	}
+	if !strings.Contains(lastError, "decode outbox payload id=") {
+		t.Fatalf("corrupt row last_error=%q, want decode error", lastError)
+	}
+
+	// T6: the quarantined row never reappears; only the remaining due valid
+	// rows are returned, and the relay keeps making progress.
+	again, corruptAgain, err := store.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("second ListPending: %v", err)
+	}
+	if len(corruptAgain) != 0 {
+		t.Fatalf("second ListPending corrupt=%+v, want none after quarantine", corruptAgain)
+	}
+	if len(again) != 0 {
+		t.Fatalf("second ListPending records=%d, want 0 (valid rows already delivered)", len(again))
+	}
+	handled, err = relay.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if handled != 0 {
+		t.Fatalf("second RunOnce handled=%d, want 0", handled)
 	}
 }

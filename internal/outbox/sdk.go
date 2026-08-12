@@ -206,7 +206,8 @@ func classifyContentConflict(ctx context.Context, tx Execer, event domain.Event,
 }
 
 // decodeEvent decodes a stored outbox payload preserving number literals, so
-// the derived digest matches the original ingest digest (see ListPending).
+// the derived digest matches the original ingest digest (used by both the
+// sdk read-back and PostgresStore.ListPending).
 func decodeEvent(payload []byte) (domain.Event, error) {
 	var event domain.Event
 	decoder := json.NewDecoder(bytes.NewReader(payload))

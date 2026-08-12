@@ -1,5 +1,47 @@
 # Release Notes
 
+## 2026-08-12 — 单个损坏 audit_outbox payload 不再永久卡死 relay（audit-outbox-relay）
+
+**写给运营（行为变化）：**
+
+- **修复一个永久性卡死缺陷**：之前只要 `audit_outbox` 里有一条 payload 无法解码成事件（例如
+  `'[]'::jsonb`、`'"text"'::jsonb`、`'42'::jsonb`——jsonb 列保证语法合法，但结构上无法反序列化为
+  `domain.Event`），`ListPending` 就会对整个批次返回 `decode outbox payload id=<id>: …` 错误，
+  `RunOnce` 返回 0 条处理，`main` 每轮重试同样失败——该行永远保持 `status='pending'`（不触发任何
+  UPDATE），因此**所有租户的事件投递无限期停摆**，只能靠人工 SQL 清理。
+- **现在解码失败的坏行会被自动隔离（dead-letter）**：`ListPending` 跳过坏行继续扫描并把它们报告给
+  relay；relay 在投递任何有效记录之前先把坏行置为 `status='failed'`（`attempts+1`，`last_error` 写入
+  原始 `decode outbox payload id=<id>: …` 错误文本），然后照常投递本批次其余有效记录。坏行一旦
+  `failed` 便不再被 `WHERE status='pending'` 选中，卡死被永久打破——**无需人工 SQL 清理**，新版本首个
+  poll 即自动隔离存量卡死行（可用 `-once` 立即冲刷）。
+- **隔离是尽力而为**：若隔离 UPDATE 失败（数据库瞬时故障），仅记录日志，坏行保持 `pending` 下轮
+  重报，有效记录照常投递；并发 relay 实例通过乐观锁 `WHERE status='pending'` 幂等去重。隔离绕过
+  重试/`MaxAttempts` 分类（解码损坏是永久不可投递，重试无意义）。
+- **已知限制（REQ-7，有意不改）**：payload 为 `null` 或 `{}` 时 `json.Decode` 成功得到一个零值事件，
+  不会被隔离，仍走原投递路径（这是另一个缺陷，见工程文档，不在本次范围内）。
+- 观测签名：`run: decode outbox payload …` 日志不再出现；替代为 `corrupt payload quarantined` 日志与
+  `status='failed'` 行（`idx_audit_outbox_failed` 已为恢复工具预建索引）。回滚只需部署旧二进制；
+  回滚窗口内坏行会再次卡死投递，重新部署新版本后自动恢复。
+
+**写给开发（实现变化）：**
+
+- `internal/outbox/relay.go`：新增导出类型 `CorruptRecord{ID, Attempts, Err}`；`Store.ListPending` 签名
+  改为 `([]Record, []CorruptRecord, error)`（编译期强制更新全部实现者/调用点：`PostgresStore`、测试
+  double、relay 与 3 处测试调用）；`RunOnce` 先隔离坏行再投递有效记录，`handled = len(records) +
+  len(corrupt)`（与既有“handled (成功或失败)”契约一致）；新增私有方法 `quarantine`，直接以
+  `StatusFailed` 隔离、绕过 `r.fail` 的重试分类，Update 失败/返回 false 仅记日志不阻断。
+- `internal/outbox/postgres.go`：`ListPending` 保持只读，扫描时收集坏行到 `CorruptRecord` 报告并继续
+  下一行；复用共享解码助手 `decodeEvent`（`sdk.go`，保留 `UseNumber` 保证摘要一致），错误文本
+  `decode outbox payload id=%d: %w` 逐字节不变；查询级/行扫描错误仍照旧中止批次（不在范围内）。
+- `internal/outbox/sdk.go`：`decodeEvent` 文档注释同步。`cmd/audit-outbox-relay/main.go` 无改动
+  （REQ-6，runOnce 契约不变，只是不再收到卡死错误）。
+- 测试：`relay_test.go` 新增 T1 `TestRelayRunOnceQuarantinesCorruptAndDeliversValid`、T2
+  `TestRelayRunOnceQuarantinesOnlyCorruptBatch`、T3 `TestRelayRunOnceQuarantineFailureDoesNotBlockDelivery`、
+  T5 `TestRelayRunOnceProgressAfterQuarantine`（+ 混合到期行进度测试），`fakeStore` 新增 `corrupt`/
+  `updateErr` 映射与 `withCorrupt`/`withUpdateErr` 助手；`postgres_test.go` 新增 DSN 门控的 T4/T6
+  `TestPostgresStoreCorruptPayloadWedgeBreak`（种子用 `'[]'::jsonb`，禁用 `null`/`{}`），既有 3 处
+  `ListPending` 调用点补 `corrupt` 断言。`python3 cli.py quality` 全绿（gofmt/vet/单测/race/构建）。
+
 ## 2026-08-12 — 修复 DLQ 中批记录被后续提交跳跃丢失 + 每轮重建 DLQ reader（audit-kafka-dlq-replay）
 
 **写给运营（行为变化）：**
