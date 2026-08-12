@@ -9,12 +9,14 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/fsutil"
 	"github.com/snaplink/audit-governance/internal/outbox"
 )
 
@@ -29,6 +31,13 @@ type RepublishFunc func(ctx context.Context, key, value []byte) error
 type ReplayState struct {
 	Replayed map[string]bool `json:"replayed"`
 	path     string
+	// syncFile/syncDir are the durability hooks used by Mark (defaults:
+	// fsutil.SyncFile / fsutil.SyncDir). They are unexported and never
+	// marshaled, so the persisted bytes stay byte-identical; same-package
+	// tests replace them to record the ordered sync set or fault-inject a
+	// step (mirrors archive.FileStore.syncDir / store.fileBackend.syncDir).
+	syncFile func(path string) error
+	syncDir  func(path string) error
 }
 
 // LoadReplayState reads the state file; a missing or empty file starts an
@@ -71,10 +80,44 @@ func (s *ReplayState) Mark(eventID string) error {
 	}
 	temp := s.path + ".tmp"
 	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
+		_ = os.Remove(temp)
 		return fmt.Errorf("write replay state: %w", err)
 	}
+	// fsync the temp contents BEFORE the rename: the replay-marks file is
+	// the idempotency ledger for DLQ recovery, so the rename must never
+	// expose a temp file whose bytes were not flushed (a crash could
+	// otherwise leave a zeroed or torn target, which makes LoadReplayState
+	// fail and cmd/audit-kafka-dlq-replay exit at boot). Any failure before
+	// the rename removes the temp best-effort: the previously persisted
+	// state stays authoritative, decodable, and free of stale .tmp files.
+	syncFile := s.syncFile
+	if syncFile == nil {
+		syncFile = fsutil.SyncFile
+	}
+	if err := syncFile(temp); err != nil {
+		_ = os.Remove(temp)
+		return fmt.Errorf("sync replay state: %w", err)
+	}
 	if err := os.Rename(temp, s.path); err != nil {
+		_ = os.Remove(temp)
 		return fmt.Errorf("rename replay state: %w", err)
+	}
+	// The renamed directory entry must be durable before Mark reports
+	// success (the same crash window the archive and store packages closed):
+	// a power failure after rename can otherwise revert the entry, silently
+	// un-marking committed replay decisions and re-triggering re-replays on
+	// the next accepted-topic scan. The state file is flat in one
+	// pre-existing directory, so the parent-dir sync is exactly one
+	// directory. A dir-sync failure returns an error but deliberately KEEPS
+	// the new target content: the in-memory map already holds the mark and
+	// both old and new content decode, so the next Mark retries the
+	// durability step (removing the target would lose committed marks).
+	syncDir := s.syncDir
+	if syncDir == nil {
+		syncDir = fsutil.SyncDir
+	}
+	if err := syncDir(filepath.Dir(s.path)); err != nil {
+		return fmt.Errorf("sync replay state directory: %w", err)
 	}
 	return nil
 }

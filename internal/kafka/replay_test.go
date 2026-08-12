@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -225,6 +227,614 @@ func TestReplayPersistsStateAcrossRestarts(t *testing.T) {
 	if !reloaded.Replayed["evt-done"] {
 		t.Fatal("replayed set lost across restart")
 	}
+}
+
+// AC-1 (REQ-1/REQ-2): Mark fsyncs the temp file contents BEFORE the rename
+// and the parent directory AFTER the rename. The recorded-hook proof is
+// deterministic (no privileges, no power-loss simulation): the syncFile hook
+// must observe the temp file existing on disk, the syncDir hook must observe
+// the TARGET file existing and decoding to the just-marked event (so the
+// rename provably ran between the two hooks), and the recorded sequence is
+// exactly [file:<temp>, dir:<parent>]. Fails pre-fix: pre-fix Mark performed
+// zero syncs, so the recorded log would be empty.
+func TestReplayStateMarkSyncsFileBeforeRenameAndDirAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	state, err := LoadReplayState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	state.syncFile = func(p string) error {
+		if p != path+".tmp" {
+			t.Errorf("syncFile path=%s, want temp %s", p, path+".tmp")
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("syncFile must observe the temp file existing: %v", err)
+		}
+		order = append(order, "file:"+p)
+		return nil
+	}
+	state.syncDir = func(p string) error {
+		if p != filepath.Dir(path) {
+			t.Errorf("syncDir path=%s, want parent %s", p, filepath.Dir(path))
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("syncDir must observe the renamed target existing: %v", err)
+		}
+		var disk ReplayState
+		if err := json.Unmarshal(raw, &disk); err != nil {
+			t.Errorf("syncDir must observe a decodable target: %v", err)
+		}
+		if !disk.Replayed["evt-1"] {
+			t.Error("syncDir must observe the target holding the just-marked event")
+		}
+		order = append(order, "dir:"+p)
+		return nil
+	}
+	if err := state.Mark("evt-1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"file:" + path + ".tmp", "dir:" + filepath.Dir(path)}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("sync order = %v, want %v (file fsync must precede rename, dir fsync must follow)", order, want)
+	}
+	reloaded, err := LoadReplayState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Replayed["evt-1"] {
+		t.Fatal("marked event lost after reload")
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf(".tmp left behind after successful Mark: %v", err)
+	}
+
+	t.Run("production defaults", func(t *testing.T) {
+		// Nil hooks resolve to the real fsutil.SyncFile/fsutil.SyncDir on a
+		// real tempdir (mirrors TestSyncDirChainNilSyncDir).
+		realPath := filepath.Join(t.TempDir(), "state.json")
+		realState, err := LoadReplayState(realPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := realState.Mark("evt-2"); err != nil {
+			t.Fatalf("Mark with default hooks: %v", err)
+		}
+		reloaded, err := LoadReplayState(realPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reloaded.Replayed["evt-2"] {
+			t.Fatal("marked event lost with default hooks")
+		}
+	})
+}
+
+// AC-2 (REQ-5): LoadReplayState tolerates every crash leftover a crashed
+// Mark can leave. A stale .tmp is ignored — never read, parsed, or deleted —
+// alongside a valid state file; a zero-length or whitespace-only target is
+// an empty state; a missing target is an empty state.
+func TestLoadReplayStateToleratesCrashLeftovers(t *testing.T) {
+	t.Run("stale garbage tmp alongside valid state", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(`{"replayed":{"evt-a":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".tmp", []byte("\x00garbage-not-json{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("stale .tmp must not fail the load: %v", err)
+		}
+		if !state.Replayed["evt-a"] {
+			t.Fatalf("valid state lost alongside stale .tmp: %v", state.Replayed)
+		}
+		raw, err := os.ReadFile(path + ".tmp")
+		if err != nil {
+			t.Fatalf("stale .tmp must not be deleted: %v", err)
+		}
+		if string(raw) != "\x00garbage-not-json{" {
+			t.Fatalf("stale .tmp content modified: %q", raw)
+		}
+	})
+	t.Run("zero-length target is empty state", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("zero-length target must load: %v", err)
+		}
+		if len(state.Replayed) != 0 {
+			t.Fatalf("zero-length target must be an empty map, got %v", state.Replayed)
+		}
+	})
+	t.Run("whitespace-only target is empty state", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(" \n\t"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("whitespace target must load: %v", err)
+		}
+		if len(state.Replayed) != 0 {
+			t.Fatalf("whitespace target must be an empty map, got %v", state.Replayed)
+		}
+	})
+	t.Run("missing target is empty state", func(t *testing.T) {
+		state, err := LoadReplayState(filepath.Join(t.TempDir(), "absent.json"))
+		if err != nil {
+			t.Fatalf("missing target must load: %v", err)
+		}
+		if len(state.Replayed) != 0 {
+			t.Fatalf("missing target must be an empty map, got %v", state.Replayed)
+		}
+	})
+}
+
+// AC-3 (REQ-1/REQ-2 crash model): the deterministic replay model shows every
+// crash position of Mark's two-event write sequence leaves a DECODABLE state
+// file — the fsync-before-rename ordering (REQ-1) is what removes the only
+// crash path to an undecodable (torn) target:
+//   - both syncs complete → the target holds {evt-1, evt-2};
+//   - the second rename's dir entry is not synced (crash between rename and
+//     dir-sync) → the rename may revert → the target holds {evt-1};
+//   - the un-flushed temp contents are lost (crash before file-sync) → the
+//     target comes back zeroed → empty state.
+//
+// All three decode with nil error (boot proceeds; the next round re-scans —
+// at-least-once, tolerated). The non-vacuous control: a torn byte prefix —
+// the pre-fix F1 state — is a decode error, proving the model can produce an
+// undecodable file and that the fsync ordering is what prevents it.
+func TestReplayStateMarkSurvivesSimulatedCrash(t *testing.T) {
+	t.Run("both syncs complete keeps the latest mark", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Real fsutil.SyncFile/SyncDir defaults: the full protocol runs.
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-2"); err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("fully durable target must decode: %v", err)
+		}
+		if !reloaded.Replayed["evt-1"] || !reloaded.Replayed["evt-2"] {
+			t.Fatalf("both marks must survive the crash: %v", reloaded.Replayed)
+		}
+	})
+	t.Run("crash between rename and dir sync may revert the rename", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Mark evt-1 durably (real syncs) and capture its bytes: those are
+		// what the target reverts to when evt-2's rename is not durable.
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		durableAfterEvt1, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The second mark's parent-dir fsync is dropped (crash cuts the
+		// process between rename and dir-sync): Mark reports the dir-sync
+		// failure (FM-3) while the target already holds the new content.
+		state.syncDir = func(string) error { return errors.New("injected dir sync failure") }
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the parent-dir sync fails")
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after dir-sync failure: %v", err)
+		}
+		// Outcome A — the unsynced rename reverts on power failure: the
+		// target is the last durable content {evt-1}. Still decodable.
+		if err := os.WriteFile(path, durableAfterEvt1, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		reverted, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("reverted target must decode with nil error: %v", err)
+		}
+		if !reverted.Replayed["evt-1"] || reverted.Replayed["evt-2"] {
+			t.Fatalf("reverted target must hold only evt-1: %v", reverted.Replayed)
+		}
+		// Outcome B — the rename survived: the target holds {evt-1, evt-2}
+		// and also decodes with nil error (FM-4: both states decode).
+		state.syncDir = nil
+		if err := state.Mark("evt-2"); err != nil {
+			t.Fatal(err)
+		}
+		survived, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("survived-rename target must decode with nil error: %v", err)
+		}
+		if !survived.Replayed["evt-1"] || !survived.Replayed["evt-2"] {
+			t.Fatalf("survived-rename target must hold both marks: %v", survived.Replayed)
+		}
+	})
+	t.Run("crash before temp sync loses the un-flushed contents", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		// The second mark's temp-file fsync is dropped: Mark fails (FM-1),
+		// the temp is removed, and the target keeps the previous durable
+		// content {evt-1} — never torn.
+		state.syncFile = func(string) error { return errors.New("injected file sync failure") }
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the temp-file sync fails")
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after file-sync failure: %v", err)
+		}
+		untouched, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("target after file-sync failure must decode: %v", err)
+		}
+		if !untouched.Replayed["evt-1"] || untouched.Replayed["evt-2"] {
+			t.Fatalf("target after file-sync failure must hold only evt-1: %v", untouched.Replayed)
+		}
+		// Crash outcome — the un-flushed contents are lost entirely and the
+		// target comes back zeroed: an empty state, NOT a decode error
+		// (boot proceeds; the next round re-scans — at-least-once).
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		zeroed, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatalf("zeroed target must decode with nil error: %v", err)
+		}
+		if len(zeroed.Replayed) != 0 {
+			t.Fatalf("zeroed target must be an empty map, got %v", zeroed.Replayed)
+		}
+	})
+	t.Run("torn byte prefix is a decode error (non-vacuous)", func(t *testing.T) {
+		// The pre-fix F1 state: an un-fsynced write can leave a torn byte
+		// prefix after power loss. This is the ONLY crash outcome that fails
+		// to decode, and it is exactly what the fsync-before-rename ordering
+		// removes. The sub-check proves the model is non-vacuous: not every
+		// crash outcome decodes, so the three assertions above are meaningful.
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(`{"replayed":{"evt-1":tru`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadReplayState(path); err == nil {
+			t.Fatal("torn target must be a decode error (fail-loud, pinned by REQ-5)")
+		}
+	})
+}
+
+// REQ-3 (FM-1/FM-2/FM-3): every Mark failure path removes its own temp file
+// best-effort and preserves the authoritative state — the target stays
+// untouched when the failure precedes the rename (file-sync failure, write
+// failure), and KEEPS the new content when the failure follows it (dir-sync
+// failure, the D4 divergence: the in-memory map already holds the mark and
+// both old/new content decode). Deterministic: injected hook failures plus
+// two real-filesystem failure cases (ENOTDIR write target, EISDIR temp
+// path) that need no privileges.
+func TestReplayStateMarkErrorPathsCleanTempAndPreserveTarget(t *testing.T) {
+	t.Run("file sync failure: temp removed, target untouched", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err) // establish the durable baseline
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.syncFile = func(string) error { return errors.New("injected file sync failure") }
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the temp-file sync fails (FM-1)")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(after, before) {
+			t.Fatalf("target changed after file-sync failure: %s", after)
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after file-sync failure: %v", err)
+		}
+		reloaded, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reloaded.Replayed["evt-1"] || reloaded.Replayed["evt-2"] {
+			t.Fatalf("target must hold the authoritative pre-failure state: %v", reloaded.Replayed)
+		}
+	})
+	t.Run("dir sync failure: target keeps the new content", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		state.syncDir = func(string) error { return errors.New("injected dir sync failure") }
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the parent-dir sync fails (FM-3)")
+		}
+		// D4: the rename already succeeded, so the target holds the NEW
+		// content — removing it would lose the in-memory mark; the next Mark
+		// retries the durability step.
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var disk ReplayState
+		if err := json.Unmarshal(after, &disk); err != nil {
+			t.Fatalf("target after dir-sync failure must decode: %v", err)
+		}
+		if !disk.Replayed["evt-1"] || !disk.Replayed["evt-2"] {
+			t.Fatalf("target must keep the new content after dir-sync failure: %v", disk.Replayed)
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after dir-sync failure: %v", err)
+		}
+	})
+	t.Run("write failure via ENOTDIR: no temp anywhere", func(t *testing.T) {
+		dir := t.TempDir()
+		blocker := filepath.Join(dir, "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The state file's parent is a regular file: WriteFile fails with
+		// ENOTDIR. LoadReplayState would fail the same way, so construct the
+		// state directly (same package).
+		state := &ReplayState{Replayed: map[string]bool{"evt-1": true}, path: filepath.Join(blocker, "state.json")}
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the temp write hits ENOTDIR")
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".tmp") {
+				t.Fatalf(".tmp left behind after ENOTDIR write failure: %s", entry.Name())
+			}
+		}
+	})
+	t.Run("temp path blocked by a directory: temp removed, target untouched", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		// A stale directory squatting on the temp path makes WriteFile fail
+		// with EISDIR; the best-effort cleanup must remove the (empty)
+		// directory so no .tmp remains and the target stays untouched.
+		if err := os.Mkdir(path+".tmp", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-1"); err == nil {
+			t.Fatal("Mark must fail when the temp path is a directory")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("target must stay untouched after EISDIR write failure: %v", err)
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after EISDIR write failure: %v", err)
+		}
+	})
+	t.Run("rename failure: temp removed, target untouched", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.json")
+		// The target path is an existing directory: the temp write and
+		// file-sync succeed, then os.Rename(file, dir) fails (EEXIST on
+		// Linux) and leaves the temp behind for Mark's best-effort cleanup
+		// (FM-2). LoadReplayState would fail reading a directory, so
+		// construct the state directly (same package).
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		state := &ReplayState{Replayed: map[string]bool{"evt-1": true}, path: path}
+		if err := state.Mark("evt-2"); err == nil {
+			t.Fatal("Mark must fail when the rename cannot replace the target")
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf(".tmp left behind after rename failure: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
+			t.Fatal("target must stay untouched after rename failure")
+		}
+	})
+}
+
+// Rolling-restart contract (design §4): the on-disk bytes are part of the
+// mixed-version compatibility surface, so pin the exact schema. A future
+// exported field, tag rename, or reordering breaks this test loudly instead
+// of silently invalidating the "zero data migration" claim. Also pins the
+// 0o600 permission contract.
+func TestReplayStateOnDiskFormatIsStable(t *testing.T) {
+	const golden = `{"replayed":{"evt-1":true}}`
+	t.Run("Mark writes exactly the golden bytes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.Mark("evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != golden {
+			t.Fatalf("persisted bytes = %q, want golden %q", raw, golden)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("state file mode = %o, want 600", perm)
+		}
+	})
+	t.Run("golden bytes load back", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(golden), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state, err := LoadReplayState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(state.Replayed) != 1 || !state.Replayed["evt-1"] {
+			t.Fatalf("golden bytes must decode to exactly {evt-1}: %v", state.Replayed)
+		}
+	})
+}
+
+// Crash→reboot idempotency through the replayer: a crash AFTER Mark
+// persisted the replay decision but BEFORE the DLQ offsets were committed
+// (the round aborts mid-scan with a transport error) must not re-republish
+// on the next daemon round — the durable state file alone carries the
+// idempotency across a reboot, which is the convergence the pre-fix F1
+// torn-file boot Fatalf destroyed. Sub-case "reverted rename" pins the F2
+// residue bound: if the crash reverted the second mark's rename (FM-4:
+// crash between rename and parent-dir sync), only the reverted event is
+// re-published, exactly once; the durably-marked event is not.
+func TestReplayCrashAfterMarkRebootDoesNotRepublish(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	dlqMsgs := []kafka.Message{dlqMessageAt("evt-a", 0), dlqMessageAt("evt-b", 1)}
+	acceptedMsgs := []kafka.Message{acceptedMessage("evt-a"), acceptedMessage("evt-b")}
+	collect := func(dst *[]string) func(ctx context.Context, key, value []byte) error {
+		return func(ctx context.Context, key, value []byte) error {
+			*dst = append(*dst, string(key))
+			return nil
+		}
+	}
+
+	// Round 1 replays both events and Marks them durably (real fsyncs on a
+	// real tempdir); then the accepted scan hits a transport failure BEFORE
+	// commitResolved runs — the crash window "after the last Mark, before
+	// the DLQ commit".
+	broker := &brokerDLQ{topic: TopicDLQ, messages: dlqMsgs}
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: acceptedMsgs}
+	accepted.fetchErr = errors.New("injected accepted-topic transport failure after both marks")
+	var republished []string
+	first := newReplayerWithFactories(broker.freshDLQSession(), func() messageReader { return accepted }, state, collect(&republished), log.New(io.Discard, "", 0))
+	first.drainTimeout = 20 * time.Millisecond
+	count, err := first.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("round must abort on the accepted transport failure (crash before DLQ commit)")
+	}
+	if count != 2 || len(republished) != 2 {
+		t.Fatalf("round 1 replayed=%d republished=%v, want 2/[evt-a evt-b]", count, republished)
+	}
+	if broker.committed != 0 {
+		t.Fatalf("DLQ offsets must be uncommitted after the crash: committed=%d", broker.committed)
+	}
+
+	// Reboot: the state file is the only surviving decision record.
+	reloaded, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatalf("reboot must load the durable state: %v", err)
+	}
+	if !reloaded.Replayed["evt-a"] || !reloaded.Replayed["evt-b"] {
+		t.Fatalf("marks must survive the crash: %v", reloaded.Replayed)
+	}
+
+	// Round 2 (fresh sessions, as after a daemon restart): both DLQ records
+	// are re-read, but the state file makes them already-replayed, so they
+	// are committed without any republish.
+	republished = nil
+	reboot := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader(acceptedMsgs, nil), reloaded, collect(&republished), log.New(io.Discard, "", 0))
+	reboot.drainTimeout = 20 * time.Millisecond
+	count, err = reboot.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || len(republished) != 0 {
+		t.Fatalf("reboot round replayed=%d republished=%v, want 0/none (state file carries idempotency)", count, republished)
+	}
+	if broker.committed != 2 {
+		t.Fatalf("reboot round must commit the re-read records: committed=%d", broker.committed)
+	}
+
+	t.Run("second mark rename reverted by the crash", func(t *testing.T) {
+		path2 := filepath.Join(t.TempDir(), "state2.json")
+		broker2 := &brokerDLQ{topic: TopicDLQ, messages: dlqMsgs}
+		state2, err := LoadReplayState(path2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted2 := &fakeReplayReader{topic: TopicAccepted, messages: acceptedMsgs}
+		accepted2.fetchErr = errors.New("injected accepted-topic transport failure after both marks")
+		var repub2 []string
+		first2 := newReplayerWithFactories(broker2.freshDLQSession(), func() messageReader { return accepted2 }, state2, collect(&repub2), log.New(io.Discard, "", 0))
+		first2.drainTimeout = 20 * time.Millisecond
+		if _, err := first2.RunOnce(context.Background()); err == nil {
+			t.Fatal("round must abort on the accepted transport failure")
+		}
+		if broker2.committed != 0 {
+			t.Fatalf("DLQ offsets must be uncommitted after the crash: committed=%d", broker2.committed)
+		}
+		// FM-4: the crash between evt-b's rename and its parent-dir sync may
+		// revert the rename — the target holds the last durable content
+		// ({evt-a} only), still decodable.
+		if err := os.WriteFile(path2, []byte(`{"replayed":{"evt-a":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		reverted, err := LoadReplayState(path2)
+		if err != nil {
+			t.Fatalf("reverted target must decode: %v", err)
+		}
+		if !reverted.Replayed["evt-a"] || reverted.Replayed["evt-b"] {
+			t.Fatalf("reverted target must hold only the durably-marked evt-a: %v", reverted.Replayed)
+		}
+		repub2 = nil
+		reboot2 := newReplayerWithFactories(broker2.freshDLQSession(), freshAcceptedReader(acceptedMsgs, nil), reverted, collect(&repub2), log.New(io.Discard, "", 0))
+		reboot2.drainTimeout = 20 * time.Millisecond
+		count, err := reboot2.RunOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Only the reverted event is re-published, exactly once; the
+		// durably-marked event is not.
+		if count != 1 || len(repub2) != 1 || repub2[0] != "evt-b" {
+			t.Fatalf("reboot after rename revert replayed=%d republished=%v, want 1/[evt-b]", count, repub2)
+		}
+		if broker2.committed != 2 {
+			t.Fatalf("reboot round must commit both re-read records: committed=%d", broker2.committed)
+		}
+	})
 }
 
 // TestReplayTransientRepublishFailureRetriesNextRound pins convergence: a
