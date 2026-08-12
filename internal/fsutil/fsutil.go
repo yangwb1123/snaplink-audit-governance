@@ -8,6 +8,7 @@ package fsutil
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // SyncFile flushes file contents to stable storage. The caller must have
@@ -37,6 +38,42 @@ func SyncDir(path string) error {
 	defer dir.Close()
 	if err := dir.Sync(); err != nil {
 		return fmt.Errorf("sync directory %s: %w", path, err)
+	}
+	return nil
+}
+
+// SyncDirChain flushes, leaf-to-root, every directory on the path from dir up
+// to and including root. A file created at a nested key is only fully durable
+// when each ancestor directory's entry for its child has been synced: syncing
+// just the archive root (or just the immediate parent) leaves a crash window
+// in which a freshly created intermediate directory — and everything under it
+// — can vanish after a power failure. dir must be root or a descendant of
+// root; syncDir is the per-directory fsync operation and defaults to SyncDir
+// when nil. The first failure aborts the walk and is returned wrapped, so
+// callers can distinguish a chain-sync failure from a pre-existing one via
+// errors.Is.
+func SyncDirChain(root, dir string, syncDir func(string) error) error {
+	if syncDir == nil {
+		syncDir = SyncDir
+	}
+	root = filepath.Clean(root)
+	var chain []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		chain = append(chain, d)
+		if d == root {
+			break
+		}
+		if filepath.Dir(d) == d {
+			// Walked past the root without finding it: the caller's path
+			// is not under the configured root (defensive; cannot happen
+			// for paths built with filepath.Join(root, key)).
+			return fmt.Errorf("sync chain: %s is not under root %s", dir, root)
+		}
+	}
+	for i := 0; i < len(chain); i++ {
+		if err := syncDir(chain[i]); err != nil {
+			return fmt.Errorf("sync directory chain %s: %w", chain[i], err)
+		}
 	}
 	return nil
 }

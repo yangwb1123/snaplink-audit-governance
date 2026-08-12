@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -59,13 +60,49 @@ func Configured(store Store) bool {
 // it, so an error never leaves a partial object at the key.
 type FileStore struct {
 	Dir string
+
+	// syncDir is the per-directory fsync hook used by Put's directory-chain
+	// durability step. It defaults to fsutil.SyncDir; tests replace it to
+	// record the ordered sync set or fault-inject a specific path. Nil at
+	// construction (all production literals), so there is no constructor
+	// and no exported surface change.
+	syncDir func(path string) error
+
+	// mu serializes Put/Get so the create→write→sync→remove critical
+	// section cannot interleave with a concurrent idempotent retry: without
+	// it, a failing Put could remove an object that a concurrent retry had
+	// just verified as byte-identical and reported as archived, violating
+	// the "nil ⇒ durable" contract. It also prevents torn reads of an
+	// object mid-write.
+	mu sync.Mutex
+}
+
+// containedPath validates key against the archive-root containment contract
+// and returns the joined filesystem path. Keys are relative POSIX-style
+// object names; anything absolute, empty, or containing a ".." component
+// that escapes the root is rejected before any filesystem mutation, so a
+// caller (or a compromised upstream) cannot write or read outside the
+// archive directory. The empty-Dir error is byte-identical to Ready's so the
+// existing fail-closed preflight message is preserved.
+func containedPath(dir, key string) (string, error) {
+	if dir == "" {
+		return "", fmt.Errorf("archive directory is not configured")
+	}
+	clean := filepath.Clean(filepath.FromSlash(key))
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive key %q escapes the archive directory", key)
+	}
+	return filepath.Join(dir, clean), nil
 }
 
 func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
-	if f.Dir == "" {
-		return fmt.Errorf("archive directory is not configured")
+	path, err := containedPath(f.Dir, key)
+	if err != nil {
+		return err
 	}
-	path := filepath.Join(f.Dir, filepath.FromSlash(key))
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
@@ -105,12 +142,19 @@ func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
 		return err
 	}
 	// The directory entry of the new object must be durable before Put
-	// reports success (M-12); a crash right after close can otherwise lose
+	// reports success (M-12): a crash right after close can otherwise lose
 	// the object from a power failure even though the file itself was
-	// synced.
-	if err := fsutil.SyncDir(f.Dir); err != nil {
+	// synced. Directory fsync is per-directory, so the object's immediate
+	// parent and every ancestor up to the archive root must each be synced,
+	// leaf-to-root; the mutex guarantees no concurrent retry can observe or
+	// remove the object mid-sync.
+	syncDir := f.syncDir
+	if syncDir == nil {
+		syncDir = fsutil.SyncDir
+	}
+	if err := fsutil.SyncDirChain(f.Dir, filepath.Dir(path), syncDir); err != nil {
 		_ = os.Remove(path)
-		return err
+		return fmt.Errorf("sync directory chain for %s: %w", path, err)
 	}
 	return nil
 }
@@ -132,7 +176,15 @@ func verifyExistingObject(path string, data []byte) error {
 }
 
 func (f *FileStore) Get(_ context.Context, key string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(f.Dir, filepath.FromSlash(key)))
+	path, err := containedPath(f.Dir, key)
+	if err != nil {
+		return nil, err
+	}
+	// The mutex also serializes Get against an in-flight Put, so a reader
+	// never observes a torn (mid-write) object.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return os.ReadFile(path)
 }
 
 func (f *FileStore) Ready(_ context.Context) error {

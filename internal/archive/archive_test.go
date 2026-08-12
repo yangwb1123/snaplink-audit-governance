@@ -1,9 +1,13 @@
 package archive
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -254,4 +258,328 @@ func TestFileStorePutMissingData(t *testing.T) {
 	if err := store.Put(context.Background(), "a/b/c.json", []byte("x")); err != nil {
 		t.Fatalf("nested Put: %v", err)
 	}
+}
+
+// syncRecorder records every directory sync performed through the FileStore
+// seam and can fault-inject failures. Because Put's chain sync is its final
+// step, the recorded sync log is also a creation log: every entry provably
+// happened after the object file was created and closed.
+type syncRecorder struct {
+	mu     sync.Mutex
+	syncs  []string
+	fail   map[string]bool // paths whose sync must fail
+	failN  int             // number of sync calls to fail, then succeed
+	failed int
+}
+
+func (r *syncRecorder) record(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.syncs = append(r.syncs, path)
+	if r.fail != nil && r.fail[path] {
+		return fmt.Errorf("injected sync failure for %s", path)
+	}
+	if r.failN > 0 && r.failed < r.failN {
+		r.failed++
+		return fmt.Errorf("injected sync failure for %s", path)
+	}
+	return nil
+}
+
+func (r *syncRecorder) synced(path string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.syncs {
+		if p == path {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFileStorePutSyncsFullDirectoryChain is AC-1: a successful Put fsyncs
+// every directory from the object's immediate parent up to the archive root,
+// leaf-to-root, before returning nil.
+func TestFileStorePutSyncsFullDirectoryChain(t *testing.T) {
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := []byte(`{"event_id":"evt"}`)
+
+	t.Run("nested key", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		rec := &syncRecorder{}
+		store := &FileStore{Dir: dir, syncDir: rec.record}
+		if err := store.Put(context.Background(), key, payload); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{
+			filepath.Join(dir, "events", "demo", "stream"),
+			filepath.Join(dir, "events", "demo"),
+			filepath.Join(dir, "events"),
+			dir,
+		}
+		if !reflect.DeepEqual(rec.syncs, want) {
+			t.Fatalf("sync order = %v, want %v", rec.syncs, want)
+		}
+	})
+
+	t.Run("flat exports key", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		rec := &syncRecorder{}
+		store := &FileStore{Dir: dir, syncDir: rec.record}
+		if err := store.Put(context.Background(), "exports/job.jsonl", payload); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{filepath.Join(dir, "exports"), dir}
+		if !reflect.DeepEqual(rec.syncs, want) {
+			t.Fatalf("sync order = %v, want %v", rec.syncs, want)
+		}
+	})
+
+	t.Run("pre-existing parent chain", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		if err := os.MkdirAll(filepath.Join(dir, "events", "demo", "stream"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		rec := &syncRecorder{}
+		store := &FileStore{Dir: dir, syncDir: rec.record}
+		if err := store.Put(context.Background(), key, payload); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{
+			filepath.Join(dir, "events", "demo", "stream"),
+			filepath.Join(dir, "events", "demo"),
+			filepath.Join(dir, "events"),
+			dir,
+		}
+		if !reflect.DeepEqual(rec.syncs, want) {
+			t.Fatalf("sync order = %v, want %v", rec.syncs, want)
+		}
+	})
+}
+
+// crashDrop models a power failure after a successful Put: a directory's
+// dentry survives only if it was synced after its child was created. Because
+// Put's chain sync is its final step, "recorded as synced" implies "after
+// creation". The object (whose dentry lives in the first chain member)
+// survives iff every member from the immediate parent up to the archive root
+// was synced; any unsynced member loses its whole subtree.
+func crashDrop(recorded, chain []string) []string {
+	set := make(map[string]bool, len(recorded))
+	for _, p := range recorded {
+		set[p] = true
+	}
+	var dropped []string
+	for _, d := range chain {
+		if !set[d] {
+			dropped = append(dropped, d)
+		}
+	}
+	return dropped
+}
+
+// TestFileStorePutSurvivesSimulatedCrash is AC-2: the deterministic replay
+// model (no privileges, no tmpfs mount) shows the full chain is required for
+// the object to survive a power failure, and that the model is non-vacuous —
+// the pre-fix root-only sync demonstrably loses the subtree.
+func TestFileStorePutSurvivesSimulatedCrash(t *testing.T) {
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := []byte(`{"event_id":"evt"}`)
+
+	chain := func(dir string) []string {
+		return []string{
+			filepath.Join(dir, "events", "demo", "stream"),
+			filepath.Join(dir, "events", "demo"),
+			filepath.Join(dir, "events"),
+			dir,
+		}
+	}
+
+	t.Run("full chain survives", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		rec := &syncRecorder{}
+		store := &FileStore{Dir: dir, syncDir: rec.record}
+		if err := store.Put(context.Background(), key, payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range crashDrop(rec.syncs, chain(dir)) {
+			_ = os.RemoveAll(d)
+		}
+		got, err := store.Get(context.Background(), key)
+		if err != nil {
+			t.Fatalf("object lost after simulated crash: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("object corrupted after simulated crash: %q", got)
+		}
+	})
+
+	t.Run("root-only sync loses the subtree (non-vacuous)", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		target := filepath.Join(dir, "events", "demo", "stream", "obj.json")
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, payload, 0o440); err != nil {
+			t.Fatal(err)
+		}
+		// Pre-fix behavior synced only the archive root.
+		dropped := crashDrop([]string{dir}, chain(dir))
+		if len(dropped) != 3 {
+			t.Fatalf("root-only sync must drop the 3 chain members above root, got %v", dropped)
+		}
+		for _, d := range dropped {
+			_ = os.RemoveAll(d)
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatal("model must drop the object when only the root was synced")
+		}
+	})
+}
+
+// TestFileStorePutSyncFailureLeavesNoObject is AC-3: a chain-sync failure at
+// the immediate parent, any intermediate ancestor, or the archive root must
+// fail the Put and leave no object at the key.
+func TestFileStorePutSyncFailureLeavesNoObject(t *testing.T) {
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := []byte(`{"event_id":"evt"}`)
+	targets := []struct {
+		name string
+		path string
+	}{
+		{"immediate parent", filepath.Join("events", "demo", "stream")},
+		{"intermediate ancestor", filepath.Join("events", "demo")},
+		{"archive root", "."},
+	}
+	for _, tc := range targets {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "archive")
+			rec := &syncRecorder{fail: map[string]bool{filepath.Join(dir, filepath.FromSlash(tc.path)): true}}
+			store := &FileStore{Dir: dir, syncDir: rec.record}
+			if err := store.Put(context.Background(), key, payload); err == nil {
+				t.Fatal("Put must fail when a chain member cannot be synced")
+			}
+			target := filepath.Join(dir, filepath.FromSlash(key))
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatalf("object left at key after failed chain sync: %v", err)
+			}
+		})
+	}
+}
+
+// TestFileStorePutIdempotentRetryPerformsNoDirectorySyncs pins REQ-3: a
+// byte-identical retry takes the verify-existing path and performs zero new
+// directory syncs (the seam makes this observable).
+func TestFileStorePutIdempotentRetryPerformsNoDirectorySyncs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := []byte(`{"event_id":"evt"}`)
+	rec := &syncRecorder{}
+	store := &FileStore{Dir: dir, syncDir: rec.record}
+	if err := store.Put(context.Background(), key, payload); err != nil {
+		t.Fatal(err)
+	}
+	first := len(rec.syncs)
+	if first == 0 {
+		t.Fatal("first Put must sync the directory chain")
+	}
+	if err := store.Put(context.Background(), key, payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(rec.syncs); got != first {
+		t.Fatalf("idempotent retry performed %d directory syncs, want 0 new", got-first)
+	}
+}
+
+// TestFileStorePutKeyEscapingRootRejectedBeforeWrite is SEC-1: keys that
+// would escape the archive root (.. traversal, absolute, empty) are rejected
+// before any filesystem mutation, and Get is guarded symmetrically.
+func TestFileStorePutKeyEscapingRootRejectedBeforeWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	rec := &syncRecorder{}
+	store := &FileStore{Dir: dir, syncDir: rec.record}
+	for _, key := range []string{"../escape.json", "a/../../escape.json", "/abs/escape.json", ""} {
+		if err := store.Put(context.Background(), key, []byte("boom")); err == nil {
+			t.Fatalf("Put(%q) must be rejected before any write", key)
+		}
+		if len(rec.syncs) != 0 {
+			t.Fatalf("Put(%q) must not reach the sync step", key)
+		}
+	}
+	// Nothing may exist outside the archive root.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "escape.json")); !os.IsNotExist(err) {
+		t.Fatal("escaping key wrote an object outside the archive root")
+	}
+	// Get is guarded symmetrically.
+	for _, key := range []string{"../escape.json", "a/../../escape.json", "/abs/escape.json"} {
+		if _, err := store.Get(context.Background(), key); err == nil {
+			t.Fatalf("Get(%q) must be rejected", key)
+		}
+	}
+}
+
+// TestFileStorePutConcurrentSameKeyNoLostArchive is SEC-2 pin: a failing Put
+// must never remove an object that a concurrent byte-identical retry already
+// verified as durable. The per-store mutex serializes create→sync→remove, so
+// the interleaving is impossible; the hammer asserts the "nil ⇒ durable"
+// invariant under -race.
+func TestFileStorePutConcurrentSameKeyNoLostArchive(t *testing.T) {
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := []byte(`{"event_id":"evt"}`)
+	for i := 0; i < 20; i++ {
+		dir := filepath.Join(t.TempDir(), "archive")
+		// Fail the sync of the archive root: the failing Put removes its
+		// object only after the other chain members were synced, widening
+		// any (now impossible) race window for a concurrent retry.
+		rec := &syncRecorder{fail: map[string]bool{dir: true}}
+		store := &FileStore{Dir: dir, syncDir: rec.record}
+		var wg sync.WaitGroup
+		results := make([]error, 2)
+		for j := 0; j < 2; j++ {
+			wg.Add(1)
+			go func(j int) {
+				defer wg.Done()
+				results[j] = store.Put(context.Background(), key, payload)
+			}(j)
+		}
+		wg.Wait()
+		data, err := store.Get(context.Background(), key)
+		if err == nil {
+			if !bytes.Equal(data, payload) {
+				t.Fatalf("iteration %d: object corrupted: %q", i, data)
+			}
+			continue
+		}
+		for j, res := range results {
+			if res == nil {
+				t.Fatalf("iteration %d: caller %d got nil but the object is gone", i, j)
+			}
+		}
+	}
+}
+
+// TestFileStoreGetDoesNotObservePartialObject is a W1 pin: with the mutex, a
+// Get cannot observe a torn object while a Put is mid-write; a successful
+// Get returns the complete payload.
+func TestFileStoreGetDoesNotObservePartialObject(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	store := &FileStore{Dir: dir}
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	payload := bytes.Repeat([]byte("x"), 512*1024)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = store.Put(context.Background(), key, payload)
+	}()
+	for attempts := 0; attempts < 500; attempts++ {
+		data, err := store.Get(context.Background(), key)
+		if err == nil {
+			if !bytes.Equal(data, payload) {
+				t.Fatalf("torn read: got %d bytes, want %d", len(data), len(payload))
+			}
+			<-done
+			return
+		}
+	}
+	<-done
+	t.Fatal("Get never observed the completed object")
 }
