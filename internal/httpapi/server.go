@@ -422,7 +422,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.Operation(tenantID, r.PathValue("operationID"))
+	result, err := s.Service.Operation(tenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return

@@ -1,5 +1,45 @@
 # Release Notes
 
+## 2026-08-12 — 读路径自审计闭环补齐：`GET /api/v1/operations/{operationID}` 追加 audit.event.read 事实
+
+**写给运营（行为变化，观察类）：**
+
+- **最后一个此前不落账的事件内容读端点现在记录 `audit.event.read` 事实**：
+  `GET /api/v1/operations/{operationID}`（操作摘要）返回 200 前在服务层追加
+  一条自审计事实，编码 `(operation, id, summary)`，携带调用者 subject
+  （`actor`）。2026-08-11 的「五个读端点闭环」随之变为**六个**，读路径自审计
+  闭环（“谁读过什么”）对事件内容读全部成立；`GET /api/v1/admin/actions`
+  现在也能回答“谁读过这个操作摘要”。
+- **失败关闭语义与既有读一致**：事实追加失败（存储不可写、乐观锁冲突耗尽）
+  时返回 500/503，**不返回读结果**；操作不存在/非法请求（404/400）不落账。
+- **历史读不回溯**：本变更前的摘要读未留事实，不补写（追加只向前，与
+  2026-08-11 批次发布方式一致）。
+- **明确不审计的读路径保持不变**：`POST /api/v1/restores/preview` 与
+  `POST /api/v1/restores` 按 F1 设计门显式拒绝仍为零 `audit.event.read`
+  （仅 `restore.created` 等既有事实）；`GET /api/v1/exports/{jobID}`（导出
+  任务状态，含事件内容）继续不落读账，由行为固定测试钉住。
+
+**写给开发（API 契约变化）：**
+
+- `Service.Operation` 签名增加 `actor string`（位于 `tenantID` 之后，与
+  2026-08-11 六方法的约定一致）：`Operation(tenantID, actor, operationID)`；
+  空 `actor` 不落账（内部调用者静默，`recordReadAction` 约定不变）。
+- `Operation` 保持自有 `eventsFor` 扫描（不委托 `OperationTimeline`，避免
+  双重追加）；追加点位于摘要构建成功之后、返回之前，早退路径
+  （`ErrInvalid`/`ErrNotFound`/读取错误）不落账。
+- `getOperation` 处理器转发 `claims.Subject`；HTTP 路由/权限
+  （`audit:operation:read`）/200 响应体/错误码逐字不变（仅新增 trail 行）。
+- 调用点共 2 处（`internal/httpapi/server.go:getOperation`、
+  `internal/service/read_selfaudit_test.go` 测试），无 gRPC 暴露。
+- 回归测试：`TestHTTPReadEndpointsAppendSelfAuditFacts` 六路由清单与
+  `performReadEndpoints` 同步扩为六条；新增
+  `TestHTTPOperationSummaryAppendsExactlyOneFact`（单请求恰好一条事实）、
+  `TestHTTPOperationSummaryNotFoundAppendsNothing`（404 两腿零行）、
+  `TestReadSelfAuditOperationInvalidAppendsNothing`（空 id → ErrInvalid 零行）；
+  作用域钉 `TestReadSelfAuditOutOfScopeReadsRecordNothing` 反转：`Operation`
+  移出未审计集（1→2 条事实期望），`GetExport` 仍钉住零自审计。
+- `python3 cli.py quality` 全绿。
+
 ## 2026-08-12 — DLQ 回放状态 `Mark` 落盘增加 fsync（internal/kafka 持久化加固）
 
 **写给运营（行为变化）：**

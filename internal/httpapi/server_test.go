@@ -3063,9 +3063,10 @@ func httpReadSeedEvent() domain.Event {
 	return domain.Event{EventID: "http-read-evt", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "http-read-op", AggregateType: "invoice", AggregateID: "inv-1", AggregateVersion: 1, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-read-idem", Payload: map[string]any{"value": 1}}
 }
 
-// performReadEndpoints executes the five audited read endpoints with the
+// performReadEndpoints executes the six audited read endpoints with the
 // given bearer token and returns the response status codes in fixed order
-// (receipt, timeline, replay, aggregate timeline, integrity verify).
+// (receipt, operation summary, timeline, replay, aggregate timeline,
+// integrity verify).
 func performReadEndpoints(t *testing.T, server *httptest.Server, token string) []int {
 	t.Helper()
 	requests := []struct {
@@ -3074,6 +3075,7 @@ func performReadEndpoints(t *testing.T, server *httptest.Server, token string) [
 		body   string
 	}{
 		{http.MethodGet, "/api/v1/events/http-read-evt/receipt", ""},
+		{http.MethodGet, "/api/v1/operations/http-read-op", ""},
 		{http.MethodGet, "/api/v1/operations/http-read-op/timeline", ""},
 		{http.MethodGet, "/api/v1/operations/http-read-op/replay", ""},
 		{http.MethodGet, "/api/v1/aggregates/invoice/inv-1/timeline", ""},
@@ -3128,8 +3130,8 @@ func httpReadFacts(t *testing.T, server *httptest.Server) []domain.AdminAction {
 	return reads
 }
 
-// TestHTTPReadEndpointsAppendSelfAuditFacts is AC-1 (HTTP): the five read
-// routes append exactly five audit.event.read rows carrying the acting
+// TestHTTPReadEndpointsAppendSelfAuditFacts is AC-1 (HTTP): the six read
+// routes append exactly six audit.event.read rows carrying the acting
 // subject (claims.Subject) and the FR-4 target encoding.
 func TestHTTPReadEndpointsAppendSelfAuditFacts(t *testing.T) {
 	server := testHTTPServer(t)
@@ -3147,8 +3149,8 @@ func TestHTTPReadEndpointsAppendSelfAuditFacts(t *testing.T) {
 		}
 	}
 	reads := httpReadFacts(t, server)
-	if len(reads) != 5 {
-		t.Fatalf("audit.event.read rows=%d, want 5; %+v", len(reads), reads)
+	if len(reads) != 6 {
+		t.Fatalf("audit.event.read rows=%d, want 6; %+v", len(reads), reads)
 	}
 	for _, read := range reads {
 		if read.Actor != "auditor" {
@@ -3161,6 +3163,7 @@ func TestHTTPReadEndpointsAppendSelfAuditFacts(t *testing.T) {
 	}
 	want := map[string]bool{
 		"event|http-read-evt|receipt":     true,
+		"operation|http-read-op|summary":  true,
 		"operation|http-read-op|timeline": true,
 		"operation|http-read-op|replay":   true,
 		"aggregate|inv-1|invoice":         true,
@@ -3176,8 +3179,68 @@ func TestHTTPReadEndpointsAppendSelfAuditFacts(t *testing.T) {
 	}
 }
 
+// TestHTTPOperationSummaryAppendsExactlyOneFact is AC-1 focused: a single
+// GET of the operation summary appends exactly one audit.event.read row
+// (delta from the pre-request baseline) with the FR-4 encoding
+// (operation, id, summary) and the acting subject (claims.Subject).
+func TestHTTPOperationSummaryAppendsExactlyOneFact(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	if result := postTestEvent(t, server.URL, "dev:tenant-a:service:crm", httpReadSeedEvent()); result.Status != http.StatusAccepted {
+		t.Fatalf("seed ingest status=%d: %+v", result.Status, result)
+	}
+	token := mintRestoreJWT(t, "auditor", "tenant-a", []string{"compliance"})
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/operations/http-read-op", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("summary status=%d, want 200", response.StatusCode)
+	}
+	reads := httpReadFacts(t, server)
+	if len(reads) != 1 {
+		t.Fatalf("audit.event.read rows=%d, want exactly 1; %+v", len(reads), reads)
+	}
+	read := reads[0]
+	if read.Action != domain.AdminActionEventRead || read.TargetType != "operation" || read.TargetID != "http-read-op" || read.Detail != "summary" || read.Actor != "auditor" {
+		t.Fatalf("summary fact=%+v, want (operation, http-read-op, summary) by auditor", read)
+	}
+}
+
+// TestHTTPOperationSummaryNotFoundAppendsNothing is AC-2 (HTTP): an unknown
+// operation id 404s before the append point and appends no fact. The empty
+// segment /api/v1/operations/ is answered 404 by the ServeMux itself (Go 1.22
+// wildcard routing never invokes the handler), so both legs leave the trail
+// untouched; the ErrInvalid→400 mapping is covered at the service layer
+// (TestReadSelfAuditOperationInvalidAppendsNothing).
+func TestHTTPOperationSummaryNotFoundAppendsNothing(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	token := mintRestoreJWT(t, "auditor", "tenant-a", []string{"compliance"})
+	for _, path := range []string{"/api/v1/operations/does-not-exist", "/api/v1/operations/"} {
+		request, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status=%d, want 404", path, response.StatusCode)
+		}
+	}
+	if reads := httpReadFacts(t, server); len(reads) != 0 {
+		t.Fatalf("audit.event.read rows=%d, want 0 (rejected reads append nothing); %+v", len(reads), reads)
+	}
+}
+
 // TestHTTPReadEndpointsFailClosedOnAppendFailure is AC-2 (HTTP) plus the F3
-// status mapping: when the admin-action append fails, all five read routes
+// status mapping: when the admin-action append fails, all six read routes
 // return non-200 and append nothing. The backend is seeded and the event
 // ingested through a clean backend FIRST, then the failure is armed (async
 // review finding 1).

@@ -756,7 +756,7 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 	return result, nil
 }
 
-func (s *Service) Operation(tenantID, operationID string) (domain.OperationSummary, error) {
+func (s *Service) Operation(tenantID, actor, operationID string) (domain.OperationSummary, error) {
 	if operationID == "" {
 		return domain.OperationSummary{}, fmt.Errorf("%w: operation_id is required", domain.ErrInvalid)
 	}
@@ -777,6 +777,13 @@ func (s *Service) Operation(tenantID, operationID string) (domain.OperationSumma
 		outcomes = append(outcomes, outcome)
 	}
 	sort.Strings(outcomes)
+	// Read self-audit (F-06): an operation summary exposes event content, so
+	// it appends one audit.event.read fact in the service layer (no transport
+	// can bypass it), fail-closed like GetEvent/QueryEvents. Encoding matches
+	// the sibling operation facts: (operation, id, timeline|replay|summary).
+	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "summary"); err != nil {
+		return domain.OperationSummary{}, err
+	}
 	return domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[len(events)-1].OccurredAt, Outcomes: outcomes}, nil
 }
 

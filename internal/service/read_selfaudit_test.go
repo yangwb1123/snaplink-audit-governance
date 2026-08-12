@@ -282,16 +282,17 @@ func TestReadSelfAuditRestoreFlowRecordsNothing(t *testing.T) {
 }
 
 // TestReadSelfAuditOutOfScopeReadsRecordNothing pins design constraint 7 and
-// async-review finding 2: Operation (summary) and GetExport (job status with
-// event content) are out of scope and must keep recording nothing on their
-// success paths — a future change adding audit there fails this test.
+// async-review finding 2: GetExport (job status with event content) is out of
+// scope and must keep recording nothing on its success path — a future change
+// adding audit there fails this test. Operation (summary) is now audited
+// (F-06 closure): it appends exactly one fact per call.
 func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
 	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("scope-evt", "op-scope", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Operation("tenant-a", "op-scope"); err != nil {
+	if _, err := svc.Operation("tenant-a", "auditor-1", "op-scope"); err != nil {
 		t.Fatalf("Operation: %v", err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
@@ -303,14 +304,40 @@ func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 	if _, err := svc.GetExport("tenant-a", job.ID); err != nil {
 		t.Fatalf("GetExport: %v", err)
 	}
-	// CreateExport runs the query internally, so exactly one read fact is
-	// expected — and it must be the query fact, not Operation/GetExport.
+	// Two read facts are expected: the operation summary (auditor-1) and the
+	// export's internal query (compliance-1). GetExport itself appends
+	// nothing — any fact attributable to it fails this scope pin.
 	reads := readFacts(t, svc)
-	if len(reads) != 1 {
-		t.Fatalf("audit.event.read rows=%d, want 1 (only the export's internal query); %+v", len(reads), reads)
+	if len(reads) != 2 {
+		t.Fatalf("audit.event.read rows=%d, want 2 (operation summary + export's internal query); %+v", len(reads), reads)
 	}
-	if reads[0].TargetType != "query" || reads[0].Actor != "compliance-1" {
-		t.Fatalf("only fact=%+v, want (query, compliance-1)", reads[0])
+	var opFact, queryFact bool
+	for _, read := range reads {
+		switch {
+		case read.TargetType == "operation" && read.TargetID == "op-scope" && read.Detail == "summary" && read.Actor == "auditor-1":
+			opFact = true
+		case read.TargetType == "query" && read.Actor == "compliance-1":
+			queryFact = true
+		default:
+			t.Fatalf("unexpected read fact=%+v (GetExport must record nothing)", read)
+		}
+	}
+	if !opFact || !queryFact {
+		t.Fatalf("read facts=%+v, want operation|op-scope|summary by auditor-1 and query by compliance-1", reads)
+	}
+}
+
+// TestReadSelfAuditOperationInvalidAppendsNothing is AC-2 (service): an empty
+// operation id fails with ErrInvalid before the append point and appends
+// nothing; the HTTP mapping (statusForError: ErrInvalid→400) is covered by
+// the handler path tests.
+func TestReadSelfAuditOperationInvalidAppendsNothing(t *testing.T) {
+	svc := testService(t, false)
+	if _, err := svc.Operation("tenant-a", "auditor-1", ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Operation(empty id) err=%v, want ErrInvalid", err)
+	}
+	if reads := readFacts(t, svc); len(reads) != 0 {
+		t.Fatalf("audit.event.read rows=%d, want 0 (invalid calls append nothing); %+v", len(reads), reads)
 	}
 }
 
