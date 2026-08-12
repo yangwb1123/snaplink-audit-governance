@@ -1,5 +1,41 @@
 # Release Notes
 
+## 2026-08-12 — DLQ 回放状态 `Mark` 落盘增加 fsync（internal/kafka 持久化加固）
+
+**写给运营（行为变化）：**
+
+- **`audit-kafka-dlq-replay` 的幂等账本落盘语义增强**：`ReplayState.Mark` 此前只做
+  临时文件写入 + rename，从不 fsync——断电可能留下零字节/撕裂的状态文件，导致启动时
+  `LoadReplayState` 解码失败、命令在引导阶段退出（`state: …` Fatalf），DLQ 恢复离线直至
+  人工修复；或 rename 回退，下一轮 accepted 主题重扫重复重发已回放的事件。现在 `Mark` 按
+  「写临时文件 → fsync 临时文件内容 → rename → fsync 父目录」的顺序落盘：`Mark` 返回
+  `nil` 即代表已回放决策对断电持久，撕裂/零字节目标文件不会再被新写入产生。
+- **残留窗口与失败语义**：rename 与父目录 fsync 之间的断电最多让 rename 回退一次，下一轮
+  至多重复重发该事件一次（至少一次语义，被 audit API 的 `event_id` 幂等吸收）；`Mark`
+  失败时本轮中止、DLQ 偏移不提交，记录留待下轮重试。受影响范围：仅
+  `AUDIT_DLQ_REPLAY_STATE`/`-state`（默认 `./data/dlq-replay-state.json`）文件路径。
+  修复前已撕裂的旧状态文件仍需人工删除/修复（解码失败保持 fail-loud，行为不变）。回滚：
+  仅需部署旧二进制（单文件 revert），无状态迁移、无配置/环境变量变化。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`ReplayState` 新增未导出 `syncFile`/`syncDir` 钩子（nil →
+  `fsutil.SyncFile`/`fsutil.SyncDir`，镜像 `archive.FileStore.syncDir` /
+  `store.fileBackend.syncDir`）；`Mark` 改为 `os.WriteFile(temp, 0o600)` → `syncFile(temp)`
+  → `os.Rename` → `syncDir(filepath.Dir(path))`。rename 前的失败（写/文件同步/rename）尽力
+  删除 `.tmp`、返回包装错误、旧状态保持权威；目录同步失败返回错误但保留新目标内容（D4：
+  内存 map 已含新标记、新旧内容均可解码，下一轮 `Mark` 重试持久化）。钩子字段不被
+  `encoding/json` 序列化，磁盘字节逐位不变（零迁移、混合版本滚动重启安全）。
+- 新增回归测试（`internal/kafka/replay_test.go`，6 个函数）：
+  `TestReplayStateMarkSyncsFileBeforeRenameAndDirAfterRename`（AC-1 顺序证明 + 生产默认钩子）、
+  `TestLoadReplayStateToleratesCrashLeftovers`（AC-2：陈旧 `.tmp`/零长/空白/缺失）、
+  `TestReplayStateMarkSurvivesSimulatedCrash`（AC-3：三个崩溃点 + 撕裂字节非空对照）、
+  `TestReplayStateMarkErrorPathsCleanTempAndPreserveTarget`（FM-1/2/3 错误路径、无 `.tmp` 残留）、
+  `TestReplayStateOnDiskFormatIsStable`（golden bytes + `0o600`）、
+  `TestReplayCrashAfterMarkRebootDoesNotRepublish`（崩溃重启幂等：持久标记后 0 次重发、
+  rename 回退时至多重发一次）。
+- `python3 cli.py quality` 全绿。
+
 ## 2026-08-12 — 文件快照 `Save` 在 rename 后 fsync 父目录链（internal/store）
 
 **写给运营（行为变化）：**
