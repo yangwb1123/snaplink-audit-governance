@@ -108,7 +108,7 @@ AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker 
   按 key 从 accepted topic 恢复原消息重发 → consumer 重新接入 → 事件入账，
   状态文件持久化；`-once` 使用独立 consumer group（避免与常驻实例 rebalance
   竞争），每阶段独立 drain 窗口。
-- **ClickHouse**：`audit-projector` 消费 accepted topic 写入查询投影表
+- **ClickHouse**：`audit-projector` 消费 ledgered topic 写入查询投影表
   （ReplacingMergeTree、tenant 前缀排序键、按月分区），投影可 SQL 查询。
 - **MinIO（Object Lock）**：事件/段清单/导出写入 `--with-lock` 桶；
   retention（governance 365d）下删除仅产生版本删除标记，对象不可物理删除。

@@ -16,7 +16,7 @@ import (
 
 func main() {
 	brokers := flag.String("brokers", os.Getenv("AUDIT_KAFKA_BROKERS"), "comma-separated Kafka brokers")
-	topic := flag.String("topic", envOr("AUDIT_KAFKA_TOPIC", kafka.TopicAccepted), "source topic")
+	topic := flag.String("topic", envOr("AUDIT_KAFKA_TOPIC", kafka.TopicLedgered), "source topic")
 	group := flag.String("group", envOr("AUDIT_KAFKA_GROUP", "audit-projector"), "consumer group id")
 	dsn := flag.String("clickhouse-dsn", envOr("AUDIT_CLICKHOUSE_DSN", "clickhouse://audit:audit-local-only@localhost:19000/audit"), "ClickHouse native DSN")
 	backoff := flag.Duration("backoff", durationEnv("AUDIT_KAFKA_BACKOFF", 2*time.Second), "retry backoff on projection failure")
@@ -28,6 +28,9 @@ func main() {
 		log.Fatalf("backoff must be positive")
 	}
 	logger := log.New(os.Stdout, "audit-projector ", log.LstdFlags|log.Lmicroseconds)
+	// FIRST LINE: the resolved source topic is observable even when
+	// ClickHouse/Kafka are unreachable (REQ-3, AC-3).
+	logger.Printf("brokers=%s topic=%s group=%s clickhouse=%s", *brokers, *topic, *group, *dsn)
 	store, err := projection.Open(*dsn)
 	if err != nil {
 		logger.Fatalf("clickhouse: %v", err)
@@ -38,7 +41,6 @@ func main() {
 	if err := store.EnsureSchema(ctx); err != nil {
 		logger.Fatalf("schema: %v", err)
 	}
-	logger.Printf("brokers=%s topic=%s group=%s clickhouse=%s", *brokers, *topic, *group, *dsn)
 	consumer := kafka.NewConsumer(strings.Split(*brokers, ","), *topic, *group, kafka.IngestFunc(store.Insert), *backoff, logger)
 	defer consumer.Close()
 	if err := consumer.Run(ctx); err != nil && ctx.Err() == nil {

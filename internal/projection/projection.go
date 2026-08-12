@@ -1,12 +1,13 @@
 // Package projection maintains the online query projection in ClickHouse
 // (architecture plan section 11.2, ADR-0004). The projection is derived
-// from the ledger events on the accepted topic, is eventually consistent
-// and can be rebuilt from scratch; it is never the source of truth.
+// from ledger events on the ledgered topic, is eventually consistent and
+// can be rebuilt from scratch; it is never the source of truth.
 package projection
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
+
+// ErrNotLedgered is returned when an event lacks complete ledger-assigned
+// chain state; such an event must never materialize into the query surface.
+var ErrNotLedgered = errors.New("projection: event lacks ledger-assigned chain state")
 
 // Store writes the query projection table. tenant_id leads the sort key so
 // tenant-scoped time-range scans stay efficient; ReplacingMergeTree keeps
@@ -66,6 +71,15 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 // the ReplacingMergeTree dedup asynchronously; queries must not assume
 // immediate uniqueness.
 func (s *Store) Insert(ctx context.Context, event domain.Event) error {
+	// Presence guard FIRST: before payload encoding and before any database
+	// access, so a zero-value *Store (nil db) returns ErrNotLedgered without
+	// panicking and no DB round-trip is wasted. Presence, not authenticity:
+	// chain state is assigned by the ledger upstream (the service strips
+	// client-supplied stream_id and stamps StreamID/Sequence/Hash in the
+	// commit closure), so a row lacking it is a non-fact.
+	if event.StreamID == "" || event.Sequence <= 0 || event.Hash == "" {
+		return ErrNotLedgered
+	}
 	payload, err := domain.CanonicalJSON(event.Payload)
 	if err != nil {
 		return fmt.Errorf("encode payload: %w", err)
