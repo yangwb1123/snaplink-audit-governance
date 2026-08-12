@@ -1,5 +1,33 @@
 # Release Notes
 
+## 2026-08-12 — S3 归档 Put 对 Stat 失败改为 fail-closed，并新增写后校验（internal/archive）
+
+**写给运营（行为变化）：**
+
+- **S3 瞬时故障不再盲写覆盖**：`S3Store.Put` 此前把 `StatObject` 的**任何**失败都当作“对象不存在”并
+  直接 `PutObject`——限流（`SlowDown`）、鉴权失败、网络错误、上下文取消都会被当作 key 缺失，静默覆盖
+  该 key 上已存在的对象（若已被篡改/损坏，则被无声替换且收据被标记为 archived），与 `FileStore` 的
+  fail-closed `Lstat` 行为背离。现在只有 minio 的 `NoSuchKey`（HEAD 404 的类型化错误）才算“确实不存在”；
+  其余 stat 错误一律中止归档（`s3 stat <key>: …`），**绝不调用 `PutObject`**。S3 不稳定时错误与重试会
+  变多，但永远不会再出现静默覆盖——这是本修复的预期行为，不是回归。
+- **新版本首次写入后强制读回校验**：对不存在 key 的写入在返回成功前会 `GetObject` 读回并逐字节比对；
+  若并发写入者在 stat→put 窗口内抢先落盘了不同内容，或读回失败，`Put` 返回响亮错误（
+  `archive object <key> cannot be verified after write: …` 或既有的 `already exists with different content`），
+  对象保持不动（WORM），收据不会标记为 archived，后续字节一致的重试会经既有对象路径收敛。
+- 回滚：仅需部署旧二进制（单文件 revert），无状态迁移、无配置/环境变量变化。
+
+**写给开发（实现变化）：**
+
+- `internal/archive/archive.go`：`S3Store.Put` 重写为 fail-closed stat 分支（
+  `minio.ToErrorResponse(err).Code != minio.NoSuchKey ⇒ 中止`；`ToErrorResponse` 是类型 switch，被包装的
+  `NoSuchKey` 也判为失败，偏向 fail-closed 永不 fail-open），新增未导出 `verifyAfterWrite` 与共享有界读回
+  `readBack`（唯一 `len(data)+1` 上限站点，`verifyExistingObject` 改为委托它）。无公开 API 变化；
+  minio-go 仍钉在 v7.2.1（`NoSuchKey`/`ToErrorResponse` 均已验证存在）。
+- `internal/archive/archive_s3_test.go`：`fakeS3Client` 升级——全状态加互斥锁、缺失 key 返回类型化
+  `NoSuchKey`（原为裸 `errors.New`）、`statErrs` 脚本队列、`putHook` 并发写入模拟、`putCalls/putData/gets`
+  调用与字节记录；新增 AC-1..AC-4 对应测试（stat 失败 fail-closed 且 `PutObject` 零调用、NoSuchKey 快乐
+  路径、写后校验三态、`-race` 下“nil ⇒ verify GET 曾返回调用方载荷”并发不变量）。
+- `python3 cli.py quality` 全绿（gofmt/vet/单测/race/全部六个生产二进制构建）。
 ## 2026-08-12 — 投影死信接入 DLQ 发布 + 可配置最大尝试次数（audit-projector）
 
 **写给运营（行为变化）：**

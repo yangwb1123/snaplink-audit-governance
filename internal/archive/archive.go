@@ -286,18 +286,36 @@ func NewS3Store(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*S3
 
 func (s *S3Store) Put(ctx context.Context, key string, data []byte) error {
 	key = strings.TrimPrefix(key, "/")
-	// 幂等：对象已存在时必须逐字节核对，不能仅凭 Stat 命中就视为已归档 ——
-	// 否则被篡改/损坏的对象会被静默报告为 archived（与 FileStore 的
-	// verifyExistingObject 对齐）。Object Lock 版本化下先写后查也能收敛，
-	// 但 Stat 前置避免无意义的上传。
+	// 幂等且防篡改，与 FileStore 的 Lstat 处理对齐：Stat 命中时必须逐字节核对
+	// （verifyExistingObject）；Stat 失败时必须区分“确实不存在”（只有 minio 的
+	// NoSuchKey 才算）与“探针失败”——其余错误（限流、鉴权、网络、被包装的
+	// 非 ErrorResponse 错误）一律中止，绝不落入盲写。ToErrorResponse 是类型
+	// switch 而非 errors.As，因此被包装的 NoSuchKey 也会被判为失败：偏向
+	// fail-closed，永不 fail-open。
 	if _, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{}); err == nil {
 		return s.verifyExistingObject(ctx, key, data)
+	} else if minio.ToErrorResponse(err).Code != minio.NoSuchKey {
+		return fmt.Errorf("s3 stat %s: %w", key, err)
 	}
-	_, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"})
-	if err != nil {
+	// 此刻 key 被证明不存在。写入后必须读回校验（verifyAfterWrite），关闭
+	// Stat→Put 的 TOCTOU 窗口：并发写入者在窗口内抢先落盘的内容绝不会被
+	// 当作“已验证”而静默返回 nil。
+	if _, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"}); err != nil {
 		return fmt.Errorf("s3 put %s: %w", key, err)
 	}
-	return nil
+	return s.verifyAfterWrite(ctx, key, data)
+}
+
+// readBack returns up to len(data)+1 bytes of the object at key. The bound
+// mirrors the existing verifier: a superset object is detected as differing
+// content instead of being read unboundedly. Never writes.
+func (s *S3Store) readBack(ctx context.Context, key string, data []byte) ([]byte, error) {
+	object, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer object.Close()
+	return io.ReadAll(io.LimitReader(object, int64(len(data))+1))
 }
 
 // verifyExistingObject returns nil only when the object already at key is
@@ -306,16 +324,32 @@ func (s *S3Store) Put(ctx context.Context, key string, data []byte) error {
 // instead of being silently accepted as archived. The existing object is
 // never modified or removed (WORM).
 func (s *S3Store) verifyExistingObject(ctx context.Context, key string, data []byte) error {
-	object, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("archive object %s already exists and cannot be verified: %w", key, err)
-	}
-	defer object.Close()
-	existing, err := io.ReadAll(io.LimitReader(object, int64(len(data))+1))
+	existing, err := s.readBack(ctx, key, data)
 	if err != nil {
 		return fmt.Errorf("archive object %s already exists and cannot be verified: %w", key, err)
 	}
 	if !bytes.Equal(existing, data) {
+		return fmt.Errorf("archive object %s already exists with different content", key)
+	}
+	return nil
+}
+
+// verifyAfterWrite returns nil only when the object just written at key reads
+// back byte-identical to data. It closes the stat→put TOCTOU window: a
+// concurrent writer that created or replaced content between the NoSuchKey
+// stat and this read is surfaced as an error instead of being reported as
+// archived. The object is never modified or removed (WORM); a later
+// byte-identical retry converges via the existing-object path.
+func (s *S3Store) verifyAfterWrite(ctx context.Context, key string, data []byte) error {
+	existing, err := s.readBack(ctx, key, data)
+	if err != nil {
+		return fmt.Errorf("archive object %s cannot be verified after write: %w", key, err)
+	}
+	if !bytes.Equal(existing, data) {
+		// Keep the existing mismatch wording verbatim (F-3.2): the object at
+		// the key now holds different content, e.g. a concurrent writer's
+		// version, so the failure reads exactly like the pre-existing
+		// mismatch case for operator triage.
 		return fmt.Errorf("archive object %s already exists with different content", key)
 	}
 	return nil
