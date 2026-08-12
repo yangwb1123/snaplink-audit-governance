@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 // ErrSnapshotConflict is returned when a concurrent instance persisted the
@@ -128,7 +129,11 @@ func (s *Snapshot) normalize() {
 }
 
 // Backend persists the control-plane state snapshot. Save must be atomic:
-// on error the previously persisted snapshot stays authoritative.
+// on error the previously persisted snapshot stays authoritative. A Save
+// returning nil additionally implies the renamed snapshot entry is durable
+// against power failure: the parent-directory chain of the renamed entry is
+// fsynced after the rename (M-12), so a crash immediately after Save cannot
+// revert or lose the committed snapshot.
 type Backend interface {
 	// Load returns the current snapshot for read-only access. The returned
 	// snapshot is owned by the backend and must not be retained. Load must
@@ -140,7 +145,8 @@ type Backend interface {
 	// baseline for the subsequent Save; callers must not retain the
 	// returned snapshot.
 	LoadForUpdate() (*Snapshot, error)
-	// Save atomically persists data.
+	// Save atomically persists data. A nil return means the rename is
+	// durable (parent-directory chain fsynced after rename).
 	Save(data *Snapshot) error
 }
 
@@ -348,6 +354,13 @@ type fileBackend struct {
 	mu   sync.RWMutex
 	data *Snapshot
 	path string
+
+	// syncDir is the per-directory fsync hook used by Save's post-rename
+	// durability step (mirrors archive.FileStore.syncDir). It defaults to
+	// fsutil.SyncDir; tests replace it to record the ordered sync set or
+	// fault-inject a specific path. Nil at production construction
+	// (openFileBackend), so there is no exported surface change.
+	syncDir func(path string) error
 }
 
 func openFileBackend(path string) (*fileBackend, error) {
@@ -385,7 +398,16 @@ func (f *fileBackend) Save(data *Snapshot) error {
 		f.data = data
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o750); err != nil {
+	parent := filepath.Dir(f.path)
+	// REQ-2: chain root = deepest ancestor that pre-exists this Save
+	// (probed BEFORE MkdirAll so freshly created intermediates are included
+	// in the post-rename sync chain). The snapshot has no configured root
+	// directory (unlike archive's FileStore.Dir), so the chain terminates
+	// at the deepest pre-existing directory: ancestors above it already
+	// have durable dentries and must not be re-synced (fsutil_test.go pins
+	// the root==dir collapse to exactly one sync).
+	root := deepestExistingAncestor(parent)
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
 	}
 	encoded, err := json.MarshalIndent(data, "", "  ")
@@ -395,9 +417,11 @@ func (f *fileBackend) Save(data *Snapshot) error {
 	tmp := f.path + ".tmp"
 	// fsync before rename: the snapshot is the control-plane source of
 	// truth, so a crash after rename must not leave an empty or partial
-	// state file behind (B1-2 "fsync" acceptance). Any write/sync error
-	// removes the temp file best-effort, keeping "Save returned an error
-	// ⇒ no file at the target key" (mirrors FileStore.Put).
+	// state file behind. Any write/sync error removes the temp file
+	// best-effort, keeping the invariant: Save returned an error ⇒ the
+	// previously persisted snapshot stays authoritative (in memory, and —
+	// best-effort — on disk); the target never holds a torn snapshot; no
+	// .tmp remains (mirrors FileStore.Put).
 	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
 	if err != nil {
 		return err
@@ -419,8 +443,100 @@ func (f *fileBackend) Save(data *Snapshot) error {
 	if err := os.Rename(tmp, f.path); err != nil {
 		return err
 	}
+	// The renamed entry must be durable before Save reports success (M-12,
+	// the same crash window the archive package closed): a power failure
+	// after rename can otherwise revert or lose the snapshot's directory
+	// entry, silently rolling back committed ledger state. Sync the
+	// parent-directory chain leaf-to-root; f.data is updated only after the
+	// chain sync succeeds.
+	syncDir := f.syncDir
+	if syncDir == nil {
+		syncDir = fsutil.SyncDir
+	}
+	if err := fsutil.SyncDirChain(root, parent, syncDir); err != nil {
+		// Chain sync failed: the rename already replaced the target, so
+		// best-effort restore the previously persisted snapshot to the
+		// target path ("no rename visible" — a fresh Open must load the
+		// previously persisted snapshot). f.data still holds the previous
+		// snapshot; it is only replaced below. Restore failures are
+		// best-effort: the original chain-sync error is returned
+		// regardless, and the restore's write+sync-before-rename guarantees
+		// the target never holds a torn snapshot and no .tmp remains.
+		f.restoreSnapshot()
+		return fmt.Errorf("sync directory chain for %s: %w", f.path, err)
+	}
 	f.data = data
 	return nil
+}
+
+// deepestExistingAncestor returns the deepest directory on the path to dir
+// that already exists before this Save runs (walking upward with os.Stat;
+// the filesystem root always exists and terminates the walk). Only these
+// directories have durable dentries already; every directory between the
+// returned root and dir is created by this Save and must itself be synced
+// after the rename. A Stat error other than "confirmed present" is treated
+// as not-existing: over-syncing a pre-existing ancestor is harmless (one
+// extra fsync), while under-syncing a freshly created intermediate would
+// reopen the M-12 window — the probe can therefore never compromise
+// durability.
+func deepestExistingAncestor(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return d // filesystem root always exists
+		}
+	}
+}
+
+// restoreSnapshot rewrites the previously persisted snapshot over the
+// target path (best-effort "no rename visible" after a post-rename
+// chain-sync failure in Save). It follows the same write → file.Sync →
+// close → rename sequence as Save so the target never holds a torn
+// snapshot, and finishes with a best-effort chain sync of its own. Every
+// error is swallowed: the caller already returns the original chain-sync
+// error, and the worst case is the target holding the new (complete,
+// parseable) snapshot from the original rename — the in-memory authority
+// (f.data) stays the previously persisted snapshot either way.
+func (f *fileBackend) restoreSnapshot() {
+	prev := f.data
+	if prev == nil {
+		prev = NewSnapshot()
+	}
+	encoded, err := json.MarshalIndent(prev, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := f.path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return
+	}
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, f.path); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	syncDir := f.syncDir
+	if syncDir == nil {
+		syncDir = fsutil.SyncDir
+	}
+	_ = fsutil.SyncDirChain(deepestExistingAncestor(filepath.Dir(f.path)), filepath.Dir(f.path), syncDir)
 }
 
 func cloneSnapshot(data *Snapshot) (*Snapshot, error) {

@@ -1,5 +1,46 @@
 # Release Notes
 
+## 2026-08-12 — 文件快照 `Save` 在 rename 后 fsync 父目录链（internal/store）
+
+**写给运营（行为变化）：**
+
+- **无 Postgres 时（文件快照即控制面账本）的落盘语义增强**：`fileBackend.Save` 此前在
+  `os.Rename` 成功后只 fsync 了临时文件内容，从未 fsync 父目录——按 POSIX 持久性语义，
+  rename 在父目录条目同步前不保证持久，断电可能把已提交的账本（事件、哈希链头、聚合
+  检查点、法律保留、导出、管理操作）回滚或丢失，破坏哈希链连续性（即归档 M-12 窗口在
+  快照路径上的同款缺陷）。现在 `Save` 返回 `nil` 意味着：rename 后父目录链已逐叶到根
+  fsync，快照条目对断电持久。
+- **失败语义不变且更严**：目录链 fsync 失败时 `Save` 返回错误（`sync directory chain
+  for <path>: …`，`errors.Is` 可达），此前已持久化的快照在内存中继续作为权威，并尽力
+  把旧快照写回目标路径（"no rename visible"）；目标路径绝不会出现撕裂快照，也不会残留
+  `.tmp`。
+- 受影响范围：仅 `AUDIT_STATE_PATH`/`-state` 文件后端路径。Postgres 后端（自己处理
+  提交持久性）与内存模式（空路径）逐位不变。代价：每次 `Save` 多一次目录 open+fsync
+  （新建中间目录时最多多两次），与控制面提交路径的既有写代价同级。回滚：仅需部署旧
+  二进制（单文件 revert），无状态迁移、无配置/环境变量变化。
+
+**写给开发（实现变化）：**
+
+- `internal/store/store.go`：`fileBackend` 新增未导出 `syncDir` 钩子（nil →
+  `fsutil.SyncDir`，镜像 `archive.FileStore.syncDir`）；`Save` 在 `MkdirAll` **之前**用新
+  私有助手 `deepestExistingAncestor` 探测链根（快照无配置根目录，链终止于最深的既有
+  祖先；Stat 错误只可能过度同步、绝不欠同步），rename 后调用
+  `fsutil.SyncDirChain(root, parent, syncDir)`（叶到根），失败时先 `restoreSnapshot()`
+  （写→sync→close→rename 同序，全部错误吞掉，旧快照保持权威）再返回包装错误；
+  `f.data = data` 仅在链同步成功后执行。`Backend` 契约注释更新为：返回 `nil` 额外蕴含
+  rename 条目的父目录链已 fsync（持久）。新增 `store → fsutil` 依赖边（fsutil 仅 stdlib，
+  无环）；`internal/fsutil` 与 `internal/archive` 未改动。
+- 新增回归测试（`internal/store/store_test.go`）：`syncRecorder` 钩子（记录同步顺序/
+  故障注入/failN/sentinel）与 `crashDrop` 断电模型；`TestFileBackendSaveSyncsParentDirectoryChain`
+  （AC-1：既有父目录坍缩为一次同步、新建嵌套目录叶到根、二次 Save 坍缩、钩子内
+  `os.Stat(path)` 证明同步在 rename 之后且目标内容为提交快照）、
+  `TestFileBackendSaveDirSyncFailureKeepsPreviousAuthoritative`（AC-2：`errors.Is` 可达、
+  内存权威 + 全新 `Open` 读到旧快照、无 `.tmp`、同步确被尝试）、
+  `TestFileBackendSaveSurvivesSimulatedCrash`（AC-3：全链存活 / 修复前无同步断电丢失
+  账本 / 仅根同步仍丢失——三者均非空）。
+- `python3 cli.py quality` 全绿（gofmt/vet/单测/race/全部生产二进制构建）；负向对照：
+  AC-3 的"修复前无同步"与"仅根同步"子用例在未修复代码上丢账本，证明模型非空。
+
 ## 2026-08-12 — Dev 令牌 `platform` subject 不再隐含 Platform 权限（internal/auth）
 
 **写给运营（行为变化）：**
