@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-08-12 — 投影死信接入 DLQ 发布 + 可配置最大尝试次数（audit-projector）
+
+**写给运营（行为变化）：**
+
+- **投影失败不再静默丢失**：`audit-projector` 此前用零 `ConsumerOption` 构建消费者，死信路径退化为
+  commit + 日志（`internal/kafka/kafka.go` 的 `else if c.dlq != nil` 守卫被跳过），ClickHouse 瞬时故障
+  重试耗尽后不产生任何 `Failure` 记录，`audit-kafka-dlq-replay` 无从恢复——违反架构计划 §6.4
+  （“投影失败不回滚账本，通过重试和 DLQ 修复”）。现在消费者的**默认行为**是：超过 `-max-attempts`
+  （默认 8，与消费者端默认上限一致）的投影失败在提交前发布 `attempts_exhausted` Failure 到
+  `audit.events.dlq.v1`（AsyncAPI 三字段载荷），恢复 §6.4 恢复路径。
+- **新增两个配置项**（与 `audit-kafka-consumer` 完全一致的命名/默认/优先级）：`-max-attempts`
+  （env `AUDIT_KAFKA_MAX_ATTEMPTS`，默认 8，非数字 env 回退 8，`≤0` 启动即致命退出）与 `-dlq-topic`
+  （env `AUDIT_KAFKA_DLQ_TOPIC`，默认 `audit.events.dlq.v1`；显式 `-dlq-topic ""` 可禁用发布器，恢复
+  原来的 commit+log 降级）。首行启动日志现在额外输出 `max_attempts=` 与 `dlq_topic=`。
+- **恢复路径的运维要求（重要）**：投影死信的事件位于 `audit.events.ledgered.v1`，因此运行
+  `audit-kafka-dlq-replay` 恢复投影失败时必须指定 `-accepted-topic audit.events.ledgered.v1`
+  （env `AUDIT_KAFKA_ACCEPTED_TOPIC`），否则默认按 accepted topic 查找会找不到原事件。按字节重发布
+  保持哈希链完整。
+- **DLQ 不可达不阻塞**：发布失败自动降级为 commit+log，分区进度永不阻塞；`-dlq-topic ""` 等价于
+  旧版本行为。回滚只需部署旧二进制（零选项 = 原 commit+log 行为），无需兼容开关。
+
+**写给开发（实现变化）：**
+
+- `cmd/audit-projector/main.go`：新增 `-max-attempts`/`-dlq-topic` flag（`intEnv`/`envOr` 回退，新增
+  `strconv` 导入与 `intEnv` helper，与兄弟二进制逐字一致）；`*backoff <= 0 || *maxAttempts <= 0`
+  启动致命校验（REQ-5，早于任何构造）；消费者以 `[]kafka.ConsumerOption{kafka.WithMaxAttempts(...)}`
+  构建，`-dlq-topic` 非空时 `kafka.NewProducer(strings.Split(*brokers, ","), *dlqTopic)` + `defer Close`
+  + `kafka.WithDLQ`（REQ-1/REQ-2）；首行日志扩展为
+  `brokers= topic= group= clickhouse= max_attempts= dlq_topic=` 且仍在任何阻塞调用之前输出（REQ-6）。
+  仅 stdlib 新增依赖，无 `internal/kafka`/`internal/projection`/consumer/replayer 改动。
+- `cmd/audit-projector/main_test.go`：新增 4 个二进制测试 `TestResolvedDefaultDLQConfig`（默认
+  `max_attempts=8 dlq_topic=audit.events.dlq.v1`）、`TestDLQConfigFlagOverrides`（flag 覆盖）、
+  `TestDLQConfigEnvOverrides`（env 覆盖）、`TestMaxAttemptsNonPositiveRejected`（`-max-attempts 0`
+  非零退出且报错提及 max-attempts）。行为契约（permanent_error 先发布后提交、attempts_exhausted
+  恰好 `maxAttempts` 次、发布失败降级）由 `internal/kafka/kafka_test.go` 既有 fake-reader 测试原样覆盖。
+- `python3 cli.py quality` 全绿（gofmt/vet/单测/race/构建，含 `audit-projector` 二进制）。
+
 ## 2026-08-12 — 单个损坏 audit_outbox payload 不再永久卡死 relay（audit-outbox-relay）
 
 **写给运营（行为变化）：**
