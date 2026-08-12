@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-12 — 消费端拒绝单值外/尾随垃圾 Kafka 消息（audit-kafka-consumer）
+
+**写给运营（行为变化）：**
+
+- **一条消息里包含两个 JSON 对象、或合法 JSON 后跟非空白垃圾，整条消息现在按
+  `unparsable_message` 死信，不再静默只摄取第一个值**：此前 `Consumer.Run` 只解码
+  一次，双值消息的第一个事件会被当作正常事件摄取并提交，第二个事件被静默丢弃
+  （无任何死信证据）；尾随垃圾消息也会被当作正常事件摄取。现在第二段解码非 `EOF`
+  即视为信封非法：`audit_consumer_dead_lettered_total` /
+  `audit_consumer_dlq_published_total` 计数各 +1，DLQ 记录 `error_code=`
+  `unparsable_message`（而非此前可到达的错误归类 `permanent_error`），`event_id`
+  取消息 key（payload 探针在多值/尾随垃圾上探测不到 event_id）。消息仍然**总是提交**，
+  分区进度不被阻塞；DLQ 未挂载或发布失败时降级为提交+日志（既有契约）。
+- **合法消息零行为变化**：单值消息（含尾随空白/换行）仍走 解码→摄取→重试/退避→
+  提交 路径，摄取失败的死信码仍为 `permanent_error` / `attempts_exhausted`。
+- 回滚只需部署旧 `audit-kafka-consumer` 二进制；已死信消息留在 DLQ 可回放，已摄取
+  事实不丢失也不重复（修复从不单独摄取非法首值）。旧二进制的静默部分摄取行为会
+  在回滚窗口内复现，需尽快重新发布修复。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/kafka.go`：`Consumer.Run` 解码阶段在第一段 `Decode` 成功后增加
+  第二次 `Decode(&extra)`——非 `io.EOF` 即拒绝整条消息（第二段解码成功时合成错误
+  `message value must contain one JSON value`，与 `internal/httpapi/server.go` 的
+  `decodeBody` 单值契约一致；解析错误时透传真实错误文本）；新增私有助手
+  `deadLetterUnparsable`（原内联不可解析死信块逐字提取，两条拒绝分支共用：记录
+  死信证据→probe/key 解析 event_id→发布或降级→总是提交），`Run` 保持
+  `continue` 语义（提交失败仍使 `Run` 退出，与修复前一致）。`eventIDFromValue`、
+  `consume`/`deadLetter` 状态机、`Failure` 三键载荷、AsyncAPI/OpenAPI/Proto 均未改动。
+- `internal/kafka/kafka_test.go`：新增 AC-1 `TestConsumerRejectsMultiValueMessageAsUnparsable`
+  （双值→零摄取、提交 1 次、一条 `unparsable_message` Failure、event_id 取 key）、
+  AC-2 `TestConsumerRejectsTrailingGarbageAsUnparsable`（尾随垃圾→同上且 ErrorMessage
+  含 `invalid character 'g'`）、AC-4 正向控制 `TestConsumerAllowsTrailingWhitespaceAfterSingleValue`
+  （尾随换行仍走正常摄取→提交）。两个拒绝用例在修复前代码上确实失败（首值会被摄取）。
+
 ## 2026-08-12 — 卡死导出作业恢复（governance worker）
 
 **写给运营（行为变化）：**

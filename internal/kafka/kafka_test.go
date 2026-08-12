@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,6 +338,89 @@ func TestConsumerDeadLettersWithoutPublisherCommitsAndLogs(t *testing.T) {
 	}
 	if reader.publishCalls != 0 || len(reader.published) != 0 {
 		t.Fatalf("no publisher attached, want zero publish activity, calls=%d published=%v", reader.publishCalls, reader.published)
+	}
+}
+
+// AC-1 (REQ-1): a message value containing two JSON objects is a malformed
+// envelope — the whole message is dead-lettered as unparsable, the first
+// value is never ingested alone (silent partial ingest), and the message is
+// committed as dead-letter evidence.
+func TestConsumerRejectsMultiValueMessageAsUnparsable(t *testing.T) {
+	value := []byte(`{"event_id":"evt-1","tenant_id":"demo","source_system":"demo","action":"update","outcome":"success"}` +
+		`{"event_id":"evt-2","tenant_id":"demo","source_system":"demo","action":"update","outcome":"success"}`)
+	reader := &fakeReader{messages: []kafka.Message{{Key: []byte("evt-1"), Value: value, Partition: 0, Offset: 9}}}
+	ingested := 0
+	runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, WithDLQ(reader))
+	if ingested != 0 {
+		t.Fatalf("two-value message reached ingest %d times, want 0", ingested)
+	}
+	if len(reader.commits) != 1 || reader.committedOffset != 9 {
+		t.Fatalf("commits=%d committedOffset=%d, want 1 commit at offset 9 (dead-letter evidence)", len(reader.commits), reader.committedOffset)
+	}
+	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodeUnparsable {
+		t.Fatalf("published=%v, want one unparsable_message Failure", reader.published)
+	}
+	failure := reader.published[0]
+	if failure.EventID != "evt-1" {
+		t.Fatalf("event_id=%q, want evt-1 (key fallback)", failure.EventID)
+	}
+	if failure.ErrorMessage == "" {
+		t.Fatal("ErrorMessage must be non-empty (synthesized single-value error)")
+	}
+}
+
+// AC-2 (REQ-1/REQ-2): valid JSON followed by non-whitespace garbage is also
+// a malformed envelope — dead-lettered whole, never ingested, with the second
+// decode's parse error surfaced in ErrorMessage so operators see why.
+func TestConsumerRejectsTrailingGarbageAsUnparsable(t *testing.T) {
+	value := []byte(`{"event_id":"evt-1","tenant_id":"demo","source_system":"demo","action":"update","outcome":"success"} garbage`)
+	reader := &fakeReader{messages: []kafka.Message{{Key: []byte("evt-1"), Value: value, Partition: 0, Offset: 10}}}
+	ingested := 0
+	runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, WithDLQ(reader))
+	if ingested != 0 {
+		t.Fatalf("trailing-garbage message reached ingest %d times, want 0", ingested)
+	}
+	if len(reader.commits) != 1 || reader.committedOffset != 10 {
+		t.Fatalf("commits=%d committedOffset=%d, want 1/10", len(reader.commits), reader.committedOffset)
+	}
+	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodeUnparsable {
+		t.Fatalf("published=%v, want one unparsable_message Failure", reader.published)
+	}
+	if reader.published[0].EventID != "evt-1" {
+		t.Fatalf("event_id=%q, want evt-1", reader.published[0].EventID)
+	}
+	if !strings.Contains(reader.published[0].ErrorMessage, "invalid character 'g'") {
+		t.Fatalf("ErrorMessage=%q, want trailing-data parse error text", reader.published[0].ErrorMessage)
+	}
+}
+
+// AC-4 (REQ-4 positive control): a single value followed by trailing
+// whitespace stays legal — the second decode hits io.EOF and the message
+// takes the normal ingest -> commit path (boundary between legal whitespace
+// and illegal trailing data).
+func TestConsumerAllowsTrailingWhitespaceAfterSingleValue(t *testing.T) {
+	message := validMessage("evt-1", 11)
+	message.Value = append(message.Value, '\n')
+	reader := &fakeReader{messages: []kafka.Message{message}}
+	ingested := 0
+	runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, WithDLQ(reader))
+	if ingested != 1 {
+		t.Fatalf("ingested=%d, want 1 (trailing whitespace is legal)", ingested)
+	}
+	if len(reader.commits) != 1 || reader.committedOffset != 11 {
+		t.Fatalf("commits=%d committedOffset=%d, want 1/11", len(reader.commits), reader.committedOffset)
+	}
+	if len(reader.published) != 0 {
+		t.Fatalf("published=%v, want no dead-letter for a legal message", reader.published)
 	}
 }
 

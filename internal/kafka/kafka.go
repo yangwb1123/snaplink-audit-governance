@@ -289,29 +289,24 @@ func (c *Consumer) Run(ctx context.Context) error {
 		decoder := json.NewDecoder(bytes.NewReader(message.Value))
 		decoder.UseNumber()
 		if err := decoder.Decode(&event); err != nil {
-			// 不可解析的消息没有重试价值：先记录死信证据（DLQ 有挂载时），
-			// 再提交；绝不静默丢弃。event_id 优先取 payload 探针，key 仅作
-			// 回退；两者皆空时只提交+记日志，避免发布空 event_id 的 Failure
-			//（replay 无法路由它，只会制造噪音）。
-			c.deadLettered.Add(1)
-			failure := Failure{ErrorCode: ErrorCodeUnparsable, ErrorMessage: err.Error()}
-			if id := eventIDFromValue(message.Value); id != "" {
-				failure.EventID = id
-			} else {
-				failure.EventID = string(message.Key)
+			if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
+				return deadErr
 			}
-			if failure.EventID == "" {
-				c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=no-event-id-recoverable (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset)
-			} else if c.dlq != nil {
-				if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
-					c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
-				} else {
-					c.dlqPublished.Add(1)
-				}
+			continue
+		}
+		// REQ-1: the accepted topic's envelope is exactly one JSON value per
+		// message — the HTTP API enforces the same contract in decodeBody
+		// (internal/httpapi/server.go). A second value or trailing
+		// non-whitespace data makes the whole message malformed: the first
+		// value must never be ingested alone (silent partial ingest).
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			if err == nil {
+				// Second decode succeeded: a second JSON value exists.
+				err = errors.New("message value must contain one JSON value")
 			}
-			c.logf("dead-letter topic=%s partition=%d offset=%d event_id=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, err)
-			if commitErr := c.reader.CommitMessages(ctx, message); commitErr != nil {
-				return commitErr
+			if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
+				return deadErr
 			}
 			continue
 		}
@@ -319,6 +314,37 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// deadLetterUnparsable routes a message that could not be decoded into an
+// event (or violated the single-value contract) through the unparsable
+// dead-letter path: dead-letter evidence is recorded, the Failure is
+// published to the DLQ when a publisher is attached and an event_id is
+// recoverable, and the message is always committed so the partition
+// advances. The message is never retried and never reaches ingest.
+func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Message, cause error) error {
+	// 不可解析的消息没有重试价值：先记录死信证据（DLQ 有挂载时），
+	// 再提交；绝不静默丢弃。event_id 优先取 payload 探针，key 仅作
+	// 回退；两者皆空时只提交+记日志，避免发布空 event_id 的 Failure
+	//（replay 无法路由它，只会制造噪音）。
+	c.deadLettered.Add(1)
+	failure := Failure{ErrorCode: ErrorCodeUnparsable, ErrorMessage: cause.Error()}
+	if id := eventIDFromValue(message.Value); id != "" {
+		failure.EventID = id
+	} else {
+		failure.EventID = string(message.Key)
+	}
+	if failure.EventID == "" {
+		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=no-event-id-recoverable (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset)
+	} else if c.dlq != nil {
+		if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
+			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
+		} else {
+			c.dlqPublished.Add(1)
+		}
+	}
+	c.logf("dead-letter topic=%s partition=%d offset=%d event_id=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, cause)
+	return c.reader.CommitMessages(ctx, message)
 }
 
 // consume resolves one fetched message in place. Ingest is retried on the
