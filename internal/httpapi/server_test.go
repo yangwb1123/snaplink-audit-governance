@@ -1565,6 +1565,355 @@ func TestHTTPCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 	}
 }
 
+// TestDevAuditorCannotCreateTenant is AC-1.3 with the M2 (listTenants) and L1
+// (4-part service form) folds: a dev token whose subject is "platform" but
+// whose roles are non-admin must never create or list tenants. Pre-fix,
+// dev:platform:auditor short-circuited Platform and POST /api/v1/tenants
+// returned 201 with the tenant persisted; post-fix it is 403 with nothing
+// persisted, while the pinned platform-admin form keeps 201 (AC-2).
+func TestDevAuditorCannotCreateTenant(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	postTenant := func(token, id string) int {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"id": id, "name": "X", "active": true})
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/tenants", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	// AC-1.3: subject "platform" + non-admin auditor role is 403, not 201.
+	if status := postTenant("dev:platform:auditor", "auditor-created"); status != http.StatusForbidden {
+		t.Fatalf("POST tenants with dev:platform:auditor status=%d, want 403", status)
+	}
+	// L1 fold: the 4-part non-admin service form must not create tenants either.
+	if status := postTenant("dev:platform:service:crm", "service-created"); status != http.StatusForbidden {
+		t.Fatalf("POST tenants with dev:platform:service:crm status=%d, want 403", status)
+	}
+	// M2 fold: GET /api/v1/tenants is 403 for the same non-admin principal.
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/tenants", nil)
+	request.Header.Set("Authorization", "Bearer dev:platform:auditor")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("GET tenants with dev:platform:auditor status=%d, want 403", response.StatusCode)
+	}
+	// AC-2 control: the pinned platform-admin dev form still creates tenants.
+	if status := postTenant("dev:platform:platform-admin", "admin-created"); status != http.StatusCreated {
+		t.Fatalf("POST tenants with dev:platform:platform-admin status=%d, want 201", status)
+	}
+	// The 403 bodies were never persisted; the 201 control was.
+	if err := st.Read(func(data *store.Snapshot) error {
+		for _, id := range []string{"auditor-created", "service-created"} {
+			if _, exists := data.Tenants[id]; exists {
+				t.Fatalf("rejected tenant %q was persisted", id)
+			}
+		}
+		if _, exists := data.Tenants["admin-created"]; !exists {
+			t.Fatalf("control tenant admin-created was not persisted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDevAuditorTenantOverrideIgnored is AC-1.4: for a non-Platform claim the
+// ?tenant_id= escape hatch in tenantFor (server.go) is unreachable, so a dev
+// token with subject "platform" and role auditor is scoped to its own tenant
+// context ("platform") on every read route. The design pins the events route:
+// an event living in tenant-b is 404 under dev:platform:auditor with a
+// tenant_id=tenant-b override (override ignored -> scoped to "platform"), and
+// the same request returns 200 for a real platform principal (escape hatch
+// preserved).
+func TestDevAuditorTenantOverrideIgnored(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
+		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	// The victim event lives in tenant-b.
+	victim := domain.Event{EventID: "cross-tenant-event", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "read", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "cross-tenant-idem", Payload: map[string]any{"resource": "invoice"}}
+	if got := postTestEvent(t, server.URL, "dev:tenant-b:service:crm", victim); got.Status != http.StatusAccepted {
+		t.Fatalf("victim ingest status=%d, want 202", got.Status)
+	}
+
+	getEvent := func(token, query string) int {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events/cross-tenant-event"+query, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	// 404: override ignored — the auditor claim is scoped to its own tenant
+	// "platform", where the victim event does not exist.
+	if status := getEvent("dev:platform:auditor", "?tenant_id=tenant-b"); status != http.StatusNotFound {
+		t.Fatalf("GET event with override status=%d, want 404 (override ignored)", status)
+	}
+	// 404: without an override the same claim still cannot see tenant-b's event.
+	if status := getEvent("dev:platform:auditor", ""); status != http.StatusNotFound {
+		t.Fatalf("GET event without override status=%d, want 404", status)
+	}
+	// 200: the escape hatch is preserved for a real platform principal.
+	if status := getEvent("dev:platform:platform-admin", "?tenant_id=tenant-b"); status != http.StatusOK {
+		t.Fatalf("GET event with platform-admin override status=%d, want 200", status)
+	}
+}
+
+// TestDevPlatformComplianceExportScopedToOwnTenant is review fold M1: the
+// highest-impact exfil vector — dev:platform:compliance + POST /api/v1/exports
+// with a ?tenant_id=<victim> override — is closed by the fix. The export job
+// must be scoped to the claim's own tenant ("platform") and nothing may be
+// persisted under the victim tenant; the platform-admin control still honors
+// the override.
+func TestDevPlatformComplianceExportScopedToOwnTenant(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: filepath.Join(t.TempDir(), "archive"), Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
+		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	victim := domain.Event{EventID: "export-victim", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "read", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "export-victim-idem", Payload: map[string]any{"resource": "invoice"}}
+	if got := postTestEvent(t, server.URL, "dev:tenant-b:service:crm", victim); got.Status != http.StatusAccepted {
+		t.Fatalf("victim ingest status=%d, want 202", got.Status)
+	}
+
+	createExport := func(token string) domain.ExportJob {
+		t.Helper()
+		body, _ := json.Marshal(domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_020, 0).UTC()})
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/exports?tenant_id=tenant-b", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("POST exports status=%d, want 202", response.StatusCode)
+		}
+		var job domain.ExportJob
+		if err := json.NewDecoder(response.Body).Decode(&job); err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	// The compliance dev token is scoped to its own tenant: the override is
+	// ignored and the job belongs to "platform", not the victim.
+	job := createExport("dev:platform:compliance")
+	if job.TenantID != "platform" {
+		t.Fatalf("export job.TenantID=%q, want platform (override ignored)", job.TenantID)
+	}
+	// The platform-admin control still honors the escape hatch.
+	adminJob := createExport("dev:platform:platform-admin")
+	if adminJob.TenantID != "tenant-b" {
+		t.Fatalf("platform-admin export job.TenantID=%q, want tenant-b (escape hatch preserved)", adminJob.TenantID)
+	}
+	// The compliance token's job is persisted under its own tenant; the
+	// platform-admin control's job is persisted under the victim (escape
+	// hatch). Neither may be mis-scoped.
+	if err := st.Read(func(data *store.Snapshot) error {
+		if got := data.Exports[job.ID].TenantID; got != "platform" {
+			t.Fatalf("compliance export %q persisted under tenant %q, want platform", job.ID, got)
+		}
+		if got := data.Exports[adminJob.ID].TenantID; got != "tenant-b" {
+			t.Fatalf("platform-admin export %q persisted under tenant %q, want tenant-b", adminJob.ID, got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Let the async runExport goroutines finish so the archive writes land
+	// before TempDir cleanup (same pattern as the existing export tests);
+	// poll the snapshot directly to avoid re-entering route scoping.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		done := true
+		if err := st.Read(func(data *store.Snapshot) error {
+			for _, id := range []string{job.ID, adminJob.ID} {
+				current := data.Exports[id]
+				if current.Status != "completed" && current.Status != "failed" {
+					done = false
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDevPlatformTenantAdminSourceStampedToOwnTenant is review fold M2: the
+// cross-tenant policy-write stamping. A dev:platform:tenant-admin token that
+// sends a body tenant_id for a victim tenant must have the source stamped to
+// its own tenant ("platform") — post-fix the !claims.Platform branch in
+// createSource stamps claims.TenantID; nothing may be created under the
+// victim tenant's key.
+func TestDevPlatformTenantAdminSourceStampedToOwnTenant(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
+		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	body, _ := json.Marshal(map[string]any{"id": "src-x", "tenant_id": "tenant-b", "name": "X", "active": true})
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/sources", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:platform:tenant-admin")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("POST sources status=%d, want 201", response.StatusCode)
+	}
+	var source domain.SourceSystem
+	if err := json.NewDecoder(response.Body).Decode(&source); err != nil {
+		t.Fatal(err)
+	}
+	// The body tenant override must be stamped to the claim's own tenant.
+	if source.TenantID != "platform" {
+		t.Fatalf("source.TenantID=%q, want platform (body tenant_id override ignored)", source.TenantID)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Sources[store.SourceKey("platform", "src-x")]; !exists {
+			t.Fatalf("source src-x was not persisted under the claim's own tenant platform")
+		}
+		if _, exists := data.Sources[store.SourceKey("tenant-b", "src-x")]; exists {
+			t.Fatalf("source src-x must not be persisted under victim tenant tenant-b")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDevPlatformAuditorSourceTamperRejected is the security reviewer's extra
+// pin: the cross-tenant tamper chain (create a source in a victim tenant by
+// sending tenant_id in the body) is blocked for a non-admin dev token — 403
+// before any store access, victim source list byte-identical, nothing
+// persisted.
+func TestDevPlatformAuditorSourceTamperRejected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "victim-src", Name: "Victim", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	defer server.Close()
+
+	body, _ := json.Marshal(map[string]any{"id": "tamper-src", "tenant_id": "tenant-a", "name": "Tamper", "active": true})
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/sources", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:platform:auditor")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST sources with dev:platform:auditor status=%d, want 403", response.StatusCode)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if len(data.Sources) != 1 {
+			t.Fatalf("source count=%d, want 1 (no tamper persisted)", len(data.Sources))
+		}
+		victim, exists := data.Sources[store.SourceKey("tenant-a", "victim-src")]
+		if !exists || victim.ID != "victim-src" || victim.Name != "Victim" {
+			t.Fatalf("victim source was altered: %+v", data.Sources)
+		}
+		if _, exists := data.Sources[store.SourceKey("tenant-a", "tamper-src")]; exists {
+			t.Fatalf("tamper source was persisted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // hasDigestKey reports whether any key ending in "__search_digest" exists
 // at any nesting depth of a decoded JSON value (recursive scan).
 func hasDigestKey(value any) bool {

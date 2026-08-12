@@ -88,13 +88,19 @@ func parseDevToken(token string) (Claims, error) {
 		return Claims{}, fmt.Errorf("invalid development token")
 	}
 	claims := Claims{Subject: parts[1], ClientID: clientID, TenantID: parts[1], Roles: roles, Permissions: map[string]bool{}}
-	if parts[1] == "platform" || contains(roles, "platform-admin") {
-		claims.Platform = true
-	}
+	claims.Permissions = permissionsForRoles(roles)
+	// Platform derives from the same rule as the JWT path (parseJWT): the
+	// explicit audit:platform:cross_tenant permission or the platform-admin
+	// role. The tenant name "platform" alone grants nothing — a dev token
+	// whose subject is "platform" but whose roles are non-admin (auditor,
+	// compliance, service, ...) stays tenant-scoped, matching the JWT trust
+	// model (fail-closed). Only permissionsForRoles can grant the permission,
+	// and only the platform-admin role maps to it, so Platform is set iff
+	// the platform-admin role is present.
+	claims.Platform = claims.Permissions["audit:platform:cross_tenant"] || contains(roles, "platform-admin")
 	if contains(roles, "service") || contains(roles, "event-writer") {
 		claims.Service = true
 	}
-	claims.Permissions = permissionsForRoles(roles)
 	return claims, nil
 }
 

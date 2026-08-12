@@ -1,5 +1,36 @@
 # Release Notes
 
+## 2026-08-12 — Dev 令牌 `platform` subject 不再隐含 Platform 权限（internal/auth）
+
+**写给运营（行为变化）：**
+
+- **`dev:platform:<非 platform-admin 角色>` 令牌降权（fail-closed）**：此前 `parseDevToken` 把
+  subject/租户名 `platform` 与 `platform-admin` 角色并列设为 `Platform`，导致 `dev:platform:auditor`
+  （角色只有只读 `auditor`）被当作 Platform 主体——`POST /api/v1/tenants` 可创建租户（201），且任何
+  读路径的 `?tenant_id=` 覆盖都会生效（跨租户读取任意租户审计数据）。现在 Platform 只由
+  `platform-admin` 角色（或其映射的唯一权限 `audit:platform:cross_tenant`）授予，与 JWT 信任路径
+  完全一致；`dev:platform:auditor` 等令牌保持租户上下文（`TenantID="platform"`）但不再拥有任何
+  Platform 能力，创建/列举租户返回 403，`?tenant_id=` 覆盖被忽略。
+- **受影响范围**：仅 `dev:platform:<非 platform-admin 角色>` 形式（含 4 段 service 形式）行为变化；
+  `dev:platform:platform-admin` 与所有其他 dev/JWT 形式逐位不变。dev auth 仍受
+  `AUDIT_ALLOW_DEV_AUTH=true` 白名单门禁（无生产暴露）。回滚只需部署旧二进制（单行 revert，无状态/配置变化）。
+
+**写给开发（实现变化）：**
+
+- `internal/auth/auth.go`：`parseDevToken` 删除 `parts[1] == "platform"` 分支，`claims.Platform` 改为在
+  `claims.Permissions = permissionsForRoles(roles)` 之后用与 `parseJWT` **逐字节相同**的表达式推导
+  （`Permissions["audit:platform:cross_tenant"] || contains(roles, "platform-admin")`）；两条信任路径
+  结构性对齐，`Claims.Allows`/`require`/`tenantFor`/`createTenant`/JWT 解析均未改动。
+- 新增回归测试：`internal/auth/auth_test.go` 的 `TestDevTokenPlatformRequiresPlatformAdminRole`（subject ×
+  role 矩阵，Platform == (role == platform-admin)，含 4 段 service 形式）与
+  `TestJWTPlatformTenantWithAuditorRoleIsNotPlatform`（AC-3 JWT 对等 pin）；`internal/httpapi/server_test.go`
+  的 `TestDevAuditorCannotCreateTenant`（403 + 不落盘）、`TestDevAuditorTenantOverrideIgnored`（
+  `?tenant_id=` 覆盖 404/404/200 对比）、`TestDevPlatformComplianceExportScopedToOwnTenant`（导出任务
+  落在自身租户）、`TestDevPlatformTenantAdminSourceStampedToOwnTenant`（source 租户盖印到自身租户）、
+  `TestDevPlatformAuditorSourceTamperRejected`（跨租户篡改 403 + 受害列表逐字节不变）。
+- `python3 cli.py quality` 全绿（gofmt/vet/单测/race/全部生产二进制构建）；改动前负向对照：上述新测试在
+  未修复代码上均失败，证明其捕获真实漏洞。
+
 ## 2026-08-12 — S3 归档 Put 对 Stat 失败改为 fail-closed，并新增写后校验（internal/archive）
 
 **写给运营（行为变化）：**

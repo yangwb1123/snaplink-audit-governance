@@ -301,6 +301,104 @@ func TestDevAuthAcceptedWhenAllowlisted(t *testing.T) {
 	}
 }
 
+// TestDevTokenPlatformRequiresPlatformAdminRole is AC-1/AC-4: Platform on a
+// dev token is derived from the JWT rule (permissionsForRoles-derived
+// audit:platform:cross_tenant or the platform-admin role), never from the
+// subject/tenant name. A subject of "platform" with any non-admin role must
+// stay tenant-scoped: Platform false, cross-tenant permission denied, tenant
+// context preserved. Platform is true iff the platform-admin role is present,
+// independent of the subject name.
+func TestDevTokenPlatformRequiresPlatformAdminRole(t *testing.T) {
+	authenticator := Authenticator{AllowDev: true}
+	// Roles and role combos from permissionsForRoles; platform-admin is the
+	// only role that maps to audit:platform:cross_tenant.
+	roleCases := []struct {
+		roles    string
+		platform bool
+		service  bool
+	}{
+		{"auditor", false, false},
+		{"tenant-auditor", false, false},
+		{"compliance", false, false},
+		{"tenant-admin", false, false},
+		{"service", false, true},
+		{"event-writer", false, true},
+		{"auditor,compliance", false, false},
+		{"tenant-admin,compliance", false, false},
+		{"service,event-writer", false, true},
+		{"platform-admin", true, false},
+		{"platform-admin,auditor", true, false},
+	}
+	for _, subject := range []string{"platform", "tenant-a", "tenant-b"} {
+		for _, roleCase := range roleCases {
+			name := "dev:" + subject + ":" + roleCase.roles
+			claims, err := authenticator.AuthenticateToken(name)
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", name, err)
+				continue
+			}
+			if claims.Platform != roleCase.platform {
+				t.Errorf("%s: Platform=%v, want %v (role-based, subject must not matter)", name, claims.Platform, roleCase.platform)
+			}
+			if got := claims.Allows("audit:platform:cross_tenant"); got != roleCase.platform {
+				t.Errorf("%s: Allows(audit:platform:cross_tenant)=%v, want %v", name, got, roleCase.platform)
+			}
+			if claims.TenantID != subject {
+				t.Errorf("%s: TenantID=%q, want %q (tenant context preserved)", name, claims.TenantID, subject)
+			}
+			if claims.Service != roleCase.service {
+				t.Errorf("%s: Service=%v, want %v", name, claims.Service, roleCase.service)
+			}
+		}
+	}
+	// AC-1.2 unit form: 4-part service token with a "platform" subject must
+	// not flip Platform either (L1 review fold).
+	claims, err := authenticator.AuthenticateToken("dev:platform:service:crm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Platform || !claims.Service || claims.ClientID != "crm" || claims.TenantID != "platform" {
+		t.Fatalf("dev:platform:service:crm -> Platform=%v Service=%v ClientID=%q TenantID=%q, want non-Platform service claims", claims.Platform, claims.Service, claims.ClientID, claims.TenantID)
+	}
+}
+
+// TestJWTPlatformTenantWithAuditorRoleIsNotPlatform is AC-3: the JWT parity
+// pin. A JWT carrying tenant_id "platform" with role auditor must be
+// non-Platform (tenant context preserved, privilege absent) — the same shape
+// as the fixed dev path, so neither trust path can drift.
+func TestJWTPlatformTenantWithAuditorRoleIsNotPlatform(t *testing.T) {
+	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	payload := map[string]any{
+		"sub":       "subject-a",
+		"tenant_id": "platform",
+		"roles":     []string{"auditor"},
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	claims, err := authenticator.AuthenticateToken(signJWT(t, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Platform {
+		t.Fatalf("JWT tenant_id=platform + role auditor must not be Platform: %+v", claims)
+	}
+	if claims.Allows("audit:platform:cross_tenant") {
+		t.Fatalf("JWT tenant_id=platform + role auditor must not allow cross-tenant: %+v", claims)
+	}
+	if claims.TenantID != "platform" {
+		t.Fatalf("JWT tenant context must be preserved: TenantID=%q, want platform", claims.TenantID)
+	}
+	// Positive control: platform-admin role stays Platform via the same path.
+	admin := cloneClaims(payload)
+	admin["roles"] = []string{"platform-admin"}
+	adminClaims, err := authenticator.AuthenticateToken(signJWT(t, admin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adminClaims.Platform || !adminClaims.Allows("audit:platform:cross_tenant") {
+		t.Fatalf("JWT platform-admin role must be Platform: %+v", adminClaims)
+	}
+}
+
 func signJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]any{"alg": "HS256", "typ": "at+jwt"})
