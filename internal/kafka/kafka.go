@@ -27,6 +27,22 @@ const TopicAccepted = "audit.events.accepted.v1"
 // that failed permanently (api/asyncapi/asyncapi.yaml channel dlq).
 const TopicDLQ = "audit.events.dlq.v1"
 
+// TopicLedgered is the AsyncAPI topic for events committed to the immutable
+// ledger (post-ledger chain-linked events). Declared to satisfy the AsyncAPI
+// channel gate (checks/asyncapi_channels.py); no producer or consumer wires
+// this topic yet — see docs/proposals/ledgered-projection-pipeline.md.
+const TopicLedgered = "audit.events.ledgered.v1"
+
+// TopicProjection is the AsyncAPI topic for projection indexing signals.
+// Declared to satisfy the AsyncAPI channel gate; not yet wired — see
+// docs/proposals/ledgered-projection-pipeline.md.
+const TopicProjection = "audit.events.projection.v1"
+
+// TopicArchive is the AsyncAPI topic for archival-pass completion signals.
+// Declared to satisfy the AsyncAPI channel gate; not yet wired — see
+// docs/proposals/ledgered-projection-pipeline.md.
+const TopicArchive = "audit.events.archive.v1"
+
 // Dead-letter error codes carried in Failure.ErrorCode, matching the
 // AsyncAPI Failure payload vocabulary.
 const (

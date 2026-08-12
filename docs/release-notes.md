@@ -1,5 +1,36 @@
 # Release Notes
 
+## 2026-08-12 — AsyncAPI 频道声明与运行时 Kafka 符号对齐门禁
+
+**写给运营（行为变化）：**
+
+- **工程门禁新增 `asyncapi channels` 检查**：`python3 cli.py quality` 现在会解析
+  `api/asyncapi/asyncapi.yaml` 并核对频道声明与 Go 运行时 Kafka 常量（`internal/`、
+  `cmd/` 下的 `const Topic*`）双向一致——spec 声明了频道但 Go 没有对应常量、或 Go
+  存在未声明频道的 dotted `Topic*` 常量，门禁即失败并点名地址/符号。此前
+  `audit.events.ledgered.v1` / `audit.events.projection.v1` / `audit.events.archive.v1`
+  三个声明频道在 Go 中完全没有符号，门禁无法发现；本次补上三个常量使门禁转绿。
+- **新增三个惰性主题常量**：`TopicLedgered` / `TopicProjection` / `TopicArchive`
+  仅声明以满足契约对齐，当前没有任何生产者/消费者接线（不产生消息）。未来接线见
+  `docs/proposals/ledgered-projection-pipeline.md`。
+- 无运行时行为变化，无新依赖；回滚只需部署旧二进制（删除门禁检查与三个常量即恢复）。
+
+**写给开发（实现变化）：**
+
+- `checks/asyncapi_channels.py`：新增工程检查（纯 stdlib、fail-closed 的严格
+  YAML 子集解析器），`run(root)->int`；Rule A（spec→Go 符号与值必须一致）+ Rule B
+  （dotted `Topic*` 常量必须是已声明频道）；符号推导表驱动测试固定
+  （`dlq→DLQ` 经显式缩写表，其余首字母大写）。
+- `checks/test_asyncapi_channels.py`：35 个用例——AC-1 ghost fixture（缺符号失败/
+  有符号通过/值不一致失败）、AC-2 回归形状（accepted 经 outbox-relay、dlq 经
+  kafka-consumer）与无豁免证明（行为+静态）、AC-3 tuple 顺序静态测试、Rule B 套件、
+  fail-closed 套件（未知/缺失 action、孤儿频道、解析器健壮性）、const 块与跨包
+  重复符号、注释/raw-string 假常量。
+- `internal/kafka/kafka.go`：新增三个常量（注释注明“仅满足 AsyncAPI 门禁，尚未接线”）。
+- `cli.py`：`cmd_quality` 在 `contract_fields` 与 `proto_sync` 之间接入新检查。
+- `python3 cli.py quality`、`python -m unittest discover -s checks -p test_*.py`、
+  `go build ./... && go vet ./...` 均通过。
+
 ## 2026-08-12 — 归档目录链 fsync 与键包含性（FileStore）
 
 **写给运营（行为变化）：**

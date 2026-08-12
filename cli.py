@@ -405,6 +405,7 @@ def cmd_quality() -> int:
     from checks.make_help import run as make_help
     from checks.root_business_code import run as root_business_code
     from checks.root_files import run as root_files
+    from checks.asyncapi_channels import run as asyncapi_channels
     from checks.contract_fields import run as contract_fields
     from checks.dev_auth_manifest import run as dev_auth_manifest
     from checks.proto_sync import run as proto_sync
@@ -415,6 +416,7 @@ def cmd_quality() -> int:
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
                     adr_compliance, make_help, route_contract, contract_fields,
+                    asyncapi_channels,
                     proto_sync,  # proto drift guard: fails fast, before the ~95s Go stages
                     dev_auth_manifest, tenant_consistency, stream_consistency,
                     sensitive_logging,
