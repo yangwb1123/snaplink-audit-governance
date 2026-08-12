@@ -590,6 +590,58 @@ func (s *Service) GetRestore(tenantID, runID string) (domain.RestoreRun, error) 
 	return run, err
 }
 
+// DefaultStuckExportAge is the default age past which an export job stuck
+// in "running" is failed by the governance worker (measured from CreatedAt,
+// the only pre-terminal timestamp). Deliberately generous so a legitimately
+// long export is never failed by a slow pass cycle; operators can tighten it
+// per deployment with AUDIT_GOVERNANCE_STUCK_EXPORT_AGE; values <= 0 select
+// this default.
+const DefaultStuckExportAge = 24 * time.Hour
+
+// RecoverStuckExports fails one tenant's export jobs stuck in "running" past
+// Config.StuckExportAge (jobs left non-terminal by a crashed or restarted
+// audit-api — runExport is a fire-and-forget goroutine, so nothing else ever
+// re-examines them). The status change and the export.recovered self-audit
+// fact ride one Store.UpdateChecked Save: the closure re-checks
+// status/finished/age against the fresh snapshot and retries on
+// ErrSnapshotConflict, so a terminal job is never regressed and two worker
+// replicas cannot double-fail the same job. No archive I/O. Returns the
+// number of transitions committed by the winning attempt.
+func (s *Service) RecoverStuckExports(tenantID string) (int, error) {
+	recovered := 0
+	err := s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+		// Store.UpdateChecked may re-invoke the closure on a CAS conflict; a
+		// failed attempt's mutations are discarded, so the counter is reset at
+		// the start of every invocation to count only the committed attempt
+		// (mirrors Ingest's sealedSegments truncation precedent).
+		recovered = 0
+		cutoff := s.Now().Add(-s.Config.StuckExportAge)
+		mutated := false
+		for jobID, job := range data.Exports {
+			// Strict "older than": a job created exactly at the cutoff waits
+			// for the next pass (deterministic boundary). A job with a zero
+			// CreatedAt (corrupt/hand-edited row) fails the Before test and is
+			// recovered, which is safe: CreateExport always stamps CreatedAt.
+			if job.TenantID != tenantID || job.Status != "running" || job.FinishedAt != nil || !job.CreatedAt.Before(cutoff) {
+				continue
+			}
+			now := s.Now()
+			job.Status = "failed"
+			job.FinishedAt = &now
+			job.ObjectPath = ""
+			job.Digest = ""
+			job.EventCount = 0
+			job.Error = fmt.Sprintf("export interrupted: stuck in running since %s; re-request the export", job.CreatedAt.Format(time.RFC3339))
+			data.Exports[jobID] = job
+			data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", job.CreatedAt.Format(time.RFC3339))))
+			recovered++
+			mutated = true
+		}
+		return mutated, nil
+	})
+	return recovered, err
+}
+
 func (s *Service) runExport(jobID string) {
 	var job domain.ExportJob
 	if err := s.Store.Read(func(data *store.Snapshot) error {

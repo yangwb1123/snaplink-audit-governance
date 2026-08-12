@@ -49,6 +49,7 @@ func main() {
 	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, probe the archive destination (bounded; S3 touches the network), then exit without opening the state store or binding listeners")
 	interval := flag.Duration("interval", durationEnv("AUDIT_GOVERNANCE_INTERVAL", 5*time.Minute), "retention evaluation interval")
+	stuckExportAge := flag.Duration("stuck-export-age", durationEnv("AUDIT_GOVERNANCE_STUCK_EXPORT_AGE", service.DefaultStuckExportAge), "fail export jobs stuck in running past this age (0 = default)")
 	once := flag.Bool("once", false, "evaluate once and exit")
 	flag.Parse()
 	if *interval <= 0 {
@@ -68,7 +69,7 @@ func main() {
 			logger.Printf("warning=invalid_aggregate_checkpoint_history value=%q using_default=%d", raw, aggregateRetention)
 		}
 	}
-	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention}
+	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention, StuckExportAge: *stuckExportAge}
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external))
@@ -143,6 +144,15 @@ func runEvaluatePass(logger *log.Logger, svc *service.Service) {
 	}
 	archiveReady := probeArchiveReady(svc.Config.Archive, logger) == nil
 	for _, tenant := range tenants {
+		// Stuck-export recovery runs first, outside the archiveReady gate:
+		// it performs no archive I/O, so it behaves identically whether or not
+		// the readiness probe passed. The line is emitted unconditionally on
+		// success (including =0) so operators can confirm the step ran.
+		if recovered, recErr := svc.RecoverStuckExports(tenant.ID); recErr != nil {
+			logger.Printf("tenant=%s export_recovery_error=%v", tenant.ID, recErr)
+		} else {
+			logger.Printf("tenant=%s stuck_exports_recovered=%d", tenant.ID, recovered)
+		}
 		if err := svc.SealPendingSegments(tenant.ID); err != nil {
 			logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
 		}

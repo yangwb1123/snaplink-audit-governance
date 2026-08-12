@@ -389,6 +389,151 @@ func TestProbeArchiveReadyBoundedByTimeout(t *testing.T) {
 	}
 }
 
+// TestRunEvaluatePassRecoversStuckExports is the AC-1 pass-level variant:
+// a job stuck in "running" past the threshold is failed by the pass with a
+// clear error, the per-tenant log line reports the recovered count, and the
+// export.recovered fact is appended atomically.
+func TestRunEvaluatePassRecoversStuckExports(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	svc.Config.Now = func() time.Time { return base }
+	svc.Config.StuckExportAge = 24 * time.Hour
+	backend.data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	backend.data.Exports["export-1"] = domain.ExportJob{
+		ID: "export-1", TenantID: "tenant-a", RequestedBy: "compliance-1",
+		Query:     domain.Query{From: base.Add(-48 * time.Hour), To: base.Add(24 * time.Hour), PageSize: 100},
+		Status:    "running",
+		CreatedAt: base.Add(-25 * time.Hour),
+	}
+	savesBefore := backend.saves
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	runEvaluatePass(logger, svc)
+
+	if !strings.Contains(buf.String(), "tenant=tenant-a stuck_exports_recovered=1") {
+		t.Fatalf("log must report stuck_exports_recovered=1, got: %q", buf.String())
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := snap.Exports["export-1"]
+	if job.Status != "failed" {
+		t.Fatalf("status=%s, want failed", job.Status)
+	}
+	if !strings.Contains(job.Error, "stuck in running since") || !strings.Contains(job.Error, "re-request the export") {
+		t.Fatalf("error must be clear, got: %q", job.Error)
+	}
+	if job.FinishedAt == nil || job.FinishedAt.After(base) {
+		t.Fatalf("finished_at=%v, want set and <= now", job.FinishedAt)
+	}
+	facts := 0
+	for _, action := range snap.AdminActions {
+		if action.Action == domain.AdminActionExportRecovered {
+			facts++
+			if action.TenantID != "tenant-a" || action.TargetID != "export-1" || action.Actor != "governance-worker" {
+				t.Fatalf("fact fields wrong: %+v", action)
+			}
+		}
+	}
+	if facts != 1 {
+		t.Fatalf("export.recovered facts=%d, want exactly 1", facts)
+	}
+	if backend.saves != savesBefore+1 {
+		t.Fatalf("saves=%d, want %d (one atomic recovery window)", backend.saves, savesBefore+1)
+	}
+}
+
+// TestRunEvaluatePassRecoveryProbeIndependent proves the recovery step needs
+// no archive I/O: with the readiness probe failing, the stuck job is still
+// failed (stuck_exports_recovered=1), the archiving step is skipped, and zero
+// archive Puts occur.
+func TestRunEvaluatePassRecoveryProbeIndependent(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	svc.Config.Now = func() time.Time { return base }
+	svc.Config.StuckExportAge = 24 * time.Hour
+	backend.data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	backend.data.Policies["tenant-a"] = domain.RetentionPolicy{TenantID: "tenant-a", RetentionClass: "default", ArchiveDays: 365}
+	backend.data.Exports["export-1"] = domain.ExportJob{
+		ID: "export-1", TenantID: "tenant-a", RequestedBy: "compliance-1",
+		Query:     domain.Query{From: base.Add(-48 * time.Hour), To: base.Add(24 * time.Hour), PageSize: 100},
+		Status:    "running",
+		CreatedAt: base.Add(-25 * time.Hour),
+	}
+	archiveStub := &flakyArchive{readyErr: errors.New("archive bucket not ready")}
+	svc.Config.Archive = archiveStub
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	runEvaluatePass(logger, svc)
+
+	out := buf.String()
+	if !strings.Contains(out, "tenant=tenant-a stuck_exports_recovered=1") {
+		t.Fatalf("log must report stuck_exports_recovered=1 despite the failed probe, got: %q", out)
+	}
+	if !strings.Contains(out, "archive_ready=failed") || !strings.Contains(out, "tenant=tenant-a archive_skipped=ready_probe_failed") {
+		t.Fatalf("log must surface the probe failure and per-tenant skip, got: %q", out)
+	}
+	if len(archiveStub.puts) != 0 {
+		t.Fatalf("puts=%v, want zero archive writes (recovery does no archive I/O)", archiveStub.puts)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Exports["export-1"].Status != "failed" {
+		t.Fatalf("status=%s, want failed", snap.Exports["export-1"].Status)
+	}
+}
+
+// TestRunEvaluatePassRecoveryNoopForCompleted is the AC-2 pass-level variant:
+// a pass over a completed job only must recover nothing, log
+// stuck_exports_recovered=0 and rewrite the snapshot zero times.
+func TestRunEvaluatePassRecoveryNoopForCompleted(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	svc.Config.Now = func() time.Time { return base }
+	svc.Config.StuckExportAge = 24 * time.Hour
+	backend.data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	backend.data.Policies["tenant-a"] = domain.RetentionPolicy{TenantID: "tenant-a", RetentionClass: "default", ArchiveDays: 365}
+	past := base.Add(-48 * time.Hour)
+	backend.data.Exports["export-done"] = domain.ExportJob{
+		ID: "export-done", TenantID: "tenant-a", RequestedBy: "compliance-1",
+		Query:      domain.Query{From: base.Add(-48 * time.Hour), To: base.Add(24 * time.Hour), PageSize: 100},
+		Status:     "completed",
+		CreatedAt:  base.Add(-25 * time.Hour),
+		FinishedAt: &past,
+		ObjectPath: "exports/export-done.jsonl",
+		Digest:     "deadbeef",
+		EventCount: 7,
+	}
+	savesBefore := backend.saves
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	runEvaluatePass(logger, svc)
+
+	if !strings.Contains(buf.String(), "tenant=tenant-a stuck_exports_recovered=0") {
+		t.Fatalf("log must report stuck_exports_recovered=0, got: %q", buf.String())
+	}
+	if backend.saves != savesBefore {
+		t.Fatalf("saves=%d, want %d (idle recovery must not rewrite the snapshot)", backend.saves, savesBefore)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := snap.Exports["export-done"]
+	if done.Status != "completed" || done.ObjectPath != "exports/export-done.jsonl" || done.Digest != "deadbeef" || done.EventCount != 7 {
+		t.Fatalf("completed job mutated: %+v", done)
+	}
+}
+
 // seedPendingReceipts seeds tenant-a with n events whose receipts sit at
 // StatusIndexed (direct snapshot seeding, mirroring the service package's
 // seedPendingEvents), plus a retention policy whose class no seeded event

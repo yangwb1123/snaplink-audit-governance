@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-12 — 卡死导出作业恢复（governance worker）
+
+**写给运营（行为变化）：**
+
+- **worker pass 现在会失败卡在 `running` 超过阈值的导出作业**：audit-api 崩溃/重启
+  会在 `runExport` 的 fire-and-forget goroutine 中途留下永远 `running` 的作业（此前无
+  任何组件会重新检查非终态导出）。新 worker 部署后，下一次 pass（启动 pass 立即执行）
+  会把超过阈值（默认 24 小时，从 `CreatedAt` 起算）的卡死作业置为 `failed`，`Error`
+  写明 `stuck in running since <RFC3339>; re-request the export`（API 仍按既有规则掩盖为
+  `export failed`，原始详情在 `state.json`），并原子写入一条 `export.recovered` 自审计
+  事实（Actor=`governance-worker`，`ListAdminActions` 可查）。
+- **阈值可调**：`AUDIT_GOVERNANCE_STUCK_EXPORT_AGE`（或 `-stuck-export-age`，`0` =
+  默认）。有合法长时导出（接近 24 小时）的租户应在滚动前调高阈值；非法值回退默认，
+  不会静默关闭恢复。
+- 恢复**只失败、不重跑**：随机 nonce 密封使字节级重试必然产生误判篡改，且无租约字段，
+  跨副本重跑有竞态——终态（worker 判 failed 或原 goroutine 完成）均有效。终态作业
+  永不被回退（CAS 闭包内重新检查）；空闲 pass 零快照写入。回滚只需部署旧 worker 二进制
+  （已失败作业保持终态，操作员经 API 重新发起）。
+
+**写给开发（实现变化）：**
+
+- `internal/service/governance.go`：新增 `DefaultStuckExportAge`（24h）与
+  `RecoverStuckExports(tenantID) (int, error)`——一个 `Store.UpdateChecked` 窗口内完成
+  状态迁移 + `export.recovered` 事实（`mutated=false` 零写入，CAS 重试时闭包在新鲜快照
+  重跑，计数在每次调用开头重置）。
+- `internal/service/service.go`：`Config.StuckExportAge`（`<= 0` 走默认，镜像
+  `AggregateCheckpointRetention`）。
+- `internal/domain/models.go`：新增 `AdminActionExportRecovered = "export.recovered"`。
+- `cmd/audit-governance-worker/main.go`：`-stuck-export-age` flag 与
+  `AUDIT_GOVERNANCE_STUCK_EXPORT_AGE` env；`runEvaluatePass` 每租户第一步执行恢复
+  （`stuck_exports_recovered=%d` / `export_recovery_error=%v` 日志行），位于归档探测门
+  之外（恢复不做任何归档 I/O）。
+- 无快照格式变更（`ExportJob` 不变，无 `StartedAt`）、无 OpenAPI/AsyncAPI/Proto 变更；
+  新旧二进制双向兼容。
+
 ## 2026-08-12 — AsyncAPI 频道声明与运行时 Kafka 符号对齐门禁
 
 **写给运营（行为变化）：**

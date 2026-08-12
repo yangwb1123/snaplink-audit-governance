@@ -49,6 +49,12 @@ type Config struct {
 	// (DefaultAggregateCheckpointRetention). The worker reads the override
 	// from AUDIT_AGGREGATE_CHECKPOINT_HISTORY.
 	AggregateCheckpointRetention int
+	// StuckExportAge fails export jobs left "running" by a crashed or
+	// restarted audit-api once they exceed this age, measured from CreatedAt
+	// (the only pre-terminal timestamp). Values <= 0 select the documented
+	// default (DefaultStuckExportAge). The worker reads the override from
+	// AUDIT_GOVERNANCE_STUCK_EXPORT_AGE / -stuck-export-age.
+	StuckExportAge time.Duration
 }
 
 // Signer creates and verifies checkpoint signatures. Implementations must be
@@ -117,6 +123,9 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	}
 	if cfg.AggregateCheckpointRetention <= 0 {
 		cfg.AggregateCheckpointRetention = DefaultAggregateCheckpointRetention
+	}
+	if cfg.StuckExportAge <= 0 {
+		cfg.StuckExportAge = DefaultStuckExportAge
 	}
 	if err := resolveSecrets(&cfg); err != nil {
 		return nil, err

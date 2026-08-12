@@ -355,13 +355,17 @@ const (
 	AdminActionSchemaCreated      = "schema.created"
 	AdminActionRetentionPolicySet = "retention_policy.set"
 	AdminActionExportCreated      = "export.created"
-	AdminActionLegalHoldCreated   = "legal_hold.created"
-	AdminActionLegalHoldReleased  = "legal_hold.released"
-	AdminActionRestoreCreated     = "restore.created"
-	AdminActionRestoreApproved    = "restore.approved"
-	AdminActionRestoreRejected    = "restore.rejected"
-	AdminActionEventRead          = "audit.event.read"
-	AdminActionEventExport        = "audit.event.export"
+	// AdminActionExportRecovered records a governance-worker recovery: an
+	// export job stuck in "running" past the worker's stuck-age threshold was
+	// failed by the worker pass (atomic with the status change it audits).
+	AdminActionExportRecovered   = "export.recovered"
+	AdminActionLegalHoldCreated  = "legal_hold.created"
+	AdminActionLegalHoldReleased = "legal_hold.released"
+	AdminActionRestoreCreated    = "restore.created"
+	AdminActionRestoreApproved   = "restore.approved"
+	AdminActionRestoreRejected   = "restore.rejected"
+	AdminActionEventRead         = "audit.event.read"
+	AdminActionEventExport       = "audit.event.export"
 )
 
 func (e Event) ValidateBasic() error {

@@ -38,6 +38,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - `go run ./cmd/audit-api` 启动 REST API。
 - `go run ./cmd/audit-governance-worker -once` 执行一次留存/Legal Hold 评估。
 - 聚合 checkpoint 每租户按上限保留（默认 1000 条，drop-oldest，`AUDIT_AGGREGATE_CHECKPOINT_HISTORY` 可覆盖，下限 1）；根与签名未变化的周期去重、空闲周期不写快照，`VerifyIntegrity` 聚合校验工作量由此有界。
+- 导出作业卡在 `running` 超过阈值（默认 24 小时，从 `CreatedAt` 起算，`AUDIT_GOVERNANCE_STUCK_EXPORT_AGE`/`-stuck-export-age` 可覆盖；`0` = 默认）由 worker 在每次 pass 中失败并写入 `export.recovered` 自审计事实（状态变更与事实同一次原子保存；终态作业永不回退；空闲 pass 零写入）。
 - `go run ./cmd/audit-outbox-relay -once` 消费业务库 `audit_outbox` 待投递记录并写入审计 API；成功标记 delivered，失败按指数退避重试，超过上限或遇到客户端错误死信。
 - `go run ./cmd/audit-kafka-dlq-replay -once` 恢复死信事件（从 accepted topic 按 key 找回原消息重发或经 API 重新接入，状态文件去重）。
 - 默认本地状态保存到 `./data/state.json`，归档保存到 `./data/archive`。
