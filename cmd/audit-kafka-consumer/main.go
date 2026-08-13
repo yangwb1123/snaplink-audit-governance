@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/kafka"
 	"github.com/snaplink/audit-governance/internal/outbox"
 )
@@ -36,7 +37,14 @@ func main() {
 		log.Fatalf("backoff, timeout and max-attempts must be positive")
 	}
 	logger := log.New(os.Stdout, "audit-kafka-consumer ", log.LstdFlags|log.Lmicroseconds)
-	ingest := kafka.IngestFunc(outbox.HTTPDeliverer(*apiURL, *token, &http.Client{Timeout: *timeout}))
+	// Build the deliverer once: the per-message IngestFunc closure captures it,
+	// so every Kafka message reuses the same HTTP client and connection pool
+	// instead of allocating a fresh transport per message.
+	deliver := outbox.HTTPDeliverer(*apiURL, *token, &http.Client{Timeout: *timeout})
+	ingest := kafka.IngestFunc(func(ctx context.Context, event domain.Event) error {
+		_, err := deliver(ctx, event)
+		return err
+	})
 	options := []kafka.ConsumerOption{kafka.WithMaxAttempts(*maxAttempts)}
 	if *dlqTopic != "" {
 		dlqProducer := kafka.NewProducer(strings.Split(*brokers, ","), *dlqTopic)

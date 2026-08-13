@@ -52,7 +52,8 @@ func main() {
 			if err != nil {
 				return err
 			}
-			return deliver(ctx, event)
+			_, err = deliver(ctx, event)
+			return err
 		}
 	} else {
 		producer := kafka.NewProducer(strings.Split(*brokers, ","), *acceptedTopic)

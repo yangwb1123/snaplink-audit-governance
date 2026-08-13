@@ -61,6 +61,9 @@ func main() {
 		relay.Deliver = kafkaProducer.Deliver
 		logger.Printf("delivery=kafka brokers=%s topic=%s", *kafkaBrokers, kafka.TopicAccepted)
 	} else {
+		if strings.TrimSpace(*token) == "" {
+			logger.Printf("warning: AUDIT_OUTBOX_TOKEN is empty; the audit API will reject every delivery (401) and the backlog will retry until attempts are exhausted — set the token before starting")
+		}
 		logger.Printf("delivery=http api_url=%s", *apiURL)
 	}
 	logger.Printf("interval=%s batch=%d max_attempts=%d", *interval, *batch, *maxAttempts)

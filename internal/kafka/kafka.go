@@ -75,7 +75,9 @@ type FailurePublisher interface {
 
 // Producer writes canonical events to the accepted topic. It implements
 // outbox.DeliverFunc so the relay can choose Kafka instead of HTTP delivery
-// without changing its retry/dead-letter state machine.
+// without changing its retry/dead-letter state machine. A topic write is
+// delivery, but Kafka carries no audit receipt, so Deliver returns (nil, nil)
+// on success and the relay records no fabricated receipt fields.
 type Producer struct {
 	writer *kafka.Writer
 	topic  string
@@ -98,12 +100,17 @@ func NewProducer(brokers []string, topic string) *Producer {
 }
 
 // Deliver serializes the event to canonical JSON and writes it to Kafka.
-func (p *Producer) Deliver(ctx context.Context, event domain.Event) error {
+// On success it returns (nil, nil): the write is the delivery proof, and no
+// audit receipt exists in this transport (outbox.DeliverFunc contract).
+func (p *Producer) Deliver(ctx context.Context, event domain.Event) (*domain.EventReceipt, error) {
 	encoded, err := domain.CanonicalJSON(event)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(event.EventID), Value: encoded})
+	if err := p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(event.EventID), Value: encoded}); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // PublishFailure serializes a dead-letter Failure and writes it to the

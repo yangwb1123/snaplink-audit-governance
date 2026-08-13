@@ -344,9 +344,9 @@ VALUES ($1, 'demo', $2, $3, now(), 'pending', 0, now() - interval '1 minute')`, 
 	relay := &Relay{
 		Store:     store,
 		BatchSize: 10,
-		Deliver: func(_ context.Context, event domain.Event) error {
+		Deliver: func(_ context.Context, _ domain.Event) (*domain.EventReceipt, error) {
 			delivered++
-			return nil
+			return nil, nil
 		},
 	}
 	handled, err := relay.RunOnce(ctx)
@@ -385,5 +385,67 @@ VALUES ($1, 'demo', $2, $3, now(), 'pending', 0, now() - interval '1 minute')`, 
 	}
 	if handled != 0 {
 		t.Fatalf("second RunOnce handled=%d, want 0", handled)
+	}
+}
+
+// TestPostgresRelayVerifiesReceiptAgainstRealAPI is the AC-3 C Postgres
+// variant: a real audit_outbox row is delivered by a real PostgresStore
+// relay against the in-process audit API, and the DB row must end up with
+// the API's verified receipt values in api_status/delivered_event_id.
+// Skipped unless AUDIT_TEST_POSTGRES_DSN points at a disposable database.
+func TestPostgresRelayVerifiesReceiptAgainstRealAPI(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_POSTGRES_DSN to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+		t.Fatalf("reset outbox: %v", err)
+	}
+
+	apiURL := newRealAuditAPI(t)
+	event := domain.Event{EventID: "pg-relay-receipt-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "pg-relay-receipt-idem", Payload: map[string]any{"value": 1}}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
+VALUES ('pg-relay-receipt-1', 'tenant-a', 'pg-relay-receipt-idem', $1, now(), 'pending', 0, now() - interval '1 minute')`, string(payload)); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	relay := &Relay{
+		Store:     NewPostgresStore(db),
+		Deliver:   HTTPDeliverer(apiURL, "dev:tenant-a:service:crm", nil),
+		BatchSize: 10,
+	}
+	handled, err := relay.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if handled != 1 {
+		t.Fatalf("handled=%d, want 1", handled)
+	}
+	var apiStatus, deliveredEventID string
+	var deliveredAt *time.Time
+	if err := db.QueryRowContext(ctx, `SELECT api_status, delivered_event_id, delivered_at FROM audit_outbox WHERE event_id='pg-relay-receipt-1'`).Scan(&apiStatus, &deliveredEventID, &deliveredAt); err != nil {
+		t.Fatal(err)
+	}
+	if apiStatus != domain.StatusIndexed && apiStatus != domain.StatusArchived {
+		t.Fatalf("api_status=%q, want indexed/archived (real API post-ledger status)", apiStatus)
+	}
+	if deliveredEventID != "pg-relay-receipt-1" {
+		t.Fatalf("delivered_event_id=%q, want pg-relay-receipt-1", deliveredEventID)
+	}
+	if deliveredAt == nil || deliveredAt.IsZero() {
+		t.Fatalf("delivered_at=%v, want set", deliveredAt)
 	}
 }

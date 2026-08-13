@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-08-13 — relay 投递改为 receipt 校验：无 API 确认不再标记 delivered（internal/outbox）
+
+**写给运营（行为变化）：**
+
+- **HTTP 投递现在校验审计 API 的 receipt**：relay 请求 `POST /api/v1/events?wait_for=ledgered`，2xx 响应体必须解码出 receipt 且同时满足 V1–V4（`event_id` 与载荷一致、状态 ∈ {ledgered/indexed/archived}、`ledgered_at` 非零、`hash` 非空）才把记录标记为 delivered。此前任何 2xx（包括代理剥掉 `wait_for`、代理伪造 2xx、API 接受后失败）都会直接标记 delivered，之后 `ListPending`（只查 pending）永远看不到该行。
+- **`api_status`/`delivered_event_id` 不再伪造**：HTTP 投递存 API 返回的真实状态（`indexed`/`archived`/`ledgered`）；Kafka 投递写 NULL（迁移 003 的注释契约 "API receipt status observed at delivery time" 现在成真）。已确认无任何 Go/SQL 消费者读取这两列。
+- **401 从永久死信改为可重试**：token 过期/轮换不再一次轮询把整个积压死信到 `failed`；凭证修复后下一轮自动恢复投递（403/409/422 仍永久死信，429/5xx/网络错误仍可重试）。
+- **2xx 但无法验证的响应保持 pending 并指数退避重试**，`last_error` 写明原因（"without a verified receipt: …"），达到上限后死信（可恢复的 `failed` 状态）。`last_error` 现在能区分"API 拒绝"（4xx 永久）与"已接受但未确认"（2xx 未验证、可重试）。
+- **receipt 读取上限从 4096 字节提升到 64 KB**：大但合法的 `event_id` 不再因回显截断被误判为解码失败；超限响应仍按可重试处理，绝不把已入账的事件误死信。
+- **投递不再跟随重定向**（3xx 一律可重试，审计请求体不会转发到重定向目标）。
+- 升级提示：已 delivered 的历史行保留旧伪造值（`api_status='accepted'`），不在自动对账范围；如需一次性清扫请走死信/回放方向。
+
+**写给开发（实现变化）：**
+
+- `internal/outbox/relay.go`：`DeliverFunc` 签名改为 `func(context.Context, domain.Event) (*domain.EventReceipt, error)`；`RunOnce` 消费 receipt，`succeed` 只持久化 receipt 派生字段（`receipt == nil` 时两列留空 → SQL NULL）。
+- `internal/outbox/http.go`：`HTTPDeliverer` 解析 2xx 为 `ReceiptResponse` 信封并调用独立函数 `verifyReceipt`（V1–V4）验证；401 改可重试；`maxReceiptBytes = 64KB`；`CheckRedirect = http.ErrUseLastResponse`。
+- `internal/kafka/kafka.go`：`Producer.Deliver` 成功返回 `(nil, nil)`（Kafka 无 receipt，不伪造）。
+- `cmd/audit-kafka-consumer/main.go`：deliverer 提升到消息循环外构建一次（复用同一 HTTP client/连接池）；`cmd/audit-kafka-dlq-replay/main.go` 适配新签名；`cmd/audit-outbox-relay/main.go` HTTP 模式空 token 时启动告警日志。
+- 构建门禁补齐 `audit-kafka-dlq-replay`（`checks/build.py`、`cli.py`，与 `engineering.yaml` 六个二进制对齐）。
+- 测试（`internal/outbox/relay_test.go`、`postgres_test.go`）：AC-1..AC-5 全部落地（含真实 API E2E 与重复投递、Postgres 变体 DSN 门控），并覆盖评审补测：空/截断 2xx body 可重试、V1–V4 全分支表测试、succeed-Update 失败保持 pending、401 重试回归钉、大 event_id 边界、重定向不跟随、双实例乐观更新单次落账。
+- `python3 cli.py quality` 全绿。
+
+
 ## 2026-08-12 — DLQ 回放状态改为追加式日志 + flock 串行化（ReplayState.Mark 跨实例竞态与 O(n²) 重写修复）
 
 **写给运营（行为变化）：**

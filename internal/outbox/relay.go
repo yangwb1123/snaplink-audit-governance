@@ -56,7 +56,8 @@ type Store interface {
 }
 
 // DeliveryError classifies a failed delivery. Permanent errors (client
-// errors such as 400/403/409) dead-letter immediately instead of retrying.
+// errors such as 403/409/422) dead-letter immediately instead of retrying;
+// 401 is deliberately retryable so a token rotation heals the backlog.
 type DeliveryError struct {
 	Permanent bool
 	Err       error
@@ -66,7 +67,11 @@ func (e *DeliveryError) Error() string { return e.Err.Error() }
 func (e *DeliveryError) Unwrap() error { return e.Err }
 
 // DeliverFunc delivers one canonical event to the audit ingestion endpoint.
-type DeliverFunc func(ctx context.Context, event domain.Event) error
+// On success it returns the audit API receipt the deliverer verified
+// (event_id matched, status proves ledgering) — or (nil, nil) when the
+// transport provides no receipt at all (e.g. Kafka topic write). A 2xx that
+// cannot be verified is an error, never a nil receipt.
+type DeliverFunc func(ctx context.Context, event domain.Event) (*domain.EventReceipt, error)
 
 // Relay consumes pending audit_outbox records written by business
 // transactions and delivers them to the audit API. Success marks a record
@@ -141,10 +146,11 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 		handled++
 	}
 	for _, record := range records {
-		if err := r.Deliver(ctx, record.Event); err != nil {
+		receipt, err := r.Deliver(ctx, record.Event)
+		if err != nil {
 			r.fail(ctx, record, err)
 		} else {
-			r.succeed(ctx, record)
+			r.succeed(ctx, record, receipt)
 		}
 		handled++
 	}
@@ -174,22 +180,36 @@ func (r *Relay) quarantine(ctx context.Context, corrupt CorruptRecord) {
 	}
 }
 
-func (r *Relay) succeed(ctx context.Context, record Record) {
+// succeed persists only receipt-derived delivery bookkeeping (REQ-5). When
+// the transport provides no receipt (receipt == nil, e.g. Kafka), the two
+// API-derived columns stay empty and PostgresStore maps them to SQL NULL —
+// the migration contract says api_status is the "API receipt status observed
+// at delivery time", and none was observed. No field is fabricated.
+func (r *Relay) succeed(ctx context.Context, record Record, receipt *domain.EventReceipt) {
 	now := r.now()
+	deliveredEventID, apiStatus := "", ""
+	if receipt != nil {
+		deliveredEventID = receipt.EventID
+		apiStatus = receipt.Status
+	}
 	applied, err := r.Store.Update(ctx, record.ID, Update{
 		Status:           StatusDelivered,
 		Attempts:         record.Attempts + 1,
 		NextAttemptAt:    now,
 		DeliveredAt:      now,
-		DeliveredEventID: record.Event.EventID,
-		APIStatus:        domain.StatusAccepted,
+		DeliveredEventID: deliveredEventID,
+		APIStatus:        apiStatus,
 	})
 	if err != nil {
 		r.logf("outbox id=%d delivered but status update failed: %v", record.ID, err)
 		return
 	}
 	if applied {
-		r.logf("outbox id=%d delivered event_id=%s", record.ID, record.Event.EventID)
+		if receipt != nil {
+			r.logf("outbox id=%d delivered event_id=%s api_status=%s", record.ID, receipt.EventID, receipt.Status)
+		} else {
+			r.logf("outbox id=%d delivered event_id=%s (no audit receipt; transport provides none)", record.ID, record.Event.EventID)
+		}
 	} else {
 		r.logf("outbox id=%d already handled by another instance", record.ID)
 	}
