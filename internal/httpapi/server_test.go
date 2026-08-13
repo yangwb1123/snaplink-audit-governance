@@ -30,6 +30,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
 )
@@ -325,6 +326,10 @@ func TestHTTPExportDownloadIsTenantScoped(t *testing.T) {
 	response.Body.Close()
 	if len(data) == 0 || response.Header.Get("Content-Type") != "application/x-ndjson" {
 		t.Fatalf("unexpected download: content_type=%q bytes=%d", response.Header.Get("Content-Type"), len(data))
+	}
+	// AC-2: the bytes served hash-equal the job's stored digest.
+	if domain.HashBytes(data) != job.Digest {
+		t.Fatal("downloaded bytes must hash-equal job.Digest")
 	}
 	request, _ = http.NewRequest(http.MethodGet, server.URL+"/api/v1/exports/"+job.ID+"/download", nil)
 	request.Header.Set("Authorization", "Bearer dev:tenant-b:compliance")
@@ -762,6 +767,340 @@ func TestHTTPDownloadExportRedacts500(t *testing.T) {
 	if strings.Contains(string(data), "/") {
 		t.Fatalf("500 body leaks a path: %s", data)
 	}
+}
+
+// writeArchiveObject plants bytes at an archive key directly on disk,
+// removing any pre-existing object first (FileStore objects are created
+// read-only, so an in-place overwrite is not possible). Tests use it to
+// simulate host-level tampering of a sealed export object.
+func writeArchiveObject(t *testing.T, archiveDir, key string, data []byte) {
+	t.Helper()
+	path := filepath.Join(archiveDir, filepath.FromSlash(key))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(path)
+	if err := os.WriteFile(path, data, 0o440); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// downloadExportTestServer builds a server whose store holds one completed
+// export record. The caller plants the sealed archive object at
+// job.ObjectPath via writeArchiveObject using the returned service's
+// encryption key, so tests control the exact bytes served (no asynchronous
+// export pipeline, no timing).
+func downloadExportTestServer(t *testing.T, job domain.ExportJob) (*httptest.Server, *service.Service, string) {
+	t.Helper()
+	if job.ID == "" {
+		job.ID = "export-seeded"
+	}
+	if job.TenantID == "" {
+		job.TenantID = "tenant-a"
+	}
+	if job.Status == "" {
+		job.Status = "completed"
+	}
+	if job.ObjectPath == "" {
+		job.ObjectPath = "exports/" + job.ID + ".jsonl"
+	}
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{ArchiveDir: archiveDir, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(func(data *store.Snapshot) error {
+		data.Exports[job.ID] = job
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	return server, svc, archiveDir
+}
+
+// downloadExport performs the download request as tenant-a compliance.
+func downloadExport(t *testing.T, server *httptest.Server, jobID string) (int, string, []byte) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/exports/"+jobID+"/download", nil)
+	request.Header.Set("Authorization", "Bearer dev:tenant-a:compliance")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, _ := io.ReadAll(response.Body)
+	return response.StatusCode, response.Header.Get("Content-Type"), data
+}
+
+// assertRejectedDownload asserts the stable redacted 500 contract for a
+// rejected download: internal_error envelope, fixed message, no ndjson
+// content type and no plaintext fragment in the body.
+func assertRejectedDownload(t *testing.T, status int, contentType string, body []byte) {
+	t.Helper()
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s, want 500", status, body)
+	}
+	if strings.Contains(contentType, "x-ndjson") {
+		t.Fatalf("rejected download must not stream ndjson, content-type=%q", contentType)
+	}
+	var result struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("500 body is not the error envelope: %v (%s)", err, body)
+	}
+	if result.Error.Code != "internal_error" || result.Error.Message != "internal server error" {
+		t.Fatalf("unexpected 500 envelope: %s", body)
+	}
+	if bytes.Contains(body, []byte("legit")) || bytes.Contains(body, []byte("attacker")) || bytes.Contains(body, []byte("event line")) {
+		t.Fatalf("500 body leaks download content: %s", body)
+	}
+}
+
+// TestHTTPDownloadExportRejectsSwappedBlob pins the legacy (export:v1:)
+// swap story (design F10): a v1 blob sealed under the platform key but
+// containing content that does not match the job's stored digest, planted
+// at the job's object path. Reproduce-first: before the digest-verification
+// fix the download decrypts the swapped blob and serves it 200; after the
+// fix the digest comparison rejects it with a redacted 500 and no ndjson
+// body. The v2 (job-bound AAD) swap variant is added once EncryptBytesBound
+// exists.
+func TestHTTPDownloadExportRejectsSwappedBlob(t *testing.T) {
+	legit := []byte("legit event line\n")
+	job := domain.ExportJob{ID: "export-swap-v1", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-swap-v1.jsonl", Digest: domain.HashBytes(legit)}
+	server, svc, archiveDir := downloadExportTestServer(t, job)
+	defer server.Close()
+	key := svc.Config.EncryptionKey
+
+	sealed, err := security.EncryptBytes(legit, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, sealed)
+
+	// Positive control: the job's own blob downloads 200.
+	if status, _, _ := downloadExport(t, server, job.ID); status != http.StatusOK {
+		t.Fatalf("legit download status=%d, want 200", status)
+	}
+
+	// v1 swap: valid GCM under the shared key, wrong content for this job.
+	attacker, err := security.EncryptBytes([]byte("attacker content not matching the digest\n"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, attacker)
+	status, contentType, body := downloadExport(t, server, job.ID)
+	assertRejectedDownload(t, status, contentType, body)
+}
+
+// TestHTTPDownloadExportRejectsSwappedV2Blob pins the headline fix (F8): a
+// v2 blob sealed under another job's binding, copied onto this job's object
+// path, fails GCM authentication before a single byte is served —
+// cryptographic rejection independent of the digest check.
+func TestHTTPDownloadExportRejectsSwappedV2Blob(t *testing.T) {
+	legitA := []byte("job A legit line\n")
+	jobA := domain.ExportJob{ID: "export-swap-v2a", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-swap-v2a.jsonl", Digest: domain.HashBytes(legitA)}
+	server, svc, archiveDir := downloadExportTestServer(t, jobA)
+	defer server.Close()
+	key := svc.Config.EncryptionKey
+
+	sealedA, err := security.EncryptBytesBound(legitA, key, security.ExportBinding(jobA.TenantID, jobA.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, jobA.ObjectPath, sealedA)
+	if status, _, _ := downloadExport(t, server, jobA.ID); status != http.StatusOK {
+		t.Fatalf("legit download status=%d, want 200", status)
+	}
+
+	// Job B: a second completed job in the same store, sealed under B's own
+	// binding.
+	jobB := domain.ExportJob{ID: "export-swap-v2b", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-swap-v2b.jsonl", Digest: domain.HashBytes([]byte("job B content\n"))}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Exports[jobB.ID] = jobB
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sealedB, err := security.EncryptBytesBound([]byte("job B content\n"), key, security.ExportBinding(jobB.TenantID, jobB.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, jobB.ObjectPath, sealedB)
+
+	// Copy B's sealed object onto A's path: AAD binding mismatch must reject.
+	writeArchiveObject(t, archiveDir, jobA.ObjectPath, sealedB)
+	status, contentType, body := downloadExport(t, server, jobA.ID)
+	assertRejectedDownload(t, status, contentType, body)
+}
+
+// TestHTTPDownloadExportRejectsTamperedBlob pins AC-1 (F9): a bit-flip in
+// the sealed archive object is rejected with the redacted 500 envelope, no
+// ndjson content type and no plaintext fragment. Regression guard — GCM
+// already rejects tampering today; the test proves the new choke point
+// preserves that.
+func TestHTTPDownloadExportRejectsTamperedBlob(t *testing.T) {
+	legit := []byte("legit event line\n")
+	job := domain.ExportJob{ID: "export-tamper", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-tamper.jsonl", Digest: domain.HashBytes(legit)}
+	server, svc, archiveDir := downloadExportTestServer(t, job)
+	defer server.Close()
+
+	sealed, err := security.EncryptBytesBound(legit, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, sealed)
+
+	if status, _, _ := downloadExport(t, server, job.ID); status != http.StatusOK {
+		t.Fatalf("legit download status=%d, want 200", status)
+	}
+
+	// Flip a byte in the ciphertext body (never the plaintext prefix — the
+	// object holds sealed bytes only).
+	tampered := append([]byte(nil), sealed...)
+	tampered[len(tampered)/2] ^= 0x01
+	writeArchiveObject(t, archiveDir, job.ObjectPath, tampered)
+	status, contentType, body := downloadExport(t, server, job.ID)
+	assertRejectedDownload(t, status, contentType, body)
+}
+
+// TestHTTPDownloadExportRejectsDigestMismatch pins the negative control of
+// AC-2 (F12): a blob re-sealed under the job's own binding with different
+// content passes GCM authentication but fails the digest comparison, so
+// WriteHeader(200) is unreachable until content equality holds.
+func TestHTTPDownloadExportRejectsDigestMismatch(t *testing.T) {
+	legit := []byte("legit event line\n")
+	job := domain.ExportJob{ID: "export-mismatch", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-mismatch.jsonl", Digest: domain.HashBytes(legit)}
+	server, svc, archiveDir := downloadExportTestServer(t, job)
+	defer server.Close()
+
+	sealed, err := security.EncryptBytesBound(legit, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, sealed)
+	if status, _, _ := downloadExport(t, server, job.ID); status != http.StatusOK {
+		t.Fatalf("legit download status=%d, want 200", status)
+	}
+
+	wrong, err := security.EncryptBytesBound([]byte("different event line\n"), svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, wrong)
+	status, contentType, body := downloadExport(t, server, job.ID)
+	assertRejectedDownload(t, status, contentType, body)
+}
+
+// TestHTTPDownloadExportNotCompleted409 pins F3: a job that is not
+// completed (or has no object path) is rejected with 409 conflict before any
+// archive access, and the body is the conflict envelope, never ndjson.
+func TestHTTPDownloadExportNotCompleted409(t *testing.T) {
+	job := domain.ExportJob{ID: "export-running", TenantID: "tenant-a", Status: "running"}
+	server, _, _ := downloadExportTestServer(t, job)
+	defer server.Close()
+
+	status, contentType, body := downloadExport(t, server, job.ID)
+	if status != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", status, body)
+	}
+	if strings.Contains(contentType, "x-ndjson") {
+		t.Fatalf("409 must not stream ndjson, content-type=%q", contentType)
+	}
+	var result struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("409 body is not the error envelope: %v (%s)", err, body)
+	}
+	if result.Error.Code != "conflict" {
+		t.Fatalf("409 envelope code=%q, want conflict", result.Error.Code)
+	}
+}
+
+// TestHTTPDownloadVerificationFacts pins the F-2 governance decision at the
+// HTTP boundary: a validated download appends exactly one audit.event.export
+// fact and no rejection fact; a tampered download appends exactly one
+// export.download_rejected fact and no audit.event.export fact (only
+// validated downloads are governance facts).
+func TestHTTPDownloadVerificationFacts(t *testing.T) {
+	legit := []byte("legit event line\n")
+	job := domain.ExportJob{ID: "export-facts", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-facts.jsonl", Digest: domain.HashBytes(legit)}
+	server, svc, archiveDir := downloadExportTestServer(t, job)
+	defer server.Close()
+
+	sealed, err := security.EncryptBytesBound(legit, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, sealed)
+
+	// Validated download: audit.event.export, no rejection fact.
+	if status, _, _ := downloadExport(t, server, job.ID); status != http.StatusOK {
+		t.Fatalf("legit download status=%d, want 200", status)
+	}
+	// Tampered download: rejection fact, no audit.event.export.
+	tampered := append([]byte(nil), sealed...)
+	tampered[len(tampered)/2] ^= 0x01
+	writeArchiveObject(t, archiveDir, job.ObjectPath, tampered)
+	status, _, _ := downloadExport(t, server, job.ID)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("tampered download status=%d, want 500", status)
+	}
+
+	var snapshot *store.Snapshot
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		snapshot = data
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exportFacts, rejectedFacts := 0, 0
+	for _, action := range snapshot.AdminActions {
+		if action.Action == domain.AdminActionEventExport && action.TargetID == job.ID {
+			exportFacts++
+		}
+		if action.Action == domain.AdminActionExportRejected && action.TargetID == job.ID {
+			rejectedFacts++
+		}
+	}
+	if exportFacts != 1 {
+		t.Fatalf("validated download must append exactly one audit.event.export fact, found %d", exportFacts)
+	}
+	if rejectedFacts != 1 {
+		t.Fatalf("tampered download must append exactly one export.download_rejected fact, found %d", rejectedFacts)
+	}
+}
+
+// TestHTTPDownloadExportRejectsMalformedStoredDigest pins the fail-closed
+// digest-format rule (design F11): a completed job whose stored Digest is
+// empty must not serve a download even when the sealed object is valid.
+// Reproduce-first: before the fix the empty digest is never consulted and
+// the download serves 200; after the fix the format check rejects it.
+func TestHTTPDownloadExportRejectsMalformedStoredDigest(t *testing.T) {
+	legit := []byte("event line\n")
+	job := domain.ExportJob{ID: "export-bad-digest", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-bad-digest.jsonl", Digest: ""}
+	server, svc, archiveDir := downloadExportTestServer(t, job)
+	defer server.Close()
+
+	sealed, err := security.EncryptBytes(legit, svc.Config.EncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveObject(t, archiveDir, job.ObjectPath, sealed)
+
+	status, contentType, body := downloadExport(t, server, job.ID)
+	assertRejectedDownload(t, status, contentType, body)
 }
 
 // TestHTTPIngestRedactsStorePersistError is T2 (AC-2): a directory planted

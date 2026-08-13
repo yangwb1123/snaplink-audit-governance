@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 
@@ -108,6 +109,75 @@ func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 		return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
 	}
 	return s.recordReadAction(tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
+}
+
+// exportDigestPattern is the exact shape of domain.HashBytes output
+// (lowercase hex-encoded SHA-256). An empty or malformed stored digest
+// fails closed: the download choke point must not serve bytes whose
+// integrity cannot be established, mirroring verifyContentDigest's
+// empty-digest stance (service.go).
+var exportDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// VerifyExportDownload is the single service-layer choke point for export
+// downloads: it re-looks up the job tenant-scoped, opens the sealed blob
+// with the job-derived tenant/job binding, and verifies the decrypted bytes
+// against the stored digest. It returns the plaintext JSONL only when every
+// check passes; any failure returns an error and no bytes, and appends an
+// export.download_rejected self-audit fact so the governance trail is never
+// silent about integrity failures (security review F-2).
+//
+// The binding and digest are derived inside the service from the store
+// record, never from transport-supplied strings, so a caller cannot nominate
+// a (tenant, job) pair that differs from the authenticated job. Pairing
+// invariant: completed jobs are immutable (finishExport runs at most once
+// per job; RecoverStuckExports only transitions "running" jobs), so the
+// blob the transport fetched at job.ObjectPath and this record's
+// binding/digest always describe the same export.
+func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([]byte, error) {
+	var job domain.ExportJob
+	if err := s.Store.Read(func(data *store.Snapshot) error {
+		value, ok := data.Exports[jobID]
+		if !ok || value.TenantID != tenantID {
+			return domain.ErrNotFound
+		}
+		job = value
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	// Defense in depth: the transport already 409s non-completed jobs, but
+	// the choke point must not trust transport-supplied identity or status.
+	if job.Status != "completed" || job.ObjectPath == "" {
+		return nil, fmt.Errorf("%w: export is not completed", domain.ErrConflict)
+	}
+	plain, err := security.DecryptExport(sealed, s.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		s.recordExportRejected(job.TenantID, job.ID)
+		return nil, err
+	}
+	if !exportDigestPattern.MatchString(job.Digest) {
+		s.recordExportRejected(job.TenantID, job.ID)
+		return nil, fmt.Errorf("export %s: stored digest is empty or malformed", job.ID)
+	}
+	if domain.HashBytes(plain) != job.Digest {
+		s.recordExportRejected(job.TenantID, job.ID)
+		return nil, fmt.Errorf("export %s: decrypted content digest mismatch", job.ID)
+	}
+	return plain, nil
+}
+
+// recordExportRejected appends the export.download_rejected self-audit fact
+// for an integrity-verification failure in VerifyExportDownload. Best-effort:
+// a failed append must not mask the verification error it accompanies. The
+// fact carries only the job ID — never plaintext, ciphertext or error
+// internals. Actor stays empty because VerifyExportDownload does not receive
+// transport identity; the fact's purpose is exposing tamper attempts, and
+// tenant + job identify the target.
+func (s *Service) recordExportRejected(tenantID, jobID string) {
+	_ = s.Store.Update(func(data *store.Snapshot) error {
+		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, "", domain.AdminActionExportRejected, "export", jobID, "download_verification_failed"))
+		return nil
+	})
 }
 
 func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, error) {
@@ -835,8 +905,10 @@ func (s *Service) runExport(jobID string) {
 		bytesWritten = append(bytesWritten, line...)
 		bytesWritten = append(bytesWritten, '\n')
 	}
-	// 独立加密：导出文件整体以 AES-GCM 密封后写入归档（§14）。
-	sealed, sealErr := security.EncryptBytes(bytesWritten, s.Config.EncryptionKey)
+	// 独立加密：导出文件整体以 AES-GCM 密封后写入归档（§14）。v2 密封把
+	// 租户/任务派生绑定（ExportBinding）作为 AEAD 关联数据，下载时同一
+	// 绑定才能解开 —— 跨任务/跨租户的 blob 交换在 GCM 认证处失败（F8）。
+	sealed, sealErr := security.EncryptBytesBound(bytesWritten, s.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
 	if sealErr != nil {
 		s.finishExport(jobID, "failed", "", "", 0, sealErr.Error())
 		return

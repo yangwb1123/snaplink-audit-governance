@@ -406,7 +406,7 @@ func TestExportJSONLStripsSearchDigests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := security.DecryptBytes(sealed, svc.Config.EncryptionKey)
+	plain, err := security.DecryptExport(sealed, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -154,3 +154,135 @@ func TestExportBytesRoundTrip(t *testing.T) {
 		t.Fatal("missing prefix must fail")
 	}
 }
+
+// TestExportBindingFraming pins the exact byte layout of ExportBinding,
+// including a hostile tenant ID whose embedded '|', ':' and digit runs must
+// not shift the length-prefixed framing boundaries.
+func TestExportBindingFraming(t *testing.T) {
+	got := string(ExportBinding("tenant-a", "export-abc123"))
+	want := "export:v2:8:tenant-a|13:export-abc123"
+	if got != want {
+		t.Fatalf("ExportBinding(%q, %q) = %q, want %q", "tenant-a", "export-abc123", got, want)
+	}
+	// len("5:abc|2:xy") == 10: the length prefix fixes the exact byte span.
+	got = string(ExportBinding("5:abc|2:xy", "job"))
+	want = "export:v2:10:5:abc|2:xy|3:job"
+	if got != want {
+		t.Fatalf("ExportBinding hostile = %q, want %q", got, want)
+	}
+}
+
+// TestExportBindingInjective is the property-form of the collision-freedom
+// argument: over a grid of hostile (tenantID, jobID) values, every distinct
+// pair derives distinct binding bytes, and re-derivation is deterministic.
+func TestExportBindingInjective(t *testing.T) {
+	values := []string{"a", "5:abc|2:xy", "10:abc", "a|b", "1:2", ":", "|", ""}
+	seen := map[string][2]string{}
+	for _, tenant := range values {
+		for _, job := range values {
+			binding := string(ExportBinding(tenant, job))
+			if prev, ok := seen[binding]; ok {
+				t.Fatalf("binding collision: (%q,%q) and (%q,%q) both derive %q", tenant, job, prev[0], prev[1], binding)
+			}
+			seen[binding] = [2]string{tenant, job}
+		}
+	}
+	if string(ExportBinding("tenant-a", "job-1")) != string(ExportBinding("tenant-a", "job-1")) {
+		t.Fatal("ExportBinding must be deterministic")
+	}
+}
+
+// TestExportV2Binding is the v2 binding matrix (AC-3): a blob sealed under
+// (T1,J1) opens only with the identical binding — wrong tenant, wrong job,
+// nil binding and wrong key all fail GCM authentication, and an invalid
+// prefix is rejected.
+func TestExportV2Binding(t *testing.T) {
+	key := "export-key"
+	plain := []byte("line1\nline2\n")
+	t1j1 := ExportBinding("tenant-a", "job-1")
+	sealed, err := EncryptBytesBound(plain, key, t1j1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(sealed[:len(exportV2Prefix)]) != exportV2Prefix {
+		t.Fatalf("sealed output missing v2 prefix: %q", sealed[:16])
+	}
+	opened, err := DecryptExport(sealed, key, t1j1)
+	if err != nil || string(opened) != string(plain) {
+		t.Fatalf("correct binding must open: err=%v", err)
+	}
+	if _, err := DecryptExport(sealed, key, ExportBinding("tenant-a", "job-2")); err == nil {
+		t.Fatal("wrong job binding must fail GCM authentication")
+	}
+	if _, err := DecryptExport(sealed, key, ExportBinding("tenant-b", "job-1")); err == nil {
+		t.Fatal("wrong tenant binding must fail GCM authentication")
+	}
+	if _, err := DecryptExport(sealed, key, nil); err == nil {
+		t.Fatal("nil binding must fail for a v2 blob")
+	}
+	if _, err := DecryptExport(sealed, "wrong-key", t1j1); err == nil {
+		t.Fatal("wrong key must fail")
+	}
+	if _, err := DecryptExport([]byte("garbage"), key, t1j1); err == nil {
+		t.Fatal("invalid prefix must fail")
+	}
+}
+
+// TestDecryptExportVersions pins the version dispatch: v1 blobs open with
+// nil AAD (binding ignored), v2 blobs open only with the correct binding,
+// and a v2 blob fed to the v1-only DecryptBytes is rejected.
+func TestDecryptExportVersions(t *testing.T) {
+	key := "export-key"
+	binding := ExportBinding("tenant-a", "job-1")
+	plain := []byte("line1\n")
+	v1, err := EncryptBytes(plain, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := DecryptExport(v1, key, nil)
+	if err != nil || string(opened) != string(plain) {
+		t.Fatalf("v1 blob with nil binding must open: err=%v", err)
+	}
+	opened, err = DecryptExport(v1, key, binding)
+	if err != nil || string(opened) != string(plain) {
+		t.Fatalf("v1 blob with non-nil binding must still open (binding ignored): err=%v", err)
+	}
+	v2, err := EncryptBytesBound(plain, key, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecryptBytes(v2, key); err == nil {
+		t.Fatal("v2 blob must be rejected by v1-only DecryptBytes")
+	}
+	if _, err := DecryptExport(v2[:len(exportV2Prefix)+5], key, binding); err == nil {
+		t.Fatal("truncated v2 envelope must fail")
+	}
+}
+
+// FuzzDecryptExport exercises the version-dispatching open on arbitrary
+// attacker-controlled bytes: it must never panic and never return partial
+// output — a nil error always means the full plaintext.
+func FuzzDecryptExport(f *testing.F) {
+	key := "export-key"
+	binding := ExportBinding("tenant-a", "job-1")
+	validV1, err := EncryptBytes([]byte("line1\n"), key)
+	if err != nil {
+		f.Fatal(err)
+	}
+	validV2, err := EncryptBytesBound([]byte("line2\n"), key, binding)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(validV1)
+	f.Add(validV2)
+	f.Add([]byte("export:v1:"))
+	f.Add([]byte("export:v2:"))
+	f.Add([]byte("export:v2:garbage"))
+	f.Add([]byte("not-an-export"))
+	f.Fuzz(func(t *testing.T, sealed []byte) {
+		plain, err := DecryptExport(sealed, key, binding)
+		if err == nil && len(plain) == 0 {
+			t.Fatal("successful open returned empty plaintext")
+		}
+	})
+}

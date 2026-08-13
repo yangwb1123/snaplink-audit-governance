@@ -577,12 +577,6 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
 		return
 	}
-	// 导出下载是治理事实（audit.event.export）：服务层追加失败则中止下载
-	// （fail-closed，与读自审计同一规则）。
-	if err := s.Service.RecordExportDownload(job.TenantID, claims.Subject, job.ID); err != nil {
-		s.writeError(w, r, statusForError(err), err)
-		return
-	}
 	data, err := s.Service.Config.Archive.Get(r.Context(), job.ObjectPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -592,10 +586,19 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	// 导出文件独立加密：下载时用平台加密密钥解开密封。
-	decrypted, err := security.DecryptBytes(data, s.Service.Config.EncryptionKey)
+	// 下载完整性：绑定认证 + 摘要格式 + 摘要一致全部通过后才返回明文。
+	// 任一失败均为 500（redacted），且不记录 audit.event.export —— 只有
+	// 经过验证的下载才是治理事实（此前 404/500 归档失败也会先记录该事实）。
+	decrypted, err := s.Service.VerifyExportDownload(job.TenantID, job.ID, data)
 	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, err)
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	// 导出下载是治理事实（audit.event.export）：服务层追加失败则中止下载
+	// （fail-closed，与读自审计同一规则）。R4 法律保留门禁在服务方法内部
+	// 重新执行，故 403 仍在任何字节流出前生效。
+	if err := s.Service.RecordExportDownload(job.TenantID, claims.Subject, job.ID); err != nil {
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")

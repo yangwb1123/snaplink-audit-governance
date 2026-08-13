@@ -1134,11 +1134,15 @@ func TestExportEncryptedAndDecryptable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 归档内容必须是密封的（明文 JSONL 不会出现）。
+	// 归档内容必须是密封的（明文 JSONL 不会出现），且新密封必须携带 v2
+	// 租户/任务绑定前缀。
 	if contains(sealed, []byte("exp-enc-1")) {
 		t.Fatal("archive object must not contain plaintext event data")
 	}
-	plain, err := security.DecryptBytes(sealed, svc.Config.EncryptionKey)
+	if !strings.HasPrefix(string(sealed), "export:v2:") {
+		t.Fatalf("new exports must be sealed export:v2:, got prefix %q", sealed[:16])
+	}
+	plain, err := security.DecryptExport(sealed, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1147,6 +1151,172 @@ func TestExportEncryptedAndDecryptable(t *testing.T) {
 	}
 	if job.Digest != domain.HashBytes(plain) {
 		t.Fatal("job digest must cover the decrypted content")
+	}
+}
+
+// waitExportCompleted polls an export job until it reaches a terminal state
+// (deadline-polled on the real condition, never a fixed sleep).
+func waitExportCompleted(t *testing.T, svc *Service, jobID string) domain.ExportJob {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, getErr := svc.GetExport("tenant-a", jobID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if current.Status == "completed" || current.Status == "failed" {
+			return current
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("export stuck in %s", current.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestVerifyExportDownloadRejectsTamperedAndSwapped is the service-layer
+// matrix (AC-1/AC-2): the choke point returns plaintext only for the exact
+// (job, binding, digest) triple — tampered ciphertext, a swapped v2 blob
+// from another job, a swapped v1 blob with valid GCM but wrong content, a
+// re-seal under the correct binding with different content, and an empty
+// stored digest all return an error and no bytes.
+func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
+	svc := testService(t, true)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("verify-exp-1", "op-verify", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("verify-exp-2", "op-verify", at.Add(time.Second)), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
+	jobA, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobA = waitExportCompleted(t, svc, jobA.ID)
+	jobB = waitExportCompleted(t, svc, jobB.ID)
+	if jobA.Status != "completed" || jobB.Status != "completed" {
+		t.Fatalf("exports did not complete: A=%s B=%s", jobA.Status, jobB.Status)
+	}
+	sealedA, err := svc.Config.Archive.Get(context.Background(), jobA.ObjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedB, err := svc.Config.Archive.Get(context.Background(), jobB.ObjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Happy path: the job's own blob verifies, and the returned plaintext is
+	// the full decrypted slice (single full-buffer compare, AC-2 ordering).
+	plainA, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedA)
+	if err != nil {
+		t.Fatalf("legit verify failed: %v", err)
+	}
+	if domain.HashBytes(plainA) != jobA.Digest {
+		t.Fatal("verified plaintext must hash to the stored digest")
+	}
+
+	// Tampered ciphertext (F9): flip a byte inside the sealed body.
+	tampered := append([]byte(nil), sealedA...)
+	tampered[len(tampered)/2] ^= 0x01
+	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, tampered); err == nil {
+		t.Fatalf("tampered blob must fail, got plaintext %q", plain)
+	}
+
+	// v2 swap (F8): job B's blob is sealed under B's binding — opening it
+	// against job A must fail GCM authentication.
+	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedB); err == nil {
+		t.Fatalf("swapped v2 blob must fail, got plaintext %q", plain)
+	}
+
+	// v1 swap (F10): a v1 blob of different content opens with nil AAD, so
+	// only the digest comparison rejects it.
+	v1Swap, err := security.EncryptBytes([]byte("attacker content\n"), svc.Config.EncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, v1Swap); err == nil {
+		t.Fatalf("swapped v1 blob must fail, got plaintext %q", plain)
+	}
+
+	// Digest mismatch with valid GCM (F12): re-seal different content under
+	// job A's own binding — authentication passes, equality fails.
+	resealed, err := security.EncryptBytesBound([]byte("different content\n"), svc.Config.EncryptionKey, security.ExportBinding(jobA.TenantID, jobA.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, resealed); err == nil {
+		t.Fatalf("digest mismatch must fail, got plaintext %q", plain)
+	}
+
+	// Empty/malformed stored digest (F11): fail-closed format check.
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		job := data.Exports[jobA.ID]
+		job.Digest = ""
+		data.Exports[jobA.ID] = job
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedA); err == nil {
+		t.Fatalf("empty stored digest must fail, got plaintext %q", plain)
+	}
+}
+
+// TestVerifyExportDownloadRecordsRejectionFact pins the F-2 governance
+// decision: an integrity-verification failure appends exactly one
+// export.download_rejected fact for the job, while a validated download
+// appends no rejection fact (the audit.event.export fact is the transport's
+// job, pinned by the HTTP tests).
+func TestVerifyExportDownloadRecordsRejectionFact(t *testing.T) {
+	svc := testService(t, true)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("reject-exp-1", "op-reject", at), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
+	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job = waitExportCompleted(t, svc, job.ID)
+	if job.Status != "completed" {
+		t.Fatalf("export failed: %+v", job)
+	}
+	sealed, err := svc.Config.Archive.Get(context.Background(), job.ObjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.VerifyExportDownload(job.TenantID, job.ID, sealed); err != nil {
+		t.Fatalf("legit verify failed: %v", err)
+	}
+	// Tampered attempt: expect exactly one rejection fact.
+	tampered := append([]byte(nil), sealed...)
+	tampered[len(tampered)/2] ^= 0x01
+	if _, err := svc.VerifyExportDownload(job.TenantID, job.ID, tampered); err == nil {
+		t.Fatal("tampered blob must fail")
+	}
+	var snapshot *store.Snapshot
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		snapshot = data
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rejected := 0
+	for _, action := range snapshot.AdminActions {
+		if action.Action == domain.AdminActionExportRejected && action.TargetID == job.ID && action.TargetType == "export" {
+			rejected++
+		}
+	}
+	if rejected != 1 {
+		t.Fatalf("expected exactly one export.download_rejected fact for the job, found %d", rejected)
 	}
 }
 

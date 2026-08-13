@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,12 @@ const encryptedPrefix = "enc:v1:"
 // exportPrefix marks byte-level encrypted export files (independent
 // encryption of the whole JSONL payload, architecture plan section 14).
 const exportPrefix = "export:v1:"
+
+// exportV2Prefix marks byte-level encrypted export files sealed under an
+// explicit tenant/job AEAD binding (ExportBinding). The open path dispatches
+// on this prefix (DecryptExport); a v2 blob fed to the v1-only DecryptBytes
+// fails the v1 prefix check and is rejected.
+const exportV2Prefix = "export:v2:"
 
 func keyBytes(key string) []byte {
 	sum := sha256.Sum256([]byte(key))
@@ -187,6 +194,79 @@ func EncryptBytes(plain []byte, key string) ([]byte, error) {
 	combined := append([]byte(exportPrefix), nonce...)
 	combined = append(combined, ciphertext...)
 	return combined, nil
+}
+
+// ExportBinding derives the canonical AEAD associated data binding a sealed
+// export blob to its owning (tenantID, jobID) pair. Exact byte layout
+// (pinned by TestExportBindingFraming):
+//
+//	export:v2:<decimal(len(tenantID))>:<tenantID>|<decimal(len(jobID))>:<jobID>
+//
+// The framing is collision-free by construction: every component is
+// length-prefixed (decimal(N) + ":" + value), so a parser cannot shift a
+// boundary — a hostile tenant ID containing '|', ':' or digits (e.g.
+// "5:abc|2:xy") is framed as "10:5:abc|2:xy", where the length 10 fixes the
+// exact byte span. The export:v2: prefix inside the AAD provides version
+// separation: a v2 AAD can never equal the nil AAD of v1, nor a future v3
+// AAD reusing the same framing. The open path never parses this string — it
+// re-derives the identical bytes from the job record and passes them to
+// gcm.Open, which is what makes the framing safe by construction.
+func ExportBinding(tenantID, jobID string) []byte {
+	return []byte(exportV2Prefix + strconv.Itoa(len(tenantID)) + ":" + tenantID + "|" + strconv.Itoa(len(jobID)) + ":" + jobID)
+}
+
+// EncryptBytesBound seals raw bytes with AES-GCM under an explicit AEAD
+// binding (export:v2: format). Mechanics are identical to EncryptBytes
+// (random 12-byte nonce, AES-256-GCM, layout prefix || nonce || ciphertext)
+// except that gcm.Seal authenticates the binding, so a blob opened with the
+// wrong or missing binding fails authentication.
+func EncryptBytesBound(plain []byte, key string, binding []byte) ([]byte, error) {
+	block, err := aes.NewCipher(keyBytes(key))
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	ciphertext := gcm.Seal(nil, nonce, plain, binding)
+	combined := append([]byte(exportV2Prefix), nonce...)
+	combined = append(combined, ciphertext...)
+	return combined, nil
+}
+
+// DecryptExport opens a sealed export blob produced by either seal version.
+// export:v1: blobs (legacy) open with nil AAD — exactly today's DecryptBytes
+// semantics, and the binding argument is ignored, so a legacy blob never
+// requires one. export:v2: blobs open with the caller-supplied job-derived
+// binding; a wrong or missing binding fails GCM authentication. Any other
+// prefix is rejected with the same "invalid encrypted export" error text as
+// DecryptBytes.
+func DecryptExport(sealed []byte, key string, binding []byte) ([]byte, error) {
+	if len(sealed) >= len(exportV2Prefix) && string(sealed[:len(exportV2Prefix)]) == exportV2Prefix {
+		body := sealed[len(exportV2Prefix):]
+		block, err := aes.NewCipher(keyBytes(key))
+		if err != nil {
+			return nil, err
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return nil, err
+		}
+		if len(body) < gcm.NonceSize() {
+			return nil, fmt.Errorf("invalid encrypted export")
+		}
+		plain, err := gcm.Open(nil, body[:gcm.NonceSize()], body[gcm.NonceSize():], binding)
+		if err != nil {
+			return nil, err
+		}
+		return plain, nil
+	}
+	return DecryptBytes(sealed, key)
 }
 
 // DecryptBytes opens an export:v1: blob produced by EncryptBytes.

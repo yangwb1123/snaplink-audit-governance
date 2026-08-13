@@ -362,7 +362,15 @@ const (
 	// AdminActionExportBlocked records a legal-hold gate denial: a create,
 	// run-time or download attempt for an export whose query overlaps an
 	// active legal hold. TargetID carries the blocking hold ID.
-	AdminActionExportBlocked     = "export.blocked"
+	AdminActionExportBlocked = "export.blocked"
+	// AdminActionExportRejected records a download whose sealed object failed
+	// integrity verification (binding authentication, digest format or digest
+	// equality) in VerifyExportDownload. TargetID carries the job ID; the
+	// fact carries no content, error internals or actor. The governance
+	// trail must not be silent about integrity failures — an unrecorded
+	// tamper attempt is exactly the attack class this fact exists to expose
+	// (security review F-2).
+	AdminActionExportRejected    = "export.download_rejected"
 	AdminActionLegalHoldCreated  = "legal_hold.created"
 	AdminActionLegalHoldReleased = "legal_hold.released"
 	AdminActionRestoreCreated    = "restore.created"

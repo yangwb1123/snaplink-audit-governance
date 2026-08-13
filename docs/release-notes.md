@@ -1,5 +1,44 @@
 # Release Notes
 
+## 2026-08-13 — 导出下载完整性：租户/任务绑定密封与摘要校验（export:v2，internal/security + service/governance + httpapi/server）
+
+**写给运营（行为变化）：**
+
+- **下载现在验证内容后才返回**：`GET /api/v1/exports/{jobId}/download` 在写出任何字节前校验
+  密封对象与任务记录的绑定和摘要。此前下载直接解封并 200 流出，归档对象被换/损坏时照常
+  当作权威数据返回；现在：
+  - 归档对象字节被篡改（位翻转）、被换成其他任务/租户的对象、或内容与任务摘要不符 →
+    **500 `internal_error`**（redacted 信封，无路径/errno/事件内容），不再返回任何 ndjson 字节；
+  - 新导出的归档对象以 `export:v2:` 密封并绑定任务（租户+任务 ID 派生 AAD）；历史
+    `export:v1:` 对象继续可下载（v1 分支语义不变）；
+  - 任务记录 `Digest` 为空或畸形（异常状态）→ 下载 fail-closed 500，绝不静默放行。
+- **审计事实语义收紧**：`audit.event.export` 只对**通过验证**的下载记录；归档 404/500 的失败
+  下载不再记录该事实（此前在取对象前就记录）。验证失败（篡改/摘要不符）新增
+  `export.download_rejected` 自审计事实（target 为任务 ID，无内容）——篡改尝试现在在治理
+  痕迹中可见。
+- **HTTP 状态语义保留**：404（不存在/跨租户）、403（法律保留）、409（未完成）不变；仅产生
+  500 的条件变宽（验证失败）。OpenAPI 下载操作补充 `500` 响应。
+- **升级提示**：无数据迁移、无密钥轮换、无配置变更；单版本发布即可。回滚 = 回退二进制，
+  回滚窗口内写入的 v2 对象无法被旧版 v1-only 解封（500），任务记录保留摘要，重新导出可恢复。
+
+**写给开发（实现变化）：**
+
+- `internal/security/fieldcrypto.go`：新增 `exportV2Prefix`、`ExportBinding`（长度前缀的
+  tenant/job AAD 绑定，不可碰撞）、`EncryptBytesBound`（v2 密封）、`DecryptExport`（v1/v2
+  版本分发开放；v1 分支复用 `DecryptBytes` 原语义）。`EncryptBytes`/`DecryptBytes` 签名与
+  行为不变。
+- `internal/service/governance.go`：`runExport` 密封改为 `EncryptBytesBound` + 任务派生绑定；
+  新增下载咽喉 `VerifyExportDownload`（租户重查 → 409 防御 → 绑定解封 → 摘要格式
+  `^[0-9a-f]{64}$` → 摘要相等 → 仅全过返回明文）与 `recordExportRejected`（失败事实，
+  best-effort）。
+- `internal/httpapi/server.go`：`downloadExport` 顺序改为 取对象 → `VerifyExportDownload` →
+  `RecordExportDownload` → 200。
+- `internal/domain/models.go`：新增 `AdminActionExportRejected = "export.download_rejected"`。
+- `api/openapi/openapi.yaml`：下载操作补充 `500` 响应。
+- 测试：绑定矩阵/黄金帧/版本分发/注入性属性/Fuzz、服务层篡改与换 blob 矩阵与拒绝事实、
+  HTTP 层篡改/换 blob（v1+v2）/摘要不符/空摘要 500、未完成 409、验证事实计数；两个既有
+  服务测试改为经 `DecryptExport` + 绑定打开 v2 blob 并断言 `export:v2:` 前缀。
+
 ## 2026-08-13 — 外部归档/签名传输强制 TLS：S3 新增 `AUDIT_S3_USE_SSL`，Vault 地址做 scheme/回环校验（internal/runtimeconfig）
 
 **写给运营（行为变化）：**
