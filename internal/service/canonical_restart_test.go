@@ -58,7 +58,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	svc := reloadService(t, st, true)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
@@ -77,7 +77,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	}
 	defer reopened.Close()
 	svc2 := reloadService(t, reopened, false)
-	result, err := svc2.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc2.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	// service, close the store, and verify against a freshly opened store
 	// (the same restart shape as the file leg).
 	svc := reloadService(t, st, true)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
@@ -144,7 +144,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	}
 	defer reopened.Close()
 	svc2 := reloadService(t, reopened, false)
-	result, err := svc2.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc2.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

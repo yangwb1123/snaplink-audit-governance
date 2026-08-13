@@ -292,7 +292,7 @@ func TestRecoverStuckExportsNeverUnblocksHeldExport(t *testing.T) {
 // and after release the object is downloadable again.
 func TestSealedObjectRetainedWhileHoldActive(t *testing.T) {
 	svc := testService(t, true)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-worm", "op-1", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-worm", "op-1", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	job, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
@@ -348,7 +348,7 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	}
 
 	// tenant-a: event + completed export + hold.
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-a", "op-a", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-a", "op-a", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	jobA, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
@@ -362,7 +362,7 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	}
 
 	// tenant-b: its own event + completed export + hold.
-	if _, err := svc.Ingest("tenant-b", crmPrincipal, testEvent("evt-b", "op-b", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-b", crmPrincipal, testEvent("evt-b", "op-b", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	jobB, err := svc.CreateExport("tenant-b", "test", wideExportQuery())
@@ -439,16 +439,16 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 // consults holds, and neither writes into the export archive namespace.
 func TestRestoreAndVerifyPathsUnaffectedByHeldExport(t *testing.T) {
 	svc := testService(t, true)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-1", "op-restore", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-1", "op-restore", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-2", "op-restore", t0.Add(time.Second)), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-2", "op-restore", t0.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-verify", Reason: "hold while verifying", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("integrity must stay valid under an active hold: %+v %v", result, err)
 	}

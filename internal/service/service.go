@@ -58,10 +58,11 @@ type Config struct {
 }
 
 // Signer creates and verifies checkpoint signatures. Implementations must be
-// deterministic per input so Verify can re-check archived manifests.
+// deterministic per input so Verify can re-check archived manifests. The
+// context cancels in-flight external (Vault) requests; local signers ignore it.
 type Signer interface {
-	Sign(data []byte) (string, error)
-	Verify(data []byte, signature string) (bool, error)
+	Sign(ctx context.Context, data []byte) (string, error)
+	Verify(ctx context.Context, data []byte, signature string) (bool, error)
 	Algorithm() string
 }
 
@@ -70,14 +71,14 @@ type hmacSigner struct {
 	secret string
 }
 
-func (h hmacSigner) Sign(data []byte) (string, error) {
+func (h hmacSigner) Sign(_ context.Context, data []byte) (string, error) {
 	mac := hmac.New(sha256.New, []byte(h.secret))
 	_, _ = mac.Write(data)
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-func (h hmacSigner) Verify(data []byte, signature string) (bool, error) {
-	expected, err := h.Sign(data)
+func (h hmacSigner) Verify(ctx context.Context, data []byte, signature string) (bool, error) {
+	expected, err := h.Sign(ctx, data)
 	if err != nil {
 		return false, err
 	}
@@ -400,7 +401,7 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 	return report, nil
 }
 
-func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, event domain.Event, waitFor string) (domain.EventReceipt, error) {
+func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.IngestPrincipal, event domain.Event, waitFor string) (domain.EventReceipt, error) {
 	if waitFor != "" && waitFor != domain.StatusAccepted && waitFor != domain.StatusLedgered && waitFor != domain.StatusIndexed && waitFor != domain.StatusArchived {
 		return domain.EventReceipt{}, fmt.Errorf("%w: unsupported wait_for value", domain.ErrInvalid)
 	}
@@ -542,7 +543,7 @@ func (s *Service) Ingest(tenantID string, principal domain.IngestPrincipal, even
 		receipt.Hash = event.Hash
 		data.Receipts[key] = receipt
 		if len(stream.PendingHashes) >= s.Config.SegmentSize {
-			segment, checkpoint, sealErr := s.sealSegment(stream, now)
+			segment, checkpoint, sealErr := s.sealSegment(ctx, stream, now)
 			if sealErr != nil {
 				return sealErr
 			}
@@ -1093,12 +1094,12 @@ func (s *Service) eventHash(event domain.Event) (string, error) {
 	return domain.HashBytes(data), nil
 }
 
-func (s *Service) sealSegment(stream store.StreamState, now time.Time) (domain.Segment, domain.Checkpoint, error) {
+func (s *Service) sealSegment(ctx context.Context, stream store.StreamState, now time.Time) (domain.Segment, domain.Checkpoint, error) {
 	hashes := append([]string(nil), stream.PendingHashes...)
 	root := merkleRoot(hashes)
 	manifest := fmt.Sprintf("%s:%d:%d:%s:%s", stream.TenantID, stream.NextSequence-int64(len(hashes)), stream.NextSequence-1, stream.HeadHash, root)
 	manifestHash := domain.HashBytes([]byte(manifest))
-	signature, err := s.Config.Signer.Sign([]byte(manifestHash))
+	signature, err := s.Config.Signer.Sign(ctx, []byte(manifestHash))
 	if err != nil {
 		return domain.Segment{}, domain.Checkpoint{}, fmt.Errorf("sign segment: %w", err)
 	}

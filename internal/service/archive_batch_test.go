@@ -120,7 +120,7 @@ func seedPendingEvents(t *testing.T, svc *Service, archiveStub *recordingArchive
 	svc.Config.Archive = archiveStub
 	base := time.Unix(1_700_000_010, 0).UTC()
 	for i := 1; i <= n; i++ {
-		receipt, err := svc.Ingest("tenant-a", crmPrincipal, testEvent(fmt.Sprintf("evt-%d", i), "op-pending", base.Add(time.Duration(i)*time.Second)), domain.StatusLedgered)
+		receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent(fmt.Sprintf("evt-%d", i), "op-pending", base.Add(time.Duration(i)*time.Second)), domain.StatusLedgered)
 		if err != nil {
 			t.Fatal(err)
 		}

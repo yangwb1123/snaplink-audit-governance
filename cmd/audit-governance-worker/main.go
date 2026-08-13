@@ -110,20 +110,24 @@ func main() {
 	if err := probeArchiveReady(svc.Config.Archive, logger); err != nil {
 		logger.Fatalf("archive ready: %v", err)
 	}
-	evaluate := func() { runEvaluatePass(logger, svc) }
+	// REQ-3: the pass context is cancelled by SIGINT/SIGTERM so in-flight
+	// Vault sign calls abort promptly instead of blocking on the client
+	// timeout. stop() must be released (async F4: signal.NotifyContext's
+	// internal registration would otherwise leak for the process lifetime).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	evaluate := func() { runEvaluatePass(ctx, logger, svc) }
 	evaluate()
 	if *once {
 		return
 	}
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	for {
 		select {
 		case <-ticker.C:
 			evaluate()
-		case <-stop:
+		case <-ctx.Done():
 			_ = st.Flush()
 			return
 		}
@@ -139,7 +143,7 @@ func main() {
 // EvaluateRetention proceed unchanged. The failure is surfaced once per pass
 // (the probe line) and once per tenant (the skip line). When the probe
 // passes, the pass is byte-identical to the pre-probe behavior.
-func runEvaluatePass(logger *log.Logger, svc *service.Service) {
+func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Service) {
 	tenants, listErr := svc.ListTenants()
 	if listErr != nil {
 		logger.Printf("list tenants: %v", listErr)
@@ -156,10 +160,10 @@ func runEvaluatePass(logger *log.Logger, svc *service.Service) {
 		} else {
 			logger.Printf("tenant=%s stuck_exports_recovered=%d", tenant.ID, recovered)
 		}
-		if err := svc.SealPendingSegments(tenant.ID); err != nil {
+		if err := svc.SealPendingSegments(ctx, tenant.ID); err != nil {
 			logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
 		}
-		if err := svc.CreateAggregateCheckpoint(tenant.ID); err != nil {
+		if err := svc.CreateAggregateCheckpoint(ctx, tenant.ID); err != nil {
 			logger.Printf("tenant=%s aggregate_checkpoint_error=%v", tenant.ID, err)
 		}
 		if !archiveReady {

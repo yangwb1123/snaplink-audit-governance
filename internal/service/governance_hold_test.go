@@ -128,7 +128,7 @@ func holdGateService(t *testing.T) (*holdGateBackend, *Service) {
 func ingestHeldEvent(t *testing.T, svc *Service) time.Time {
 	t.Helper()
 	t0 := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-held", "op-held", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-held", "op-held", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	return t0
@@ -342,7 +342,7 @@ func TestRecordExportDownloadStoreReadErrorPropagates(t *testing.T) {
 func TestBlankFilterHoldBlocksAllTenantExports(t *testing.T) {
 	svc := testService(t, true)
 	t0 := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-1", "op-1", t0), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-1", "op-1", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}

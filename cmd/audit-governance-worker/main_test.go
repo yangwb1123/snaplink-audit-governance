@@ -410,7 +410,7 @@ func TestRunEvaluatePassRecoversStuckExports(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	if !strings.Contains(buf.String(), "tenant=tenant-a stuck_exports_recovered=1") {
 		t.Fatalf("log must report stuck_exports_recovered=1, got: %q", buf.String())
@@ -469,7 +469,7 @@ func TestRunEvaluatePassRecoveryProbeIndependent(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	out := buf.String()
 	if !strings.Contains(out, "tenant=tenant-a stuck_exports_recovered=1") {
@@ -516,7 +516,7 @@ func TestRunEvaluatePassRecoveryNoopForCompleted(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	if !strings.Contains(buf.String(), "tenant=tenant-a stuck_exports_recovered=0") {
 		t.Fatalf("log must report stuck_exports_recovered=0, got: %q", buf.String())
@@ -582,7 +582,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	snap, err := svc.Store.Snapshot()
 	if err != nil {
@@ -609,7 +609,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 
 	// Heal and re-run: the pass behaves exactly as before the probe.
 	archiveStub.readyErr = nil
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	snap, err = svc.Store.Snapshot()
 	if err != nil {
@@ -646,7 +646,7 @@ func TestRunEvaluatePassSurfacesProbeFailurePerPass(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 
 	out := buf.String()
 	for _, want := range []string{
@@ -662,7 +662,7 @@ func TestRunEvaluatePassSurfacesProbeFailurePerPass(t *testing.T) {
 	// Healed pass: archive_ready=ok, no skip line, receipts archived.
 	archiveStub.readyErr = nil
 	buf.Reset()
-	runEvaluatePass(logger, svc)
+	runEvaluatePass(context.Background(), logger, svc)
 	out = buf.String()
 	if strings.Contains(out, "archive_skipped=ready_probe_failed") {
 		t.Fatalf("healed pass must not log skip lines, got: %q", out)
@@ -673,6 +673,63 @@ func TestRunEvaluatePassSurfacesProbeFailurePerPass(t *testing.T) {
 	}
 	if receipt := snap.Receipts[store.EventKey("tenant-a", "evt-1")]; receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt status=%s, want archived after healing", receipt.Status)
+	}
+}
+
+// blockingWorkerSigner is the worker-test stand-in for an in-flight Vault
+// call: it returns the context error once the context is done, so a cancelled
+// pass context aborts the sign deterministically instead of blocking on the
+// client timeout.
+type blockingWorkerSigner struct {
+	service.Signer
+}
+
+func (b *blockingWorkerSigner) Sign(ctx context.Context, _ []byte) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestRunEvaluatePassAbortsOnCancelledContext pins REQ-3 at the worker
+// boundary (QA review High #2): a signal-cancelled pass context
+// (signal.NotifyContext in main) makes the in-flight Vault sign calls abort
+// promptly — one fail-fast checkpoint_error per tenant, no retry loop — and
+// the pass returns within the deadline instead of blocking on the client
+// timeout.
+func TestRunEvaluatePassAbortsOnCancelledContext(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	backend.data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	backend.data.Streams[store.StreamKey("tenant-a", "s1")] = store.StreamState{
+		TenantID:      "tenant-a",
+		StreamID:      "s1",
+		NextSequence:  2,
+		PendingHashes: []string{"h1", "h2"},
+		PendingEvents: []string{"e1", "e2"},
+	}
+	// A sealed checkpoint so CreateAggregateCheckpoint actually signs (with
+	// no checkpoints it skips the sign entirely — FR-2 idle path).
+	backend.data.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{{
+		ID: "ck-1", TenantID: "tenant-a", StreamID: "s1", Sequence: 1,
+		MerkleRoot: "root-1", Signature: "sig-1", Algorithm: "hmac-sha256",
+	}}
+	svc.Config.Signer = &blockingWorkerSigner{Signer: svc.Config.Signer}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	done := make(chan struct{})
+	go func() { runEvaluatePass(ctx, logger, svc); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runEvaluatePass did not abort promptly on a cancelled pass context")
+	}
+	out := buf.String()
+	if n := strings.Count(out, "tenant=tenant-a checkpoint_error="); n != 1 {
+		t.Fatalf("checkpoint_error lines=%d, want exactly 1 (fail fast, no retry loop)", n)
+	}
+	if n := strings.Count(out, "tenant=tenant-a aggregate_checkpoint_error="); n != 1 {
+		t.Fatalf("aggregate_checkpoint_error lines=%d, want exactly 1", n)
 	}
 }
 

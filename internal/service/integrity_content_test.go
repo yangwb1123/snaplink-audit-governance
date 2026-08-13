@@ -59,7 +59,7 @@ func ingestThree(t *testing.T, svc *Service) {
 		testEvent("evt-2", "op-1", base.Add(time.Second)),
 		testEvent("evt-3", "op-1", base.Add(2*time.Second)),
 	} {
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,7 +88,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func TestEventContentDigestMatchesIngestDigest(t *testing.T) {
 	sensitive.SchemaVersion = 2
 	sensitive.Payload["email"] = "alice@example.test"
 	for _, event := range []domain.Event{plain, sensitive} {
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,7 +175,7 @@ func TestVerifyIntegrityAcceptsSensitiveEvents(t *testing.T) {
 	event := testEvent("evt-sensitive", "op-sensitive", time.Unix(1_700_000_010, 0).UTC())
 	event.SchemaVersion = 2
 	event.Payload["email"] = "alice@example.test"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := svc.GetEvent("tenant-a", "test", "evt-sensitive")
@@ -189,7 +189,7 @@ func TestVerifyIntegrityAcceptsSensitiveEvents(t *testing.T) {
 	if naive == stored.SourceDigest {
 		t.Fatalf("naive re-derivation must not match the stored digest (reconstruction is mandatory): %s", naive)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 	svc := testService(t, false)
 	base := time.Unix(1_700_000_010, 0).UTC()
 	original := testEvent("evt-1", "op-1", base)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, original, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, original, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	// Attacker tampers the stored payload but leaves SourceDigest stale.
@@ -219,7 +219,7 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, original, domain.StatusLedgered); !errors.Is(err, domain.ErrConflict) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, original, domain.StatusLedgered); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("re-ingest of original content over tampered state must conflict, got %v", err)
 	}
 	// Honest duplicate detection is unchanged.
@@ -232,7 +232,7 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, original, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, original, domain.StatusLedgered)
 	if err != nil || !receipt.Duplicate {
 		t.Fatalf("honest duplicate must still be Duplicate=true: %+v %v", receipt, err)
 	}
@@ -246,11 +246,11 @@ func TestVerifyIntegrityReportsKeyMismatch(t *testing.T) {
 	event := testEvent("evt-key", "op-key", time.Unix(1_700_000_010, 0).UTC())
 	event.SchemaVersion = 2
 	event.Payload["email"] = "alice@example.test"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	svc.Config.EncryptionKey = "rotated-key"
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "", "")
+	result, err = svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -341,7 +341,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +363,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,11 +383,11 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	second := testEvent("evt-b-1", "", base)
 	second.AggregateID = "inv-2" // derived stream: tenant-a:aggregate:invoice:inv-2
 	for _, event := range []domain.Event{first, second} {
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
-	scoped, err := svc.VerifyIntegrity("tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
+	scoped, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,14 +405,14 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scoped, err = svc.VerifyIntegrity("tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
+	scoped, err = svc.VerifyIntegrity(testCtx, "tenant-a", "", "tenant-a:aggregate:invoice:inv-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !scoped.Valid || scoped.EventCount != 1 {
 		t.Fatalf("cross-stream tamper must not affect scoped verify: %+v", scoped)
 	}
-	full, err := svc.VerifyIntegrity("tenant-a", "", "")
+	full, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,10 +457,10 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("new-1", "", base.Add(time.Second)), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("new-1", "", base.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid || result.EventCount != 2 {
 		t.Fatalf("mixed-stream integrity failed: %+v %v", result, err)
 	}
@@ -472,7 +472,7 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 		t.Fatalf("streams=%d want 2 (legacy client-value + derived)", len(snap.Streams))
 	}
 	for _, sid := range []string{"tenant-a:legacy:stream", "tenant-a:aggregate:invoice:inv-1"} {
-		scoped, err := svc.VerifyIntegrity("tenant-a", "", sid)
+		scoped, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", sid)
 		if err != nil || !scoped.Valid || scoped.EventCount != 1 {
 			t.Fatalf("scoped verify %q failed: %+v %v", sid, scoped, err)
 		}
@@ -494,7 +494,7 @@ func TestVerifyIntegrityConcurrentIngest(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 300; i++ {
 			event := testEvent(fmt.Sprintf("concurrent-%d", i), "op-concurrent", base.Add(time.Duration(i)*time.Second))
-			if _, err := svc.Ingest("tenant-a", crmPrincipal, event, ""); err != nil {
+			if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, ""); err != nil {
 				mu.Lock()
 				ingestErr = err
 				mu.Unlock()
@@ -506,7 +506,7 @@ func TestVerifyIntegrityConcurrentIngest(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			result, err := svc.VerifyIntegrity("tenant-a", "", "")
+			result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 			if err != nil {
 				mu.Lock()
 				verifyErr = err
@@ -543,10 +543,10 @@ func TestVerifyIntegrityLargeIntSensitiveField(t *testing.T) {
 	event := testEvent("evt-large", "op-large", time.Unix(1_700_000_010, 0).UTC())
 	event.SchemaVersion = 2
 	event.Payload["amount"] = int64(9007199254740993)
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,13 +569,13 @@ func BenchmarkVerifyIntegrity(b *testing.B) {
 			event.SchemaVersion = 2
 			event.Payload["email"] = fmt.Sprintf("user%d@example.test", i)
 		}
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, ""); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, ""); err != nil {
 			b.Fatal(err)
 		}
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := svc.VerifyIntegrity("tenant-a", "", "")
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 		if err != nil || !result.Valid {
 			b.Fatalf("verify failed: %+v %v", result, err)
 		}

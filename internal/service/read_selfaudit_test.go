@@ -16,7 +16,7 @@ import (
 func TestReadSelfAuditOnQueryAndGet(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("selfaudit-evt", "op-sa", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("selfaudit-evt", "op-sa", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	// Empty actor (system-internal read) records nothing.
@@ -64,7 +64,7 @@ func TestReadSelfAuditOnQueryAndGet(t *testing.T) {
 func TestReadSelfAuditOnExport(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("export-sa-evt", "op-exp", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("export-sa-evt", "op-exp", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
@@ -114,7 +114,7 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 func TestReadSelfAuditFailClosed(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("failclosed-evt", "op-fc", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("failclosed-evt", "op-fc", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
@@ -146,7 +146,7 @@ func readFacts(t *testing.T, svc *Service) []domain.AdminAction {
 func TestReadSelfAuditOnTimelineReplayReceiptVerify(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("selfaudit-evt", "op-sa", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("selfaudit-evt", "op-sa", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.OperationTimeline("tenant-a", "auditor-1", "op-sa"); err != nil {
@@ -161,7 +161,7 @@ func TestReadSelfAuditOnTimelineReplayReceiptVerify(t *testing.T) {
 	if _, err := svc.GetReceipt("tenant-a", "auditor-1", "selfaudit-evt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.VerifyIntegrity("tenant-a", "auditor-1", ""); err != nil {
+	if _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	reads := readFacts(t, svc)
@@ -200,7 +200,7 @@ func TestReadSelfAuditOnTimelineReplayReceiptVerify(t *testing.T) {
 func TestReadSelfAuditNoDoubleAppendOnReplay(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("dbl-evt", "op-dbl", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("dbl-evt", "op-dbl", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-dbl"); err != nil {
@@ -243,7 +243,7 @@ func TestReadSelfAuditNoDoubleAppendOnReplay(t *testing.T) {
 func TestReadSelfAuditRestoreFlowRecordsNothing(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("restore-evt", "op-res", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("restore-evt", "op-res", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	preview, err := svc.PreviewRestore("tenant-a", domain.RestoreRequest{OperationID: "op-res"})
@@ -289,7 +289,7 @@ func TestReadSelfAuditRestoreFlowRecordsNothing(t *testing.T) {
 func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("scope-evt", "op-scope", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("scope-evt", "op-scope", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Operation("tenant-a", "auditor-1", "op-scope"); err != nil {
@@ -351,7 +351,7 @@ func TestReadSelfAuditFailClosedTimelineReplayReceiptVerify(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("fail-evt", "op-fail", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("fail-evt", "op-fail", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	appendErr := errors.New("append failed")
@@ -364,7 +364,7 @@ func TestReadSelfAuditFailClosedTimelineReplayReceiptVerify(t *testing.T) {
 		{"replay", func() error { _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-fail"); return err }()},
 		{"aggregate timeline", func() error { _, err := svc.AggregateTimeline("tenant-a", "auditor-1", "invoice", "inv-1"); return err }()},
 		{"receipt", func() error { _, err := svc.GetReceipt("tenant-a", "auditor-1", "fail-evt"); return err }()},
-		{"verify", func() error { _, err := svc.VerifyIntegrity("tenant-a", "auditor-1", ""); return err }()},
+		{"verify", func() error { _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); return err }()},
 	}
 	for _, check := range checks {
 		if !errors.Is(check.err, appendErr) {
@@ -385,7 +385,7 @@ func TestReadSelfAuditConflictExhaustionFailsReads(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("conf-evt", "op-conf", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("conf-evt", "op-conf", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	backend.alwaysConflict = true
@@ -397,7 +397,7 @@ func TestReadSelfAuditConflictExhaustionFailsReads(t *testing.T) {
 		{"replay", func() error { _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-conf"); return err }()},
 		{"aggregate timeline", func() error { _, err := svc.AggregateTimeline("tenant-a", "auditor-1", "invoice", "inv-1"); return err }()},
 		{"receipt", func() error { _, err := svc.GetReceipt("tenant-a", "auditor-1", "conf-evt"); return err }()},
-		{"verify", func() error { _, err := svc.VerifyIntegrity("tenant-a", "auditor-1", ""); return err }()},
+		{"verify", func() error { _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); return err }()},
 	}
 	for _, check := range checks {
 		if !errors.Is(check.err, store.ErrSnapshotConflict) {
@@ -417,7 +417,7 @@ func TestReadSelfAuditConflictExhaustionFailsReads(t *testing.T) {
 func TestVerifyIntegrityRejectsUnboundedStreamID(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("f2-evt", "op-f2", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("f2-evt", "op-f2", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
@@ -430,7 +430,7 @@ func TestVerifyIntegrityRejectsUnboundedStreamID(t *testing.T) {
 		{"path separator", "stream/id"},
 	}
 	for _, tc := range cases {
-		result, err := svc.VerifyIntegrity("tenant-a", "auditor-1", tc.sid)
+		result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", tc.sid)
 		if !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("%s: err=%v, want ErrInvalid; result=%+v", tc.name, err, result)
 		}
@@ -441,7 +441,7 @@ func TestVerifyIntegrityRejectsUnboundedStreamID(t *testing.T) {
 	// Boundary: a valid stream_id of exactly the cap is accepted and its fact
 	// carries the bounded target_id.
 	boundary := strings.Repeat("s", maxVerifyStreamIDLength)
-	result, err := svc.VerifyIntegrity("tenant-a", "auditor-1", boundary)
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", boundary)
 	if err != nil {
 		t.Fatalf("boundary verify: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestVerifyIntegrityRejectsUnboundedStreamID(t *testing.T) {
 func TestReadSelfAuditReplayAggregateSingleFact(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("agg-evt", "op-agg", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("agg-evt", "op-agg", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.ReplayAggregate("tenant-a", "auditor-1", "invoice", "inv-1")
@@ -493,7 +493,7 @@ func TestReadSelfAuditReplayAggregateSingleFact(t *testing.T) {
 func TestVerifyIntegrityDoesNotAttestAdminTrail(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("f4-evt", "op-f4", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("f4-evt", "op-f4", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.GetEvent("tenant-a", "auditor-1", "f4-evt"); err != nil {
@@ -508,7 +508,7 @@ func TestVerifyIntegrityDoesNotAttestAdminTrail(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "auditor-1", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", "")
 	if err != nil {
 		t.Fatalf("VerifyIntegrity: %v", err)
 	}

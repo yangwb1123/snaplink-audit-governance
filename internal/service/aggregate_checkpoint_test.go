@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"testing"
@@ -18,9 +19,9 @@ type countingSigner struct {
 	verifyCalls int
 }
 
-func (c *countingSigner) Verify(data []byte, signature string) (bool, error) {
+func (c *countingSigner) Verify(ctx context.Context, data []byte, signature string) (bool, error) {
 	c.verifyCalls++
-	return c.Signer.Verify(data, signature)
+	return c.Signer.Verify(ctx, data, signature)
 }
 
 // erroringSigner fails Sign on demand so the signer-failure path of
@@ -29,7 +30,7 @@ type erroringSigner struct {
 	Signer
 }
 
-func (e erroringSigner) Sign([]byte) (string, error) {
+func (e erroringSigner) Sign(context.Context, []byte) (string, error) {
 	return "", fmt.Errorf("signer unavailable")
 }
 
@@ -62,7 +63,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	first.AggregateID = "inv-a"
 	first.OperationID = ""
 	first.IdempotencyKey = "ac1-a"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	second := testEvent("ac1-b", "", at.Add(time.Second))
@@ -70,15 +71,15 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	second.AggregateID = "inv-b"
 	second.OperationID = ""
 	second.IdempotencyKey = "ac1-b"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 
 	// First call appends exactly one record.
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	snap, err := svc.Store.Snapshot()
@@ -101,7 +102,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	}
 
 	// Second call with no ledger change: dedup skip, success, still one record.
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatalf("dedup skip must return success, got %v", err)
 	}
 	if got := tenantAggregateCount(t, svc, "tenant-a"); got != 1 {
@@ -114,13 +115,13 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	third.AggregateID = "inv-c"
 	third.OperationID = ""
 	third.IdempotencyKey = "ac1-c"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, third, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, third, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	snap, err = svc.Store.Snapshot()
@@ -143,7 +144,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	aBefore := tenantAggregateCount(t, svc, "tenant-a")
-	if err := svc.CreateAggregateCheckpoint("tenant-b"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-b"); err != nil {
 		t.Fatal(err)
 	}
 	if got := tenantAggregateCount(t, svc, "tenant-b"); got != 1 {
@@ -169,7 +170,7 @@ func TestCreateAggregateCheckpointNoSaveWhenIdle(t *testing.T) {
 
 	// Zero-checkpoint tenant: no record, no Save.
 	backend.saves = 0
-	if err := svc.CreateAggregateCheckpoint("tenant-c"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-c"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 0 {
@@ -178,7 +179,7 @@ func TestCreateAggregateCheckpointNoSaveWhenIdle(t *testing.T) {
 
 	// First append writes exactly once.
 	backend.saves = 0
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 1 {
@@ -187,7 +188,7 @@ func TestCreateAggregateCheckpointNoSaveWhenIdle(t *testing.T) {
 
 	// Dedup skip: no Save.
 	backend.saves = 0
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 0 {
@@ -202,15 +203,15 @@ func TestSealPendingSegmentsNoWriteWhenQuiet(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("seal-q1", "op-q", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("seal-q1", "op-q", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("seal-q2", "op-q", at.Add(time.Second)), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("seal-q2", "op-q", at.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	// Pending hashes exist now; a first seal pass must write once.
 	backend.saves = 0
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 1 {
@@ -232,7 +233,7 @@ func TestSealPendingSegmentsNoWriteWhenQuiet(t *testing.T) {
 
 	// Quiet pass (nothing pending): zero Saves.
 	backend.saves = 0
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 0 {
@@ -252,7 +253,7 @@ func TestCreateAggregateCheckpointSignerFailureSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.Config.Signer = erroringSigner{Signer: svc.Config.Signer}
-	err := svc.CreateAggregateCheckpoint("tenant-a")
+	err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a")
 	if err == nil {
 		t.Fatal("CreateAggregateCheckpoint must surface the signer failure")
 	}
@@ -275,7 +276,7 @@ func TestCreateAggregateCheckpointDedupSurvivesConflictRetry(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	// Change one stream's root: the next candidate differs from the last
@@ -289,7 +290,7 @@ func TestCreateAggregateCheckpointDedupSurvivesConflictRetry(t *testing.T) {
 
 	backend.conflicts = 1
 	backend.saves = 0
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 2 {
@@ -337,7 +338,7 @@ func TestCreateAggregateCheckpointDedupAfterConcurrentWinner(t *testing.T) {
 	signer := hmacSigner{secret: "test-secret"}
 	roots := []string{"root-s1"}
 	root := merkleRoot(roots)
-	signature, err := signer.Sign([]byte(root))
+	signature, err := signer.Sign(testCtx, []byte(root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +353,7 @@ func TestCreateAggregateCheckpointDedupAfterConcurrentWinner(t *testing.T) {
 
 	backend := &stagedConflictBackend{loads: []*store.Snapshot{first, winner}}
 	svc := newServiceOn(t, store.NewWithBackend(backend))
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if backend.saves != 1 {
@@ -441,7 +442,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 		for i := 0; i < legacy; i++ {
 			roots := []string{fmt.Sprintf("fabricated-root-%d", i)}
 			root := merkleRoot(roots)
-			signature, err := svc.Config.Signer.Sign([]byte(root))
+			signature, err := svc.Config.Signer.Sign(testCtx, []byte(root))
 			if err != nil {
 				return err
 			}
@@ -457,7 +458,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	}
 	// The next append changes the root (live checkpoint), so it appends and
 	// trims: 55 legacy + 1 new -> 5 retained, oldest dropped.
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if got := tenantAggregateCount(t, svc, "tenant-a"); got != 5 {
@@ -477,7 +478,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	// append path are not counted.
 	counting := &countingSigner{Signer: svc.Config.Signer}
 	svc.Config.Signer = counting
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +502,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "", "")
+	result, err = svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

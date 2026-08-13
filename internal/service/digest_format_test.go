@@ -157,7 +157,7 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 	event := testEvent("new-1", "op-new", at)
 	event.SchemaVersion = 2
 	event.Payload = map[string]any{"resource": "invoice", "email": "alice@example.test"}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +232,7 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 	replay := testEvent("legacy-1", "op-legacy", at)
 	replay.SchemaVersion = 2
 	replay.Payload = map[string]any{"resource": "invoice", "email": "alice@example.test"}
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, replay, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, replay, domain.StatusLedgered)
 	if err != nil || !receipt.Duplicate {
 		t.Fatalf("legacy event re-ingest must dedupe: %+v %v", receipt, err)
 	}
@@ -250,7 +250,7 @@ func TestEncryptedSearchableFieldLimitsCrossFormatMatching(t *testing.T) {
 	event := testEvent("enc-1", "op-enc", at)
 	event.SchemaVersion = 2
 	event.Payload = map[string]any{"resource": "invoice", "pii_email": "alice@example.test"}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,7 +286,7 @@ func TestCrossFormatDigestLargeIntParityAfterRestart(t *testing.T) {
 	event := testEvent("big-1", "op-big", at)
 	event.SchemaVersion = 2
 	event.Payload = map[string]any{"resource": "invoice", "amount": big}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 
@@ -342,20 +342,20 @@ func TestVerifyIntegrityMixedDigestFormats(t *testing.T) {
 	first := testEvent("v2-plain-1", "op-mixed", at)
 	first.SchemaVersion = 2
 	first.Payload = map[string]any{"resource": "invoice", "email": "alice@example.test"}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	second := testEvent("v2-enc-1", "op-mixed", at.Add(time.Second))
 	second.SchemaVersion = 2
 	second.Payload = map[string]any{"resource": "invoice", "pii_email": "bob@example.test"}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 
 	// Legacy-format event seeded directly on its own stream.
 	seedLegacyEvent(t, svc, testEvent("v1-legacy-1", "op-mixed", at.Add(2*time.Second)), map[string]any{"resource": "invoice", "email": "carol@example.test"})
 
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestExportJSONLStripsSearchDigests(t *testing.T) {
 	event := testEvent("exp-strip-1", "op-exp", at)
 	event.SchemaVersion = 2
 	event.Payload = map[string]any{"resource": "invoice", "email": "alice@example.test", "nested": map[string]any{"note__search_digest": "sd2:should-be-stripped", "keep": 1}}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 

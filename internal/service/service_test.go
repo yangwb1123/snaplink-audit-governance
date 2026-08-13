@@ -74,28 +74,28 @@ func testEvent(id, operation string, at time.Time) domain.Event {
 func TestIngestIdempotencyConflictAndIntegrity(t *testing.T) {
 	svc := testService(t, true)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	first, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-1", "op-1", at), domain.StatusLedgered)
+	first, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-1", "op-1", at), domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Status != domain.StatusArchived || first.Sequence != 1 {
 		t.Fatalf("unexpected first receipt: %+v", first)
 	}
-	duplicate, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-1", "op-1", at), domain.StatusLedgered)
+	duplicate, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-1", "op-1", at), domain.StatusLedgered)
 	if err != nil || !duplicate.Duplicate {
 		t.Fatalf("duplicate not detected: %+v %v", duplicate, err)
 	}
 	conflicting := testEvent("evt-1", "op-1", at)
 	conflicting.Payload["value"] = 11
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, conflicting, domain.StatusLedgered); !errors.Is(err, domain.ErrConflict) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, conflicting, domain.StatusLedgered); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("expected conflict, got %v", err)
 	}
 	second := testEvent("evt-2", "op-1", at.Add(time.Second))
 	second.AggregateVersion = 2
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,12 +111,12 @@ func TestIngestIdempotencyConflictAndIntegrity(t *testing.T) {
 func TestIdempotencyKeyCannotBeReusedAcrossEvents(t *testing.T) {
 	svc := testService(t, false)
 	firstEvent := testEvent("idem-event-1", "idem-op", time.Now().UTC())
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, firstEvent, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, firstEvent, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	secondEvent := testEvent("idem-event-2", "idem-op", time.Now().UTC())
 	secondEvent.IdempotencyKey = firstEvent.IdempotencyKey
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, secondEvent, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, secondEvent, domain.StatusLedgered)
 	if !errors.Is(err, domain.ErrConflict) || !receipt.Conflict || receipt.ErrorCode != "idempotency_key_conflict" {
 		t.Fatalf("expected idempotency conflict: %+v %v", receipt, err)
 	}
@@ -125,21 +125,21 @@ func TestIdempotencyKeyCannotBeReusedAcrossEvents(t *testing.T) {
 func TestIngestBindsSourceToAuthenticatedClient(t *testing.T) {
 	svc := testService(t, false)
 	event := testEvent("source-bound", "source-op", time.Unix(1_700_000_010, 0).UTC())
-	_, wrongErr := svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, event, domain.StatusLedgered)
+	_, wrongErr := svc.Ingest(testCtx, "tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, event, domain.StatusLedgered)
 	if !errors.Is(wrongErr, domain.ErrForbidden) {
 		t.Fatalf("cross-source client must be forbidden: %v", wrongErr)
 	}
-	_, missingErr := svc.Ingest("tenant-a", domain.IngestPrincipal{}, event, domain.StatusLedgered)
+	_, missingErr := svc.Ingest(testCtx, "tenant-a", domain.IngestPrincipal{}, event, domain.StatusLedgered)
 	if !errors.Is(missingErr, domain.ErrForbidden) || missingErr.Error() != wrongErr.Error() {
 		t.Fatalf("missing client identity must fail closed: wrong=%v missing=%v", wrongErr, missingErr)
 	}
 	unknown := event
 	unknown.SourceSystem = "unknown"
-	_, unknownErr := svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, unknown, domain.StatusLedgered)
+	_, unknownErr := svc.Ingest(testCtx, "tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, unknown, domain.StatusLedgered)
 	if !errors.Is(unknownErr, domain.ErrForbidden) || unknownErr.Error() != wrongErr.Error() {
 		t.Fatalf("unknown source must be indistinguishable: wrong=%v unknown=%v", wrongErr, unknownErr)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatalf("source ID default binding rejected: %v", err)
 	}
 }
@@ -157,10 +157,10 @@ func TestUpdateSourceReplacesClientAllowList(t *testing.T) {
 		t.Fatalf("allow-list was not normalized: %+v", updated)
 	}
 	event := testEvent("source-updated", "source-op", time.Unix(1_700_000_010, 0).UTC())
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("old default binding must be replaced: %v", err)
 	}
-	if _, err := svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID: "relay-a"}, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", domain.IngestPrincipal{ClientID: "relay-a"}, event, domain.StatusLedgered); err != nil {
 		t.Fatalf("explicitly allowed client rejected: %v", err)
 	}
 }
@@ -185,12 +185,12 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 	// re-labelled, so the writer cannot attribute events to tenant-b through
 	// a tenant-a token even when tenant-b owns a same-named source.
 	event.TenantID = "tenant-b"
-	if _, err := svc.Ingest("", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
+	if _, err := svc.Ingest(testCtx, "", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
 		t.Fatalf("mismatched envelope tenant err=%v, want tenant mismatch", err)
 	}
 	// Empty envelope tenant is derived from the server-side binding.
 	event.TenantID = ""
-	receipt, err := svc.Ingest("", crmPrincipal, event, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 		t.Fatalf("server binding was not used: %+v", receipt)
 	}
 	crossTenant := testEvent("cross-tenant", "derive-op", time.Unix(1_700_000_011, 0).UTC())
-	if _, err := svc.Ingest("tenant-b", crmPrincipal, crossTenant, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.Ingest(testCtx, "tenant-b", crmPrincipal, crossTenant, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("signed tenant hint escaped source binding: %v", err)
 	}
 	if _, err := svc.UpdateSource("test", domain.SourceSystem{
@@ -208,7 +208,7 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	ambiguous := testEvent("ambiguous-tenant", "derive-op", time.Unix(1_700_000_012, 0).UTC())
-	if _, err := svc.Ingest("", crmPrincipal, ambiguous, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.Ingest(testCtx, "", crmPrincipal, ambiguous, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("ambiguous server-side tenant binding must fail closed: %v", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestQueryReplayAndExport(t *testing.T) {
 		event := testEvent("evt-q-"+string(rune('1'+i)), "op-query", at.Add(time.Duration(i)*time.Second))
 		event.AggregateVersion = int64(i + 1)
 		event.ChangedFields = map[string]domain.FieldChange{"status": {After: []any{"open", "paid", "closed"}[i]}}
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -265,7 +265,7 @@ func TestSensitivePayloadRejected(t *testing.T) {
 	svc := testService(t, false)
 	event := testEvent("evt-secret", "op-secret", time.Now().UTC())
 	event.Payload["password"] = "do-not-store"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, ""); err == nil || !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, ""); err == nil || !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("expected sensitive payload rejection, got %v", err)
 	}
 }
@@ -276,12 +276,12 @@ func TestRetentionReportRespectsLegalHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := testEvent("evt-old", "op-old", time.Now().Add(-72*time.Hour).UTC())
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	securityEvent := testEvent("evt-security", "op-security", time.Now().Add(-72*time.Hour).UTC())
 	securityEvent.RetentionClass = "security"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, securityEvent, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, securityEvent, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation"})
@@ -325,7 +325,7 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("persisted", "op-persisted", time.Unix(1_700_000_010, 0).UTC()), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("persisted", "op-persisted", time.Unix(1_700_000_010, 0).UTC()), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := store.Open(statePath)
@@ -358,7 +358,7 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	event := testEvent("evt-encrypted", "op-encrypted", time.Now().UTC())
 	event.SchemaVersion = 2
 	event.Payload["email"] = "alice@example.test"
-	first, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	first, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	if err != nil || stored.Payload["email__search_digest"] != expectedDigest {
 		t.Fatalf("search digest must use original value and tenant/field binding: got=%v want=%v err=%v", stored.Payload["email__search_digest"], expectedDigest, err)
 	}
-	duplicate, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	duplicate, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil || !duplicate.Duplicate || first.Hash != duplicate.Hash {
 		t.Fatalf("encrypted duplicate failed: %+v %v", duplicate, err)
 	}
@@ -389,13 +389,13 @@ func TestIntegrityChecksStreamsIndependently(t *testing.T) {
 	first := testEvent("evt-a-1", "", base.Add(10*time.Second))
 	second := testEvent("evt-b-1", "", base)
 	second.AggregateID = "inv-2" // derived stream: tenant-a:aggregate:invoice:inv-2
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("independent streams should validate: %+v %v", result, err)
 	}
@@ -436,7 +436,7 @@ func TestIngestStripsClientStreamID(t *testing.T) {
 				tc.mutate(&e)
 			}
 			e.StreamID = tc.crafted
-			receipt, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered)
+			receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, e, domain.StatusLedgered)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -503,7 +503,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 		e.AggregateType = ""
 		e.AggregateID = ""
 		e.StreamID = fmt.Sprintf("crafted-%d", i)
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, e, domain.StatusLedgered); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -551,7 +551,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 	if len(dirs) != 1 || dirs[0].Name() != safeName(derived) {
 		t.Fatalf("archive dirs=%v want exactly one %s", dirs, safeName(derived))
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid || result.EventCount != n {
 		t.Fatalf("collapsed-stream integrity failed: %+v %v", result, err)
 	}
@@ -574,12 +574,12 @@ func TestIngestDuplicateWithCraftedStreamID(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0).UTC()
 	first := testEvent("evt-dup", "", base)
 	first.StreamID = "crafted-a"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	again := testEvent("evt-dup", "", base)
 	again.StreamID = "crafted-b"
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, again, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, again, domain.StatusLedgered)
 	if err != nil || !receipt.Duplicate {
 		t.Fatalf("expected duplicate: %+v %v", receipt, err)
 	}
@@ -605,7 +605,7 @@ func TestIngestTenantMismatchPrecedesStreamStrip(t *testing.T) {
 	e := testEvent("evt-x", "", base)
 	e.TenantID = "tenant-b"
 	e.StreamID = "crafted-foreign"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, e, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, e, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
 		t.Fatalf("expected ErrTenantMismatch, got %v", err)
 	}
 	snap, err := svc.Store.Snapshot()
@@ -620,7 +620,7 @@ func TestIngestTenantMismatchPrecedesStreamStrip(t *testing.T) {
 func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	svc := testService(t, false)
 	event := testEvent("pending-archive", "op-pending", time.Now().UTC())
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	// Wire the archive store itself (not the ArchiveDir string, which
@@ -658,7 +658,7 @@ func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +698,7 @@ func TestIngestArchivesWithS3OnlyConfig(t *testing.T) {
 	archiveStub := &recordingArchive{}
 	svc.Config.Archive = archiveStub
 	event := testEvent("s3-only", "op-s3-only", time.Now().UTC())
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +725,7 @@ func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
 	archiveStub := &recordingArchive{fail: true}
 	svc.Config.Archive = archiveStub
 	event := testEvent("s3-only-retry", "op-s3-only", time.Now().UTC())
-	receipt, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +746,7 @@ func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
 func TestRestoreApprovalWorkflow(t *testing.T) {
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-restore", "op-restore", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-restore", "op-restore", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "user error"}, "requester-1")
@@ -818,7 +818,7 @@ func TestRestoreApprovalSeparationOfDutiesRefusalIsAtomic(t *testing.T) {
 	// no admin action — and a distinct actor can still decide afterwards.
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-sod", "op-sod", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-sod", "op-sod", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-sod", Reason: "rollback"}, "requester-1")
@@ -856,7 +856,7 @@ func TestRestoreApprovalConcurrentDistinctActors(t *testing.T) {
 	// Store.Update — exactly one wins, the loser sees ErrConflict.
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race", "op-race", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-race", "op-race", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race", Reason: "rollback"}, "requester-1")
@@ -894,7 +894,7 @@ func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
 	// stays pending and a distinct actor can still decide afterwards.
 	svc := testService(t, false)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("evt-race2", "op-race2", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-race2", "op-race2", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race2", Reason: "rollback"}, "requester-1")
@@ -927,19 +927,19 @@ func TestQueryCorrelationDimensions(t *testing.T) {
 	first := testEvent("corr-evt-1", "op-corr", at)
 	first.CorrelationID = "corr-outer"
 	first.TraceID = "trace-1"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	second := testEvent("corr-evt-2", "op-corr", at.Add(time.Second))
 	second.CausationID = "corr-evt-1"
 	second.CorrelationID = "corr-outer"
 	second.TraceID = "trace-1"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	unrelated := testEvent("corr-evt-3", "op-other", at.Add(2*time.Second))
 	unrelated.CorrelationID = "corr-other"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, unrelated, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, unrelated, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 
@@ -990,7 +990,7 @@ func TestAdminActionSelfAudit(t *testing.T) {
 	// 竞争，race 模式下可见）。
 	waitExport(t, svc, exportJob.ID)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("audit-evt", "op-audit", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("audit-evt", "op-audit", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-audit", Reason: "rollback"}, "requester-1")
@@ -1057,9 +1057,9 @@ func TestSourceAccessFailClosedSameError(t *testing.T) {
 
 	// 未知来源、停用来源、越权来源（client_id 不在白名单）必须返回完全相同的
 	// 拒绝结果，防止来源枚举。
-	_, errUnknown := svc.Ingest("tenant-a", crmPrincipal, withSource("ghost"), "")
-	_, errDisabled := svc.Ingest("tenant-a", crmPrincipal, withSource("disabled"), "")
-	_, errForbidden := svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, withSource("crm"), "")
+	_, errUnknown := svc.Ingest(testCtx, "tenant-a", crmPrincipal, withSource("ghost"), "")
+	_, errDisabled := svc.Ingest(testCtx, "tenant-a", crmPrincipal, withSource("disabled"), "")
+	_, errForbidden := svc.Ingest(testCtx, "tenant-a", domain.IngestPrincipal{ClientID: "other-client"}, withSource("crm"), "")
 	for name, err := range map[string]error{"unknown": errUnknown, "disabled": errDisabled, "forbidden": errForbidden} {
 		if err == nil {
 			t.Fatalf("%s source accepted", name)
@@ -1081,13 +1081,13 @@ func TestQueryStreamIDFilter(t *testing.T) {
 	first.AggregateID = ""
 	first.OperationID = ""
 	first.SourceSystem = "crm" // stream: tenant-a:source:crm
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	second := testEvent("stream-2", "op-other", at.Add(time.Second))
 	second.AggregateType = "invoice"
 	second.AggregateID = "inv-9" // stream: tenant-a:aggregate:invoice:inv-9
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
@@ -1103,7 +1103,7 @@ func TestQueryStreamIDFilter(t *testing.T) {
 func TestExportEncryptedAndDecryptable(t *testing.T) {
 	svc := testService(t, true)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("exp-enc-1", "op-enc", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("exp-enc-1", "op-enc", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
@@ -1183,10 +1183,10 @@ func waitExportCompleted(t *testing.T, svc *Service, jobID string) domain.Export
 func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 	svc := testService(t, true)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("verify-exp-1", "op-verify", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("verify-exp-1", "op-verify", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("verify-exp-2", "op-verify", at.Add(time.Second)), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("verify-exp-2", "op-verify", at.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
@@ -1277,7 +1277,7 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 func TestVerifyExportDownloadRecordsRejectionFact(t *testing.T) {
 	svc := testService(t, true)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("reject-exp-1", "op-reject", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("reject-exp-1", "op-reject", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
@@ -1333,7 +1333,7 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	first.AggregateID = "inv-a"
 	first.OperationID = ""
 	first.IdempotencyKey = "agg-a1"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, first, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	second := testEvent("agg-a2", "", at.Add(time.Second))
@@ -1341,16 +1341,16 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	second.AggregateID = "inv-b"
 	second.OperationID = ""
 	second.IdempotencyKey = "agg-a2"
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, second, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("aggregate verify failed: %+v %v", result, err)
 	}
@@ -1364,7 +1364,7 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err = svc.VerifyIntegrity("tenant-a", "", "")
+	result, err = svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1381,11 +1381,11 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 	earlier := testEvent("ooo-earlier", "op-ooo", time.Unix(1_700_000_010, 0).UTC())
 	earlier.IdempotencyKey = "ooo-2"
 
-	receiptLater, err := svc.Ingest("tenant-a", crmPrincipal, later, domain.StatusLedgered)
+	receiptLater, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, later, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiptEarlier, err := svc.Ingest("tenant-a", crmPrincipal, earlier, domain.StatusLedgered)
+	receiptEarlier, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, earlier, domain.StatusLedgered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1410,7 +1410,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 		t.Fatalf("timeline must order by occurred_at: %+v", timeline)
 	}
 	// 哈希链按 sequence 链接，不受业务时间乱序影响。
-	integrity, err := svc.VerifyIntegrity("tenant-a", "", "")
+	integrity, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !integrity.Valid {
 		t.Fatalf("integrity after out-of-order ingest: %+v %v", integrity, err)
 	}

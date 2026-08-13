@@ -43,7 +43,7 @@ func BenchmarkIngest(b *testing.B) {
 		for pb.Next() {
 			i++
 			event := domain.Event{EventID: fmt.Sprintf("bench-%d", i), SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: base, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("idem-%d", i), Payload: map[string]any{"resource": "invoice", "value": 10}}
-			if _, err := svc.Ingest("tenant-a", crmPrincipal, event, ""); err != nil {
+			if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, ""); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -56,7 +56,7 @@ func BenchmarkQuery(b *testing.B) {
 	base := time.Unix(1_700_000_010, 0).UTC()
 	for i := 0; i < 1000; i++ {
 		event := domain.Event{EventID: fmt.Sprintf("q-%d", i), SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: base.Add(time.Duration(i) * time.Second), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("q-idem-%d", i), Payload: map[string]any{"resource": "invoice", "value": i}}
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, ""); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, ""); err != nil {
 			b.Fatal(err)
 		}
 	}

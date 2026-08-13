@@ -74,7 +74,7 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 	} {
 		event := testEvent("keyf-"+tc.name, "op-1", at)
 		tc.mutate(&event)
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrInvalid) {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("%s: Ingest = %v, want ErrInvalid", tc.name, err)
 		}
 	}
@@ -92,7 +92,7 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 	}
 	for i, id := range []string{"keyf-valid-a", "keyf-valid-b", "keyf-valid-c"} {
 		event := testEvent(id, "op-ok", at.Add(time.Duration(i)*time.Second))
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatalf("valid ingest %d failed: %v", i, err)
 		}
 	}
@@ -204,7 +204,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 		opEvent, second(opEvent, "cover-op-2", 4*time.Second),
 		aggEvent, second(aggEvent, "cover-agg-2", 5*time.Second),
 	} {
-		if _, err := svc.Ingest("tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatalf("ingest %s failed: %v", event.EventID, err)
 		}
 	}
@@ -235,7 +235,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 
 	// (ii) VerifyIntegrity's SegmentCount equals the stored total — the
 	// fail-closed skip would undercount it.
-	result, err := svc.VerifyIntegrity("tenant-a", "", "")
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 	}
 
 	// (iii) the aggregate checkpoint covers exactly the three sealed streams.
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Store.Read(func(data *store.Snapshot) error {

@@ -57,18 +57,18 @@ func TestPostgresSnapshotSizeFlatAcrossIdleTicks(t *testing.T) {
 	svc := newServiceOn(t, st)
 	seedTestDomain(t, svc)
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("pg-idle-1", "op-pg", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("pg-idle-1", "op-pg", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("pg-idle-2", "op-pg", at.Add(time.Second)), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("pg-idle-2", "op-pg", at.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
 	// One real pass seeds the sealed checkpoint + first aggregate record
 	// (below the retention cap, so no trim can fire on the idle passes).
-	if err := svc.SealPendingSegments("tenant-a"); err != nil {
+	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,10 +82,10 @@ func TestPostgresSnapshotSizeFlatAcrossIdleTicks(t *testing.T) {
 
 	const passes = 10
 	for i := 0; i < passes; i++ {
-		if err := svc.SealPendingSegments("tenant-a"); err != nil {
+		if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.CreateAggregateCheckpoint("tenant-a"); err != nil {
+		if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 			t.Fatal(err)
 		}
 	}

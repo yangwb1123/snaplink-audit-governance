@@ -119,7 +119,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		requestID := r.Header.Get("X-Request-ID")
+		requestID := truncateRequestID(r.Header.Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = newRequestID()
 		}
@@ -262,7 +262,12 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
-	receipt, err := s.Service.Ingest(claims.TenantID, principal, event, r.URL.Query().Get("wait_for"))
+	// F1: the ingest commit must survive client disconnect — the durable
+	// write is detached from r.Context() cancellation (values are kept) so a
+	// dropped connection can never roll back a ledgered event. The worker's
+	// signal-driven context stays cancellable: server-initiated stop is a
+	// legitimate abort.
+	receipt, err := s.Service.Ingest(context.WithoutCancel(r.Context()), claims.TenantID, principal, event, r.URL.Query().Get("wait_for"))
 	s.ingestCount.Add(1)
 	if errors.Is(err, domain.ErrQuotaExceeded) {
 		s.ingestQuotaCount.Add(1)
@@ -305,8 +310,9 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	receipts := make([]domain.EventReceipt, 0, len(request.Events))
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
+	commitCtx := context.WithoutCancel(r.Context())
 	for _, event := range request.Events {
-		receipt, ingestErr := s.Service.Ingest(claims.TenantID, principal, event, request.WaitFor)
+		receipt, ingestErr := s.Service.Ingest(commitCtx, claims.TenantID, principal, event, request.WaitFor)
 		if receipt.Duplicate {
 			s.ingestDuplicateCount.Add(1)
 		}
@@ -626,7 +632,7 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.VerifyIntegrity(tenantID, claims.Subject, request.StreamID)
+	result, err := s.Service.VerifyIntegrity(r.Context(), tenantID, claims.Subject, request.StreamID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1232,6 +1238,21 @@ func statusForError(err error) int {
 }
 
 func newRequestID() string { return fmt.Sprintf("req-%d", time.Now().UnixNano()) }
+
+// maxRequestIDBytes caps the client-supplied X-Request-ID echoed into
+// response headers, error bodies, span attributes and panic logs. The value
+// is correlation-only (never used for authorization), so an unbounded copy
+// would only amplify abuse (F-3): a flood of 1 MB IDs would balloon every
+// error body and every OTLP span attribute.
+const maxRequestIDBytes = 128
+
+// truncateRequestID clips a client-supplied X-Request-ID to the cap.
+func truncateRequestID(value string) string {
+	if len(value) <= maxRequestIDBytes {
+		return value
+	}
+	return value[:maxRequestIDBytes]
+}
 
 func safeDownloadName(value string) string {
 	var b strings.Builder

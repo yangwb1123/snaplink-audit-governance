@@ -78,13 +78,13 @@ func TestIngestRollbackShapeFails(t *testing.T) {
 	// Exact-version lookup: the legitimate v1 still accepts events even
 	// though v2 exists (FR-2 preserved; no newest-version-only ingest rule).
 	at := time.Unix(1_700_000_010, 0).UTC()
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, testEvent("rollback-shape-1", "op-rs", at), domain.StatusLedgered); err != nil {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("rollback-shape-1", "op-rs", at), domain.StatusLedgered); err != nil {
 		t.Fatalf("ingest under legitimate lower version must succeed: %v", err)
 	}
 	// A version that was never registered fails the version-exact lookup.
 	missing := testEvent("rollback-shape-2", "op-rs", at)
 	missing.SchemaVersion = 5
-	if _, err := svc.Ingest("tenant-a", crmPrincipal, missing, domain.StatusLedgered); !errors.Is(err, domain.ErrSchemaNotFound) {
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, missing, domain.StatusLedgered); !errors.Is(err, domain.ErrSchemaNotFound) {
 		t.Fatalf("ingest under unregistered version must fail with ErrSchemaNotFound, got %v", err)
 	}
 }

@@ -47,7 +47,10 @@ func (s *Server) Write(ctx context.Context, request *auditv1.WriteRequest) (*aud
 		return nil, s.statusError(err)
 	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
-	receipt, err := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
+	// F1: the durable ingest commit survives client disconnect — the write is
+	// detached from RPC-context cancellation (values are kept) so a dropped
+	// connection can never roll back a ledgered event.
+	receipt, err := s.Service.Ingest(context.WithoutCancel(ctx), claims.TenantID, principal, event, request.GetWaitFor())
 	if err != nil {
 		return nil, s.statusError(err)
 	}
@@ -64,12 +67,13 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	}
 	response := &auditv1.WriteBatchResponse{}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
+	commitCtx := context.WithoutCancel(ctx)
 	for _, item := range request.GetEvents() {
 		event, convertErr := fromProto(item)
 		if convertErr != nil {
 			return nil, s.statusError(convertErr)
 		}
-		receipt, ingestErr := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
+		receipt, ingestErr := s.Service.Ingest(commitCtx, claims.TenantID, principal, event, request.GetWaitFor())
 		if ingestErr != nil {
 			return response, s.statusError(ingestErr)
 		}
@@ -99,7 +103,7 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 		if convertErr != nil {
 			return s.statusError(convertErr)
 		}
-		receipt, ingestErr := s.Service.Ingest(claims.TenantID, principal, event, request.GetWaitFor())
+		receipt, ingestErr := s.Service.Ingest(context.WithoutCancel(stream.Context()), claims.TenantID, principal, event, request.GetWaitFor())
 		if ingestErr != nil {
 			return s.statusError(ingestErr)
 		}

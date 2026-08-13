@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -271,7 +272,7 @@ func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.
 // even on a dedup skip (one-time write after deploy), so VerifyIntegrity's
 // aggregate work is bounded by the cap (FR-5). Retained records keep
 // today's layout and stay individually verifiable (C4).
-func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
+func (s *Service) CreateAggregateCheckpoint(ctx context.Context, tenantID string) error {
 	now := s.Now()
 	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		roots := make([]string, 0, len(data.Checkpoints))
@@ -295,7 +296,7 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 		}
 		sort.Strings(roots)
 		root := merkleRoot(roots)
-		signature, err := s.Config.Signer.Sign([]byte(root))
+		signature, err := s.Config.Signer.Sign(ctx, []byte(root))
 		if err != nil {
 			return false, fmt.Errorf("sign aggregate checkpoint: %w", err)
 		}
@@ -333,7 +334,15 @@ func (s *Service) CreateAggregateCheckpoint(tenantID string) error {
 // audit-format concern.
 const maxVerifyStreamIDLength = 256
 
-func (s *Service) VerifyIntegrity(tenantID, actor, streamID string) (IntegrityResult, error) {
+// isInterrupted reports whether a signer/verifier error means the operation
+// was cancelled or timed out rather than producing a verdict. Such errors
+// must not be recorded as a false "signature mismatch" fact in the audit
+// trail (F-2).
+func isInterrupted(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID string) (IntegrityResult, error) {
 	result := IntegrityResult{Valid: true, TenantID: tenantID, StreamID: streamID, CheckedAt: s.Now()}
 	// Self-audit trail bound (security review F2): the fact records stream_id
 	// verbatim as target_id into the unbounded single-row admin trail, so an
@@ -389,10 +398,16 @@ func (s *Service) VerifyIntegrity(tenantID, actor, streamID string) (IntegrityRe
 		roots := append([]string(nil), aggregate.StreamRoots...)
 		sort.Strings(roots)
 		expected := merkleRoot(roots)
-		valid, verifyErr := s.Config.Signer.Verify([]byte(expected), aggregate.Signature)
+		valid, verifyErr := s.Config.Signer.Verify(ctx, []byte(expected), aggregate.Signature)
 		if verifyErr != nil || expected != aggregate.Root || !valid {
 			result.Valid = false
-			result.Errors = append(result.Errors, fmt.Sprintf("aggregate checkpoint %s root/signature mismatch", aggregate.ID))
+			if isInterrupted(verifyErr) {
+				// Cancelled/deadline-exceeded verification is not a mismatch:
+				// the audit trail must not record a false mismatch fact.
+				result.Errors = append(result.Errors, fmt.Sprintf("aggregate checkpoint %s verification interrupted", aggregate.ID))
+			} else {
+				result.Errors = append(result.Errors, fmt.Sprintf("aggregate checkpoint %s root/signature mismatch", aggregate.ID))
+			}
 		}
 	}
 	// Events from different streams have independent sequence spaces.  They
@@ -461,10 +476,14 @@ func (s *Service) VerifyIntegrity(tenantID, actor, streamID string) (IntegrityRe
 		}
 		manifest := fmt.Sprintf("%s:%d:%d:%s:%s", segment.TenantID, segment.FirstSequence, segment.LastSequence, segment.LastHash, segment.MerkleRoot)
 		manifestHash := domain.HashBytes([]byte(manifest))
-		valid, verifyErr := s.Config.Signer.Verify([]byte(manifestHash), segment.Signature)
+		valid, verifyErr := s.Config.Signer.Verify(ctx, []byte(manifestHash), segment.Signature)
 		if verifyErr != nil || manifestHash != segment.ManifestHash || !valid {
 			result.Valid = false
-			result.Errors = append(result.Errors, fmt.Sprintf("stream %s segment %d-%d signature mismatch", segment.StreamID, segment.FirstSequence, segment.LastSequence))
+			if isInterrupted(verifyErr) {
+				result.Errors = append(result.Errors, fmt.Sprintf("stream %s segment %d-%d verification interrupted", segment.StreamID, segment.FirstSequence, segment.LastSequence))
+			} else {
+				result.Errors = append(result.Errors, fmt.Sprintf("stream %s segment %d-%d signature mismatch", segment.StreamID, segment.FirstSequence, segment.LastSequence))
+			}
 		}
 	}
 	// Read self-audit (F-06): the verification itself is a governance fact.
@@ -482,7 +501,7 @@ func (s *Service) VerifyIntegrity(tenantID, actor, streamID string) (IntegrityRe
 //
 // A pass that seals nothing (no pending hashes for the tenant) persists
 // nothing: Store.UpdateChecked skips the Save on an idle tick (FR-2).
-func (s *Service) SealPendingSegments(tenantID string) error {
+func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) error {
 	now := s.Now()
 	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		mutated := false
@@ -490,7 +509,7 @@ func (s *Service) SealPendingSegments(tenantID string) error {
 			if stream.TenantID != tenantID || len(stream.PendingHashes) == 0 {
 				continue
 			}
-			segment, checkpoint, err := s.sealSegment(stream, now)
+			segment, checkpoint, err := s.sealSegment(ctx, stream, now)
 			if err != nil {
 				return false, err
 			}
