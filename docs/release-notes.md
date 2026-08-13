@@ -1,5 +1,54 @@
 # Release Notes
 
+## 2026-08-13 — Vault Transit 签名密钥绑定与可取消请求路径（internal/security + service + httpapi/grpcapi/worker）
+
+**写给运营（行为变化）：**
+
+- **签名现在绑定到配置的 Transit 密钥**：`Sign` 收到 Vault 返回的签名时校验其
+  `vault:v<ver>:<key>:…` 前缀中的密钥名。若密钥名与 `AUDIT_VAULT_TRANSIT_KEY` 不一致
+  （Vault 被攻破、被换、或配置漂移）、或前缀畸形（缺失/空 payload）→ **签名请求失败**，
+  该证据**绝不落库、绝不归档**（原子写中止）。此前任何非空签名都会被当作权威检查点
+  记录，密钥漂移只会在事后 `VerifyIntegrity` 才暴露。正确配置的部署行为零变化。
+- **Vault 请求可被取消**：`Sign`/`Verify` 全程携带调用方 context——HTTP 客户端断开、
+  gRPC 取消、worker 收到 SIGTERM 都会**立即中止在途 Vault 请求**，不再死等 10s 客户端
+  超时。
+  - **ingest 提交不受客户端断开影响**：`POST /events` 的落库提交使用
+    `context.WithoutCancel(r.Context())`——客户端中途断开**不会**回滚已提交事件
+    （事件照常入账，客户端按 `event_id`/`receipt_url` 查询）；取消只中止签名往返。
+  - worker 改用 `signal.NotifyContext`：SIGTERM 在 pass 中途取消 Vault 往返并快速退出。
+- **拒绝跟随重定向**：Vault 客户端设置 `CheckRedirect: http.ErrUseLastResponse`，任何 3xx
+  按非 200 状态失败关闭——**`X-Vault-Token` 永不转发到跨域重定向目标**（此前会原样
+  带过去，配合被攻破的 Vault 前端/代理可被窃取）。
+- **Vault 往返有 3s 预算**：即使取消被剥离（ingest 提交路径），单次签名调用在持锁状态下
+  最多阻塞 3s（原本可达 10s 客户端超时）；调用方更早的 deadline 仍然优先。
+- **杂项加固**：Vault 非 200 响应体回显截断为 256 字节并 `%q` 转义（防日志注入）；
+  `X-Request-ID` 请求头截断至 128 字节（响应头/错误体/span 属性均受限）。
+- **升级提示**：无环境变量、无数据迁移、无密钥轮换；正确配置下行为不变。两个二进制
+  必须同批发布（接口为模块内部契约，二进制锁步既有要求）。回滚 = 回退二进制，无持久化
+  格式变化。
+
+**写给开发（实现变化）：**
+
+- `internal/security/vaultsigner.go`：`Sign`/`Verify`/`call` 改为接收 `context.Context`；
+  新增 `checkSignatureKey`（解析 `vault:v<ver>:<key>:<payload>`，密钥名非机密可指名，
+  payload 永不回显；ASCII-only 版本段，unicode 数字/trailing-colon 一律 fail-closed）；
+  `NewVaultTransitSigner` 保留原签名，新增 `newVaultTransitSigner` 构造 seam（超时可注入）；
+  `vaultCallBudget`（3s）叠加在客户端超时之上；`redirectReject` 拒绝跟随重定向；
+  `truncateEcho` 截断响应体回显；构造注释更新（明文 http 仅经上游
+  `SigningArchive.resolveVaultTransport` 的回环 opt-in 可达）。
+- `internal/service/service.go`：`Signer` 接口 `Sign`/`Verify` 增加 `ctx`（本地 `hmacSigner`
+  忽略之）；`Ingest`/`sealSegment`/`SealPendingSegments`/`CreateAggregateCheckpoint`/
+  `VerifyIntegrity` 线程化调用方 context；`isInterrupted` 将 `context.Canceled`/deadline
+  分类为「中断」而非签名不匹配，`VerifyIntegrity` 取消时返回 `Valid=false` 且不记录
+  虚假的 mismatch 自审计事实。
+- `internal/httpapi/server.go`：ingest 提交边界 `context.WithoutCancel(r.Context())`；
+  `X-Request-ID` 截断至 128 字节。`internal/grpcapi/server.go`：RPC ctx 传入 ingest。
+  `cmd/audit-governance-worker/main.go`：`signal.NotifyContext` + `defer stop()`。
+- 测试：`internal/security`（外键密钥拒绝/畸形矩阵/取消/在途取消确定性证明/重定向零请求
+  断言/慢响应超时）、`internal/service`（seal 路径签名失败原子中止且零归档、ctx 链取消、
+  `VerifyIntegrity` 取消语义）、`internal/httpapi`（客户端断开事件保留、请求 ID 截断）、
+  `FuzzCheckSignatureKey`（不 panic、错误文本不含 payload）。
+
 ## 2026-08-13 — 导出下载完整性：租户/任务绑定密封与摘要校验（export:v2，internal/security + service/governance + httpapi/server）
 
 **写给运营（行为变化）：**
