@@ -574,7 +574,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			}
 		}
 		if archived {
-			_ = s.Store.Update(func(data *store.Snapshot) error {
+			if err := s.Store.Update(func(data *store.Snapshot) error {
 				key := store.EventKey(tenantID, event.EventID)
 				r := data.Receipts[key]
 				r.IndexedAt = s.Now()
@@ -582,31 +582,44 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 				r.ArchivedAt = s.Now()
 				data.Receipts[key] = r
 				return nil
-			})
+			}); err != nil {
+				// Durability boundary (store.go Update): the status write is
+				// save-or-nothing, so a failed transition must not be reported.
+				// Fail closed — receipt still carries the ledger-CAS-committed
+				// state (StatusLedgered, zero IndexedAt/ArchivedAt), which is
+				// the durable truth; the client recovers by idempotent retry
+				// (503 contract). The local receipt is only mutated after the
+				// transition durably commits.
+				return receipt, err
+			}
 			receipt.Status = domain.StatusArchived
 			receipt.IndexedAt = s.Now()
 			receipt.ArchivedAt = s.Now()
 		} else {
-			_ = s.Store.Update(func(data *store.Snapshot) error {
+			if err := s.Store.Update(func(data *store.Snapshot) error {
 				key := store.EventKey(tenantID, event.EventID)
 				r := data.Receipts[key]
 				r.Status = domain.StatusIndexed
 				r.IndexedAt = s.Now()
 				data.Receipts[key] = r
 				return nil
-			})
+			}); err != nil {
+				return receipt, err
+			}
 			receipt.Status = domain.StatusIndexed
 			receipt.IndexedAt = s.Now()
 		}
 	} else {
-		_ = s.Store.Update(func(data *store.Snapshot) error {
+		if err := s.Store.Update(func(data *store.Snapshot) error {
 			key := store.EventKey(tenantID, event.EventID)
 			r := data.Receipts[key]
 			r.Status = domain.StatusIndexed
 			r.IndexedAt = s.Now()
 			data.Receipts[key] = r
 			return nil
-		})
+		}); err != nil {
+			return receipt, err
+		}
 		receipt.Status = domain.StatusIndexed
 		receipt.IndexedAt = s.Now()
 	}

@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-08-13 — Ingest 回执状态转换失败改为失败关闭，不再上报未持久化的 Indexed/Archived（internal/service）
+
+**写给运营（行为变化）：**
+
+- **失败关闭语义**：当回执状态转换的持久化写入（`Store.Update`）失败时——并发副本乐观锁冲突重试 3 次后仍耗尽，或后端不可用——`POST /api/v1/events`（及批量接口的对应事件）现在返回 503/500，**不再返回声称 `indexed`/`archived` 的成功响应**。此前三个状态写入的错误被丢弃（`_ =`），本地内存回执被无条件推进到 `Indexed`/`Archived`，客户端看到的成功状态从未持久化（重启后 `GetReceipt` 回退为 `ledgered`）。
+- **幂等重试安全**：503 沿用既有“按幂等语义重试”契约；重试同一事件返回已持久化的 `ledgered` 回执（`duplicate=true`），绝不返回虚构转换。`wait_for=indexed|archived` 只在转换已持久化后才成功。
+- **无需客户端变更**：无 API/OpenAPI 版本变化；成功路径与今天逐字节一致。回执停留在 `ledgered` 的事件由既有 `ArchivePending` 收敛（归档对象/状态自愈）。
+
+**写给开发（实现变化）：**
+
+- `internal/service/service.go`：`Ingest` 中三处回执状态转换 `Store.Update`（归档成功→`archived`、归档降级→`indexed`、无归档→`indexed`）由 `_ =` 改为错误检查，失败时在本地回执变更之前 `return receipt, err`——返回的回执携带账本 CAS 已提交状态（`StatusLedgered`，`IndexedAt`/`ArchivedAt` 为零），与既有 `ErrConflict` 模式一致；错误原样返回（`errors.Is` 保持 503 映射）。`internal/store` 契约（重试/耗尽/保存即提交）与 HTTP/OpenAPI 层零改动。
+- 测试：新增 `internal/service/ingest_durability_test.go`（`failSaveBackend` 窗口故障注入 + AC-1..AC-4 映射）；对修复前代码红（吞错被检出），修复后绿；`python3 cli.py quality` 全绿。
+
+
 ## 2026-08-13 — QueryEvents 按业务时间排序，分页游标改为时间坐标（internal/domain + internal/service）
 
 **写给运营（行为变化）：**
