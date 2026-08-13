@@ -1,5 +1,55 @@
 # Release Notes
 
+## 2026-08-13 — 外部归档/签名传输强制 TLS：S3 新增 `AUDIT_S3_USE_SSL`，Vault 地址做 scheme/回环校验（internal/runtimeconfig）
+
+**写给运营（行为变化）：**
+
+- **S3 归档新增 TLS 开关 `AUDIT_S3_USE_SSL`（对应 `-s3-use-ssl` 标志，默认 `false`）**：
+  此前归档传输被硬编码为明文 HTTP，`AUDIT_S3_ENDPOINT` 指向任何非本机端点时，静态的
+  `AUDIT_S3_ACCESS_KEY`/`AUDIT_S3_SECRET_KEY` 与归档审计证据都走明文；且操作员即使写
+  `https://…` 端点也无法使用（minio 拼出 `http://https://…` 报错）。现在：
+  - `AUDIT_S3_USE_SSL=true` 时端点按 TLS 解析（`Secure=true`）；
+  - 端点带 `https://` scheme 但开关未开 → **启动/`-check-config` 直接失败**，错误信息
+    指名要设置 `AUDIT_S3_USE_SSL=true` 或去掉 scheme，绝不静默降级为明文；
+  - 端点带 `http://` scheme 且开关为 true → 冲突报错；
+  - 本地开发端点（`localhost:19010`、`deploy/` 的 `minio:9000`）保持默认明文可用，行为不变。
+- **Vault 地址开始校验 scheme 与主机**：`AUDIT_VAULT_ADDR` 此前原样拼接进请求 URL 并明文发送
+  `X-Vault-Token`。现在：
+  - 必须带 scheme（`https://` 或回环主机上的 `http://`）；schemeless（`host:8200`）、
+    非回环 `http://`、带路径/query/userinfo/空白一律**启动失败**，错误信息给出修复方式；
+  - 回环主机（`localhost`、`host.docker.internal`、`gateway.docker.internal`、回环 IP）上的
+    明文 `http://` 需要显式设置 `AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK=true`
+    （对应 `-allow-insecure-vault-loopback`，默认 `false`）——镜像既有 JWKS 回环白名单纪律，
+    该 opt-in **永远不会放宽到非回环主机**。
+- **`-check-config` 输出新增传输标签**：`check_config=ok … transport_s3=%s transport_vault=%s`，
+  每个外部腿解析为 `tls`/`http`/`local`（未配置腿为 `local`）；解析失败时整行不打印、
+  退出码 1。两个二进制输出逐字节同形，CI 可直接断言部署解析出 `transport_s3=tls`。
+- **新增布尔开关均为 fail-closed**：`AUDIT_S3_USE_SSL`/`AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK`
+  的值格式错误（如 `tru`）时进程退出码 1 并指名变量，绝不静默回退到明文。
+- **升级提示**：两个二进制必须同批发布；旧二进制不识别新环境变量（保持明文默认），
+  新二进制对「明文非回环 Vault / schemeless 地址」的配置会启动失败——请先对每个环境执行
+  `-check-config` 确认 `transport_s3=tls`/`transport_vault=tls` 后再切流。
+
+**写给开发（实现变化）：**
+
+- `internal/runtimeconfig/runtimeconfig.go`：新增 `EnvS3UseSSL`/`EnvAllowInsecureVaultLoopback`
+  常量与 `S3UseSSL`/`AllowInsecureVaultLoopback` 字段；`resolveS3Transport()`/`resolveVaultTransport()`
+  为唯一解析源（返回归一化 `url.Parse` 的 scheme 标签，杜绝上报与实建不一致），
+  `Transport() (s3, vault string, err error)` 逐腿上报；`newS3Store` 构造 seam（`Archive()`
+  内不再有字面量布尔参数）；`sanitizeAddr` 剥离 userinfo/query/fragment 后再进错误文本，
+  凭证永不回显；`loopbackHost` 按既定纪律复制自 `internal/auth/verifier.go`（drift 由
+  镜像验收表钉住）。
+- `cmd/audit-api/main.go`、`cmd/audit-governance-worker/main.go`：新增 `-s3-use-ssl`/
+  `-allow-insecure-vault-loopback` 严格布尔标志（worker 补齐 `strictBoolEnv`，仅限这两个
+  开关，其余布尔保持宽松语义），启动路径 `logger.Fatalf` 失败即止，`check_config=ok` 增加
+  `transport_s3=%s transport_vault=%s`（两二进制格式串逐字节一致）。
+- 测试：`internal/runtimeconfig/runtimeconfig_test.go`（AC-1/AC-2 全表、非法输入矩阵、
+  per-leg 标签、上报≡实建钉、凭证不回显钉）、新 `cmd/audit-api/main_test.go`（AC-3/AC-4、
+  严格布尔子进程、启动 fail-fast）、`cmd/audit-governance-worker/main_test.go`（AC-4、
+  probe 有界超时）、`internal/service/env_consistency_test.go`（两二进制引用新常量、
+  `transport_*=%s` 针）。
+- `python3 cli.py quality` 全绿；`security-scan` N/A（govulncheck/gosec 未安装）。
+
 ## 2026-08-13 — relay 投递改为 receipt 校验：无 API 确认不再标记 delivered（internal/outbox）
 
 **写给运营（行为变化）：**
