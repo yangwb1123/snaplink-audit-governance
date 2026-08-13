@@ -935,6 +935,16 @@ func (s *Service) validateEvent(tenantID string, principal domain.IngestPrincipa
 	if err := rejectSensitive(event.Payload); err != nil {
 		return domain.EventSchema{}, err
 	}
+	// Reserved namespace (this direction): top-level payload keys ending in
+	// "__search_digest" are not user-allocatable. The stored SourceDigest
+	// authenticates the pre-protection payload; a producer-planted colliding
+	// key would be overwritten by protectSensitiveFields at rest and deleted
+	// by reconstructAndDerive on verification, making the derived digest
+	// permanently unequal to the stored one (stream invalid forever). Reject
+	// before protectSensitiveFields / Store.Update so nothing persists.
+	if err := rejectReservedSearchDigestNamespace(event.Payload); err != nil {
+		return domain.EventSchema{}, err
+	}
 	if encodedChanges, marshalErr := json.Marshal(event.ChangedFields); marshalErr == nil {
 		var decodedChanges any
 		if json.Unmarshal(encodedChanges, &decodedChanges) == nil {
@@ -1016,7 +1026,7 @@ func (s *Service) protectSensitiveFields(event *domain.Event, schema domain.Even
 		if err != nil {
 			return err
 		}
-		event.Payload[field+"__search_digest"] = digest
+		event.Payload[field+security.SearchDigestSuffix] = digest
 	}
 	return nil
 }
@@ -1036,6 +1046,20 @@ func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]dom
 		return fmt.Errorf("stream %s sequence %d content digest check failed: %w", event.StreamID, event.Sequence, err)
 	}
 	if derived != event.SourceDigest {
+		if key, ok := firstReservedSearchDigestKey(event.Payload); ok {
+			// Neutral diagnostic for any content mismatch on an event whose
+			// stored payload carries a top-level reserved-namespace key. This
+			// covers both the legacy namespace-collision shape (producer-
+			// planted digest key with SourceDigest over the payload including
+			// it) and ordinary tampering of an event that legitimately carries
+			// a stored digest key; in both shapes the mismatch cannot be
+			// attributed to ordinary tampering of a non-digest payload, and
+			// the wording stays factually accurate — the digest WAS
+			// reconstructed (that is how the mismatch was detected); it simply
+			// does not match. Validity outcome is unchanged (invalid) — only
+			// the wording differs.
+			return fmt.Errorf("stream %s sequence %d content verification failed: stored payload carries top-level key %q in the reserved search_digest namespace (mismatch cannot be attributed to ordinary tampering)", event.StreamID, event.Sequence, key)
+		}
 		return fmt.Errorf("stream %s sequence %d content digest mismatch", event.StreamID, event.Sequence)
 	}
 	return nil
@@ -1064,7 +1088,7 @@ func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]do
 		return "", err
 	}
 	for _, field := range schema.SearchableFields {
-		delete(payload, field+"__search_digest")
+		delete(payload, field+security.SearchDigestSuffix)
 	}
 	for _, field := range schema.EncryptedFields {
 		encoded, ok := payload[field].(string)
@@ -1199,7 +1223,7 @@ func (s *Service) matches(event domain.Event, query domain.Query, schemas map[st
 // The fallback keeps old v1 clients able to search events ingested under
 // the new bound format and new v2 clients able to search legacy events.
 func (s *Service) digestMatches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
-	stored, ok := event.Payload[query.PayloadField+"__search_digest"].(string)
+	stored, ok := event.Payload[query.PayloadField+security.SearchDigestSuffix].(string)
 	if !ok {
 		return false
 	}

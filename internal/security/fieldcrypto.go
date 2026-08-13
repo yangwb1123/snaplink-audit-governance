@@ -104,6 +104,15 @@ func SearchDigest(value any, key string) (string, error) {
 // are distinguishable from the value alone, without a versioned struct.
 const searchDigestPrefix = "sd2:"
 
+// SearchDigestSuffix is the reserved on-disk namespace for search digests:
+// protectSensitiveFields stores the tenant/field-bound digest under
+// field+SearchDigestSuffix, reconstructAndDerive removes exactly that key,
+// and QueryEvents digest-matching reads it. Top-level payload keys ending in
+// this suffix are rejected at ingest (validateEvent) — the namespace is not
+// user-allocatable. Stripping on read/export matches the same suffix at any
+// nesting depth.
+const SearchDigestSuffix = "__search_digest"
+
 // SearchDigestBound derives a tenant- and field-scoped search digest. The
 // HMAC input binds the canonical JSON value to the tenant ID and field
 // name, so the same plaintext in two tenants (or under two field names)
@@ -160,7 +169,7 @@ func stripSearchDigestKeys(value any) {
 	switch v := value.(type) {
 	case map[string]any:
 		for key := range v {
-			if strings.HasSuffix(key, "__search_digest") {
+			if strings.HasSuffix(key, SearchDigestSuffix) {
 				delete(v, key)
 			}
 		}

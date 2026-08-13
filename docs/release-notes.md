@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-08-13 — 保留 `*__search_digest` 负载命名空间：ingest 前 fail-closed 拒绝冲突顶层键（internal/service + internal/security）
+
+**写给运营（行为变化）：**
+
+- **顶层 `*__search_digest` 键不再可分配**：`POST /events`（单条、批量）与 gRPC 写入在 ingest 校验阶段拒绝任何顶层负载键以 `__search_digest` 结尾的事件，返回 400 `invalid_request`（`domain.ErrInvalid`），**不落库、不产生回执、不写管理痕迹**（校验先于字段保护与任何存储写入）。此前的行为是：生产方植入的冲突键会原样入库，随后被内部摘要覆盖/删除，导致流永久校验失败（历史问题 R3/F4“ingest 卫生”）。重试/去重此类历史负载同样返回 `ErrInvalid` 而非 `Duplicate`/`Conflict`——有意为之的 fail-closed 变更。
+  **兼容性说明**：拒绝范围比“会触发损坏的冲突键”更宽——即使顶层键对应的字段不在 `SearchableFields` 中（本不会与内部摘要写入发生覆盖冲突），也一律拒绝；这是有意的命名空间卫生决策（AC-1/AC-2 钉住）。此前以非可搜索字段携带顶层 `*__search_digest` 自有数据的生产方需在升级前调整负载。
+- **嵌套 `*__search_digest` 键不变**：仍可入库，仅在读取/导出边界由 `StripSearchDigests` 递归剔除（`TestExportJSONLStripsSearchDigests` 保持通过）。
+- **`VerifyIntegrity` 对携带保留键的失配给出中立诊断**：已入库的、负载携带顶层 `*__search_digest` 键且内容校验失配的事件，报告专门指出保留命名空间（`search_digest`/reserved）的错误，替代笼统的 `content digest mismatch`。措辞中立且事实准确：不宣称“无法重建”（重构本身成功——正是靠它发现失配），无论失配源于遗留冲突还是对健康事件普通内容的篡改；多冲突键时报告的键名按字典序确定。有效性结论不变（事件/流仍为 invalid），仅措辞更可诊断；**无数据修复**（被覆盖的生产方明文已不可恢复）。
+- **自洽的遗留形状不变**：顶层摘要键持有真实摘要、`SourceDigest` 覆盖剔除摘要键内容的旧事件照常验证 `Valid`。
+- **升级提示**：无环境变量、无数据迁移、无 proto/OpenAPI 变更；二进制同批发布（模块内部接口，既有锁步要求）。
+
+**写给开发（实现变化）：**
+
+- `internal/security/fieldcrypto.go`：新增导出常量 `SearchDigestSuffix = "__search_digest"`，替换 4 处字面量（写入/重构删除/匹配/剥离）——写者、重构者、匹配器、剥离器与新校验器共用同一后缀。
+- `internal/service/reserved_namespace.go`（新增）：`rejectReservedSearchDigestNamespace`（REQ-1，仅顶层键，`ErrInvalid` 包装，先于 `AllowedFields` 循环）与 `firstReservedSearchDigestKey`（REQ-3 归因辅助；多冲突键时按字典序确定报告键，保证 triage 确定性）。
+- `internal/service/service.go`：`validateEvent` 在 `rejectSensitive` 之后新增保留命名空间校验；`verifyContentDigest` 失配分支在负载含顶层保留键时返回中立、事实准确的专属诊断（不包含“cannot be reconstructed”断言）。
+- `internal/service/reserved_namespace_test.go`（新增）：AC-1 拒绝且零落库、AC-2 即使 `AllowedFields` 显式列出仍拒绝、AC-3.1 被拒事件不影响完整性、AC-3.2 遗留碰撞得到专属错误（且不含笼统 mismatch 串）、嵌套键合法，以及两项评审回归钉：健康事件被篡改且带保留键时不误报为遗留碰撞（F-1）、多冲突键报告键名确定（F-4）。
+
 ## 2026-08-13 — Vault Transit 签名密钥绑定与可取消请求路径（internal/security + service + httpapi/grpcapi/worker）
 
 **写给运营（行为变化）：**
