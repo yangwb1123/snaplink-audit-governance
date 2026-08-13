@@ -271,27 +271,68 @@ func EventDigest(e Event) (string, error) {
 	return EventContentDigest(e)
 }
 
-func EncodeCursor(sequence int64, eventID string) string {
-	data, _ := CanonicalJSON([]any{sequence, eventID})
+// Cursor is an opaque pagination key in the chronological total order
+// (OccurredAt, Sequence, EventID). Legacy reports a pre-chronological
+// 2-tuple (Sequence, EventID) cursor; callers must reject Legacy cursors
+// because per-stream sequence coordinates have no meaning in the
+// chronological space.
+type Cursor struct {
+	OccurredAt time.Time
+	Sequence   int64
+	EventID    string
+	Legacy     bool
+}
+
+// EncodeCursor encodes a cursor as a stable opaque string:
+//   - chronological: [occurred_at_rfc3339nano_utc, sequence, event_id]
+//   - legacy (Legacy=true): [sequence, event_id]  (byte-identical to today)
+func EncodeCursor(c Cursor) string {
+	var value any
+	if c.Legacy {
+		value = []any{c.Sequence, c.EventID}
+	} else {
+		value = []any{c.OccurredAt, c.Sequence, c.EventID}
+	}
+	data, _ := CanonicalJSON(value)
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
-func DecodeCursor(cursor string) (int64, string, error) {
+// DecodeCursor parses an opaque cursor. It accepts both the current 3-tuple
+// (Legacy=false) and the legacy 2-tuple (Legacy=true); any other payload
+// fails closed with ErrInvalid. The 3-tuple's first element must be an
+// RFC3339 time (time.Time round-trips through CanonicalJSON's RFC3339Nano
+// UTC normalization).
+func DecodeCursor(cursor string) (Cursor, error) {
 	data, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return 0, "", fmt.Errorf("%w: invalid cursor", ErrInvalid)
+		return Cursor{}, fmt.Errorf("%w: invalid cursor", ErrInvalid)
 	}
 	var values []json.RawMessage
-	if err := json.Unmarshal(data, &values); err != nil || len(values) != 2 {
-		return 0, "", fmt.Errorf("%w: invalid cursor", ErrInvalid)
+	if err := json.Unmarshal(data, &values); err != nil {
+		return Cursor{}, fmt.Errorf("%w: invalid cursor", ErrInvalid)
 	}
-	var sequence int64
-	var eventID string
-	if err := json.Unmarshal(values[0], &sequence); err != nil {
-		return 0, "", fmt.Errorf("%w: invalid cursor sequence", ErrInvalid)
+	var decoded Cursor
+	switch len(values) {
+	case 2:
+		decoded.Legacy = true
+		if err := json.Unmarshal(values[0], &decoded.Sequence); err != nil {
+			return Cursor{}, fmt.Errorf("%w: invalid cursor sequence", ErrInvalid)
+		}
+		if err := json.Unmarshal(values[1], &decoded.EventID); err != nil {
+			return Cursor{}, fmt.Errorf("%w: invalid cursor event", ErrInvalid)
+		}
+	case 3:
+		if err := json.Unmarshal(values[0], &decoded.OccurredAt); err != nil {
+			return Cursor{}, fmt.Errorf("%w: invalid cursor occurred_at", ErrInvalid)
+		}
+		if err := json.Unmarshal(values[1], &decoded.Sequence); err != nil {
+			return Cursor{}, fmt.Errorf("%w: invalid cursor sequence", ErrInvalid)
+		}
+		if err := json.Unmarshal(values[2], &decoded.EventID); err != nil {
+			return Cursor{}, fmt.Errorf("%w: invalid cursor event", ErrInvalid)
+		}
+	default:
+		return Cursor{}, fmt.Errorf("%w: invalid cursor", ErrInvalid)
 	}
-	if err := json.Unmarshal(values[1], &eventID); err != nil {
-		return 0, "", fmt.Errorf("%w: invalid cursor event", ErrInvalid)
-	}
-	return sequence, eventID, nil
+	return decoded, nil
 }

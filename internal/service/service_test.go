@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,35 @@ func testService(t *testing.T, archive bool) *Service {
 
 func testEvent(id, operation string, at time.Time) domain.Event {
 	return domain.Event{EventID: id, SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: at, OperationID: operation, AggregateType: "invoice", AggregateID: "inv-1", AggregateVersion: 1, Actor: domain.Actor{ID: "user-1", Roles: []string{"operator"}}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "idem-" + id, Payload: map[string]any{"resource": "invoice", "value": 10}, ChangedFields: map[string]domain.FieldChange{"status": {Before: "open", After: "paid"}}}
+}
+
+// seedChronologyFixture ingests four events across two aggregate streams with
+// interleaved occurred_at (A1@t0, B1@t0+3s, A2@t0+1s, B2@t0+4s). Per-stream
+// sequences make the old (Sequence, EventID) order A1,B1,A2,B2 while the
+// chronological order is A1,A2,B1,B2, so tests can distinguish the sort key.
+func seedChronologyFixture(t *testing.T, svc *Service, t0 time.Time) {
+	t.Helper()
+	ingest := func(id, aggregate string, at time.Time, version int64) {
+		event := testEvent(id, "op-"+aggregate, at)
+		event.AggregateID = aggregate
+		event.AggregateVersion = version
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ingest("A1", "agg-1", t0, 1)
+	ingest("B1", "agg-2", t0.Add(3*time.Second), 1)
+	ingest("A2", "agg-1", t0.Add(time.Second), 2)
+	ingest("B2", "agg-2", t0.Add(4*time.Second), 2)
+}
+
+// eventIDs extracts the event identifiers of a result slice in order.
+func eventIDs(events []domain.Event) []string {
+	ids := make([]string, 0, len(events))
+	for _, event := range events {
+		ids = append(ids, event.EventID)
+	}
+	return ids
 }
 
 func TestIngestIdempotencyConflictAndIntegrity(t *testing.T) {
@@ -258,6 +288,187 @@ func TestQueryReplayAndExport(t *testing.T) {
 	}
 	if job.Status != "completed" || job.EventCount != 3 {
 		t.Fatalf("export did not complete: %+v", job)
+	}
+}
+
+// TestQueryEventsChronologicalAcrossStreams is AC-1: a tenant-wide query must
+// order events chronologically across streams (occurred_at, sequence,
+// event_id), not by the per-stream sequence coordinates.
+func TestQueryEventsChronologicalAcrossStreams(t *testing.T) {
+	svc := testService(t, true)
+	t0 := time.Unix(1_700_000_200, 0).UTC()
+	seedChronologyFixture(t, svc, t0)
+	query := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second)}
+	result, err := svc.QueryEvents("tenant-a", "test", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 4 {
+		t.Fatalf("Count=%d, want 4", result.Count)
+	}
+	want := []string{"A1", "A2", "B1", "B2"}
+	if got := eventIDs(result.Items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("order=%v, want %v", got, want)
+	}
+	for i := 0; i+1 < len(result.Items); i++ {
+		if !result.Items[i].OccurredAt.Before(result.Items[i+1].OccurredAt) {
+			t.Fatalf("items not strictly increasing by occurred_at: %v", eventIDs(result.Items))
+		}
+	}
+	// Positive control: the same query restricted to one stream keeps the
+	// chronological order.
+	filtered, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: query.From, To: query.To, StreamID: "tenant-a:aggregate:invoice:agg-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Count != 2 || !reflect.DeepEqual(eventIDs(filtered.Items), []string{"A1", "A2"}) {
+		t.Fatalf("stream-filtered result=%+v", filtered)
+	}
+}
+
+// TestQueryEventsCursorReproducesSet is AC-2: a PageSize walk driven by
+// next_cursor must reproduce the unpaginated result exactly — same set, same
+// order, strictly increasing pages — and legacy/garbage cursors must fail
+// closed with ErrInvalid.
+func TestQueryEventsCursorReproducesSet(t *testing.T) {
+	svc := testService(t, true)
+	t0 := time.Unix(1_700_000_200, 0).UTC()
+	seedChronologyFixture(t, svc, t0)
+	base := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second)}
+	reference, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, PageSize: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reference.NextCursor != "" {
+		t.Fatalf("unpaginated query must not return next_cursor")
+	}
+	if reference.Count != 4 || len(reference.Items) != 4 {
+		t.Fatalf("reference Count=%d len=%d, want 4/4", reference.Count, len(reference.Items))
+	}
+	walk := domain.Query{From: base.From, To: base.To, PageSize: 2}
+	var collected []string
+	for pages := 0; pages < 100; pages++ {
+		page, err := svc.QueryEvents("tenant-a", "test", walk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(page.Items); i++ {
+			if !page.Items[i].OccurredAt.Before(page.Items[i+1].OccurredAt) {
+				t.Fatalf("page %d not strictly increasing: %v", pages, eventIDs(page.Items))
+			}
+		}
+		for _, event := range page.Items {
+			collected = append(collected, event.EventID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		walk.Cursor = page.NextCursor
+	}
+	if len(collected) != len(reference.Items) {
+		t.Fatalf("walk collected %d events, reference has %d: %v", len(collected), len(reference.Items), collected)
+	}
+	for i, event := range reference.Items {
+		if collected[i] != event.EventID {
+			t.Fatalf("walk diverged from reference at %d: %v != %v", i, collected, eventIDs(reference.Items))
+		}
+	}
+	set := map[string]bool{}
+	for _, id := range collected {
+		if set[id] {
+			t.Fatalf("duplicate event %s in walk", id)
+		}
+		set[id] = true
+	}
+	for _, event := range reference.Items {
+		if !set[event.EventID] {
+			t.Fatalf("walk dropped %s", event.EventID)
+		}
+	}
+	// Negative control: a legacy 2-tuple cursor (the pre-chronological wire
+	// format) must fail closed with ErrInvalid and an explicit message.
+	legacyCursor := domain.EncodeCursor(domain.Cursor{Sequence: 1, EventID: "evt-x", Legacy: true})
+	bad := walk
+	bad.Cursor = legacyCursor
+	if _, err := svc.QueryEvents("tenant-a", "test", bad); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "predates chronological ordering") {
+		t.Fatalf("legacy cursor must fail closed, got %v", err)
+	}
+	garbage := walk
+	garbage.Cursor = "not-a-cursor"
+	if _, err := svc.QueryEvents("tenant-a", "test", garbage); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("garbage cursor must fail closed, got %v", err)
+	}
+}
+
+// TestExportMatchesQueryEventsOrder is AC-3: a compliance export must agree
+// with the chronological QueryEvents order — page 1 of a paginated query is a
+// strict prefix of the export, and the export set equals the unpaginated API
+// result.
+func TestExportMatchesQueryEventsOrder(t *testing.T) {
+	svc := testService(t, true)
+	t0 := time.Unix(1_700_000_200, 0).UTC()
+	seedChronologyFixture(t, svc, t0)
+	query := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second), PageSize: 3}
+	page1, err := svc.QueryEvents("tenant-a", "test", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Items) != 3 || page1.NextCursor == "" {
+		t.Fatalf("page1=%+v", page1)
+	}
+	job, err := svc.CreateExport("tenant-a", "user-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job = waitExportCompleted(t, svc, job.ID)
+	if job.Status != "completed" || job.EventCount != 4 {
+		t.Fatalf("export did not complete: %+v", job)
+	}
+	sealed, err := svc.Config.Archive.Get(context.Background(), job.ObjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := security.DecryptExport(sealed, svc.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: query.From, To: query.To, PageSize: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(plain), []byte{'\n'})
+	if len(lines) != len(reference.Items) {
+		t.Fatalf("export has %d lines, API has %d events", len(lines), len(reference.Items))
+	}
+	exported := make([]domain.Event, 0, len(lines))
+	for _, line := range lines {
+		var event domain.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("export line is not a decodable event: %v", err)
+		}
+		exported = append(exported, event)
+	}
+	// Page 1 (PageSize 3) is a strict prefix of the export.
+	for i, event := range page1.Items {
+		if exported[i].EventID != event.EventID {
+			t.Fatalf("export[%d]=%s, want page1[%d]=%s", i, exported[i].EventID, i, event.EventID)
+		}
+	}
+	// Set equality with the unpaginated API result.
+	set := map[string]bool{}
+	for _, event := range exported {
+		set[event.EventID] = true
+	}
+	for _, event := range reference.Items {
+		if !set[event.EventID] {
+			t.Fatalf("export missing %s", event.EventID)
+		}
+	}
+	// The full export line order is strictly increasing by occurred_at.
+	for i := 0; i+1 < len(exported); i++ {
+		if !exported[i].OccurredAt.Before(exported[i+1].OccurredAt) {
+			t.Fatalf("export not strictly increasing at line %d", i)
+		}
 	}
 }
 
@@ -1393,13 +1604,14 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 	if receiptLater.Sequence != 1 || receiptEarlier.Sequence != 2 {
 		t.Fatalf("sequence must follow write order: later=%d earlier=%d", receiptLater.Sequence, receiptEarlier.Sequence)
 	}
-	// 查询返回按账本序号（写入序）：later 先写入，排在前。
+	// 查询按业务时间排序（occurred_at, sequence, event_id）：earlier 在前，
+	// 与写入序/账本序解耦。
 	result, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Count != 2 || result.Items[0].EventID != "ooo-later" || result.Items[1].EventID != "ooo-earlier" {
-		t.Fatalf("event query must follow ledger sequence order: %+v", result.Items)
+	if result.Count != 2 || result.Items[0].EventID != "ooo-earlier" || result.Items[1].EventID != "ooo-later" {
+		t.Fatalf("event query must order chronologically: %+v", result.Items)
 	}
 	// 操作时间线按业务时间排序：earlier 在前（与账本序解耦）。
 	timeline, err := svc.OperationTimeline("tenant-a", "", "op-ooo")

@@ -24,6 +24,7 @@ paths:
         '422': { $ref: '#/components/responses/Error', description: Envelope tenant_id does not match the resolved tenant, or schema not found }
     get:
       operationId: queryEvents
+      description: Items are ordered by (occurred_at, sequence, event_id). next_cursor resumes at exactly that position; a page walk reproduces the unpaginated result with no duplicates and no drops. Cursors issued before chronological ordering are rejected with 400; re-run the query to obtain a fresh cursor.
       parameters:
         - { $ref: '#/components/parameters/from' }
         - { $ref: '#/components/parameters/to' }

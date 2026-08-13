@@ -721,20 +721,21 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].Sequence == events[j].Sequence {
-			return events[i].EventID < events[j].EventID
-		}
-		return events[i].Sequence < events[j].Sequence
-	})
+	sort.Slice(events, func(i, j int) bool { return compareEvents(events[i], events[j]) })
 	if query.Cursor != "" {
-		sequence, eventID, err := domain.DecodeCursor(query.Cursor)
+		cur, err := domain.DecodeCursor(query.Cursor)
 		if err != nil {
 			return domain.QueryResult{}, err
 		}
+		if cur.Legacy {
+			return domain.QueryResult{}, fmt.Errorf("%w: cursor predates chronological ordering; re-run the query", domain.ErrInvalid)
+		}
 		filtered := events[:0]
 		for _, event := range events {
-			if event.Sequence > sequence || (event.Sequence == sequence && event.EventID > eventID) {
+			if event.OccurredAt.After(cur.OccurredAt) ||
+				(event.OccurredAt.Equal(cur.OccurredAt) &&
+					(event.Sequence > cur.Sequence ||
+						(event.Sequence == cur.Sequence && event.EventID > cur.EventID))) {
 				filtered = append(filtered, event)
 			}
 		}
@@ -744,7 +745,7 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 	if len(events) > query.PageSize {
 		last := events[query.PageSize-1]
 		result.Items = events[:query.PageSize]
-		result.NextCursor = domain.EncodeCursor(last.Sequence, last.EventID)
+		result.NextCursor = domain.EncodeCursor(domain.Cursor{OccurredAt: last.OccurredAt, Sequence: last.Sequence, EventID: last.EventID})
 	} else {
 		result.Items = events
 	}
@@ -1271,16 +1272,21 @@ func appendUnique(values []string, wanted string) []string {
 	return append(values, wanted)
 }
 
-func sortEvents(events []domain.Event) {
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
-			if events[i].Sequence == events[j].Sequence {
-				return events[i].EventID < events[j].EventID
-			}
-			return events[i].Sequence < events[j].Sequence
+// compareEvents reports whether a precedes b in the chronological total
+// order (OccurredAt, Sequence, EventID). event_id is unique per tenant
+// (store.EventKey dedupe), so the tuple never ties: the order is strict.
+func compareEvents(a, b domain.Event) bool {
+	if a.OccurredAt.Equal(b.OccurredAt) {
+		if a.Sequence == b.Sequence {
+			return a.EventID < b.EventID
 		}
-		return events[i].OccurredAt.Before(events[j].OccurredAt)
-	})
+		return a.Sequence < b.Sequence
+	}
+	return a.OccurredAt.Before(b.OccurredAt)
+}
+
+func sortEvents(events []domain.Event) {
+	sort.Slice(events, func(i, j int) bool { return compareEvents(events[i], events[j]) })
 }
 
 func replay(events []domain.Event, tenantID, operationID, aggregateID string) domain.ReplayResult {

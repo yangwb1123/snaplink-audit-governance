@@ -1,5 +1,59 @@
 # Release Notes
 
+## 2026-08-13 — QueryEvents 按业务时间排序，分页游标改为时间坐标（internal/domain + internal/service）
+
+**写给运营（行为变化）：**
+
+- **查询结果改为确定性时间序**：`GET /api/v1/events`（及内部 `QueryEvents`）的返回顺序由
+  `(occurred_at, sequence, event_id)` 决定，跨流按业务时间排列，不再按每流账本序号
+  `(sequence, event_id)`。`sequence` 是每流独立空间，旧序在多流查询下并非全局时间序；
+  新序与合规导出的排序完全一致（共享同一比较器，不再可能漂移）。单流、业务时间严格递增
+  的既有客户端看到的顺序不变。
+- **分页游标失效（需客户端动作）**：本次发布前签发的 opaque `cursor` 值在
+  `QueryEvents` 中被拒绝，返回 HTTP 400 `invalid_request`，消息明确提示
+  “cursor predates chronological ordering; re-run the query”。**没有兼容映射**：旧游标是
+  每流 `(sequence, event_id)` 坐标，在全局时间空间中无确切切点，fail-closed 是唯一安全
+  行为。客户端重跑查询获取新游标即可；无数据迁移、无环境变量、无 schema/快照变化。
+- **新增确定性契约**：`next_cursor` 精确落在当前页最后一条的
+  `(occurred_at, sequence, event_id)` 上；按 `next_cursor` 逐页翻页与原查询全集
+  无重复、无遗漏。恶意/畸形游标与过去一样返回 400，不产生新攻击面。
+
+**写给开发（实现变化）：**
+
+- `internal/domain/canonical.go`：新增 `Cursor` 值对象（`OccurredAt/Sequence/EventID/Legacy`）；
+  `EncodeCursor`/`DecodeCursor` 由 2 元组编解码改为 3 元组
+  `[occurred_at_rfc3339nano_utc, sequence, event_id]`（经既有 `CanonicalJSON` 归一化），
+  元素个数区分新旧格式（2 → `Legacy`，3 → 时间序，其余 `ErrInvalid` fail-closed）。
+- `internal/service/service.go`：抽取 `compareEvents` 作为 `(OccurredAt, Sequence, EventID)`
+  唯一比较器，`sortEvents`（导出路径）与 `QueryEvents` 排序共用，杜绝再次漂移；
+  `QueryEvents` 对 `Legacy` 游标返回 `ErrInvalid` 包装的明确拒绝（`statusForError` 映射 400）。
+- 契约文档：`api/openapi/openapi.yaml` 为 `GET /api/v1/events` 补充排序/游标语义描述（schema 不变）。
+- 测试：`TestQueryEventsChronologicalAcrossStreams`（跨流时间序 + 单流正控）、
+  `TestQueryEventsCursorReproducesSet`（分页复现全集 + legacy/垃圾游标负控）、
+  `TestExportMatchesQueryEventsOrder`（API 首页为导出严格前缀，集合/顺序一致）；
+  `TestCursorRoundTrip` 改钉 3 元组往返与 legacy 解码；`TestOutOfOrderOccurredAtEvents` 的
+  `QueryEvents` 断言随新契约更新（其余钉：按写入序分配 sequence、时间线按业务时间、
+  哈希链按 sequence——不变）。
+
+**性能与分页成本（实测，2026-08-13，本机 Ryzen AI Max+ 395）：**
+
+- **排序无回归**：`QueryEvents` 排序键由 `(Sequence, EventID)` 改为
+  `(OccurredAt, Sequence, EventID)`，实测比较器增量 ≈ +1.4 ns/次比较——5,000 事件账本
+  排序 519 µs → 602 µs（+83 µs，占单页总成本 ~0.1%）；端到端 `BenchmarkQuery`
+  新旧代码在本机噪声带（±25%）内（12.5–17.4 ms @1k）。导出路径 `sortEvents` 比较器
+  字节级未变（仅抽取为共享 `compareEvents`），**导出延迟不受影响**。
+- **游标编解码可忽略**：3 元组 `EncodeCursor` 481 ns、`DecodeCursor` 1.1 µs
+  （旧 2 元组为 214 ns / 644 ns），增量 < 0.5 µs，占单页成本 <0.01%。
+- **逐页成本上界（本次契约的固有写放大，需要知晓）**：每一页都是
+  **O(ledger) 全量扫描 + 排序 + 1 次读自审计快照写**（F-06，actor 非空时整快照
+  clone+序列化+持久化）。N 页翻页 = N 次扫描 + N 条审计事实。实测单页：
+  ~13–16 ms @1,000 事件、~68–73 ms @5,000 事件（内存后端；磁盘后端另付
+  marshal+fsync）。1,000 事件账本全量翻页（`PageSize=100`，10 页）≈ 0.16 s；
+  5,000 事件（50 页）≈ 3.6 s。**上界**：`PageSize ≤ 1000`（`MaxPageSize`），
+  单页 p95 仍在既有容量 envelope 内（cutover 门禁 10⁵ 事件 / p95>500 ms 不变）；
+  但**全量翻页成本随页数线性累积**，客户端应优先用大 `PageSize` 减少页数；生产热查询路径
+  为 ClickHouse 投影（ADR-0004），不存在此写放大。
+
 ## 2026-08-13 — 保留 `*__search_digest` 负载命名空间：ingest 前 fail-closed 拒绝冲突顶层键（internal/service + internal/security）
 
 **写给运营（行为变化）：**

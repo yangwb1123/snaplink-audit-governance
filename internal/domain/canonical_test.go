@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -68,13 +70,56 @@ func TestEventContentDigestEqualsEventDigestWhenSourceDigestUnset(t *testing.T) 
 }
 
 func TestCursorRoundTrip(t *testing.T) {
-	cursor := EncodeCursor(42, "evt/1")
-	sequence, eventID, err := DecodeCursor(cursor)
+	// The chronological 3-tuple round-trips exactly: RFC3339Nano time,
+	// sequence and event_id survive the wire format.
+	at := time.Date(2024, 1, 1, 0, 0, 0, 123456789, time.UTC)
+	cursor := EncodeCursor(Cursor{OccurredAt: at, Sequence: 42, EventID: "evt/1"})
+	decoded, err := DecodeCursor(cursor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sequence != 42 || eventID != "evt/1" {
-		t.Fatalf("unexpected cursor: %d %s", sequence, eventID)
+	if decoded.Legacy {
+		t.Fatal("3-tuple cursor must decode as chronological, not legacy")
+	}
+	if !decoded.OccurredAt.Equal(at) || decoded.Sequence != 42 || decoded.EventID != "evt/1" {
+		t.Fatalf("unexpected cursor: %+v", decoded)
+	}
+	// A zoned instant normalizes through CanonicalJSON (RFC3339Nano UTC) and
+	// still round-trips to the same instant.
+	zone := time.FixedZone("CEST", 2*3600)
+	zoned := time.Date(2024, 1, 1, 0, 0, 0, 123456789, zone)
+	zonedCursor := EncodeCursor(Cursor{OccurredAt: zoned, Sequence: 7, EventID: "evt-2"})
+	decodedZoned, err := DecodeCursor(zonedCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decodedZoned.OccurredAt.Equal(zoned) || decodedZoned.Sequence != 7 || decodedZoned.EventID != "evt-2" || decodedZoned.Legacy {
+		t.Fatalf("zoned cursor did not round-trip: %+v", decodedZoned)
+	}
+	// The legacy 2-tuple (the pre-chronological wire format) still parses,
+	// flagged Legacy, with the original coordinates intact.
+	legacy := EncodeCursor(Cursor{Sequence: 42, EventID: "evt/1", Legacy: true})
+	decodedLegacy, err := DecodeCursor(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decodedLegacy.Legacy || decodedLegacy.Sequence != 42 || decodedLegacy.EventID != "evt/1" {
+		t.Fatalf("legacy cursor did not decode: %+v", decodedLegacy)
+	}
+	// Fail-closed: garbage base64, non-array payload, wrong arity, and a
+	// 3-tuple whose first element is not an RFC3339 time all yield ErrInvalid.
+	bad := []string{
+		"not-a-cursor",
+		base64.RawURLEncoding.EncodeToString([]byte(`{}`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`["only-one"]`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`["a","b","c","d"]`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`["not-a-time",1,"evt-1"]`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`[1,"evt-1","extra"]`)),
+	}
+	for _, value := range bad {
+		if _, err := DecodeCursor(value); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("cursor %q must fail closed with ErrInvalid, got %v", value, err)
+		}
 	}
 }
 
