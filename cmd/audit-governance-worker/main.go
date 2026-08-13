@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -46,6 +47,8 @@ func main() {
 	s3Bucket := flag.String("s3-bucket", os.Getenv("AUDIT_S3_BUCKET"), "S3 bucket for the compliance archive")
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
+	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint (AUDIT_S3_USE_SSL)")
+	allowInsecureVaultLoopback := flag.Bool("allow-insecure-vault-loopback", strictBoolEnv(runtimeconfig.EnvAllowInsecureVaultLoopback, false), "allow plaintext HTTP Vault only on loopback hosts (AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK)")
 	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, probe the archive destination (bounded; S3 touches the network), then exit without opening the state store or binding listeners")
 	interval := flag.Duration("interval", durationEnv("AUDIT_GOVERNANCE_INTERVAL", 5*time.Minute), "retention evaluation interval")
@@ -70,7 +73,7 @@ func main() {
 		}
 	}
 	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention, StuckExportAge: *stuckExportAge}
-	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external))
 	}
@@ -261,6 +264,25 @@ func boolEnv(name string, fallback bool) bool {
 	return parsed
 }
 
+// strictBoolEnv parses an environment variable as a boolean for the two
+// security-relevant transport knobs (AUDIT_S3_USE_SSL,
+// AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK). Unset or empty values fall back to
+// fallback; a present-but-malformed value exits 1 naming the variable before
+// flag.Parse, so there is no fail-open path to plaintext (REQ-TLS-7). The
+// worker's other booleans keep the lenient boolEnv behavior.
+func strictBoolEnv(name string, fallback bool) bool {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit-governance-worker: %s=%q is not a valid boolean\n", name, value)
+		os.Exit(1)
+	}
+	return parsed
+}
+
 // runCheckConfig validates the resolved configuration without opening the
 // state store or binding listeners. service.New performs the secret fail-fast
 // checks (and resolves dev defaults), then the external signer/archive
@@ -301,7 +323,16 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 	if _, ok := archiveStore.(*archive.FileStore); !ok {
 		archiveName = "s3"
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName)
+	// Per-leg transport labels (REQ-TLS-6/F3): the S3 and Vault legs are each
+	// reported ("tls"/"http"/"local"), byte-identical in shape to the API's
+	// line. A Transport() error is a check failure: the line is never printed
+	// with an unresolved transport (FM-8).
+	s3Transport, vaultTransport, transportErr := external.Transport()
+	if transportErr != nil {
+		logger.Printf("transport: %v", transportErr)
+		return 1
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport)
 	return 0
 }
 

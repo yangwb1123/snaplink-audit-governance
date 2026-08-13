@@ -773,3 +773,184 @@ func TestStartupProbeSubprocessFatal(t *testing.T) {
 		t.Fatalf("startup output must surface archive_ready=failed, got: %s", out)
 	}
 }
+
+// TestCheckConfigTransportLine is AC-4 (REQ-TLS-6): the worker's ok line
+// carries per-leg transport labels for both legs, byte-identical in shape to
+// the API's line (same fields, same order, same format string), so a mixed
+// S3+Vault configuration never hides one leg's transport (F3). S3 rows swap
+// the newArchiveStore seam so the destination probe passes network-free and
+// archive=s3 matches the API line.
+func TestCheckConfigTransportLine(t *testing.T) {
+	cases := []struct {
+		name      string
+		external  runtimeconfig.SigningArchive
+		wantS3    string
+		wantVault string
+		swapStore bool
+	}{
+		{"no external legs", runtimeconfig.SigningArchive{}, "local", "local", false},
+		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true}, "tls", "local", true},
+		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}, "http", "local", true},
+		{"vault tls", runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints"}, "local", "tls", false},
+		{"mixed s3 tls + vault tls", runtimeconfig.SigningArchive{
+			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true,
+			VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints",
+		}, "tls", "tls", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.swapStore {
+				swapArchiveStore(t, func(runtimeconfig.SigningArchive) (archive.Store, error) {
+					return archive.NewS3StoreWithClient(lockedScriptedS3(), "worm"), nil
+				})
+			}
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			exit := runCheckConfig(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, tc.external)
+			if exit != 0 {
+				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+			}
+			out := buf.String()
+			if !strings.Contains(out, "check_config=ok") {
+				t.Fatalf("missing check_config=ok, got: %q", out)
+			}
+			for _, want := range []string{"transport_s3=" + tc.wantS3, "transport_vault=" + tc.wantVault} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log must contain %q, got: %q", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestRunCheckConfigVaultFailFast covers REQ-TLS-4/5 through the worker's
+// check-config path: plaintext non-loopback and schemeless Vault addrs fail
+// with exit 1 and actionable text; https passes with transport_vault=tls.
+func TestRunCheckConfigVaultFailFast(t *testing.T) {
+	cases := []struct {
+		name        string
+		addr        string
+		allow       bool
+		wantExit    int
+		wantErrText string
+	}{
+		{"http non-loopback", "http://vault.example.com:8200", false, 1, "non-loopback"},
+		{"http non-loopback even with opt-in", "http://vault.example.com:8200", true, 1, "non-loopback"},
+		{"schemeless", "vault.example.com:8200", false, 1, "scheme"},
+		{"https passes", "https://vault.example.com:8200", false, 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			external := runtimeconfig.SigningArchive{VaultAddr: tc.addr, VaultToken: "t", VaultTransitKey: "audit-checkpoints", AllowInsecureVaultLoopback: tc.allow}
+			exit := runCheckConfig(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, external)
+			if exit != tc.wantExit {
+				t.Fatalf("exit=%d, want %d; log: %q", exit, tc.wantExit, buf.String())
+			}
+			out := buf.String()
+			if tc.wantExit == 1 {
+				if tc.wantErrText != "" && !strings.Contains(out, tc.wantErrText) {
+					t.Fatalf("log must contain %q, got: %q", tc.wantErrText, out)
+				}
+				if strings.Contains(out, "check_config=ok") {
+					t.Fatalf("check_config=ok must not be printed, got: %q", out)
+				}
+			} else if !strings.Contains(out, "transport_vault=tls") {
+				t.Fatalf("ok line must report transport_vault=tls, got: %q", out)
+			}
+		})
+	}
+}
+
+// TestStrictBoolEnvSubprocessFailsClosed is FM-1 (REQ-TLS-7): a malformed
+// AUDIT_S3_USE_SSL value makes the real binary exit 1 naming the variable
+// before flag.Parse — there is no fail-open path to plaintext.
+func TestStrictBoolEnvSubprocessFailsClosed(t *testing.T) {
+	binary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	cmd := exec.Command(binary, "-check-config", "-allow-dev-secrets")
+	cmd.Env = append(os.Environ(), "AUDIT_S3_USE_SSL=tru")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("binary must exit non-zero on a malformed AUDIT_S3_USE_SSL, output: %s", out)
+	}
+	if !strings.Contains(string(out), runtimeconfig.EnvS3UseSSL) || !strings.Contains(string(out), "not a valid boolean") {
+		t.Fatalf("output must name the variable and the parse failure, got: %s", out)
+	}
+}
+
+// TestStrictBoolEnvSubprocessPositive is the FM-1/REQ-TLS-7 wiring control:
+// well-formed strict env vars parse into the flags and drive the resolved
+// transport end-to-end. Network-free by construction: the S3 case configures
+// no S3 endpoint (the flag merely parses → transport_s3=local), and the
+// Vault case is a loopback opt-in (no probe on the signer path).
+func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
+	binary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	archiveDir := t.TempDir()
+	baseEnv := []string{
+		"AUDIT_SIGNING_SECRET=test-secret",
+		"AUDIT_ENCRYPTION_KEY=test-key",
+	}
+	run := func(env ...string) (string, error) {
+		cmd := exec.Command(binary, "-check-config", "-archive", archiveDir)
+		cmd.Env = append(os.Environ(), baseEnv...)
+		cmd.Env = append(cmd.Env, env...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	t.Run("s3 use ssl true parses with no s3 config", func(t *testing.T) {
+		out, err := run("AUDIT_S3_USE_SSL=true")
+		if err != nil {
+			t.Fatalf("check-config must exit 0: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "check_config=ok") || !strings.Contains(out, "transport_s3=local") {
+			t.Fatalf("output must report check_config=ok with transport_s3=local, got: %s", out)
+		}
+	})
+	t.Run("vault loopback opt-in", func(t *testing.T) {
+		out, err := run("AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK=true", "AUDIT_VAULT_ADDR=http://127.0.0.1:8200",
+			"AUDIT_VAULT_TOKEN=t", "AUDIT_VAULT_TRANSIT_KEY=audit-checkpoints")
+		if err != nil {
+			t.Fatalf("check-config must exit 0: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "check_config=ok") || !strings.Contains(out, "transport_vault=http") {
+			t.Fatalf("output must report check_config=ok with transport_vault=http, got: %s", out)
+		}
+	})
+}
+
+// TestStartupVaultHTTPFatal is QA F5/REQ-TLS-5: the real worker refuses to
+// start (-once mode) with a non-loopback plaintext Vault addr — non-zero
+// exit and the actionable validation text naming the opt-in, matching the
+// check-config preflight.
+func TestStartupVaultHTTPFatal(t *testing.T) {
+	binary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(binary, "-once", "-state", filepath.Join(dir, "state.json"), "-archive", filepath.Join(dir, "archive"))
+	cmd.Env = append(os.Environ(),
+		"AUDIT_SIGNING_SECRET=test-secret",
+		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_VAULT_ADDR=http://vault.example.com:8200",
+		"AUDIT_VAULT_TOKEN=t",
+		"AUDIT_VAULT_TRANSIT_KEY=audit-checkpoints",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("startup with a non-loopback plaintext Vault must exit non-zero, output: %s", out)
+	}
+	if !strings.Contains(string(out), runtimeconfig.EnvAllowInsecureVaultLoopback) {
+		t.Fatalf("startup must surface the actionable validation text naming the opt-in, got: %s", out)
+	}
+	if strings.Contains(string(out), "check_config=ok") {
+		t.Fatalf("startup output must not contain check_config=ok, got: %s", out)
+	}
+}

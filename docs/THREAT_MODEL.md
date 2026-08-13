@@ -87,6 +87,31 @@
   `-allow-dev-auth` 的开发认证均失败关闭；开发认证白名单仅接受环境变量
   `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
 
+### 3.7 外部基础设施传输（B1/B2）
+- **边界 B1（进程 → Vault Transit）：** `AUDIT_VAULT_ADDR` 必须为
+  `https://…`，或为本机 loopback（`localhost`/`host.docker.internal`/
+  `gateway.docker.internal`/loopback IP）+ 显式
+  `AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK=true`。非 loopback 明文 http
+  无论该开关如何均启动/预检失败关闭（与 JWKS 同一规则，见
+  `internal/auth/verifier.go` 与 `internal/runtimeconfig` 中镜像的
+  `loopbackHost`）。scheme 缺失（`vault:8200`）、空 host（`https://:8200`）、
+  带路径/query/userinfo/空白 的地址同样失败关闭，错误信息可操作且永不
+  回显地址中的凭据（userinfo/query 会被剥离）。
+- **边界 B2（进程 → S3 归档）：** `AUDIT_S3_USE_SSL=true` 时 S3 走 TLS
+  （`transport_s3=tls`）；`https://` scheme 端点必须与该开关一致，否则
+  失败关闭（绝不静默降级为明文）。**已记录的残余风险（决策，见
+  design-rev2 §1）：** scheme 缺失的非 loopback 端点 + `AUDIT_S3_USE_SSL`
+  默认 false 时允许明文 http（本机开发/验证栈 `localhost:19010`、
+  `deploy/` `minio:9000` 兼容），静态密钥与归档证据在明文链路上可被
+  MITM 读取——该不对称（与 Vault 侧分类禁止相反）是有意的兼容性权衡，
+  由 `check_config=ok` 的 `transport_s3=http` 与 CI 断言
+  `transport_s3=tls` 观察式强制；改变该姿势的硬化（默认 true 或新增
+  S3 loopback 开关）超出当前需求范围，被
+  `TestS3PlaintextNonLoopbackPermitted` 钉住。
+- 两个二进制（audit-api / audit-governance-worker）的 `check_config=ok`
+  逐腿报告 `transport_s3=`/`transport_vault=`（tls/http/local），格式串
+  字节一致，CI 可对两腿分别断言（REQ-TLS-6/F3）。
+
 ## 4. 不在本机验证的攻击面
 
 - 跨地域双写破坏链（tenant home region + 租约 + fencing）

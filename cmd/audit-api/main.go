@@ -63,6 +63,8 @@ func main() {
 	s3Bucket := flag.String("s3-bucket", os.Getenv("AUDIT_S3_BUCKET"), "S3 bucket for the compliance archive")
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
+	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint (AUDIT_S3_USE_SSL)")
+	allowInsecureVaultLoopback := flag.Bool("allow-insecure-vault-loopback", strictBoolEnv(runtimeconfig.EnvAllowInsecureVaultLoopback, false), "allow plaintext HTTP Vault only on loopback hosts (AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK)")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "audit-api ", log.LstdFlags|log.Lmicroseconds)
@@ -73,7 +75,7 @@ func main() {
 		logger.Printf("warning=development_secrets_enabled")
 	}
 	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets}
-	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey}
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external, authenticator))
@@ -88,46 +90,16 @@ func main() {
 		logger.Fatalf("invalid secrets: %v", err)
 	}
 	logSecretWarnings(logger, svc.Config)
-	external.SigningSecret = svc.Config.SigningSecret
-	external.EncryptionKey = svc.Config.EncryptionKey
-	if signer, signErr := external.Signer(); signErr != nil {
-		logger.Fatalf("signer: %v", signErr)
-	} else if signer != nil {
-		svc.Config.Signer = signer
-		logger.Printf("signer=vault-transit key=%s addr=%s", *vaultTransitKey, *vaultAddr)
-	}
-	if archiveStore, archiveErr := external.Archive(); archiveErr != nil {
-		logger.Fatalf("archive: %v", archiveErr)
-	} else {
-		svc.Config.Archive = archiveStore
-		if *s3Endpoint != "" {
-			logger.Printf("archive=s3 bucket=%s endpoint=%s", *s3Bucket, *s3Endpoint)
-		}
+	if err := wireExternal(logger, svc, external, *vaultTransitKey, *vaultAddr, *s3Bucket, *s3Endpoint); err != nil {
+		logger.Fatalf("%v", err)
 	}
 	if err := bootstrap(svc, *bootstrapTenant); err != nil {
 		logger.Fatalf("bootstrap: %v", err)
 	}
-
-	if err := authenticator.ValidateConfiguration(); err != nil {
-		logger.Fatalf("invalid authentication configuration: %v", err)
-	}
-	// AC-3 dev-auth allowlist, applied to the real startup path with the
-	// same rule as the check-config preflight: development auth is only
-	// legal when AUDIT_ALLOW_DEV_AUTH=true is present in the environment.
-	// A flag-only -allow-dev-auth can never start the server, so CI cannot
-	// bless a configuration the runtime would reject.
-	if authenticator.AllowDev && !devAuthAllowlisted() {
-		logger.Fatalf("invalid authentication configuration: development auth (-allow-dev-auth) requires AUDIT_ALLOW_DEV_AUTH=true in the environment (flag-only dev auth is not allowed)")
-	}
-	api := httpapi.NewServer(svc, authenticator, logger)
-	tracer, err := telemetry.Init(context.Background(), *otlpEndpoint, "audit-api")
+	server, tracer, err := prepareServer(logger, svc, authenticator, *otlpEndpoint, *listen)
 	if err != nil {
-		logger.Fatalf("init telemetry: %v", err)
+		logger.Fatalf("%v", err)
 	}
-	if tracer != nil {
-		logger.Printf("tracing=otlp endpoint=%s", *otlpEndpoint)
-	}
-	server := &http.Server{Addr: *listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	var grpcServer *grpc.Server
 	var healthServer *health.Server
 	var grpcListener net.Listener
@@ -183,6 +155,58 @@ func main() {
 		grpcServer.GracefulStop()
 	}
 	_ = st.Close()
+}
+
+// wireExternal attaches the resolved external signer and archive to the
+// service configuration, logging which provider is in use. Extracted from
+// main so the startup wiring (REQ-TLS-4/5 fail-fast at boot) is
+// unit-testable: the store and service are already open when this runs, and
+// any validation error aborts startup with the same "signer:"/"archive:"
+// message main previously emitted directly.
+func wireExternal(logger *log.Logger, svc *service.Service, external runtimeconfig.SigningArchive, vaultTransitKey, vaultAddr, s3Bucket, s3Endpoint string) error {
+	external.SigningSecret = svc.Config.SigningSecret
+	external.EncryptionKey = svc.Config.EncryptionKey
+	if signer, signErr := external.Signer(); signErr != nil {
+		return fmt.Errorf("signer: %w", signErr)
+	} else if signer != nil {
+		svc.Config.Signer = signer
+		logger.Printf("signer=vault-transit key=%s addr=%s", vaultTransitKey, vaultAddr)
+	}
+	if archiveStore, archiveErr := external.Archive(); archiveErr != nil {
+		return fmt.Errorf("archive: %w", archiveErr)
+	} else {
+		svc.Config.Archive = archiveStore
+		if s3Endpoint != "" {
+			logger.Printf("archive=s3 bucket=%s endpoint=%s", s3Bucket, s3Endpoint)
+		}
+	}
+	return nil
+}
+
+// prepareServer validates the authentication configuration (including the
+// AC-3 dev-auth allowlist: a flag-only -allow-dev-auth can never start the
+// server, so CI cannot bless a config the runtime would reject), builds the
+// HTTP handler, initializes telemetry for the given OTLP endpoint (empty
+// disables tracing) and returns the server. Extracted from main so the
+// pre-server startup path is unit-testable; error text matches what main
+// previously emitted directly.
+func prepareServer(logger *log.Logger, svc *service.Service, authenticator auth.Authenticator, otlpEndpoint, listen string) (*http.Server, *telemetry.Tracer, error) {
+	if err := authenticator.ValidateConfiguration(); err != nil {
+		return nil, nil, fmt.Errorf("invalid authentication configuration: %w", err)
+	}
+	if authenticator.AllowDev && !devAuthAllowlisted() {
+		return nil, nil, fmt.Errorf("invalid authentication configuration: development auth (-allow-dev-auth) requires AUDIT_ALLOW_DEV_AUTH=true in the environment (flag-only dev auth is not allowed)")
+	}
+	api := httpapi.NewServer(svc, authenticator, logger)
+	tracer, err := telemetry.Init(context.Background(), otlpEndpoint, "audit-api")
+	if err != nil {
+		return nil, nil, fmt.Errorf("init telemetry: %w", err)
+	}
+	if tracer != nil {
+		logger.Printf("tracing=otlp endpoint=%s", otlpEndpoint)
+	}
+	server := &http.Server{Addr: listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	return server, tracer, nil
 }
 
 func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store, error) {
@@ -310,7 +334,16 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 	if _, ok := archiveStore.(*archive.FileStore); !ok {
 		archiveName = "s3"
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName)
+	// Per-leg transport labels (REQ-TLS-6/F3): the S3 and Vault legs are each
+	// reported ("tls"/"http"/"local"), so a mixed configuration never hides
+	// one leg's transport. A Transport() error is a check failure: the line
+	// is never printed with an unresolved transport (FM-8).
+	s3Transport, vaultTransport, transportErr := external.Transport()
+	if transportErr != nil {
+		logger.Printf("transport: %v", transportErr)
+		return 1
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport)
 	return 0
 }
 
