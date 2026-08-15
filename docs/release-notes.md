@@ -1,5 +1,65 @@
 # Release Notes
 
+## 2026-08-15 — 流帧组件拒绝 `:`：aggregate 帧与租户 ID 层的冒号注入收口（internal/domain，internal-domain-6c1ab500）
+
+**写给运营（行为变化）：**
+
+- **`aggregate_type` / `aggregate_id` 禁止 `:`**：`:` 是流帧分隔符（`Event.Stream` 以
+  `tenant:aggregate:<type>:<id>` 组帧），此前 `("a","b:c")` 与 `("a:b","c")` 会导出**字节相同**
+  的流键 `tenant-a:aggregate:a:b:c`，两个不同聚合被静默合并进同一条哈希链账本流（同一序列
+  计数器、同一条哈希链、同一 segment/checkpoint 血缘、同一归档前缀），且 `VerifyIntegrity`
+  按存储流键重验时合并链一致、**不可检出**——租户内写者可故意把事件交织进另一聚合的链而
+  不触发任何校验失败。现在携带 `:` 的聚合组件在入账前被拒：HTTP 单条与批端点均返回
+  **400 `invalid_request`**（非 422），批端点仍按 ERP 契约在首个错误处截断（已入账 receipts
+  作前缀返回，`not_attempted` 语义不变）；gRPC 与 outbox 写入共享同一 `ValidateBasic` 边界，
+  同样在写库前拒绝。**需要生产方动作**：发送 `:` 聚合组件的生产方请改为无冒号的命名；
+  新事件永不落库。OpenAPI 的 `aggregate_type`/`aggregate_id` pattern 已同步排除 `:`，新生产方
+  客户端侧即失败。
+- **租户 ID 禁止 `:`（创建与请求边界）**：`:` 是 dev token 的分隔符
+  （`strings.Split(token, ":")`），租户 ID 含 `:` 时 `dev:<tenant>:<roles>` 会被静默重绑定到
+  另一个租户（如 `dev:acme:prod:tenant-admin` → 租户 `acme`）。现在新创建租户的 ID 含 `:`
+  即 400 拒绝（side-effect free，无租户/无 admin action）；平台 `?tenant_id=` 查询含 `:` 的租户
+  过滤器返回 400；JWT `tenant_id`/`tenant` 声明含 `:` 的令牌认证失败（错误文本保持
+  非 oracular 的 `token <name> claim is invalid`）。
+- **既有含 `:` 租户不受数据迁移影响（行为收窄，无数据重写）**：已存储的含 `:` 租户继续
+  保持全部存储键与入账路径（`Ingest` 解析到的租户不再重验字符集，流帧字符串零改动，序列/
+  哈希链/segment/checkpoint/归档前缀逐字节不变）。这些租户仅在新创建、`?tenant_id=` 查询、
+  JWT 声明与 dev token 边界被拒；如需恢复完整边界功能，请将其重命名为无冒号 ID
+  （已存储账本不动）。dev token 的租户主体段位于前两个冒号之间，构造上不可能含 `:`——
+  4 段客户端形式（`dev:tenant-a:service:crm`）保持可用，重绑定向量改在创建源收口。
+- **无存储迁移**；回滚 = 重新部署旧二进制（旧二进制重新接受冒号组件，缺陷随之回归，
+  请同步升级生产方）。`operation_id`/`source_system`/`event_id`/`schema_id` 仍允许 `:`
+  （单组件帧，构造上单射），字符集规则与帧字符串本身均未改动。
+
+**写给开发（实现变化）：**
+
+- `internal/domain/identifiers.go`：新增导出 `ValidStreamComponent(name, value)` 与
+  `ValidTenantIDComponent(name, value)`，均为 `ValidKeyComponent` + 恰好一条 `:` 拒绝
+  （错误包装 `domain.ErrInvalid` 并命名组件）；`ValidKeyComponent` 本身对非租户/非流调用方
+  保持不变（`:` 仍合法）。
+- `internal/domain/models.go`：`ValidateBasic` 的聚合循环拆为两层——`aggregate type`/
+  `aggregate id` 走 `ValidStreamComponent`，`operation id` 留在通用规则；循环顺序保持
+  确定性错误优先级（event_id/source_system 循环仍先于聚合循环，聚合循环内 type 先于 id）。
+  `Event.Stream()` 帧字符串零改动。
+- `internal/store/store.go`：`ValidTenantID` 委托 `ValidTenantIDComponent`；`CreateTenant`
+  （service.go:199）、`tenantFor` 两条分支（server.go:1087,1105）经此继承拒绝。
+- `internal/auth/auth.go`：`parseDevToken` 主体校验与 `tenantClaim`（JWT `tenant_id`/`tenant`）
+  切换到 `ValidTenantIDComponent`；错误文本逐字节不变（`invalid development token` /
+  `token <name> claim is invalid`，非 oracular）。
+- `api/openapi/openapi.yaml`：`aggregate_type`/`aggregate_id`/`Tenant.id` pattern →
+  `^[^:\x00-\x1F\x7F\s/\\]+$`（排除 `:`）；`event_id`/`source_system`/`operation_id`/
+  `schema_id`/`Source.id` 不变。
+- 测试：`identifiers_test.go` 泛型 accepted 语料移出 `"a:b"`（通用规则以非租户名 `event id`
+  另行钉死 `:` 合法），新增 `ValidStreamComponent`/`ValidTenantIDComponent` 拒绝钉、`ValidateBasic`
+  冒号碰撞对与跨层确定性、`TestStreamFrameInjectiveOverAcceptedPairs`（往返+单射+
+  at-most-one）、`TestStreamFrameFuzzColonFreeUnique`（固定种子 ≥1 万迭代，字母表含 `:`）、
+  `TestStreamFramesCrossBranchDisjoint`（`:aggregate:`/`:operation:`/`:source:` 字面量互斥）；
+  `tenantkey_test.go`/`tenant_validation_test.go`/`server_test.go`/`auth_test.go` 语料同步迁移
+  （`"a:b"` 从 accepted 移入 rejected，dev token 4 段形式正向钉住，JWT 声明 `"a:b"` 拒绝）；
+  `key_framing_test.go` 新增冒号入账拒绝 + 快照前后不变 + `TestStoredStreamFramingByteIdentical`
+  （存储 `StreamID` 逐字节等于改动前常量 + `VerifyIntegrity` 同 `SegmentCount`）；
+  `erp_contract_test.go` 新增批端点冒号 400 + 首错截断契约；`outbox` SDK 冒号拒绝（写库前）；
+  `openapi_pattern_test.go` 双 pattern 计数（通用 5 处 + 流/租户 3 处）。`python3 cli.py quality` 全绿。
 ## 2026-08-15 — 本地 HS256 密钥强度门禁：JWT 密钥 ≥32 字节 + 与服务密钥互斥 + `jwt_secret_length` 预检字段（internal/auth，local-hs256-mode-has-no-secret-strength-gate-whi-b3c8be60）
 
 **写给运营（行为变化）：**

@@ -69,6 +69,8 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 		{"source_system space", func(e *domain.Event) { e.SourceSystem = "x y" }},
 		{"aggregate_type alone", func(e *domain.Event) { e.AggregateType = "a\x1fb"; e.AggregateID = "" }},
 		{"aggregate_id", func(e *domain.Event) { e.AggregateID = "a\x1fb" }},
+		{"aggregate_type colon (collision pair a)", func(e *domain.Event) { e.AggregateType = "a:b"; e.AggregateID = "c" }},
+		{"aggregate_id colon (collision pair b)", func(e *domain.Event) { e.AggregateType = "a"; e.AggregateID = "b:c" }},
 		{"operation_id", func(e *domain.Event) { e.OperationID = "a\x1fb" }},
 		{"operation_id space (source-branch stream)", func(e *domain.Event) { e.OperationID = "op ok"; e.AggregateType = ""; e.AggregateID = "" }},
 	} {
@@ -103,6 +105,146 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestIngestRejectsColonStreamComponentsMutationFree is REQ-4's mutation-free
+// guarantee for the colon class specifically: ingesting the collision pair
+// (AggregateType="a:b", AggregateID="c") — and its mirror — fails with
+// domain.ErrInvalid before any snapshot mutation: no new Events, Receipts,
+// Streams, Segments or Checkpoints entries, no admin action, and a valid
+// ingest after the rejections still succeeds (store not wedged).
+func TestIngestRejectsColonStreamComponentsMutationFree(t *testing.T) {
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	counts := func() (events, receipts, streams, segments, checkpoints, actions int) {
+		t.Helper()
+		if err := svc.Store.Read(func(data *store.Snapshot) error {
+			events = len(data.Events)
+			receipts = len(data.Receipts)
+			streams = len(data.Streams)
+			segments = len(data.Segments)
+			checkpoints = len(data.Checkpoints)
+			actions = len(data.AdminActions)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return events, receipts, streams, segments, checkpoints, actions
+	}
+	type countsValue struct {
+		events, receipts, streams, segments, checkpoints, actions int
+	}
+	snapshotCounts := func() countsValue {
+		e, r, st, se, c, a := counts()
+		return countsValue{e, r, st, se, c, a}
+	}
+	before := snapshotCounts()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.Event)
+	}{
+		{"aggregate_type colon", func(e *domain.Event) { e.AggregateType = "a:b"; e.AggregateID = "c" }},
+		{"aggregate_id colon (mirror)", func(e *domain.Event) { e.AggregateType = "a"; e.AggregateID = "b:c" }},
+	} {
+		event := testEvent("keyf-colon-"+tc.name, "op-1", at)
+		tc.mutate(&event)
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("%s: Ingest = %v, want ErrInvalid", tc.name, err)
+		}
+	}
+	after := snapshotCounts()
+	if after != before {
+		t.Fatalf("rejected colon ingests mutated the snapshot: before %+v after %+v", before, after)
+	}
+
+	// A valid ingest after the rejections succeeds and produces only
+	// parseable keys (the store is not wedged).
+	event := testEvent("keyf-colon-valid", "op-ok", at)
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		t.Fatalf("valid ingest after colon rejections failed: %v", err)
+	}
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if bad := unparsableKeyCount(data); bad != 0 {
+			t.Fatalf("valid ingest produced %d unparsable keys", bad)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStoredStreamFramingByteIdentical is REQ-5's service regression: the
+// framing string itself is untouched, so the three no-colon branch fixtures
+// store byte-identical pre-change stream IDs, VerifyIntegrity stays Valid
+// with the same SegmentCount, and the unparsable-key audit stays at zero.
+func TestStoredStreamFramingByteIdentical(t *testing.T) {
+	svc := testService(t, false)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	// Aggregate branch: the stream key must be the pre-change constant.
+	aggEvent := testEvent("frame-agg-1", "op-x", at)
+	aggEvent.AggregateType = "invoice"
+	aggEvent.AggregateID = "inv-1"
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, aggEvent, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	// Operation branch.
+	opEvent := testEvent("frame-op-1", "op-9", at.Add(time.Second))
+	opEvent.AggregateType = ""
+	opEvent.AggregateID = ""
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, opEvent, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	// Source branch.
+	srcEvent := testEvent("frame-src-1", "", at.Add(2*time.Second))
+	srcEvent.OperationID = ""
+	srcEvent.AggregateType = ""
+	srcEvent.AggregateID = ""
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, srcEvent, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		for eventID, want := range map[string]string{
+			"frame-agg-1": "tenant-a:aggregate:invoice:inv-1",
+			"frame-op-1":  "tenant-a:operation:op-9",
+			"frame-src-1": "tenant-a:source:crm",
+		} {
+			if got := data.Events[store.EventKey("tenant-a", eventID)].StreamID; got != want {
+				t.Errorf("stored StreamID for %s = %q, want the pre-change constant %q", eventID, got, want)
+			}
+		}
+		if bad := unparsableKeyCount(data); bad != 0 {
+			t.Fatalf("%d unparsable keys after framing regression ingests", bad)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// VerifyIntegrity re-verifies the sealed chain as one consistent chain
+	// with the same segment count as stored.
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid {
+		t.Fatalf("integrity invalid after framing regression: %+v", result)
+	}
+	var storedSegments int
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		for key := range data.Segments {
+			if tenantID, _, ok := store.SplitTenantKey(key); ok && tenantID == "tenant-a" {
+				storedSegments += len(data.Segments[key])
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if result.SegmentCount != storedSegments {
+		t.Fatalf("VerifyIntegrity.SegmentCount = %d, want stored total %d", result.SegmentCount, storedSegments)
 	}
 }
 

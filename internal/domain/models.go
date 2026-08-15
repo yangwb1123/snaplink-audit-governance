@@ -406,8 +406,25 @@ func (e Event) ValidateBasic() error {
 			return err
 		}
 	}
+	// Stream components: the aggregate frame is tenant + ":aggregate:" +
+	// type + ":" + id, so a ':' in either aggregate component would make the
+	// frame ambiguous — ("a","b:c") and ("a:b","c") derive the identical
+	// stream key and silently merge two aggregates into one hash-chained
+	// ledger stream. ValidStreamComponent layers exactly the ':' rejection
+	// on the generic rule. operation id stays on the generic rule:
+	// tenant:operation:<id> is a single-component frame, injective by
+	// construction.
 	for _, pair := range [][2]string{
-		{"aggregate type", e.AggregateType}, {"aggregate id", e.AggregateID}, {"operation id", e.OperationID},
+		{"aggregate type", e.AggregateType}, {"aggregate id", e.AggregateID},
+	} {
+		if pair[1] != "" {
+			if err := ValidStreamComponent(pair[0], pair[1]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, pair := range [][2]string{
+		{"operation id", e.OperationID},
 	} {
 		if pair[1] != "" {
 			if err := ValidKeyComponent(pair[0], pair[1]); err != nil {

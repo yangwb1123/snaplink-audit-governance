@@ -624,11 +624,14 @@ func StreamKey(tenantID, streamID string) string { return tenantID + KeySeparato
 // ID containing it makes composite keys ambiguous with another tenant's keys
 // (StreamKey("a\x1fb","s") == StreamKey("a","b\x1fs")). Control
 // characters, whitespace and path separators are rejected as hygiene (URLs,
-// logs, archive paths). Delegates to domain.ValidKeyComponent so the charset
-// rule has exactly one implementation across every untrusted API boundary.
+// logs, archive paths). ':' is additionally rejected: tenant IDs prefix
+// every Event.Stream() frame and are the subject of ':'-delimited dev
+// tokens, so an embedded ':' makes both ambiguous (dev-token rebinding
+// defect). Delegates to domain.ValidTenantIDComponent so the charset rule
+// has exactly one implementation across every untrusted API boundary.
 // Returns a domain.ErrInvalid-wrapped error, or nil.
 func ValidTenantID(id string) error {
-	return domain.ValidKeyComponent("tenant id", id)
+	return domain.ValidTenantIDComponent("tenant id", id)
 }
 
 // SplitTenantKey splits a composite key into its tenant prefix and the

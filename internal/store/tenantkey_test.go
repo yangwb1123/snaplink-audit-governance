@@ -25,6 +25,7 @@ func TestValidTenantID(t *testing.T) {
 		"a\u00a0b", // NBSP (unicode.IsSpace)
 		"a/b",      // path separator
 		`a\b`,      // path separator (windows)
+		"a:b",      // stream-frame/dev-token delimiter: tenant ids prefix Event.Stream() and are the dev-token subject
 	}
 	for _, id := range rejected {
 		if err := ValidTenantID(id); !errors.Is(err, domain.ErrInvalid) {
@@ -35,7 +36,6 @@ func TestValidTenantID(t *testing.T) {
 		"tenant-a",
 		"a-b_c.d",
 		"tëstant", // non-ASCII letters stay valid (rejection-based rule)
-		"a:b",
 		"123",
 	}
 	for _, id := range accepted {
@@ -78,7 +78,7 @@ func TestSplitTenantKey(t *testing.T) {
 // collide. This is exactly what ValidTenantID guarantees: without the
 // separator in tenant IDs, the first KeySeparator splits deterministically.
 func TestStreamKeyPrefixInjectiveForValidTenantIDs(t *testing.T) {
-	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a:b", "123"}
+	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a.b", "123"}
 	allStreamIDs := []string{"", "s", "s1", "x\x1f y-invalid-stream-but-distinct"}
 	for _, tenantID := range tenantIDs {
 		if err := ValidTenantID(tenantID); err != nil {
@@ -116,7 +116,7 @@ func TestStreamKeyPrefixInjectiveForValidTenantIDs(t *testing.T) {
 // guarantees: without the separator in tenant IDs, the first KeySeparator
 // splits deterministically.
 func TestCompositeKeyInjectivityForValidTenantIDs(t *testing.T) {
-	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a:b", "123"}
+	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a.b", "123"}
 	allIDs := []string{"", "s", "s1", "x\x1f y-invalid-but-distinct"}
 	wellFormed := []string{"", "s", "s1"}
 	for _, tenantID := range tenantIDs {
@@ -162,7 +162,7 @@ func TestCompositeKeyInjectivityForValidTenantIDs(t *testing.T) {
 // SplitTenantKey (ok=false) by design, and the schema-id component is
 // validated separately by RegisterSchema's ValidKeyComponent rule.
 func TestSchemaKeyInjectivityForValidTenantIDs(t *testing.T) {
-	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a:b", "123"}
+	tenantIDs := []string{"a", "ab", "a-b", "tëstant", "a.b", "123"}
 	schemaIDs := []string{"audit.event", "s", "x\x1f y-invalid-but-distinct"}
 	versions := []int{0, 1, 42}
 	seen := map[string]string{}

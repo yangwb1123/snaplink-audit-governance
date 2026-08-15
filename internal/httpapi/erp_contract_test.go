@@ -233,6 +233,49 @@ func TestERPContractBatchStopsAtFirstError(t *testing.T) {
 	}
 }
 
+// M0-5b（本方向的批端点回归）：批内第 2 条事件携带冒号聚合组件时，返回
+// 400 invalid_request（statusForError(ErrInvalid)——不是 422），同样首错截断：
+// receipts 前缀 = [已入账的 good, 零值 bad（not_attempted 证据）]。分类仍是
+// ErrInvalid，所以 ERP 首错截断语义原样成立。
+func TestERPContractBatchRejectsColonAggregate(t *testing.T) {
+	server := erpTestHTTPServer(t)
+	defer server.Close()
+	good := erpEvent("erp-evt-5c", "idem-5c", map[string]any{"order": "PO-1006"})
+	bad := erpEvent("erp-evt-5d", "idem-5d", map[string]any{"order": "PO-1006"})
+	bad.AggregateType = "a:b" // stream-frame delimiter: collision pair with ("a","b:c")
+	bad.AggregateID = "c"
+
+	status, body := postEvents(t, server, []domain.Event{good, bad})
+	// ErrInvalid → 400（statusForError 唯一映射；422 仅限 ErrSchemaNotFound /
+	// ErrTenantMismatch）。
+	if status != http.StatusBadRequest {
+		t.Fatalf("batch status=%d body=%v (must be 400 invalid_request)", status, body)
+	}
+	receipts, _ := body["receipts"].([]any)
+	if len(receipts) != 2 {
+		t.Fatalf("expected 2 receipts (accepted + zero-value), got %v", body)
+	}
+	firstReceipt, _ := receipts[0].(map[string]any)
+	if firstReceipt["event_id"] != "erp-evt-5c" || firstReceipt["status"] != "accepted" {
+		t.Fatalf("first receipt must be the accepted event, got %v", firstReceipt)
+	}
+	secondReceipt, _ := receipts[1].(map[string]any)
+	if eventID, _ := secondReceipt["event_id"].(string); eventID != "" {
+		t.Fatalf("second receipt must be the zero-value (not_attempted), got %v", secondReceipt)
+	}
+	// 第 1 条已入账（receipt 可查）——发送端据此逐事件裁决，不得整批重投。
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events/erp-evt-5c?tenant_id=tenant-a", nil)
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("accepted event must be queryable, status=%d", response.StatusCode)
+	}
+}
+
 func receiptErrorCode(body map[string]any) string {
 	receipts, _ := body["receipts"].([]any)
 	if len(receipts) == 0 {

@@ -8,12 +8,15 @@ import (
 
 // TestOpenAPIDocumentsKeyFramingPatterns is F-5/G6 (made mandatory by QA):
 // the OpenAPI contract must keep documenting the key-framing charset rule at
-// the same eight body fields and three tenant_id query params the runtime
-// enforces. The body pattern (plus-quantified) applies to required fields;
-// the query-param form allows the empty string, which is legal at runtime
-// (platform all-tenants reads). The assertion pins exact occurrence counts
-// so a drift in either direction (a field losing its pattern or a pattern
-// spreading to a non-key field) fails here.
+// the same body fields and three tenant_id query params the runtime
+// enforces. The generic body pattern (plus-quantified) applies to the
+// single-component-frame fields and non-tenant ids; the stream/tenant
+// variant additionally excludes ':' (aggregate_type, aggregate_id, Tenant.id
+// — the ':'-delimited framing components). The query-param form allows the
+// empty string, which is legal at runtime (platform all-tenants reads). The
+// assertion pins exact occurrence counts so a drift in either direction (a
+// field losing its pattern or a pattern spreading to a non-key field) fails
+// here.
 func TestOpenAPIDocumentsKeyFramingPatterns(t *testing.T) {
 	spec, err := os.ReadFile("../../api/openapi/openapi.yaml")
 	if err != nil {
@@ -21,24 +24,39 @@ func TestOpenAPIDocumentsKeyFramingPatterns(t *testing.T) {
 	}
 	text := string(spec)
 	bodyPattern := `pattern: '^[^\x00-\x1F\x7F\s/\\]+$'`
+	// Stream/tenant variant: ValidStreamComponent / ValidTenantIDComponent
+	// reject ':' on top of the generic rule because ':' is the stream-frame
+	// delimiter and the dev-token delimiter.
+	streamTenantPattern := `pattern: '^[^:\x00-\x1F\x7F\s/\\]+$'`
 	queryPattern := `pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$'`
 
-	// Body pattern: Event.event_id, Event.source_system, Event.operation_id,
-	// Event.aggregate_type, Event.aggregate_id, Tenant.id, Source.id,
-	// EventSchema.schema_id — exactly these eight.
-	if count := strings.Count(text, bodyPattern); count != 8 {
-		t.Errorf("body key-framing pattern appears %d times, want exactly 8 (5 Event fields + Tenant.id + Source.id + EventSchema.schema_id)", count)
+	// Generic body pattern: Event.event_id, Event.source_system,
+	// Event.operation_id, Source.id, EventSchema.schema_id — exactly five.
+	if count := strings.Count(text, bodyPattern); count != 5 {
+		t.Errorf("generic body key-framing pattern appears %d times, want exactly 5 (event_id, source_system, operation_id, Source.id, EventSchema.schema_id)", count)
+	}
+	// Stream/tenant body pattern: Event.aggregate_type, Event.aggregate_id,
+	// Tenant.id — exactly three (the ':'-delimited framing components).
+	if count := strings.Count(text, streamTenantPattern); count != 3 {
+		t.Errorf("stream/tenant key-framing pattern appears %d times, want exactly 3 (aggregate_type, aggregate_id, Tenant.id)", count)
 	}
 	// Query pattern: the three tenant_id query params (admin/actions,
 	// sources, schemas) — exactly three.
 	if count := strings.Count(text, queryPattern); count != 3 {
 		t.Errorf("query key-framing pattern appears %d times, want exactly 3 (tenant_id query params)", count)
 	}
-	// The five Event key components must each carry the pattern inline;
+	// The five Event key components must each carry their pattern inline;
 	// non-key components (event_type, schema_id, idempotency_key) must not.
-	for _, field := range []string{"event_id", "source_system", "operation_id", "aggregate_type", "aggregate_id"} {
+	// The single-component frame fields stay colon-permissive; the aggregate
+	// pair carries the colon-excluding stream variant.
+	for _, field := range []string{"event_id", "source_system", "operation_id"} {
 		if !strings.Contains(text, field+": { type: string, "+bodyPattern) {
-			t.Errorf("Event.%s must carry the key-framing pattern", field)
+			t.Errorf("Event.%s must carry the generic key-framing pattern", field)
+		}
+	}
+	for _, field := range []string{"aggregate_type", "aggregate_id"} {
+		if !strings.Contains(text, field+": { type: string, "+streamTenantPattern) {
+			t.Errorf("Event.%s must carry the stream key-framing pattern (':' rejected)", field)
 		}
 	}
 }

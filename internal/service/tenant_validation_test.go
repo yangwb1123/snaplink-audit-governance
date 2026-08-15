@@ -14,7 +14,7 @@ import (
 func TestCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 	svc := testService(t, false)
 	rejected := []string{
-		"a\x1fb", "a b", " a", "a\tb", "a\nb", "\x00", "a/b", `a\b`, "a\u00a0b",
+		"a\x1fb", "a b", " a", "a\tb", "a\nb", "\x00", "a/b", `a\b`, "a\u00a0b", "a:b",
 	}
 	for _, id := range rejected {
 		err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true})
@@ -22,7 +22,7 @@ func TestCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 			t.Errorf("CreateTenant(id=%q) = %v, want ErrInvalid", id, err)
 		}
 	}
-	accepted := []string{"tenant-c", "a-b_c.d", "tëstant", "a:b"}
+	accepted := []string{"tenant-c", "a-b_c.d", "tëstant", "123"}
 	for _, id := range accepted {
 		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true}); err != nil {
 			t.Errorf("CreateTenant(id=%q) = %v, want nil", id, err)
@@ -48,7 +48,7 @@ func TestCreateTenantRejectionSideEffectFree(t *testing.T) {
 	}
 	beforeTenants, beforeActions := readCounts()
 
-	for _, id := range []string{"a\x1fb", "a b", "a/b"} {
+	for _, id := range []string{"a\x1fb", "a b", "a/b", "a:b"} {
 		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("CreateTenant(id=%q) = %v, want ErrInvalid", id, err)
 		}

@@ -53,6 +53,8 @@ func TestInsertRejectsKeyFramingFields(t *testing.T) {
 		{"event_id", func(e *domain.Event) { e.EventID = "a\x1fb" }},
 		{"source_system", func(e *domain.Event) { e.SourceSystem = "x\x1fy" }},
 		{"source_system space", func(e *domain.Event) { e.SourceSystem = "x y" }},
+		{"aggregate_type colon", func(e *domain.Event) { e.AggregateType = "a:b"; e.AggregateID = "c" }},
+		{"aggregate_id colon", func(e *domain.Event) { e.AggregateType = "a"; e.AggregateID = "b:c" }},
 	} {
 		event := base
 		tc.mutate(&event)

@@ -233,6 +233,22 @@ func TestDevAuthRejectsKeyFramingSubjects(t *testing.T) {
 	if _, err := authenticator.AuthenticateToken("dev:tenant-a:service:crm"); err != nil {
 		t.Fatalf("valid service dev token rejected: %v", err)
 	}
+	// C3 (re-scoped acceptance): the dev-token subject segment between the
+	// first two colons is inherently colon-free (strings.Split), so no
+	// reading of a dev token can express — or reject — a colon tenant
+	// subject without breaking the pinned 4-part client form above. The
+	// rebinding vector is instead closed at the creation boundary (a colon
+	// tenant can no longer be created via CreateTenant). Pin the actual
+	// parse so the limitation stays explicit, not silently "fixed":
+	// "dev:a:b:auditor" is the 4-part client form, tenant "a", client
+	// "auditor".
+	claims, err = authenticator.AuthenticateToken("dev:a:b:auditor")
+	if err != nil {
+		t.Fatalf("4-part dev token must keep authenticating: %v", err)
+	}
+	if claims.TenantID != "a" || claims.ClientID != "auditor" {
+		t.Fatalf("dev:a:b:auditor → tenant %q client %q, want tenant \"a\" client \"auditor\"", claims.TenantID, claims.ClientID)
+	}
 }
 
 // TestJWTRejectsKeyFramingTenantClaims is REQ-6's acceptance: the JWT
@@ -244,7 +260,7 @@ func TestDevAuthRejectsKeyFramingSubjects(t *testing.T) {
 func TestJWTRejectsKeyFramingTenantClaims(t *testing.T) {
 	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	for _, name := range []string{"tenant_id", "tenant"} {
-		for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b", "\x00", "\n", " a"} {
+		for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b", "\x00", "\n", " a", "a:b"} {
 			payload := map[string]any{"sub": "service-subject", name: bad, "exp": time.Now().Add(time.Hour).Unix()}
 			_, err := authenticator.AuthenticateToken(signJWT(t, payload))
 			if err == nil {

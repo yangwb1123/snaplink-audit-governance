@@ -3600,7 +3600,7 @@ func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
 // context stays legal (all-tenants reads; client-id-resolved ingest).
 func TestHTTPTenantForRechecksClaimTenantID(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/events/x", nil)
-	for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b"} {
+	for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b", "a:b"} {
 		if _, err := (&Server{}).tenantFor(request, auth.Claims{TenantID: bad}); !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("tenantFor with claim %q err=%v, want domain.ErrInvalid", bad, err)
 		}
@@ -3616,6 +3616,14 @@ func TestHTTPTenantForRechecksClaimTenantID(t *testing.T) {
 	if tenantID, err := (&Server{}).tenantFor(query, auth.Claims{Platform: true, TenantID: "a/b"}); err != nil || tenantID != "tenant-a" {
 		t.Errorf("platform tenantFor = (%q,%v), want (tenant-a,nil)", tenantID, err)
 	}
+	// REQ-2: the platform escape-hatch query is a tenant input too — a colon
+	// tenant filter must be rejected with the same ErrInvalid (400) so a
+	// platform read can never select a tenant whose ID would be ambiguous
+	// in stream framing.
+	colonQuery := httptest.NewRequest(http.MethodGet, "/api/v1/events/x?tenant_id=a:b", nil)
+	if _, err := (&Server{}).tenantFor(colonQuery, auth.Claims{Platform: true, TenantID: ""}); !errors.Is(err, domain.ErrInvalid) {
+		t.Errorf("platform tenantFor(?tenant_id=a:b) err=%v, want domain.ErrInvalid", err)
+	}
 	// S-2.3: the platform branch returns the empty all-tenants sentinel when
 	// no (or an empty) tenant_id query is present — it must never fall
 	// through to claims.TenantID (dev tokens fill it with their subject,
@@ -3626,6 +3634,40 @@ func TestHTTPTenantForRechecksClaimTenantID(t *testing.T) {
 		if err != nil || tenantID != "" {
 			t.Errorf("platform tenantFor(%q) = (%q,%v), want (\"\",nil) all-tenants sentinel", raw, tenantID, err)
 		}
+	}
+}
+
+// TestHTTPIngestRejectsColonStreamComponents is REQ-4 at the HTTP boundary:
+// the single-event ingest endpoint rejects the colon-aggregate collision
+// pair with 400 invalid_request (statusForError(ErrInvalid) — never 422,
+// which is reserved for ErrSchemaNotFound/ErrTenantMismatch). The identical
+// event with colon-free components is accepted.
+func TestHTTPIngestRejectsColonStreamComponents(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+	base := domain.Event{EventID: "http-colon-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-colon-idem", Payload: map[string]any{"value": 1}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.Event)
+	}{
+		{"aggregate_type colon (collision pair a)", func(e *domain.Event) { e.AggregateType = "a:b"; e.AggregateID = "c" }},
+		{"aggregate_id colon (collision pair b)", func(e *domain.Event) { e.AggregateType = "a"; e.AggregateID = "b:c" }},
+	} {
+		event := base
+		tc.mutate(&event)
+		got := postTestEvent(t, server.URL, "dev:tenant-a:service:crm", event)
+		if got.Status != http.StatusBadRequest || got.Code != "invalid_request" {
+			t.Errorf("%s: status=%d code=%q, want 400 invalid_request", tc.name, got.Status, got.Code)
+		}
+	}
+	// Positive control: the same event with colon-free components ingests.
+	ok := base
+	ok.EventID = "http-colon-ok"
+	ok.IdempotencyKey = "http-colon-idem-ok"
+	ok.AggregateType = "invoice"
+	ok.AggregateID = "inv-1"
+	if got := postTestEvent(t, server.URL, "dev:tenant-a:service:crm", ok); got.Status != http.StatusAccepted {
+		t.Fatalf("colon-free aggregate ingest status=%d, want 202", got.Status)
 	}
 }
 

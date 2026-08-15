@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 )
 
@@ -22,6 +23,34 @@ func ValidKeyComponent(name, value string) error {
 		case r == '/' || r == '\\':
 			return fmt.Errorf("%w: %s must not contain path separators", ErrInvalid, name)
 		}
+	}
+	return nil
+}
+
+// ValidStreamComponent is ValidKeyComponent plus the ':' rejection. ':' is a
+// stream-frame delimiter (Event.Stream: tenant + ":aggregate:" + type + ":" + id);
+// ("a","b:c") and ("a:b","c") would otherwise derive the same stream key and
+// silently merge two distinct aggregates into one hash-chained ledger stream.
+func ValidStreamComponent(name, value string) error {
+	if err := ValidKeyComponent(name, value); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, ':') {
+		return fmt.Errorf("%w: %s must not contain ':'", ErrInvalid, name)
+	}
+	return nil
+}
+
+// ValidTenantIDComponent is ValidKeyComponent plus the ':' rejection for
+// tenant identifiers: tenant IDs prefix every Event.Stream() frame and are
+// the subject of ':'-delimited dev tokens, so an embedded ':' makes both
+// ambiguous (dev-token rebinding defect).
+func ValidTenantIDComponent(name, value string) error {
+	if err := ValidKeyComponent(name, value); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, ':') {
+		return fmt.Errorf("%w: %s must not contain ':'", ErrInvalid, name)
 	}
 	return nil
 }

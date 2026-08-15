@@ -73,10 +73,13 @@ func parseDevToken(token string) (Claims, error) {
 	// embedding KeySeparator (0x1F) would collide with another tenant's keys
 	// (EventKey("a\x1fb","evt") == EventKey("a","b\x1fevt")); control
 	// characters, whitespace and path separators are rejected for the same
-	// hygiene reasons as JWT tenant claims. The rejection reuses the exact
+	// hygiene reasons as JWT tenant claims. ':' is additionally rejected
+	// (tenant layer): the subject segment is the tenant ID, which prefixes
+	// every Event.Stream() frame and must never be ambiguous with the
+	// ':'-delimited dev-token framing itself. The rejection reuses the exact
 	// malformed-token error text so a valid-vs-invalid subject is never an
 	// oracle for token format.
-	if err := domain.ValidKeyComponent("tenant id", parts[1]); err != nil {
+	if err := domain.ValidTenantIDComponent("tenant id", parts[1]); err != nil {
 		return Claims{}, fmt.Errorf("invalid development token")
 	}
 	roles := strings.Split(parts[2], ",")
@@ -192,13 +195,13 @@ func clientIdentity(payload map[string]any) (string, error) {
 }
 
 // tenantClaim extracts the tenant context claim under the same strictness as
-// sub/client_id, delegating the charset rule to domain.ValidKeyComponent —
-// the canonical key-framing rule every other tenant input uses. Control
-// characters (incl. KeySeparator 0x1F), whitespace and '/'/'\\' are rejected
-// so a padded or separator-embedding tenant_id can never reach the tenant
-// consistency comparison (where " a" vs "a" would surface as a confusing 422
-// instead of an authentication failure) or collide with composite snapshot
-// keys.
+// sub/client_id, delegating the charset rule to domain.ValidTenantIDComponent —
+// the canonical tenant rule every other tenant input uses. Control
+// characters (incl. KeySeparator 0x1F), whitespace, '/'/'\\' and ':' are
+// rejected so a padded or separator-embedding tenant_id can never reach the
+// tenant consistency comparison (where " a" vs "a" would surface as a
+// confusing 422 instead of an authentication failure) or collide with
+// composite snapshot keys or stream frames.
 func tenantClaim(payload map[string]any, name string) (string, bool, error) {
 	value, present := payload[name]
 	if !present {
@@ -215,13 +218,14 @@ func tenantClaim(payload map[string]any, name string) (string, bool, error) {
 		// approval). Strictness still applies to any non-empty value below.
 		return "", false, nil
 	}
-	// Delegation to the canonical key-framing rule — the same rejection set
-	// as every other tenant input (control chars incl. KeySeparator 0x1F,
-	// whitespace, '/' and '\\'). The previous ad-hoc IsControl/IsSpace loop
-	// is fully subsumed: unicode.IsSpace covers every rune TrimSpace trims,
-	// so the padding rejection is unchanged. The error text is preserved
-	// exactly so token rejection stays a single non-oracular string.
-	if err := domain.ValidKeyComponent(name, identity); err != nil {
+	// Delegation to the canonical tenant rule — the same rejection set as
+	// every other tenant input (control chars incl. KeySeparator 0x1F,
+	// whitespace, '/' and '\\', plus ':' for stream-frame/dev-token
+	// ambiguity). The previous ad-hoc IsControl/IsSpace loop is fully
+	// subsumed: unicode.IsSpace covers every rune TrimSpace trims, so the
+	// padding rejection is unchanged. The error text is preserved exactly so
+	// token rejection stays a single non-oracular string.
+	if err := domain.ValidTenantIDComponent(name, identity); err != nil {
 		return "", false, fmt.Errorf("token %s claim is invalid", name)
 	}
 	return identity, true, nil
