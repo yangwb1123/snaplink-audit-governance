@@ -17,6 +17,10 @@
   `audit_dlq_unresolvable_total` 增长即触发。unresolvable 丢弃此前只留下
   `unresolvable event_id=...` 日志行，对告警不可见；现在 15 分钟内可见，
   收到告警请人工确认 accepted-topic retention / 重建事件。
+- **`-once`/cron 模式注意**：`/metrics` 只在常驻模式挂载（`-metrics-listen`
+  非空且未传 `-once`），cron `-once` 单轮部署不暴露新计数器，
+  `AuditDLQUnresolvableDrop` 不会触发；`-once` 部署如需不可解析丢弃告警，
+  请改用常驻模式。
 - **存量仪表盘注意**：依赖 `audit_dlq_replayed_total` 的看板在部署后会出现
   台阶式下降（收敛路径迁移到三个新计数器）。仓库内无其他消费者依赖旧语义
   （告警集从未使用该指标）。

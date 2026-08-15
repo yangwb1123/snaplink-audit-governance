@@ -106,9 +106,10 @@ func serveMetrics(address string, replayer *kafka.Replayer, logger *log.Logger) 
 
 // metricsText renders the replay resolution counters in the Prometheus text
 // format. The line order is pinned (golden-tested, T7): the three split
-// resolution counters sit between replayed and republish_failures, so the
-// original five lines keep their positions for dashboards that parse by
-// position and the new lines stay deterministic for tests and dashboards.
+// resolution counters sit between replayed and republish_failures, pushing
+// republish_failures and pending down by three lines. Consumers must parse
+// by metric name (as Prometheus does), not by position; the fixed order
+// keeps the output deterministic for tests and dashboards.
 func metricsText(m kafka.ReplayerMetrics) string {
 	return fmt.Sprintf(
 		"audit_dlq_records_total %d\n"+

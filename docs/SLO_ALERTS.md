@@ -18,8 +18,9 @@
 
 ## 2. 告警规则（映射到现有指标）
 
-> 已落地：`deploy/prometheus-rules.verify.yml`（12 条规则，3 组：audit-dlq /
-> audit-slo / audit-production）。本机可验证的 7 条 SLO 规则直接映射
+> 已落地：`deploy/prometheus-rules.verify.yml`（13 条规则，3 组：audit-dlq /
+> audit-slo / audit-production；audit-dlq 组含 `AuditDLQUnresolvableDrop`，
+> 对 unresolvable 永久丢弃告警，见 2026-08-15 release note）。本机可验证的 7 条 SLO 规则直接映射
 > audit-api `/metrics`；消费滞后与签名失败依赖生产形态指标（本机不提供，
 > 规则已声明待生产接入）；readyz 的 store/archive 503 由部署侧探针负责
 > （本机以 `AuditAPIDown`（up=0）兜底）。
