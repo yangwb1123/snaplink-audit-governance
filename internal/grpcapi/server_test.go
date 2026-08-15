@@ -402,6 +402,16 @@ func TestGRPCRejectsKeyFramingEventInvalidArgument(t *testing.T) {
 		t.Fatalf("Write with 0x1F event_id: code=%v, want InvalidArgument", status.Code(err))
 	}
 
+	// The FM-1 length cap funnels through the same boundary: an event_id
+	// above MaxArchiveComponentBytes maps to InvalidArgument (the gRPC field
+	// cap alone would admit it at 8KB, so this is the archive-component
+	// bound doing the rejection, matching the HTTP surface).
+	overCap := testProtoEvent("grpc-overcap", "crm")
+	overCap.EventId = strings.Repeat("a", domain.MaxArchiveComponentBytes+1)
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: overCap}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Write with over-cap event_id: code=%v, want InvalidArgument", status.Code(err))
+	}
+
 	// WriteBatch partial-acceptance contract: the valid prefix is committed
 	// to the ledger before the invalid tail aborts the batch. Unlike HTTP
 	// (which returns {receipts, error} in the body), gRPC error responses

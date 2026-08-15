@@ -15,6 +15,20 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+// TestS3StorePutKeyTooLongRejectedBeforeNetwork is the S3 leg of the F1
+// pre-flight guard: an over-limit key is rejected with the typed
+// ErrArchiveKeyTooLong before any network call. The scripted StatObject
+// sentinel proves the pre-flight returned before the first round trip.
+func TestS3StorePutKeyTooLongRejectedBeforeNetwork(t *testing.T) {
+	sentinel := errors.New("StatObject must not be called for an over-limit key")
+	fake := &fakeS3Client{objects: map[string][]byte{}, statErrs: []error{sentinel}}
+	store := NewS3StoreWithClient(fake, "audit-bucket")
+	key := strings.Repeat("events/", 300) // > 1024 bytes
+	if err := store.Put(context.Background(), key, []byte("boom")); !errors.Is(err, ErrArchiveKeyTooLong) {
+		t.Fatalf("Put err=%v, want ErrArchiveKeyTooLong (StatObject must not be reached)", err)
+	}
+}
+
 // fakeS3Client is a scripted s3Client for the WORM contract tests: objects
 // live in a map (tampering is simulated by mutating the stored bytes), and
 // the bucket configuration flags control Ready outcomes. All state is

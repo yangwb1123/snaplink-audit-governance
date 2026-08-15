@@ -77,6 +77,15 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 	if err := domain.ValidKeyComponent("source id", source.ID); err != nil {
 		return domain.SourceSystem{}, err
 	}
+	// FM-1 archive-component bound: source.ID is the source branch of
+	// Event.Stream(), whose archive key component is percent-encoded (3×
+	// expansion for non-safe bytes). A registration longer than
+	// domain.MaxArchiveComponentBytes could never produce an archivable
+	// stream, so it is rejected at the boundary instead of producing a
+	// source every event referencing it would fail to archive.
+	if err := domain.ValidArchiveComponentLength("source id", source.ID); err != nil {
+		return domain.SourceSystem{}, err
+	}
 	source.AllowedClientIDs = append([]string(nil), source.AllowedClientIDs...)
 	seen := make(map[string]struct{}, len(source.AllowedClientIDs))
 	for _, clientID := range source.AllowedClientIDs {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -15,6 +16,11 @@ func TestCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 	svc := testService(t, false)
 	rejected := []string{
 		"a\x1fb", "a b", " a", "a\tb", "a\nb", "\x00", "a/b", `a\b`, "a\u00a0b", "a:b",
+		// FM-1 archive-component bound: 86 bytes of punctuation (3× expansion
+		// = 258 > NAME_MAX) and 29 three-byte runes (87 bytes) are rejected at
+		// the boundary; 85 bytes / 28 runes are accepted below.
+		strings.Repeat("?", domain.MaxArchiveComponentBytes+1),
+		strings.Repeat("界", 29),
 	}
 	for _, id := range rejected {
 		err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true})
@@ -22,7 +28,7 @@ func TestCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 			t.Errorf("CreateTenant(id=%q) = %v, want ErrInvalid", id, err)
 		}
 	}
-	accepted := []string{"tenant-c", "a-b_c.d", "tëstant", "123"}
+	accepted := []string{"tenant-c", "a-b_c.d", "tëstant", "123", strings.Repeat("?", domain.MaxArchiveComponentBytes), strings.Repeat("界", 28)}
 	for _, id := range accepted {
 		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true}); err != nil {
 			t.Errorf("CreateTenant(id=%q) = %v, want nil", id, err)

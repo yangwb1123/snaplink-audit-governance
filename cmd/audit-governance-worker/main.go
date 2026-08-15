@@ -176,6 +176,12 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 			logger.Printf("tenant=%s archive_skipped=ready_probe_failed", tenant.ID)
 		} else if archived, archiveErr := svc.ArchivePending(tenant.ID); archiveErr != nil {
 			handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
+		} else {
+			// Dead-lettered objects are a handled outcome, not a pass error:
+			// log the outstanding count so operators see the FM-1/F-2 state
+			// on the normal success line (ListDeadLetters lists them).
+			deadLetters, _ := svc.ListDeadLetters(tenant.ID)
+			logger.Printf("tenant=%s archived=%d dead_lettered=%d", tenant.ID, archived, len(deadLetters))
 		}
 		report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
 		if reportErr != nil {

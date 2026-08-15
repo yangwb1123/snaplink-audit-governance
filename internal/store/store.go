@@ -58,6 +58,13 @@ type Snapshot struct {
 	// the snapshot document, so old snapshots decode as nil and normalize
 	// to an empty map — no migration is needed.
 	ArchiveConflictFailures map[string]int `json:"archive_conflict_failures,omitempty"`
+	// DeadLetters records per-tenant entries that will never archive (FM-1
+	// over-limit keys, F-2 byte-conflicting objects), keyed by
+	// EventKey(tenantID, eventID) for events and the synthetic segment id
+	// ("seg:<stream>:<first>-<last>") for sealed segments, which have no
+	// receipt. ArchivePending excludes them from the retry set. Old
+	// snapshots decode as nil and normalize to an empty map — no migration.
+	DeadLetters map[string]domain.DeadLetter `json:"dead_letters,omitempty"`
 }
 
 func NewSnapshot() *Snapshot {
@@ -77,6 +84,7 @@ func NewSnapshot() *Snapshot {
 		AdminActions:            []domain.AdminAction{},
 		AggregateCheckpoints:    []domain.AggregateCheckpoint{},
 		ArchiveConflictFailures: map[string]int{},
+		DeadLetters:             map[string]domain.DeadLetter{},
 	}
 }
 
@@ -125,6 +133,9 @@ func (s *Snapshot) normalize() {
 	}
 	if s.ArchiveConflictFailures == nil {
 		s.ArchiveConflictFailures = map[string]int{}
+	}
+	if s.DeadLetters == nil {
+		s.DeadLetters = map[string]domain.DeadLetter{}
 	}
 }
 

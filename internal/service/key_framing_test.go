@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,6 +309,84 @@ func TestAddSourceUpdateSourceRegisterSchemaRejectKeyFraming(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSourceRegistrationLengthCapBoundary is the FM-1 boundary-rejection pin
+// for source registration: source.ID becomes the source branch of
+// Event.Stream() (an archive key component, percent-encoded 3×), so a
+// registration longer than domain.MaxArchiveComponentBytes (85 bytes = POSIX
+// NAME_MAX ÷ 3) is rejected at AddSource and UpdateSource with ErrInvalid and
+// no snapshot mutation — the same cap ValidateBasic applies to the event's
+// source_system, keeping the registration surface consistent with the ingest
+// surface. Exactly 85 bytes is accepted end to end (a source is created and
+// an event on it archives).
+func TestSourceRegistrationLengthCapBoundary(t *testing.T) {
+	svc := testService(t, true)
+	punct85 := strings.Repeat("?", domain.MaxArchiveComponentBytes)
+	punct86 := strings.Repeat("?", domain.MaxArchiveComponentBytes+1)
+	runes28 := strings.Repeat("界", 28)
+	runes29 := strings.Repeat("界", 29)
+
+	for _, id := range []string{punct86, runes29} {
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("AddSource(id=%d bytes) = %v, want ErrInvalid", len(id), err)
+		}
+		if _, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("UpdateSource(id=%d bytes) = %v, want ErrInvalid", len(id), err)
+		}
+	}
+	// Rejections are side-effect free: no new source registered (testService
+	// pre-registers "crm", so compare against that baseline), no admin
+	// action appended.
+	sourcesBefore, actionsBefore := func() (int, int) {
+		var sources, actions int
+		if err := svc.Store.Read(func(data *store.Snapshot) error {
+			sources = len(data.Sources)
+			actions = len(data.AdminActions)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return sources, actions
+	}()
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if len(data.Sources) != sourcesBefore {
+			t.Fatalf("over-cap source registrations mutated the snapshot: %d → %d sources", sourcesBefore, len(data.Sources))
+		}
+		if len(data.AdminActions) != actionsBefore {
+			t.Fatalf("over-cap source registrations appended admin actions: %d → %d", actionsBefore, len(data.AdminActions))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Boundary: exactly 85 bytes register fine (the registration cap is the
+	// raw-component bound). A safe-alphabet 85-byte source archives end to
+	// end (identity encoding ⇒ the whole encoded stream component fits
+	// NAME_MAX); the punctuation source, whose 3× encoded component plus the
+	// tenant:source: prefix exceeds NAME_MAX, is caught by the archive
+	// pre-flight and dead-lettered — the layered defense pinned by
+	// TestArchiveStoreBoundaryCatchesCapBoundaryEvent.
+	for _, id := range []string{punct85, runes28} {
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); err != nil {
+			t.Errorf("AddSource(id=%d bytes) = %v, want nil", len(id), err)
+		}
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: strings.Repeat("a", domain.MaxArchiveComponentBytes), Name: "X-safe", Active: true, AllowedClientIDs: []string{"crm"}}); err != nil {
+		t.Fatalf("AddSource(85 safe bytes) = %v, want nil", err)
+	}
+	at := time.Unix(1_700_000_010, 0).UTC()
+	event := testEvent("evt-src-boundary", "", at) // no aggregate/operation ⇒ source branch
+	event.AggregateType = ""
+	event.AggregateID = ""
+	event.SourceSystem = strings.Repeat("a", domain.MaxArchiveComponentBytes)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusArchived)
+	if err != nil {
+		t.Fatalf("ingest on 85-byte source: %v", err)
+	}
+	if receipt.Status != domain.StatusArchived {
+		t.Fatalf("ingest on 85-byte source status=%s, want StatusArchived", receipt.Status)
 	}
 }
 

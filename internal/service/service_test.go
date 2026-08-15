@@ -15,6 +15,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/fsutil"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
 )
@@ -132,7 +133,7 @@ func TestIngestIdempotencyConflictAndIntegrity(t *testing.T) {
 	if !result.Valid || result.EventCount != 2 || result.SegmentCount != 1 {
 		t.Fatalf("integrity failed: %+v", result)
 	}
-	archiveFile := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", "tenant-a_aggregate_invoice_inv-1", "00000000000000000001-evt-1.json")
+	archiveFile := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", safeName("tenant-a:aggregate:invoice:inv-1"), "00000000000000000001-evt-1.json")
 	if _, err := os.Stat(archiveFile); err != nil {
 		t.Fatalf("archive event missing: %v", err)
 	}
@@ -893,7 +894,7 @@ func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
 	// Seed a tampered object at the exact archive path archiveEvent computes
 	// for the first event of the stream (sequence 1, same layout as the
 	// pinned path in TestIngestIdempotencyConflictAndIntegrity).
-	archivePath := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", "tenant-a_aggregate_invoice_inv-1", fmt.Sprintf("%020d-%s.json", 1, event.EventID))
+	archivePath := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", safeName("tenant-a:aggregate:invoice:inv-1"), fmt.Sprintf("%020d-%s.json", 1, event.EventID))
 	if err := os.MkdirAll(filepath.Dir(archivePath), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -1657,5 +1658,724 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 	integrity, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !integrity.Valid {
 		t.Fatalf("integrity after out-of-order ingest: %+v %v", integrity, err)
+	}
+}
+
+// TestArchivePendingIsolatesOverlongEvent is the F1 acceptance test: an
+// out-of-contract event_id whose percent-encoded archive component exceeds
+// NAME_MAX fails loudly and permanently (typed ErrArchiveKeyTooLong from the
+// archive pre-flight, receipt stays StatusIndexed, no object written, the
+// event dead-lettered with reason archive_key_too_long), but the same
+// ArchivePending pass still converges the tenant's healthy backlog — one
+// doomed object must not wedge the tenant (the pre-fix
+// abort-on-first-failure behavior). The API boundary now rejects over-limit
+// identifiers at ingest (MaxArchiveComponentBytes), so the doomed event is
+// seeded directly — the state that pre-existing or snapshot-injected data
+// can still reach.
+func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
+	svc := testService(t, true)
+	// Phase 1: healthy events land in the ArchivePending backlog (every Put
+	// fails at ingest), so the same pass must archive them alongside the
+	// doomed over-limit event.
+	archiveStub := &recordingArchive{fail: true}
+	svc.Config.Archive = archiveStub
+	base := time.Unix(1_700_000_010, 0).UTC()
+	for i := 1; i <= 3; i++ {
+		receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent(fmt.Sprintf("evt-ok-%d", i), "op-ok", base.Add(time.Duration(i)*time.Second)), domain.StatusLedgered)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if receipt.Status != domain.StatusIndexed {
+			t.Fatalf("event %d status=%s, want StatusIndexed (failing archive)", i, receipt.Status)
+		}
+	}
+	// Phase 2: the doomed over-limit event. 200 '?' bytes encode to 600
+	// bytes — over the 255-byte NAME_MAX component bound — so its Put fails
+	// with the typed pre-flight error before any write. The API boundary
+	// rejects it at ingest, so it is seeded directly like pre-existing data.
+	svc.Config.Archive = &archive.FileStore{Dir: svc.Config.ArchiveDir}
+	overlong := strings.Repeat("?", 200)
+	overlongEvent := testEvent(overlong, "op-overlong", base.Add(time.Minute))
+	overlongEvent.TenantID = "tenant-a" // testEvent leaves it empty; ingest stamps it
+	overlongEvent.StreamID = "tenant-a:aggregate:invoice:inv-1"
+	overlongEvent.Sequence = 4
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		key := store.EventKey("tenant-a", overlong)
+		data.Events[key] = overlongEvent
+		data.Receipts[key] = domain.EventReceipt{EventID: overlong, TenantID: "tenant-a", Status: domain.StatusIndexed, StreamID: overlongEvent.StreamID, Sequence: overlongEvent.Sequence}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Phase 3: one pass must archive the healthy backlog and dead-letter the
+	// doomed object — not abort on it and not return a pass error.
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil {
+		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
+	}
+	if count != 3 {
+		t.Fatalf("ArchivePending archived %d, want 3 (healthy backlog converged despite the doomed object)", count)
+	}
+	for i := 1; i <= 3; i++ {
+		got, gErr := svc.GetReceipt("tenant-a", "", fmt.Sprintf("evt-ok-%d", i))
+		if gErr != nil {
+			t.Fatal(gErr)
+		}
+		if got.Status != domain.StatusArchived {
+			t.Fatalf("healthy event %d status=%s after pass, want StatusArchived", i, got.Status)
+		}
+	}
+	// The doomed event is dead-lettered: receipt stays StatusIndexed with a
+	// typed error code, and the persisted record carries the reason.
+	got, err := svc.GetReceipt("tenant-a", "", overlong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusIndexed {
+		t.Fatalf("overlong event status=%s, want StatusIndexed (permanent failure stays visible)", got.Status)
+	}
+	if got.ErrorCode != "archive_dead_letter" {
+		t.Fatalf("overlong receipt ErrorCode=%q, want archive_dead_letter", got.ErrorCode)
+	}
+	deadLetters, err := svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 || deadLetters[0].EventID != overlong || deadLetters[0].Reason != "archive_key_too_long" {
+		t.Fatalf("dead letters = %+v, want exactly [{%s archive_key_too_long}]", deadLetters, overlong)
+	}
+	// The doomed object was never written (pre-flight rejects the key before
+	// any filesystem mutation). A stat on the doomed key itself returns
+	// ENAMETOOLONG (its filename component exceeds NAME_MAX), so assert the
+	// stream directory contains exactly the three healthy objects and no
+	// over-limit name.
+	streamDir := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", safeName("tenant-a:aggregate:invoice:inv-1"))
+	entries, err := os.ReadDir(streamDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if len(entry.Name()) > 100 { // the encoded doomed name is 626 bytes
+			t.Fatalf("doomed object was written: %q", entry.Name())
+		}
+	}
+	if len(entries) != 3 {
+		t.Fatalf("stream dir has %d objects, want 3 (no doomed object, no partial write)", len(entries))
+	}
+	// A second pass excludes the dead-lettered event: nothing to archive, no
+	// new dead letters, no error.
+	count2, err := svc.ArchivePending("tenant-a")
+	if err != nil || count2 != 0 {
+		t.Fatalf("second pass = %d, %v; want 0, nil (dead-lettered event excluded from retry)", count2, err)
+	}
+	deadLetters, err = svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 {
+		t.Fatalf("dead letters after second pass = %d, want 1 (no re-dead-letter churn)", len(deadLetters))
+	}
+}
+
+// TestArchiveStoreBoundaryCatchesCapBoundaryEvent is the layered-defense pin
+// for the FM-1 pre-flight: an event_id of exactly MaxArchiveComponentBytes
+// (85) passes the API boundary, but its percent-encoded event filename
+// component (20-digit sequence + '-' + 3·85 + ".json" = 281 bytes) exceeds
+// NAME_MAX. The store-boundary check — not the identifier caps, which only
+// bound the raw component — rejects the key with the typed
+// ErrArchiveKeyTooLong before any write, the receipt stays StatusIndexed at
+// ingest, and the next ArchivePending pass dead-letters the event (bounded,
+// tenant-backlog unaffected).
+func TestArchiveStoreBoundaryCatchesCapBoundaryEvent(t *testing.T) {
+	svc := testService(t, true)
+	eventID := strings.Repeat("?", domain.MaxArchiveComponentBytes)
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent(eventID, "op-boundary", time.Unix(1_700_000_010, 0).UTC()), domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("cap-boundary event status=%s, want StatusIndexed (store pre-flight rejects the over-limit filename component)", receipt.Status)
+	}
+	// The object was never written and the stream directory was never even
+	// created: the pre-flight ran before any mkdir.
+	streamDir := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", safeName("tenant-a:aggregate:invoice:inv-1"))
+	entries, err := os.ReadDir(streamDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("stream dir must stay empty, got %d entries", len(entries))
+	}
+	// The next pass dead-letters the event with the typed reason.
+	if _, err := svc.ArchivePending("tenant-a"); err != nil {
+		t.Fatalf("ArchivePending err=%v, want nil (dead-letter is a handled outcome)", err)
+	}
+	dead, err := svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 1 || dead[0].EventID != eventID || dead[0].Reason != "archive_key_too_long" {
+		t.Fatalf("dead letters = %+v, want exactly [{%s archive_key_too_long}]", dead, eventID)
+	}
+	// The receipt records the typed error, and a second pass does not retry
+	// the doomed event.
+	got, err := svc.GetReceipt("tenant-a", "", eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusIndexed || got.ErrorCode != "archive_dead_letter" {
+		t.Fatalf("receipt = %+v, want StatusIndexed + archive_dead_letter", got)
+	}
+	if count, err := svc.ArchivePending("tenant-a"); err != nil || count != 0 {
+		t.Fatalf("second pass = %d, %v; want 0, nil", count, err)
+	}
+}
+
+// crossTenantCollisionPair returns the two tenant IDs whose historical lossy
+// safeName framing collapsed onto the same archive directory ("a?b" and
+// "a_b" both sanitized to "a_b"); both are ValidTenantID-valid, so the pair
+// is the reachable cross-tenant instance of the supplied "a:b"/"a_b" check
+// ("a:b" itself is rejected at the tenant layer by deliberate design).
+func crossTenantCollisionPair() []string { return []string{"a?b", "a_b"} }
+
+// seedInjectiveCollisionFixture ingests the reachable lossy-safeName
+// collision fixtures end to end on svc (which must be archive-enabled): the
+// cross-tenant pair "a?b"/"a_b" (two events each, sealing one segment per
+// tenant at SegmentSize 2) and the stream-layer colon pair OperationID
+// "a:b"/"a_b" in tenant-a (two events each, Event.Stream() deriving
+// tenant-a:operation:a:b and tenant-a:operation:a_b). Every ingest waits for
+// StatusArchived, so a pre-fix run fails the status assertion exactly where
+// the collision degraded the losing receipt to StatusIndexed. Returns every
+// receipt for later convergence assertions.
+func seedInjectiveCollisionFixture(t *testing.T, svc *Service) []domain.EventReceipt {
+	t.Helper()
+	at := time.Unix(1_700_000_010, 0).UTC()
+	var receipts []domain.EventReceipt
+	for _, tenantID := range crossTenantCollisionPair() {
+		if err := store.ValidTenantID(tenantID); err != nil {
+			t.Fatalf("fixture tenant %q must be ValidTenantID-valid: %v", tenantID, err)
+		}
+		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: "T " + tenantID, Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 2; i++ {
+			event := testEvent(fmt.Sprintf("evt-%d", i), "op-"+tenantID, at.Add(time.Duration(i)*time.Second))
+			receipt, err := svc.Ingest(testCtx, tenantID, crmPrincipal, event, domain.StatusArchived)
+			if err != nil {
+				t.Fatalf("tenant %q event %d ingest failed: %v", tenantID, i, err)
+			}
+			if receipt.Status != domain.StatusArchived {
+				t.Fatalf("tenant %q event %d status = %s, want StatusArchived (receipt %+v)", tenantID, i, receipt.Status, receipt)
+			}
+			receipts = append(receipts, receipt)
+		}
+	}
+	// Stream-layer colon pair: operation_id is colon-permissive, so
+	// OperationID "a:b" and "a_b" derive distinct streams whose lossy
+	// archive dirs collided ("tenant-a_operation_a_b").
+	prefixes := map[string]string{"a:b": "op-colon", "a_b": "op-us"}
+	for _, op := range []string{"a:b", "a_b"} {
+		for i := 1; i <= 2; i++ {
+			event := testEvent(fmt.Sprintf("%s-%d", prefixes[op], i), op, at.Add(10*time.Second+time.Duration(i)*time.Second))
+			event.AggregateType = ""
+			event.AggregateID = ""
+			receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusArchived)
+			if err != nil {
+				t.Fatalf("operation %q event %d ingest failed: %v", op, i, err)
+			}
+			if receipt.Status != domain.StatusArchived {
+				t.Fatalf("operation %q event %d status = %s, want StatusArchived (receipt %+v)", op, i, receipt.Status, receipt)
+			}
+			receipts = append(receipts, receipt)
+		}
+	}
+	return receipts
+}
+
+// TestArchiveInjectiveCrossTenantPair is AC-2 T4: the reachable cross-tenant
+// instance of the supplied "a:b"/"a_b" check. "a?b" and "a_b" are both
+// ValidTenantID-valid and both collapsed to the archive dir "a_b" under the
+// historical lossy framing; under the injective encoding both tenants
+// archive to distinct keys, both receipts reach StatusArchived, and both
+// streams' segment manifests exist.
+func TestArchiveInjectiveCrossTenantPair(t *testing.T) {
+	svc := testService(t, true)
+	seedInjectiveCollisionFixture(t, svc)
+	a, b := crossTenantCollisionPair()[0], crossTenantCollisionPair()[1]
+	streamFor := func(tenantID string) string { return tenantID + ":aggregate:invoice:inv-1" }
+	// The encoded tenant and stream components are distinct (the lossy map
+	// collapsed them).
+	if encA, encB := fsutil.EncodeKeyComponent(a), fsutil.EncodeKeyComponent(b); encA == encB {
+		t.Fatalf("fixture tenants encode identically: %q", encA)
+	}
+	if encA, encB := fsutil.EncodeKeyComponent(streamFor(a)), fsutil.EncodeKeyComponent(streamFor(b)); encA == encB {
+		t.Fatalf("fixture streams encode identically: %q", encA)
+	}
+	// Both tenants' event objects exist under distinct encoded dirs and the
+	// canonical bytes differ (tenant_id is embedded in the object).
+	objects := map[string][]byte{}
+	for _, tenantID := range []string{a, b} {
+		for _, seq := range []int64{1, 2} {
+			path := filepath.Join(svc.Config.ArchiveDir, "events", fsutil.EncodeKeyComponent(tenantID), fsutil.EncodeKeyComponent(streamFor(tenantID)), fmt.Sprintf("%020d-evt-%d.json", seq, seq))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("tenant %q event %d archive object missing at %s: %v", tenantID, seq, path, err)
+			}
+			objects[fmt.Sprintf("%s|%d", tenantID, seq)] = data
+		}
+	}
+	for _, seq := range []int64{1, 2} {
+		key := func(tenantID string) string { return fmt.Sprintf("%s|%d", tenantID, seq) }
+		if bytes.Equal(objects[key(a)], objects[key(b)]) {
+			t.Fatalf("cross-tenant archive objects at sequence %d are byte-identical (tenant_id must differ)", seq)
+		}
+	}
+	// Both streams' segment manifests exist (two events at SegmentSize 2
+	// seal exactly one segment per tenant).
+	for _, tenantID := range []string{a, b} {
+		manifest := filepath.Join(svc.Config.ArchiveDir, "segments", fsutil.EncodeKeyComponent(tenantID), fsutil.EncodeKeyComponent(streamFor(tenantID)), "00000000000000000001-00000000000000000002.manifest.json")
+		if _, err := os.Stat(manifest); err != nil {
+			t.Fatalf("tenant %q segment manifest missing at %s: %v", tenantID, manifest, err)
+		}
+	}
+}
+
+// TestArchiveInjectiveColonStreamPair is AC-2 T5: the direction's exact
+// "a:b"/"a_b" pair at the stream layer, where ':' is legal (operation_id is
+// colon-permissive; Event.Stream() derives tenant-a:operation:a:b and
+// tenant-a:operation:a_b). Both streams collapsed to the single archive dir
+// "tenant-a_operation_a_b" under the historical lossy framing; under the
+// injective encoding both archive and both receipts reach StatusArchived.
+func TestArchiveInjectiveColonStreamPair(t *testing.T) {
+	svc := testService(t, true)
+	receipts := seedInjectiveCollisionFixture(t, svc)
+	colon, us := "tenant-a:operation:a:b", "tenant-a:operation:a_b"
+	if enc := fsutil.EncodeKeyComponent(colon); enc != "tenant-a%3Aoperation%3Aa%3Ab" {
+		t.Fatalf("EncodeKeyComponent(%q) = %q, want tenant-a%%3Aoperation%%3Aa%%3Ab", colon, enc)
+	}
+	if enc := fsutil.EncodeKeyComponent(us); enc != "tenant-a%3Aoperation%3Aa_b" {
+		t.Fatalf("EncodeKeyComponent(%q) = %q, want tenant-a%%3Aoperation%%3Aa_b", us, enc)
+	}
+	receiptByID := map[string]domain.EventReceipt{}
+	for _, r := range receipts {
+		receiptByID[r.EventID] = r
+	}
+	// Both streams' event objects exist under distinct encoded stream dirs.
+	for _, tc := range []struct{ stream, eventID string }{
+		{colon, "op-colon-1"}, {colon, "op-colon-2"},
+		{us, "op-us-1"}, {us, "op-us-2"},
+	} {
+		path := filepath.Join(svc.Config.ArchiveDir, "events", "tenant-a", fsutil.EncodeKeyComponent(tc.stream), fmt.Sprintf("%020d-%s.json", receiptByID[tc.eventID].Sequence, tc.eventID))
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("stream %q event %s archive object missing at %s: %v", tc.stream, tc.eventID, path, err)
+		}
+	}
+	// Both streams' segment manifests exist under distinct encoded dirs.
+	for _, stream := range []string{colon, us} {
+		manifest := filepath.Join(svc.Config.ArchiveDir, "segments", "tenant-a", fsutil.EncodeKeyComponent(stream), "00000000000000000001-00000000000000000002.manifest.json")
+		if _, err := os.Stat(manifest); err != nil {
+			t.Fatalf("stream %q segment manifest missing at %s: %v", stream, manifest, err)
+		}
+	}
+}
+
+// TestArchivePendingConvergesAfterInjectiveFix is AC-2 T6: after the
+// colliding identifiers archived, ArchivePending must not regress any
+// receipt and must not write new objects. This is the convergence property
+// the pre-fix code never satisfied: a collided receipt stayed StatusIndexed
+// and ArchivePending retried the same failing WORM key on every pass.
+func TestArchivePendingConvergesAfterInjectiveFix(t *testing.T) {
+	svc := testService(t, true)
+	receipts := seedInjectiveCollisionFixture(t, svc)
+	archiveListing := func() map[string]int {
+		t.Helper()
+		files := map[string]int{}
+		err := filepath.WalkDir(svc.Config.ArchiveDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(svc.Config.ArchiveDir, path)
+			if err != nil {
+				return err
+			}
+			files[rel]++
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	before := archiveListing()
+	for _, tenantID := range append(crossTenantCollisionPair(), "tenant-a") {
+		if _, err := svc.ArchivePending(tenantID); err != nil {
+			t.Fatalf("ArchivePending(%q) failed: %v", tenantID, err)
+		}
+	}
+	after := archiveListing()
+	if len(before) != len(after) {
+		t.Fatalf("ArchivePending wrote or removed objects: %d → %d files", len(before), len(after))
+	}
+	for rel, n := range before {
+		if after[rel] != n {
+			t.Fatalf("archive listing changed at %q: %d → %d", rel, n, after[rel])
+		}
+	}
+	// No receipt regressed: every seeded receipt is still StatusArchived.
+	for _, r := range receipts {
+		got, err := svc.GetReceipt(r.TenantID, "", r.EventID)
+		if err != nil {
+			t.Fatalf("GetReceipt(%q, %q) failed: %v", r.TenantID, r.EventID, err)
+		}
+		if got.Status != domain.StatusArchived {
+			t.Fatalf("receipt %s/%s regressed to %s after ArchivePending", r.TenantID, r.EventID, got.Status)
+		}
+	}
+}
+
+// TestIngestRejectsOversizedIdentifierAtBoundary is the API-boundary pin for
+// the new length caps: an event whose event_id / source_system / operation_id
+// exceeds MaxArchiveComponentBytes (85 bytes = NAME_MAX ÷ 3, the FM-1
+// expansion bound) is rejected by Ingest with ErrInvalid before anything
+// reaches the ledger or the archive — the FM-1 window (a validator-valid
+// identifier whose 3× encoded archive key exceeds the backend limits) is
+// closed at the boundary instead of producing a permanently unarchivable
+// receipt. Exactly 85 bytes is accepted and archives.
+func TestIngestRejectsOversizedIdentifierAtBoundary(t *testing.T) {
+	svc := testService(t, true)
+	at := time.Unix(1_700_000_010, 0).UTC()
+	cases := map[string]func(domain.Event) domain.Event{
+		"event id":     func(e domain.Event) domain.Event { e.EventID = strings.Repeat("a", 86); return e },
+		"source":       func(e domain.Event) domain.Event { e.SourceSystem = strings.Repeat("a", 86); return e },
+		"operation id": func(e domain.Event) domain.Event { e.OperationID = strings.Repeat("a", 86); return e },
+	}
+	for name, mutate := range cases {
+		event := mutate(testEvent("evt-boundary-"+name, "op-b", at))
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("%s: Ingest err=%v, want ErrInvalid", name, err)
+		}
+	}
+	// Nothing reached the ledger or the archive: no receipts, no events, no
+	// objects (the rejections happened before any write).
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Receipts) != 0 || len(snap.Events) != 0 {
+		t.Fatalf("boundary-rejected events reached the ledger: receipts=%d events=%d", len(snap.Receipts), len(snap.Events))
+	}
+	// Boundary: exactly 85 bytes (safe alphabet ⇒ identity encoding ⇒ the
+	// 26-byte filename overhead still fits NAME_MAX) is accepted end to end.
+	event := testEvent(strings.Repeat("a", 85), "op-b", at.Add(time.Second))
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusArchived)
+	if err != nil {
+		t.Fatalf("85-byte event_id ingest: %v", err)
+	}
+	if receipt.Status != domain.StatusArchived {
+		t.Fatalf("85-byte event_id status=%s, want StatusArchived", receipt.Status)
+	}
+	// 86 bytes of non-safe content is also rejected (the cap is byte-based).
+	event = testEvent(strings.Repeat("?", 86), "op-b", at.Add(2*time.Second))
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("86-byte punctuation event_id: err=%v, want ErrInvalid", err)
+	}
+}
+
+// TestArchivePendingDeadLettersOversizedWhileHealthyArchive is the FM-1
+// dead-letter E2E: one oversized identifier (whose 3× encoded archive key
+// exceeds NAME_MAX — seeded directly, since the API boundary now rejects it)
+// is dead-lettered while 100 healthy events in the same ArchivePending pass
+// reach StatusArchived. Pre-fix, the pass aborted on the first failure and
+// the whole tenant's backlog wedged forever.
+func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
+	svc := testService(t, true)
+	realStore := svc.Config.Archive
+	// Healthy events: ingest through a failing archive stub so every receipt
+	// lands StatusIndexed (the pre-ArchivePending state).
+	stub := &recordingArchive{fail: true}
+	svc.Config.Archive = stub
+	at := time.Unix(1_700_000_010, 0).UTC()
+	const healthy = 100
+	for i := 1; i <= healthy; i++ {
+		receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent(fmt.Sprintf("evt-%d", i), "op-dl", at.Add(time.Duration(i)*time.Second)), domain.StatusLedgered)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if receipt.Status != domain.StatusIndexed {
+			t.Fatalf("event %d status=%s, want StatusIndexed (failing archive stub)", i, receipt.Status)
+		}
+	}
+	// The oversized identifier: 200 '?' bytes encode to 600 bytes — over the
+	// 255-byte NAME_MAX component bound (the event filename also carries the
+	// 26-byte sequence prefix and extension). Seed it directly with a
+	// StatusIndexed receipt; only pre-existing or snapshot-injected data can
+	// reach this state now that the API cap rejects it at the boundary.
+	oversized := strings.Repeat("?", 200)
+	bigEvent := testEvent(oversized, "op-dl", at.Add(time.Duration(healthy+1)*time.Second))
+	bigEvent.TenantID = "tenant-a" // testEvent leaves it empty; ingest stamps it
+	bigEvent.StreamID = "tenant-a:aggregate:invoice:inv-1"
+	bigEvent.Sequence = healthy + 1
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		key := store.EventKey("tenant-a", oversized)
+		data.Events[key] = bigEvent
+		data.Receipts[key] = domain.EventReceipt{EventID: oversized, TenantID: "tenant-a", Status: domain.StatusIndexed, StreamID: bigEvent.StreamID, Sequence: bigEvent.Sequence}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One pass with the real store: 100 healthy receipts reach
+	// StatusArchived, the oversized event is dead-lettered (no error).
+	svc.Config.Archive = realStore
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil {
+		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
+	}
+	if count != healthy {
+		t.Fatalf("ArchivePending archived %d, want %d", count, healthy)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= healthy; i++ {
+		if r := snap.Receipts[store.EventKey("tenant-a", fmt.Sprintf("evt-%d", i))]; r.Status != domain.StatusArchived {
+			t.Fatalf("healthy event %d status=%s, want StatusArchived", i, r.Status)
+		}
+	}
+	// The oversized event: receipt stays StatusIndexed with the typed error,
+	// and the persisted dead-letter record flags the state.
+	bigReceipt := snap.Receipts[store.EventKey("tenant-a", oversized)]
+	if bigReceipt.Status != domain.StatusIndexed {
+		t.Fatalf("oversized receipt status=%s, want StatusIndexed", bigReceipt.Status)
+	}
+	if bigReceipt.ErrorCode != "archive_dead_letter" {
+		t.Fatalf("oversized receipt ErrorCode=%q, want archive_dead_letter", bigReceipt.ErrorCode)
+	}
+	deadLetters, err := svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 || deadLetters[0].EventID != oversized || deadLetters[0].Reason != "archive_key_too_long" {
+		t.Fatalf("dead letters = %+v, want exactly [{%s archive_key_too_long}]", deadLetters, oversized)
+	}
+	// No object exists at the oversized key (the archive pre-flight rejected
+	// the key before any write).
+	doomedKey := fmt.Sprintf("events/tenant-a/%s/%020d-%s.json", fsutil.EncodeKeyComponent(bigEvent.StreamID), bigEvent.Sequence, fsutil.EncodeKeyComponent(oversized))
+	if _, err := realStore.Get(context.Background(), doomedKey); err == nil {
+		t.Fatalf("object exists at the doomed key %s (pre-flight must prevent any write)", doomedKey)
+	}
+	// A second pass excludes the dead-lettered event from the retry set and
+	// does not re-dead-letter anything.
+	count2, err := svc.ArchivePending("tenant-a")
+	if err != nil || count2 != 0 {
+		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
+	}
+	deadLetters, err = svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 {
+		t.Fatalf("dead letters after second pass = %d, want 1 (no re-dead-letter churn)", len(deadLetters))
+	}
+}
+
+// TestArchiveLegacyCollisionDeadLetterDetectable is the F-2 regression test:
+// a byte-different object occupying the exact key ArchivePending computes
+// (here: the pre-injective lossy framing's leftover — the colliding tenant
+// "a?b"'s canonical bytes at the plain-name tenant "a_b"'s key) is a
+// permanent, loud failure: the event is dead-lettered with reason
+// archive_object_conflict, the WORM object is never overwritten or removed,
+// the healthy backlog in the same pass still reaches StatusArchived, and
+// ListDeadLetters flags exactly the collided state. ClearDeadLetter forces a
+// bounded operator retry cycle that re-detects the persistent conflict.
+func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
+	svc := testService(t, true)
+	realStore := svc.Config.Archive
+	// The plain-name colliding tenant: ingest through a failing stub so both
+	// receipts land StatusIndexed with no object on disk yet.
+	stub := &recordingArchive{fail: true}
+	svc.Config.Archive = stub
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "a_b", Name: "T a_b", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "a_b", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "a_b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1_700_000_010, 0).UTC()
+	event := testEvent("evt-1", "op-collide", at)
+	receipt, err := svc.Ingest(testCtx, "a_b", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != domain.StatusIndexed {
+		t.Fatalf("evt-1 status=%s, want StatusIndexed (failing stub)", receipt.Status)
+	}
+	// A second healthy event must archive in the same pass (wedge fixed).
+	receipt2, err := svc.Ingest(testCtx, "a_b", crmPrincipal, testEvent("evt-2", "op-collide", at.Add(time.Second)), domain.StatusLedgered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt2.Status != domain.StatusIndexed {
+		t.Fatalf("evt-2 status=%s, want StatusIndexed (failing stub)", receipt2.Status)
+	}
+	// Seed the legacy foreign object at the exact key ArchivePending will
+	// compute for evt-1: the colliding tenant's canonical bytes (pre-injective
+	// lossy framing wrote them at this tenant's directory).
+	svc.Config.Archive = realStore
+	stream := "a_b:aggregate:invoice:inv-1"
+	key := fmt.Sprintf("events/a_b/%s/%020d-%s.json", fsutil.EncodeKeyComponent(stream), receipt.Sequence, "evt-1")
+	legacy := event
+	legacy.TenantID = "a?b"
+	legacy.StreamID = "a?b:aggregate:invoice:inv-1"
+	legacyBytes, err := domain.CanonicalJSON(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := realStore.Put(context.Background(), key, legacyBytes); err != nil {
+		t.Fatal(err)
+	}
+	// One pass: the healthy event archives, the collision is dead-lettered —
+	// the pass completes with no error.
+	count, err := svc.ArchivePending("a_b")
+	if err != nil {
+		t.Fatalf("ArchivePending err=%v, want nil", err)
+	}
+	if count != 1 {
+		t.Fatalf("archived=%d, want 1 (only evt-2 archives)", count)
+	}
+	got2, err := svc.GetReceipt("a_b", "", "evt-2")
+	if err != nil || got2.Status != domain.StatusArchived {
+		t.Fatalf("evt-2 receipt=%+v err=%v, want StatusArchived (wedge fixed)", got2, err)
+	}
+	// The collided event: receipt stays StatusIndexed with the typed error;
+	// ListDeadLetters flags exactly this state (the detection surface).
+	got, err := svc.GetReceipt("a_b", "", "evt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusIndexed {
+		t.Fatalf("evt-1 status=%s, want StatusIndexed (permanent failure stays visible)", got.Status)
+	}
+	if got.ErrorCode != "archive_dead_letter" {
+		t.Fatalf("evt-1 ErrorCode=%q, want archive_dead_letter", got.ErrorCode)
+	}
+	deadLetters, err := svc.ListDeadLetters("a_b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 || deadLetters[0].EventID != "evt-1" || deadLetters[0].Reason != "archive_object_conflict" {
+		t.Fatalf("dead letters = %+v, want exactly [{%s archive_object_conflict}]", deadLetters, "evt-1")
+	}
+	// WORM: the legacy object is byte-identical to what was seeded (never
+	// overwritten, never removed).
+	stored, err := realStore.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, legacyBytes) {
+		t.Fatalf("legacy object at %s was modified: got %q want %q", key, stored, legacyBytes)
+	}
+	// A second pass excludes the dead-lettered event from the retry set.
+	count2, err := svc.ArchivePending("a_b")
+	if err != nil || count2 != 0 {
+		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
+	}
+	// Operator remediation cycle: clearing forces a retry, which re-detects
+	// the persistent conflict and re-dead-letters — the loop stays bounded.
+	if err := svc.ClearDeadLetter("a_b", "evt-1"); err != nil {
+		t.Fatal(err)
+	}
+	count3, err := svc.ArchivePending("a_b")
+	if err != nil || count3 != 0 {
+		t.Fatalf("post-clear pass = %d, %v; want 0, nil", count3, err)
+	}
+	deadLetters, err = svc.ListDeadLetters("a_b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadLetters) != 1 || deadLetters[0].Reason != "archive_object_conflict" {
+		t.Fatalf("dead letters after clear+retry = %+v, want the re-detected collision", deadLetters)
+	}
+}
+
+// TestArchivePendingExcludesDeadLetteredSegment pins the segment half of the
+// dead-letter exclusion invariant: a sealed segment whose manifest key is
+// occupied by a byte-different object is dead-lettered (synthetic "seg:…"
+// event id — segments have no receipt) and later passes never re-attempt it.
+// Without the exclusion, one doomed segment would churn a verify read (or
+// abort the whole pass under a failing store) on every run — the same
+// head-of-line hazard the event exclusion removes.
+func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
+	svc := testService(t, true)
+	realStore := svc.Config.Archive
+	// A sealed segment whose manifest key a byte-different object already
+	// occupies (the F-2 legacy/cross-deployment state). The store record is
+	// seeded directly: ArchivePending is the first writer of a manifest only
+	// in the injective world, and here the conflicting object predates it.
+	segment := domain.Segment{TenantID: "tenant-a", StreamID: "tenant-a:aggregate:invoice:inv-1", FirstSequence: 1, LastSequence: 2, EventCount: 2}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Segments[store.StreamKey("tenant-a", segment.StreamID)] = []domain.Segment{segment}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifestKey := fmt.Sprintf("segments/%s/%s/%020d-%020d.manifest.json",
+		fsutil.EncodeKeyComponent("tenant-a"), fsutil.EncodeKeyComponent(segment.StreamID),
+		segment.FirstSequence, segment.LastSequence)
+	legacy := segment
+	legacy.LastSequence = 99 // canonical JSON differs, so verifyExistingObject must reject it
+	legacyBytes, err := domain.CanonicalJSON(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := realStore.Put(context.Background(), manifestKey, legacyBytes); err != nil {
+		t.Fatal(err)
+	}
+	// Pass 1: the segment is dead-lettered; the pass completes with no error
+	// (nothing else is pending).
+	count, err := svc.ArchivePending("tenant-a")
+	if err != nil || count != 0 {
+		t.Fatalf("pass 1 = %d, %v; want 0, nil", count, err)
+	}
+	dead, err := svc.ListDeadLetters("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 1 || dead[0].Reason != "archive_object_conflict" || !isSegmentDeadLetter(dead[0]) {
+		t.Fatalf("dead letters = %+v, want exactly the synthetic seg entry with reason archive_object_conflict", dead)
+	}
+	// WORM: the seeded object is byte-identical (never overwritten, never
+	// removed).
+	stored, err := realStore.Get(context.Background(), manifestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, legacyBytes) {
+		t.Fatalf("manifest at %s was modified: got %q want %q", manifestKey, stored, legacyBytes)
+	}
+	// Pass 2 under a store that fails every Put: the excluded segment is not
+	// re-attempted, so the pass is a quiet no-op — zero Puts, zero errors.
+	// Without the exclusion this pass would attempt the doomed manifest and
+	// abort on the first (non-permanent) store failure.
+	stub := &recordingArchive{fail: true}
+	svc.Config.Archive = stub
+	count2, err := svc.ArchivePending("tenant-a")
+	if err != nil || count2 != 0 {
+		t.Fatalf("pass 2 (failing store) = %d, %v; want 0, nil — the dead-lettered segment must not be re-attempted", count2, err)
+	}
+	if len(stub.puts) != 0 {
+		t.Fatalf("pass 2 attempted %d archive writes %v; want 0 (dead-lettered segment excluded from retry)", len(stub.puts), stub.puts)
 	}
 }

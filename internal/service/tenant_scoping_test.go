@@ -165,7 +165,11 @@ func TestArchivePendingExactTenantScoping(t *testing.T) {
 		t.Fatalf("tenant a archive has %d manifests, want 1 (only stream s1)", n)
 	}
 	// Other tenants' segments must not be archived under a's run at all.
-	for _, foreign := range []string{"b", "a_b"} { // safeName renders 0x1F as '_'
+	// The foreign probe includes the tenant whose ID the lossy safeName used
+	// to render as "a_b" (0x1F now encodes as "a%1Fb"): the scoping filter
+	// excludes it from archiving under either encoding, so no segment dir is
+	// ever created for it.
+	for _, foreign := range []string{"b", "a_b"} {
 		if _, err := os.Stat(filepath.Join(archiveRoot, "segments", foreign)); !os.IsNotExist(err) {
 			t.Fatalf("foreign tenant dir %q exists after a's archive run: %v", foreign, err)
 		}

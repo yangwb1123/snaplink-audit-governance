@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 func TestFileStorePutGetRoundTrip(t *testing.T) {
@@ -753,6 +755,70 @@ func TestFileStorePutKeyEscapingRootRejectedBeforeWrite(t *testing.T) {
 		if _, err := store.Get(context.Background(), key); err == nil {
 			t.Fatalf("Get(%q) must be rejected", key)
 		}
+	}
+}
+
+// TestFileStorePutKeyTooLongRejectedBeforeWrite is the F1 pre-flight length
+// guard: a key whose component exceeds NAME_MAX (255 bytes) or whose total
+// exceeds the S3 ceiling (1024 bytes) is rejected with the typed
+// ErrArchiveKeyTooLong before any directory is created or file written — an
+// out-of-contract identifier (3× percent-encoded) degrades to a loud, typed,
+// per-object failure instead of a filesystem ENAMETOOLONG after partial
+// work.
+func TestFileStorePutKeyTooLongRejectedBeforeWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	store := &FileStore{Dir: dir}
+	tooLongComponent := "events/demo/" + strings.Repeat("a", 256) + "/00000000000000000001-evt.json"
+	tooLongTotal := strings.Repeat("events/", 300) // > 1024 bytes total
+	for _, key := range []string{tooLongComponent, tooLongTotal} {
+		err := store.Put(context.Background(), key, []byte("boom"))
+		if !errors.Is(err, ErrArchiveKeyTooLong) {
+			t.Fatalf("Put(%d-byte key) err=%v, want ErrArchiveKeyTooLong", len(key), err)
+		}
+	}
+	// Pre-flight: nothing may have been created under the archive root, so
+	// the rejected Put leaves no partial directory chain or object.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("archive root was created by a rejected Put: %v", err)
+	}
+}
+
+// TestFileStorePutKeyLengthBoundaries pins the FM-1 envelope at the
+// enforcement point: a component of exactly NAME_MAX (255 bytes) and a total
+// key of exactly 1024 bytes are accepted; one byte more of either is
+// rejected with the typed ErrArchiveKeyTooLong. These are the encoded-length
+// bounds the 85-byte API cap and the ~330-content-byte S3 budget keep
+// contract-conformant identifiers inside.
+func TestFileStorePutKeyLengthBoundaries(t *testing.T) {
+	keyOK := "events/" + strings.Repeat("a", 255) + "/00000000000000000001-evt.json"
+	if len(keyOK) > fsutil.MaxS3KeyBytes {
+		t.Fatalf("boundary key %d bytes unexpectedly over the S3 ceiling", len(keyOK))
+	}
+	// Component at exactly NAME_MAX succeeds (the encoded form of 85
+	// non-safe ASCII bytes / 28 three-byte runes).
+	dir := filepath.Join(t.TempDir(), "archive")
+	store := &FileStore{Dir: dir}
+	if err := store.Put(context.Background(), keyOK, []byte("ok")); err != nil {
+		t.Fatalf("Put with 255-byte component err=%v, want nil", err)
+	}
+	// One byte over the component bound is rejected before any write.
+	dir2 := filepath.Join(t.TempDir(), "archive")
+	store2 := &FileStore{Dir: dir2}
+	if err := store2.Put(context.Background(), "events/"+strings.Repeat("a", 256)+"/00000000000000000001-evt.json", []byte("boom")); !errors.Is(err, ErrArchiveKeyTooLong) {
+		t.Fatalf("Put with 256-byte component err=%v, want ErrArchiveKeyTooLong", err)
+	}
+	// Total key at exactly 1024 bytes is accepted by the pre-flight check;
+	// 1025 is rejected. (A single event key peaks at 35 + 3×255 = 800 bytes,
+	// so the total bound is exercised with a multi-component key.)
+	keyTotalOK := strings.Repeat("a/", 512) // exactly fsutil.MaxS3KeyBytes
+	if len(keyTotalOK) != fsutil.MaxS3KeyBytes {
+		t.Fatalf("total-boundary key = %d bytes, want %d", len(keyTotalOK), fsutil.MaxS3KeyBytes)
+	}
+	if err := checkKeyLength(keyTotalOK); err != nil {
+		t.Fatalf("checkKeyLength(1024-byte key) err=%v, want nil", err)
+	}
+	if err := checkKeyLength(keyTotalOK + "a"); !errors.Is(err, ErrArchiveKeyTooLong) {
+		t.Fatalf("checkKeyLength(1025-byte key) err=%v, want ErrArchiveKeyTooLong", err)
 	}
 }
 

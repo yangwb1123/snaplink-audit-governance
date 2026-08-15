@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/archive"
@@ -539,13 +540,23 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 // as already archived, while a mismatched or unverifiable object at the key
 // surfaces as an error instead of being silently accepted.
 //
+// Permanent failures are dead-lettered instead of aborting the pass (FM-1 /
+// F-2): an archive key that exceeds the backend limits
+// (archive.ErrArchiveKeyTooLong) or collides with a byte-different existing
+// object (archive.ErrObjectConflict) can never succeed on retry, so the
+// event (or sealed segment) is recorded in the tenant's DeadLetters set, its
+// receipt carries ErrorCode "archive_dead_letter", and the pass continues
+// with the remaining events — one doomed object never wedges the backlog.
+// Dead-lettered entries are excluded from later passes. Transient failures
+// (store exceptions, unverifiable objects) still abort the pass so the
+// worker retries them next pass.
+//
 // All receipts for events whose Put succeeded in this pass are committed in
 // exactly one Store.Update (one optimistic-lock window instead of one per
 // event), so a pass fails atomically — either every receipt is marked
-// StatusArchived or none is. The same atomic write resets the tenant's
-// archive-conflict counter, and the successful pass's receipts share one
-// timestamp.
-
+// StatusArchived (and every dead letter recorded) or none is. The same
+// atomic write resets the tenant's archive-conflict counter, and the
+// successful pass's receipts share one timestamp.
 func (s *Service) ArchivePending(tenantID string) (int, error) {
 	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
@@ -556,6 +567,9 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 		for key, event := range data.Events {
 			if event.TenantID != tenantID {
 				continue
+			}
+			if _, dead := data.DeadLetters[key]; dead {
+				continue // already dead-lettered: never retried
 			}
 			receipt := data.Receipts[key]
 			if receipt.Status != domain.StatusArchived {
@@ -570,25 +584,47 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 			if !ok || tid != tenantID {
 				continue
 			}
-			segments = append(segments, values...)
+			for _, segment := range values {
+				// Same dead-letter exclusion as events: a dead-lettered
+				// segment (over-limit key, or a byte-different object at its
+				// manifest key) can never succeed and is never re-attempted,
+				// so one doomed segment cannot churn a Stat/verify (or abort
+				// the pass) on every run.
+				dlKey, _ := segmentDeadLetterKey(segment)
+				if _, dead := data.DeadLetters[dlKey]; dead {
+					continue
+				}
+				segments = append(segments, segment)
+			}
 		}
 		return nil
 	}); err != nil {
 		return 0, err
 	}
+	now := s.Now()
+	deadLetters := map[string]domain.DeadLetter{}
 	for _, segment := range segments {
 		if err := s.archiveSegment(segment); err != nil {
-			return 0, err
+			if !isPermanentArchiveError(err) {
+				return 0, err
+			}
+			key, eventID := segmentDeadLetterKey(segment)
+			deadLetters[key] = domain.DeadLetter{TenantID: tenantID, EventID: eventID, StreamID: segment.StreamID, Sequence: segment.FirstSequence, Reason: archiveErrorReason(err), ErrorMessage: boundedErrorMessage(err), At: now}
 		}
 	}
 	archivedEvents := []domain.Event{}
 	for _, event := range events {
 		if err := s.archiveEvent(event); err != nil {
-			return 0, err
+			if !isPermanentArchiveError(err) {
+				return 0, err
+			}
+			key := store.EventKey(tenantID, event.EventID)
+			deadLetters[key] = domain.DeadLetter{TenantID: tenantID, EventID: event.EventID, StreamID: event.StreamID, Sequence: event.Sequence, Reason: archiveErrorReason(err), ErrorMessage: boundedErrorMessage(err), At: now}
+			continue
 		}
 		archivedEvents = append(archivedEvents, event)
 	}
-	if len(archivedEvents) == 0 {
+	if len(archivedEvents) == 0 && len(deadLetters) == 0 {
 		// Nothing to mark; the conflict counter is deliberately not reset on
 		// an empty pass (it counts consecutive passes aborted by exhaustion,
 		// and an empty pass cannot have been aborted).
@@ -600,7 +636,6 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 	// a failed Save commits nothing, so re-runs apply the same mutations.
 	// The reset of the tenant's conflict counter rides in the same atomic
 	// write as the receipt marking (no extra window).
-	now := s.Now()
 	if err := s.Store.Update(func(data *store.Snapshot) error {
 		for _, event := range archivedEvents {
 			key := store.EventKey(tenantID, event.EventID)
@@ -613,12 +648,115 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 			receipt.ArchivedAt = now
 			data.Receipts[key] = receipt
 		}
+		for key, dead := range deadLetters {
+			data.DeadLetters[key] = dead
+			receipt, ok := data.Receipts[key]
+			if !ok {
+				if isSegmentDeadLetter(dead) {
+					continue // segments have no receipt
+				}
+				return domain.ErrNotFound // event receipt vanished: fail atomically
+			}
+			receipt.ErrorCode = "archive_dead_letter"
+			receipt.ErrorMessage = dead.ErrorMessage
+			data.Receipts[key] = receipt
+		}
 		data.ArchiveConflictFailures[tenantID] = 0
 		return nil
 	}); err != nil {
 		return 0, err
 	}
 	return len(archivedEvents), nil
+}
+
+// isPermanentArchiveError reports whether an archive failure can never
+// succeed on retry: the key exceeds the backend limits (FM-1) or a
+// byte-different object already occupies the key (F-2). Everything else is
+// treated as transient and aborts the pass so the worker retries it.
+func isPermanentArchiveError(err error) bool {
+	return errors.Is(err, archive.ErrArchiveKeyTooLong) || errors.Is(err, archive.ErrObjectConflict)
+}
+
+// archiveErrorReason is the stable dead-letter reason code for a permanent
+// archive failure; it is what operators see in ListDeadLetters and the
+// receipt record.
+func archiveErrorReason(err error) string {
+	switch {
+	case errors.Is(err, archive.ErrArchiveKeyTooLong):
+		return "archive_key_too_long"
+	case errors.Is(err, archive.ErrObjectConflict):
+		return "archive_object_conflict"
+	}
+	return "archive_permanent_failure"
+}
+
+// boundedErrorMessage caps a dead-letter error message at 512 bytes so a
+// stored message never embeds an unbounded attacker-controlled value (the
+// FileStore conflict error embeds the archive path, which can be long).
+func boundedErrorMessage(err error) string {
+	message := err.Error()
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return message
+}
+
+// segmentDeadLetterKey returns the DeadLetters map key for a sealed segment
+// (segments have no receipt). The synthetic event id embeds store.KeySeparator
+// (0x1F), which ValidKeyComponent forbids in real event ids, so a segment
+// dead-letter can never alias an event dead-letter in the same map.
+func segmentDeadLetterKey(segment domain.Segment) (key, eventID string) {
+	eventID = "seg" + store.KeySeparator + segment.StreamID + ":" + fmt.Sprintf("%d-%d", segment.FirstSequence, segment.LastSequence)
+	return store.EventKey(segment.TenantID, eventID), eventID
+}
+
+// isSegmentDeadLetter reports whether a DeadLetter entry is the synthetic
+// segment record (no receipt exists for it).
+func isSegmentDeadLetter(dead domain.DeadLetter) bool {
+	return strings.HasPrefix(dead.EventID, "seg"+store.KeySeparator)
+}
+
+// ListDeadLetters returns the tenant's persisted dead-letter entries (FM-1
+// over-limit keys, F-2 byte-conflicting objects) ordered by time then event
+// id. This is the operator detection surface: entries whose receipt carries
+// ErrorCode "archive_dead_letter" exactly flag the state that will never
+// converge without operator action.
+func (s *Service) ListDeadLetters(tenantID string) ([]domain.DeadLetter, error) {
+	var out []domain.DeadLetter
+	err := s.Store.Read(func(data *store.Snapshot) error {
+		for _, dead := range data.DeadLetters {
+			if dead.TenantID == tenantID {
+				out = append(out, dead)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if !out[i].At.Equal(out[j].At) {
+				return out[i].At.Before(out[j].At)
+			}
+			return out[i].EventID < out[j].EventID
+		})
+		return nil
+	})
+	return out, err
+}
+
+// ClearDeadLetter removes a dead-letter entry (and the receipt's typed
+// error) so the next ArchivePending pass retries the event. Intended for
+// operator remediation after the root cause is resolved; the retry
+// re-dead-letters the event if the conflict persists, keeping the loop
+// bounded.
+func (s *Service) ClearDeadLetter(tenantID, eventID string) error {
+	return s.Store.Update(func(data *store.Snapshot) error {
+		key := store.EventKey(tenantID, eventID)
+		delete(data.DeadLetters, key)
+		receipt, ok := data.Receipts[key]
+		if ok {
+			receipt.ErrorCode = ""
+			receipt.ErrorMessage = ""
+			data.Receipts[key] = receipt
+		}
+		return nil
+	})
 }
 
 // RecordArchivePassConflict increments the tenant's persisted archive-pass

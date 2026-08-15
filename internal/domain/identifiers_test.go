@@ -363,3 +363,87 @@ func TestStreamFramesCrossBranchDisjoint(t *testing.T) {
 		frames[frame] = "source"
 	}
 }
+
+// TestArchiveComponentLengthCaps is the FM-1 API-boundary pin: every
+// identifier that becomes an archive key component is capped at
+// MaxArchiveComponentBytes (85 bytes = POSIX NAME_MAX ÷ 3) at the boundary
+// layer that validates it — tenant ids at ValidTenantIDComponent, aggregate
+// components at ValidStreamComponent, event_id/source_system/operation_id at
+// ValidateBasic. 85 ASCII-punctuation bytes (encode to exactly 255 = NAME_MAX)
+// and 28 three-byte runes (84 bytes → 252 encoded) stay valid; one byte more
+// of either (86 punctuation bytes, 29 runes = 87 bytes) is rejected with
+// ErrInvalid before anything reaches the ledger or the archive.
+func TestArchiveComponentLengthCaps(t *testing.T) {
+	punct85 := strings.Repeat("?", 85)
+	punct86 := strings.Repeat("?", 86)
+	runes28 := strings.Repeat("界", 28) // 84 bytes
+	runes29 := strings.Repeat("界", 29) // 87 bytes
+
+	// Tenant layer: the tenant id is the archive tenant component.
+	for name, id := range map[string]string{"punct-85": punct85, "runes-28": runes28} {
+		if err := ValidTenantIDComponent("tenant id", id); err != nil {
+			t.Errorf("tenant %s: ValidTenantIDComponent err=%v, want nil", name, err)
+		}
+	}
+	for name, id := range map[string]string{"punct-86": punct86, "runes-29": runes29} {
+		if err := ValidTenantIDComponent("tenant id", id); !errors.Is(err, ErrInvalid) {
+			t.Errorf("tenant %s: ValidTenantIDComponent err=%v, want ErrInvalid", name, err)
+		}
+	}
+
+	// Stream layer: aggregate components derive the archive stream key.
+	for name, id := range map[string]string{"punct-85": punct85, "runes-28": runes28} {
+		if err := ValidStreamComponent("aggregate type", id); err != nil {
+			t.Errorf("stream %s: ValidStreamComponent err=%v, want nil", name, err)
+		}
+	}
+	for name, id := range map[string]string{"punct-86": punct86, "runes-29": runes29} {
+		if err := ValidStreamComponent("aggregate type", id); !errors.Is(err, ErrInvalid) {
+			t.Errorf("stream %s: ValidStreamComponent err=%v, want ErrInvalid", name, err)
+		}
+	}
+
+	// Event layer: ValidateBasic caps event_id, source_system, operation_id.
+	valid := Event{
+		EventID: "evt-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event",
+		SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_000, 0).UTC(),
+		Actor: Actor{ID: "user-1"}, Action: "update", Outcome: "success",
+		DataClassification: "internal", RetentionClass: "standard",
+		IdempotencyKey: "idem-1", Payload: map[string]any{"value": 1},
+	}
+	atBoundary := map[string]func(*Event){
+		"event id":  func(e *Event) { e.EventID = punct85 },
+		"source":    func(e *Event) { e.SourceSystem = punct85 },
+		"operation": func(e *Event) { e.OperationID = punct85 },
+	}
+	for name, mutate := range atBoundary {
+		event := valid
+		mutate(&event)
+		if err := event.ValidateBasic(); err != nil {
+			t.Errorf("%s at boundary: err=%v, want nil", name, err)
+		}
+	}
+	overCap := map[string]func(*Event){
+		"event id":  func(e *Event) { e.EventID = punct86 },
+		"source":    func(e *Event) { e.SourceSystem = punct86 },
+		"operation": func(e *Event) { e.OperationID = punct86 },
+	}
+	for name, mutate := range overCap {
+		event := valid
+		mutate(&event)
+		if err := event.ValidateBasic(); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s over cap: err=%v, want ErrInvalid", name, err)
+		}
+	}
+	// The rune thresholds at the event layer: 28 runes pass, 29 are rejected.
+	event28 := valid
+	event28.EventID = runes28
+	if err := event28.ValidateBasic(); err != nil {
+		t.Errorf("28 three-byte runes event_id: err=%v, want nil", err)
+	}
+	event29 := valid
+	event29.EventID = runes29
+	if err := event29.ValidateBasic(); !errors.Is(err, ErrInvalid) {
+		t.Errorf("29 three-byte runes event_id: err=%v, want ErrInvalid", err)
+	}
+}

@@ -1,5 +1,24 @@
 # Release Notes
 
+## 2026-08-15 — 归档键改用单射可逆编码：丢损 safeName 折叠消失（internal/fsutil，lossy-safename-archive-key-framing-collapses）
+
+**写给运营（行为变化）：**
+
+- **归档对象键不再丢损**：此前 `safeName` 把安全字母表（`[a-zA-Z0-9._-]`）之外的每个字符折叠成 `_`，不同合法标识符会落到同一 WORM 对象路径——例如租户 `a?b` 与 `a_b` 的事件、或同一租户内 `operation_id` 为 `a:b` 与 `a_b` 的两条流，都会写成 `events/…/a_b/…` 与 `segments/…/a_b/…`。先写者占用该键后，后写者 `verifyExistingObject` 字节比对失败 → 回执降级 `StatusIndexed` 且 `ArchivePending` 每轮重试同一键、**永远无法归档**（跨租户归档拒绝）。现在所有归档键组件经 `fsutil.EncodeKeyComponent` 单射可逆编码：`a?b` → `a%3Fb`、`a:b` → `a%3Ab`、`tëstant` → `t%C3%ABstant`，`%` 自身转义为 `%25`（`a%b`/`a%25b` 不再碰撞），空组件编码为 `%`（不再与 `unnamed` 碰撞），`.`/`..` 编码为 `%2E`/`%2E%2E`（保持根目录包含）。
+- **UUID 标识符键逐字节不变**：平台契约要求不可变 UUID 主键，全部落在安全字母表内 → 编码后键与今天完全一致，无成本/无迁移；只有标点/非 ASCII 标识符的键变化。已归档对象为 WORM 不可变，**不做回溯迁移**。
+- **碰撞卡住的回执自动收敛（已实测钉死）**：历史丢损折叠下“赢家/输家”共用一个键，输家永远卡在 `StatusIndexed`。升级后 `ArchivePending` 以新键重算：**新键与遗留键严格不相交**（每条流的 `Event.Stream()` 都内嵌 `:`，编码为 `%3A`，而遗留键从不含 `%`），故输家的新键必然空闲——首次 `ArchivePending` 即归档收敛（AC-2 E2E 钉子：`a?b`/`a_b` 跨租户对与 `a:b`/`a_b` 流层对均 `StatusArchived`，收敛后不回归不新增对象）。
+- **API 边界新增标识符长度上限（FM-1 窗口关闭）**：所有会成为归档键组件的标识符（`tenant_id`、`aggregate_type`/`aggregate_id`、`event_id`、`source_system`、`operation_id`）在入账前上限 **85 字节**（`MaxArchiveComponentBytes`，= POSIX NAME_MAX ÷ 3，编码最坏 3× 展开后恰为 255）。超限请求在 HTTP 侧返回 422 / gRPC 侧 `InvalidArgument`，**不进入账本**，不再产生“验证合法但永远无法归档”的回执。UUID（36 字节）不受影响。
+- **超长/冲突键失败已死信化（FM-1/F-2 加固，逐对象隔离）**：编码最长 3× 输入字节，归档存储对键做**前置预检**（类型化 `ErrArchiveKeyTooLong`，单组件 ≤255B / 总键 ≤1024B，先于任何文件系统变更或网络调用，绝不产生半写对象）——FileStore 组件约 **85 个 ASCII 标点字节 / 28 个三字节 rune** 起即超限（旧丢损编码约 255 rune 才超限，回归窗口 3×；S3 复合键约 **330 个内容字节** 即超 1024B 预算）。`ArchivePending` 对**永久性失败**（键超限、或目标键被字节不同的对象占用 `ErrObjectConflict`）记录**持久化死信**（回执 `ErrorCode=archive_dead_letter` 且排除出重试集），**不再每轮重试**；同一 pass 内其余事件照常归档（E2E 钉子：1 个超长标识符死信 + 100 个健康事件同 pass 全部 `StatusArchived`）。瞬时失败（存储异常）仍中止该 pass 交给 worker 下轮重试。
+- **遗留碰撞处置（runbook，F-2 状态检测）**：历史丢损折叠的遗留对象是 WORM **COMPLIANCE 保留**（`AUDIT_ARCHIVE_RETENTION_DAYS` 内任何主体不可覆盖/删除）。升级后碰撞卡住的回执自动收敛（见上），**无需人工处置**；仅当某键出现字节不同的对象（篡改、跨部署键冲突、未来回归）时进入死信：检测——`ListDeadLetters(tenantID)` 列出死信（reason `archive_key_too_long`/`archive_object_conflict`），或 worker 成功日志 `dead_lettered=N`、回执 `ErrorCode=archive_dead_letter`；核验——读对象（canonical JSON 内嵌 `tenant_id`）确认归属；处置——若为遗留/误写对象且策略要求 WORM 归档：等 COMPLIANCE 保留期**届满**后经治理审批删除释放键，再 `ClearDeadLetter(tenantID, eventID)` 触发一次有界重试（冲突仍在则再次死信，循环有界）；若策略允许账本-only：标记回执例外并接受死信记录。新写入不再产生该状态。
+- **无存储迁移**；回滚 = 重新部署旧二进制（旧二进制恢复丢损折叠，缺陷随之回归，请同步升级生产方）。
+
+**写给开发（实现变化）：**
+
+- `internal/fsutil/fsutil.go`：新增导出 `EncodeKeyComponent(value string) string`（单射、可逆、确定性；安全字节原样透传，其余按 UTF-8 字节 `%XX` 大写十六进制转义，`%` 自身转义，空→`%`，`.`/`..`→`%2E`/`%2E%2E`）、`DecodeKeyComponent(value string) (string, error)`（仅用于测试契约与运维工具，生产无调用方）、常量 `KeyComponentEmptyMarker`、`MaxFileStoreComponentBytes`(255)/`MaxS3KeyBytes`(1024)（归档预检与 FM-1 测试的单一事实源）；编码预分配 3× 最坏长度（热路径零重分配）；`internal/service/service.go` 的 `safeName` 变为弃用委托 shim（三个生产调用点与测试路径钉子自动改道新编码）。
+- `internal/domain/`：新增 `MaxArchiveComponentBytes`(85) 与 `DeadLetter` 记录；`ValidTenantIDComponent`/`ValidStreamComponent` 及 `ValidateBasic`（`event_id`/`source_system`/`operation_id`）增加长度上限（入账前拒绝，HTTP 422 / gRPC InvalidArgument）。
+- `internal/archive/archive.go`：两个 `Put` 均增加**前置键长预检**（类型化 `ErrArchiveKeyTooLong`，先于任何文件系统变更或网络调用）；`verifyExistingObject` 字节不匹配包类型化 `ErrObjectConflict`（WORM 不覆盖不删除）。
+- `internal/service/governance.go`：`ArchivePending` 改为**逐对象死信**——永久失败（`ErrArchiveKeyTooLong`/`ErrObjectConflict`）写入快照 `DeadLetters` 集合并从重试集排除，回执 `ErrorCode=archive_dead_letter`，成功子集仍在单个原子批次提交（原子性不变）；新增 `ListDeadLetters`/`ClearDeadLetter` 运维面。`internal/store/store.go`：快照新增 `DeadLetters` map（旧快照解码为 nil 自动归一化，无迁移）。`cmd/audit-governance-worker`：成功归档日志新增 `dead_lettered=N`。
+- 测试：`fsutil_test.go` AC-1 语料单射/往返、10k 轮确定性 fuzz、根包含与反像拒绝、**FM-1 长度边界钉子**（85B→255/86B→258、28 三字节 rune→252/29→261、330 内容字节复合键超 1024B）与编码零重分配 + `BenchmarkEncodeKeyComponent`；`domain` 边界拒绝测试（85B 通过/86B 拒绝、28 rune 通过/29 拒绝，租户/流/事件三层）；`service_test.go` AC-2 跨租户对、流层冒号对、收敛不回归、**API 边界拒绝 E2E**（86B 入账前拒绝、85B 端到端归档）、**死信 E2E**（1 超长死信 + 100 健康同 pass 归档、次 pass 排除重试）、**F-2 遗留碰撞检测 E2E**（字节不同对象 → 死信 + WORM 保留 + `ListDeadLetters` 精确标记 + `ClearDeadLetter` 有界重试）；`archive_test.go` 键长边界（255/256 组件、1024/1025 总键）；gRPC 边界拒绝用例。
 ## 2026-08-15 — `occurred_at` 账本时间窗收口：入账前拒绝超范围时间戳（internal/domain，bound-occurredat-at-the-domain-boundary）
 
 **写给运营（行为变化）：**

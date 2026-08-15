@@ -17,6 +17,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/fsutil"
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
 )
@@ -1152,6 +1153,10 @@ func (s *Service) archiveEvent(event domain.Event) error {
 		return err
 	}
 	key := fmt.Sprintf("events/%s/%s/%020d-%s.json", safeName(event.TenantID), safeName(event.StreamID), event.Sequence, safeName(event.EventID))
+	// The archive store's pre-flight checkKeyLength rejects an over-limit
+	// composite with the typed archive.ErrArchiveKeyTooLong before any
+	// filesystem mutation or network call (FM-1); ArchivePending dead-letters
+	// that class instead of aborting the pass.
 	return s.Config.Archive.Put(context.Background(), key, data)
 }
 
@@ -1427,20 +1432,16 @@ func newID(prefix string) string {
 	return prefix + "-" + hex.EncodeToString(buf)
 }
 
-func safeName(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "unnamed"
-	}
-	return b.String()
-}
+// safeName is a deprecated delegation shim over the injective, reversible
+// fsutil.EncodeKeyComponent. The historical lossy sanitizer (every non-safe
+// rune → '_', empty → "unnamed") collapsed distinct valid identifiers onto
+// one WORM archive key — a cross-tenant archival denial — and is gone; all
+// three production framing sites (archiveEvent, archiveSegment, export key)
+// and the archive-key test helpers now route through the single encoding.
+// Retained so existing tests that pin expected paths by calling safeName
+// compile and stay correct. Do not add new call sites; use
+// fsutil.EncodeKeyComponent directly.
+func safeName(value string) string { return fsutil.EncodeKeyComponent(value) }
 
 // ListAdminActions returns the append-only self-audit trail, newest first.
 // A tenant-scoped caller only sees its own tenant's actions; a platform

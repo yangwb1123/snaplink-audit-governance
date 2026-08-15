@@ -14,6 +14,7 @@ package archive
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,14 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/fsutil"
 )
+
+// ErrObjectConflict marks a permanent, non-retryable archive failure: an
+// object already exists at the key with different bytes (tampering, a
+// legacy lossy-framed object, or a cross-deployment key collision). WORM
+// semantics forbid replacing or deleting it, so no retry can ever succeed;
+// ArchivePending dead-letters the event and records the collision instead
+// of aborting the whole pass (F-2).
+var ErrObjectConflict = errors.New("archive object already exists with different content")
 
 // Store persists immutable archive objects. Put must be idempotent and
 // must never silently accept corruption: an object that already exists with
@@ -112,6 +121,42 @@ func containedPath(dir, key string) (string, error) {
 	return filepath.Join(dir, clean), nil
 }
 
+// ErrArchiveKeyTooLong reports an archive key that exceeds the destination's
+// length limits before any write is attempted. It is typed so callers can
+// distinguish a permanently over-limit key (an out-of-contract identifier,
+// e.g. one whose 3× percent-encoded archive component exceeds NAME_MAX) from
+// a transient storage error: a governance pass isolates the failing object
+// and lets the rest of the tenant's backlog converge instead of aborting on
+// the first failure.
+var ErrArchiveKeyTooLong = errors.New("archive key exceeds the destination length limit")
+
+const (
+	// maxKeyBytes bounds the total encoded key, matching the S3 object-key
+	// limit. The local store's PATH_MAX sits far above any
+	// component-bound-derived total, so this is the effective composite-key
+	// ceiling for both destinations. The per-component bound is POSIX
+	// NAME_MAX; both constants are defined once in fsutil and pinned by the
+	// FM-1 threshold tests there.
+	maxKeyBytes = fsutil.MaxS3KeyBytes
+)
+
+// checkKeyLength validates key against the destination length limits
+// (maxKeyComponentBytes per component, maxKeyBytes total). It is a pre-flight
+// check: both stores run it before any filesystem mutation or network I/O, so
+// an over-limit key fails with the typed ErrArchiveKeyTooLong instead of a
+// backend-specific error after partial work.
+func checkKeyLength(key string) error {
+	if len(key) > maxKeyBytes {
+		return fmt.Errorf("%w: key %q is %d bytes (limit %d)", ErrArchiveKeyTooLong, key, len(key), maxKeyBytes)
+	}
+	for _, component := range strings.Split(key, "/") {
+		if len(component) > fsutil.MaxFileStoreComponentBytes {
+			return fmt.Errorf("%w: key %q component %q is %d bytes (limit %d)", ErrArchiveKeyTooLong, key, component, len(component), fsutil.MaxFileStoreComponentBytes)
+		}
+	}
+	return nil
+}
+
 // rootState is the durability bookkeeping for the archive root within one
 // FileStore instance. missingBase is the deepest existing ancestor observed
 // when this instance last saw the root missing — the chain root that covers
@@ -184,6 +229,12 @@ func (f *FileStore) chainRoot(probed string) string {
 func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
 	path, err := containedPath(f.Dir, key)
 	if err != nil {
+		return err
+	}
+	// Pre-flight length guard before any filesystem mutation: an over-limit
+	// key (3× encoded out-of-contract identifier) fails typed and leaves no
+	// partial directory or object behind.
+	if err := checkKeyLength(key); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -275,7 +326,7 @@ func verifyExistingObject(path string, data []byte) error {
 		return fmt.Errorf("archive path %s already exists and cannot be verified: %w", path, err)
 	}
 	if !bytes.Equal(existing, data) {
-		return fmt.Errorf("archive path %s already exists with different content", path)
+		return fmt.Errorf("archive path %s: %w", path, ErrObjectConflict)
 	}
 	return nil
 }
@@ -465,6 +516,12 @@ func NewS3Store(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*S3
 
 func (s *S3Store) Put(ctx context.Context, key string, data []byte) error {
 	key = strings.TrimPrefix(key, "/")
+	// Pre-flight length guard before any network call: an over-limit key
+	// (1024-byte S3 ceiling, or a component that would fail the local store)
+	// fails typed without consuming a Stat/Put round trip.
+	if err := checkKeyLength(key); err != nil {
+		return err
+	}
 	// 幂等且防篡改，与 FileStore 的 Lstat 处理对齐：Stat 命中时必须逐字节核对
 	// （verifyExistingObject）；Stat 失败时必须区分“确实不存在”（只有 minio 的
 	// NoSuchKey 才算）与“探针失败”——其余错误（限流、鉴权、网络、被包装的
@@ -516,7 +573,7 @@ func (s *S3Store) verifyExistingObject(ctx context.Context, key string, data []b
 		return fmt.Errorf("archive object %s already exists and cannot be verified: %w", key, err)
 	}
 	if !bytes.Equal(existing, data) {
-		return fmt.Errorf("archive object %s already exists with different content", key)
+		return fmt.Errorf("archive object %s: %w", key, ErrObjectConflict)
 	}
 	return nil
 }

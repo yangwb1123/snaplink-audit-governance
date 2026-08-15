@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
@@ -127,6 +128,57 @@ func TestMemoryStoreNeverPersists(t *testing.T) {
 	if err := reopened.Read(func(data *Snapshot) error {
 		if len(data.Tenants) != 0 {
 			t.Fatal("memory store leaked between instances")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSnapshotDeadLettersRoundTrip pins the persisted dead-letter state
+// (FM-1): entries survive a save/reload cycle, and a legacy snapshot without
+// the field normalizes to an empty map (no migration).
+func TestSnapshotDeadLettersRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := domain.DeadLetter{TenantID: "tenant-a", EventID: "evt-x", StreamID: "tenant-a:aggregate:invoice:inv-1", Sequence: 4, Reason: "archive_key_too_long", ErrorMessage: "archive key exceeds the destination length limit", At: time.Unix(1_700_000_000, 0).UTC()}
+	if err := st.Update(func(data *Snapshot) error {
+		data.DeadLetters[EventKey("tenant-a", "evt-x")] = dead
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil { // release the state-file lock before reopening
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Read(func(data *Snapshot) error {
+		got, ok := data.DeadLetters[EventKey("tenant-a", "evt-x")]
+		if !ok || got.Reason != dead.Reason || got.ErrorMessage != dead.ErrorMessage || !got.At.Equal(dead.At) {
+			t.Fatalf("dead letter after reload = %+v, want %+v", got, dead)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy snapshot without the field normalizes to an empty map.
+	legacy := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`{"tenants":{}}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	legacyStore, err := Open(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyStore.Read(func(data *Snapshot) error {
+		if data.DeadLetters == nil {
+			t.Fatal("normalize did not fill DeadLetters")
 		}
 		return nil
 	}); err != nil {

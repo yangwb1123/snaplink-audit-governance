@@ -19,6 +19,15 @@ const (
 	MaxEventBytes   = 256 * 1024
 	DefaultPageSize = 100
 	MaxPageSize     = 1000
+	// MaxArchiveComponentBytes caps every identifier that becomes an archive
+	// key component (tenant id, stream-derived components, event id). The
+	// injective percent-encoding expands a non-safe byte 3×, so 85 bytes is
+	// exactly the FileStore boundary: 85 × 3 = 255 = POSIX NAME_MAX, and 86
+	// bytes (or 29 three-byte runes = 87 bytes) can never fit a path
+	// component. Three maximal components still fit the S3 1024-byte key
+	// budget (35 fixed framing bytes + 3 × 255 = 800). UUIDs are 36 bytes,
+	// so contract-conformant identifiers are unaffected.
+	MaxArchiveComponentBytes = 85
 
 	// RestoreStatusPendingApproval means the restore run awaits a human
 	// approver; approval and business execution are separate facts.
@@ -134,6 +143,25 @@ type EventReceipt struct {
 	Conflict     bool      `json:"conflict,omitempty"`
 	ErrorCode    string    `json:"error_code,omitempty"`
 	ErrorMessage string    `json:"error_message,omitempty"`
+}
+
+// DeadLetter records an event (or sealed segment) that will never archive:
+// the archive key cannot fit the backend limits (FM-1: the 3× percent-
+// encoding expansion of an over-limit identifier) or a byte-different object
+// already occupies the key (F-2: tampering, a legacy lossy-framed object, or
+// a cross-deployment collision). The receipt stays StatusIndexed (the
+// durable truth: the event is not archived) and carries ErrorCode/
+// ErrorMessage; ArchivePending excludes dead-lettered entries from the retry
+// set, so one bad key can never wedge a tenant's backlog. Segments, which
+// have no receipt, use a synthetic event id ("seg:<stream>:<first>-<last>").
+type DeadLetter struct {
+	TenantID     string    `json:"tenant_id"`
+	EventID      string    `json:"event_id"`
+	StreamID     string    `json:"stream_id,omitempty"`
+	Sequence     int64     `json:"sequence,omitempty"`
+	Reason       string    `json:"reason"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	At           time.Time `json:"at"`
 }
 
 type EventSchema struct {
@@ -423,6 +451,20 @@ func (e Event) ValidateBasic() error {
 			return err
 		}
 	}
+	// Archive key expansion bound (FM-1): event_id and source_system are
+	// archive key components (event object file name and the source branch
+	// of Event.Stream()). The injective percent-encoding expands non-safe
+	// bytes 3×, so a component longer than MaxArchiveComponentBytes can
+	// never fit a FileStore path component; rejecting at the boundary keeps
+	// over-limit identifiers out of the ledger instead of producing a
+	// permanently unarchivable receipt.
+	for _, pair := range [][2]string{
+		{"event id", e.EventID}, {"source system", e.SourceSystem},
+	} {
+		if err := ValidArchiveComponentLength(pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
 	// Stream components: the aggregate frame is tenant + ":aggregate:" +
 	// type + ":" + id, so a ':' in either aggregate component would make the
 	// frame ambiguous — ("a","b:c") and ("a:b","c") derive the identical
@@ -445,6 +487,9 @@ func (e Event) ValidateBasic() error {
 	} {
 		if pair[1] != "" {
 			if err := ValidKeyComponent(pair[0], pair[1]); err != nil {
+				return err
+			}
+			if err := ValidArchiveComponentLength(pair[0], pair[1]); err != nil {
 				return err
 			}
 		}
