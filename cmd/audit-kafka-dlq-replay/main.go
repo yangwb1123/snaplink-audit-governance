@@ -118,39 +118,52 @@ func main() {
 
 // serveMetrics exposes the replayer's counters in the text format used by
 // the audit-api /metrics endpoint, so Prometheus can alert on DLQ traffic.
+// Mount semantics unchanged: daemon-only; -once exposes no /metrics.
 func serveMetrics(address string, replayer *kafka.Replayer, logger *log.Logger) {
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprint(w, metricsText(replayer.Metrics()))
-	})
+	http.HandleFunc("/metrics", metricsHandler(replayer.Metrics))
 	server := &http.Server{Addr: address}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Printf("metrics listen=%s error=%v", address, err)
 	}
 }
 
+// metricsHandler renders one /metrics response from a metrics source (the
+// replayer's live counters; tests inject a fixed snapshot). Unexported:
+// the mount decision stays in serveMetrics.
+func metricsHandler(metrics func() kafka.ReplayerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		fmt.Fprint(w, metricsText(metrics()))
+	}
+}
+
 // metricsText renders the replay resolution counters in the Prometheus text
-// format. The line order is pinned (golden-tested, T7): the three split
+// format. The line order is pinned (golden-tested, T7): the split
 // resolution counters sit between replayed and republish_failures, pushing
-// republish_failures and pending down by three lines; the auth-blocked
-// counter and backlog gauge follow pending (campaign fail-fast-or-warn-on-
-// empty-rotated-ingest-token). Consumers must parse by metric name (as
-// Prometheus does), not by position; the fixed order keeps the output
-// deterministic for tests and dashboards.
+// republish_failures and pending down; the auth-blocked counter and backlog
+// gauge follow pending (campaign fail-fast-or-warn-on-empty-rotated-
+// ingest-token). The renamed permanent line
+// (audit_dlq_permanent_rejections_total → audit_dlq_permanent_total,
+// REQ-PERM-3) keeps its position, and the new observational
+// audit_dlq_attempts_exhausted_total sits at the end of the resolution
+// band (after unparsable_marks, before republish_failures). Consumers must
+// parse by metric name (as Prometheus does), not by position; the fixed
+// order keeps the output deterministic for tests and dashboards.
 func metricsText(m kafka.ReplayerMetrics) string {
 	return fmt.Sprintf(
 		"audit_dlq_records_total %d\n"+
 			"audit_dlq_accepted_scanned_total %d\n"+
 			"audit_dlq_replayed_total %d\n"+
-			"audit_dlq_permanent_rejections_total %d\n"+
+			"audit_dlq_permanent_total %d\n"+
 			"audit_dlq_unresolvable_total %d\n"+
 			"audit_dlq_unparsable_marks_total %d\n"+
+			"audit_dlq_attempts_exhausted_total %d\n"+
 			"audit_dlq_republish_failures_total %d\n"+
 			"audit_dlq_pending %d\n"+
 			"audit_dlq_auth_blocked_total %d\n"+
 			"audit_dlq_auth_blocked %d\n",
-		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.PermanentRejections,
-		m.Unresolvable, m.UnparsableMarks, m.RepublishFailures, m.Pending,
+		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.Permanent,
+		m.Unresolvable, m.UnparsableMarks, m.AttemptsExhausted, m.RepublishFailures, m.Pending,
 		m.AuthBlocked, m.AuthBlockedPending)
 }
 

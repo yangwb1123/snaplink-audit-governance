@@ -1,5 +1,57 @@
 # Release Notes
 
+## 2026-08-15 — DLQ replay 尊重 Failure.ErrorCode：permanent_error 一次性闭环 + 诚实的 replayed + 按码指标（internal/kafka + cmd/audit-kafka-dlq-replay）
+
+**写给运营（行为变化）：**
+
+- **`error_code="permanent_error"` 的死信记录改为一次性重试后闭环**：此前这类记录在
+  API 永久拒绝时被标记并计入“replayed”，而瞬态失败时每轮重试、永不收敛（毒丸）。
+  现在每条 `permanent_error` 记录在其生命周期内至多重发一次；重发失败（无论永久拒绝
+  还是瞬态故障）都进入**永久闭环**：状态标记、DLQ offset 提交、日志打印
+  `PERMANENT closure event_id=... code=permanent_error one-shot republish attempt
+  failed: <reason>; DLQ offset committed`，不再出现 `marking replayed`。重发成功则照常
+  计入 replayed（留给晚部署 schema 的一次机会）。手动恢复仍可用既有模式：删除状态
+  条目后重新摄取（DLQ 记录在 topic 保留期内仍在）。
+- **`-once` 汇总与返回语义变诚实**：永久闭环不再计入 `replay round done replayed=%d`
+  （纯闭环轮次现在报告 `replayed=0`），也不再计入 `audit_dlq_replayed_total`。
+  `attempts_exhausted` / `unparsable_message` / 未知 code 的重放行为不变（对照测试
+  保留）；非 permanent 码记录被 API 以永久错误拒绝时仍走遗留闭环（返回计入保留）。
+- **指标改名（破坏性，仅影响外部消费者）**：`audit_dlq_permanent_rejections_total`
+  → **`audit_dlq_permanent_total`**（行位置不变），语义扩宽：现在同时统计 legacy 活
+  拒绝闭环与 `permanent_error` 记录的瞬态失败闭环——**新旧值不可直接对比**。仓库内
+  无消费者（告警集未引用该指标）；外部仪表盘必须在同一部署窗口更新，旧名停止输出。
+- **新指标 `audit_dlq_attempts_exhausted_total`**：按轮观测计数（每轮收集到
+  `error_code="attempts_exhausted"` 记录即递增，重投递的记录每轮再计一次）——是流量
+  计数器，不是解析/积压计数器，勿按积压解读。
+- **崩溃窗口说明**：闭环标记在重发尝试之后持久化；若进程在“尝试 → Mark 持久化”之间
+  崩溃，恢复后该记录会再重试一次（每轮至多一次；标记持久化后即闭环，不再重试）。
+  状态文件格式未变，双向兼容；回滚 = 重新部署旧二进制（指标名与语义随之回退）。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`wantedEvents` 改为返回 `wantedSet{replay, oneShot}`
+  （不变式 oneShot ⊆ replay 按构造成立；按 event ID 归类，重复 ID 混码记录共享
+  状态标记一并闭环）；`scanAccepted` 失败分支合并为单一闭环块——`permanent_error`
+  记录任何失败都闭环（返回与 `replayed` 指标均不计入），非 permanent 码记录仅
+  `DeliveryError.Permanent` 活拒绝走遗留闭环（返回贡献保留），检查顺序保证
+  permanent 码记录永不落入遗留分支；闭环日志行对 event_id（64 runes）与失败原因
+  （200 runes）做 CWE-117 清洗，原因经 `fmt.Sprintf("%v", err)` 抗 nil-Err panic；
+  `collectFailures` 对 `attempts_exhausted` 记录递增新原子；`ReplayerMetrics` 字段
+  `PermanentRejections` 改名 `Permanent` 并新增 `AttemptsExhausted`（观测计数，明确
+  排除在“一次解析一个计数器”不变式之外）。
+- `cmd/audit-kafka-dlq-replay/main.go`：`metricsText` 输出 11 行（permanent 行保持
+  位置，`attempts_exhausted` 行位于 unparsable 与 republish_failures 之间）；`/metrics`
+  处理函数抽为 `metricsHandler(func() kafka.ReplayerMetrics)`（挂载语义不变：仅常驻、
+  `-once` 不挂载）。
+- 回归测试：AC-1a/1b/1c（一次性闭环：永久拒绝 / 瞬态失败 / 非 permanent 码对照）、
+  AC-3（`TestReplayPermanentFailureConverges` 改用 `permanent_error` fixture，返回 0）、
+  AC-4（一次性成功照常重放）、S-1（遗留活拒绝闭环返回贡献 1）、REQ-PERM-3 计数、
+  FM-1a/1b/FM-2a 崩溃注入（尝试→Mark 间崩溃恰好重试一次 / Mark 持久化失败不计
+  closure 计数 / Mark 后崩溃不重试）、oneShot ⊆ replay 不变式、闭环日志 CWE-117
+  清洗（镜像 auth-blocked 测试）；混合轮次测试扩展为一次性 + legacy 共用
+  `permanent` 计数器并固定返回不对称；T7/T7b golden 更新为 11 行，新增 /metrics
+  HTTP 精确值测试。
+
 ## 2026-08-15 — 401 类死信持久判别 + 无盲重放（`-replay-auth-blocked`）+ api-url 明文传输门禁
 
 **写给运营（行为变化）：**

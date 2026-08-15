@@ -631,11 +631,20 @@ type Replayer struct {
 	// Every other first-resolution path has its own counter below, so the
 	// metric never conflates a replay with a convergence (REQ-1).
 	replayed atomic.Uint64
-	// permanentRejections counts API-rejected events marked replayed to
-	// converge the round (path c): a permanent republish failure is a
-	// permanent loss of the ledger evidence — alertable via republishFail,
-	// but never a replay.
-	permanentRejections atomic.Uint64
+	// permanent counts permanent closures — durable first resolutions where
+	// a record is closed WITHOUT replay, under two policies: (1) the one-shot
+	// closure of an error_code=permanent_error record whose single republish
+	// attempt failed for any reason (transient or permanent; REQ-PERM-1),
+	// and (2) the legacy live-rejection closure of any other record whose
+	// republish was rejected with DeliveryError.Permanent. Both converge
+	// the round and are alertable via republishFail, but never a replay
+	// (REQ-PERM-2).
+	permanent atomic.Uint64
+	// attemptsExhausted counts collected DLQ records with
+	// error_code=attempts_exhausted: per-round collection-time increments
+	// mirroring dlqRecords semantics — a traffic counter, not a resolution
+	// counter (re-delivered records count again per round; REQ-PERM-3).
+	attemptsExhausted atomic.Uint64
 	// unresolvable counts drained-unresolvable events (path d): the original
 	// is absent from the accepted topic (retention expiry or recreation),
 	// the DLQ offset is committed, and the event is dropped — a permanent
@@ -795,37 +804,46 @@ func sanitizeLogField(value string, limit int) string {
 
 // ReplayerMetrics is the /metrics snapshot of the replay counters. Every DLQ
 // event that reaches a durable first resolution increments exactly one of
-// Replayed / UnparsableMarks / PermanentRejections / Unresolvable; a
-// transient republish failure increments none of them (the record stays
-// pending for the next round). AuthBlocked increments per round a blocked
-// record is re-collected; AuthBlockedPending is the latest-round blocked
-// backlog gauge.
+// Replayed / UnparsableMarks / Permanent / Unresolvable; a transient
+// republish failure of a non-permanent-code record increments none of them
+// (the record stays pending for the next round). Permanent counts closures
+// under two policies: (1) the one-shot — a wanted error_code=permanent_error
+// record whose single republish attempt failed for ANY reason (REQ-PERM-1);
+// (2) the legacy live rejection — a non-permanent-code record whose
+// republish was rejected with DeliveryError.Permanent. Both are durable
+// closures, never a replay. AttemptsExhausted is observational
+// (collection-time, per round) and explicitly excluded from the resolution
+// invariant: re-delivered records count again per round (REQ-PERM-3).
+// AuthBlocked increments per round a blocked record is re-collected;
+// AuthBlockedPending is the latest-round blocked backlog gauge.
 type ReplayerMetrics struct {
-	DLQRecords          uint64 // DLQ Failure records collected
-	AcceptedScanned     uint64 // accepted-topic messages scanned
-	Replayed            uint64 // successful re-publishes only
-	PermanentRejections uint64 // permanent republish failures (converged, never a replay)
-	Unresolvable        uint64 // drained-unresolvable drops (permanent loss)
-	UnparsableMarks     uint64 // anti-loop marks for key-matched unparsable messages
-	RepublishFailures   uint64 // transient + permanent republish failures (inclusive)
-	Pending             uint64 // wanted events pending in the current round
-	AuthBlocked         uint64 // error_code=unauthorized records held blocked (per-round increments)
-	AuthBlockedPending  uint64 // blocked records collected by the latest round (gauge)
+	DLQRecords         uint64 // DLQ Failure records collected
+	AcceptedScanned    uint64 // accepted-topic messages scanned
+	Replayed           uint64 // successful re-publishes only
+	Permanent          uint64 // permanent closures (one-shot + legacy live rejection)
+	Unresolvable       uint64 // drained-unresolvable drops (permanent loss)
+	UnparsableMarks    uint64 // anti-loop marks for key-matched unparsable messages
+	AttemptsExhausted  uint64 // error_code=attempts_exhausted records collected (per-round traffic, NOT a resolution)
+	RepublishFailures  uint64 // transient + permanent republish failures (inclusive)
+	Pending            uint64 // wanted events pending in the current round
+	AuthBlocked        uint64 // error_code=unauthorized records held blocked (per-round increments)
+	AuthBlockedPending uint64 // blocked records collected by the latest round (gauge)
 }
 
 // Metrics returns the replay resolution counters for the /metrics endpoint.
 func (r *Replayer) Metrics() ReplayerMetrics {
 	return ReplayerMetrics{
-		DLQRecords:          r.dlqRecords.Load(),
-		AcceptedScanned:     r.acceptedSeen.Load(),
-		Replayed:            r.replayed.Load(),
-		PermanentRejections: r.permanentRejections.Load(),
-		Unresolvable:        r.unresolvable.Load(),
-		UnparsableMarks:     r.unparsableMarks.Load(),
-		RepublishFailures:   r.republishFail.Load(),
-		Pending:             r.pending.Load(),
-		AuthBlocked:         r.authBlocked.Load(),
-		AuthBlockedPending:  r.authBlockedPending.Load(),
+		DLQRecords:         r.dlqRecords.Load(),
+		AcceptedScanned:    r.acceptedSeen.Load(),
+		Replayed:           r.replayed.Load(),
+		Permanent:          r.permanent.Load(),
+		Unresolvable:       r.unresolvable.Load(),
+		UnparsableMarks:    r.unparsableMarks.Load(),
+		AttemptsExhausted:  r.attemptsExhausted.Load(),
+		RepublishFailures:  r.republishFail.Load(),
+		Pending:            r.pending.Load(),
+		AuthBlocked:        r.authBlocked.Load(),
+		AuthBlockedPending: r.authBlockedPending.Load(),
 	}
 }
 
@@ -881,7 +899,7 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 		r.logger.Printf("dlq round: %d auth-blocked records pending (fix AUDIT_OUTBOX_TOKEN before replay)", blocked)
 	}
 	wanted := wantedEvents(collected)
-	if len(wanted) == 0 {
+	if len(wanted.replay) == 0 {
 		// Every collected record is already replayed (or unparsable):
 		// consume them so the next round does not re-read the same offsets.
 		if commitErr := r.commitResolved(ctx, collected, nil); commitErr != nil {
@@ -899,7 +917,7 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	}
 	// pending is set only while a scan is actually in flight, so an abort on
 	// either reset path never leaks a stale audit_dlq_pending reading.
-	r.pending.Store(uint64(len(wanted)))
+	r.pending.Store(uint64(len(wanted.replay)))
 	replayed, resolved, scanErr := r.scanAccepted(ctx, wanted)
 	r.pending.Store(0)
 	if scanErr != nil && !isDrained(ctx, scanErr) {
@@ -985,16 +1003,35 @@ type dlqRecord struct {
 	authBlocked bool
 }
 
-// wantedEvents returns the set of collected event IDs not yet marked
-// replayed and not held auth-blocked.
-func wantedEvents(collected []dlqRecord) map[string]bool {
-	wanted := map[string]bool{}
+// wantedSet is the round's replay target set: replay holds every wanted
+// event ID; oneShot is the subset whose DLQ record carries
+// error_code=permanent_error — the one-shot closure class (REQ-PERM-1).
+// Invariant: oneShot ⊆ replay, by construction (both derived from the same
+// records below). The one-shot class applies per event ID: a duplicate ID
+// collected with mixed codes closes ALL of that ID's records under the
+// one-shot policy (the shared state mark closes them together).
+type wantedSet struct {
+	replay  map[string]bool
+	oneShot map[string]bool
+}
+
+// wantedEvents returns the round's replay target set: collected event IDs
+// not yet marked replayed and not held auth-blocked, plus the subset whose
+// DLQ record carries error_code=permanent_error. error_code must never be
+// echoed into a log line or metric label at the classification sites — the
+// vocabulary is a free string from an untrusted boundary (CWE-117).
+func wantedEvents(collected []dlqRecord) wantedSet {
+	replay := map[string]bool{}
+	oneShot := map[string]bool{}
 	for _, record := range collected {
 		if record.wanted && !record.authBlocked {
-			wanted[record.eventID] = true
+			replay[record.eventID] = true
+			if record.errorCode == ErrorCodePermanentError {
+				oneShot[record.eventID] = true
+			}
 		}
 	}
-	return wanted
+	return wantedSet{replay: replay, oneShot: oneShot}
 }
 
 // commitResolved advances the DLQ reader past every collected record whose
@@ -1074,6 +1111,12 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 			r.dlqRecords.Add(1)
 			record.eventID = failure.EventID
 			record.errorCode = failure.ErrorCode
+			// REQ-PERM-3: per-round collection-time traffic counter for
+			// error_code=attempts_exhausted records, mirroring dlqRecords
+			// semantics (re-delivered records count again per round).
+			if failure.ErrorCode == ErrorCodeAttemptsExhausted {
+				r.attemptsExhausted.Add(1)
+			}
 			record.wanted = !r.state.marked(failure.EventID)
 			// error_code=unauthorized is config-fixable: while the operator has
 			// not acknowledged the credential is fixed (-replay-auth-blocked
@@ -1118,11 +1161,12 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 // maxScanWindows x drainTimeout (drained=false: sustained ingest cut the
 // round off — nothing is marked unresolvable and everything unresolved
 // stays pending for the next round). A transport error sets scanErr and
-// leaves everything pending. Returns the number of events replayed and the
-// set of event IDs that reached a durable decision this round (replayed,
-// permanently rejected, unparsable, or converged-as-unresolvable — NOT
-// transiently failed).
-func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (int, map[string]bool, error) {
+// leaves everything pending. Returns the number of events actually
+// re-published this round (permanent closures excluded — REQ-PERM-2) and
+// the set of event IDs that reached a durable decision this round
+// (replayed, permanently closed, unparsable, or converged-as-unresolvable
+// — NOT transiently failed).
+func (r *Replayer) scanAccepted(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
 	window := r.drainWindow()
 	scanCtx, cancel := context.WithTimeout(ctx, maxScanWindows*window)
 	defer cancel()
@@ -1148,9 +1192,9 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 		r.acceptedSeen.Add(1)
 		payloadID := eventIDFromValue(message.Value) // decode once per message
 		eventID := ""
-		if payloadID != "" && wanted[payloadID] && !r.state.marked(payloadID) {
+		if payloadID != "" && wanted.replay[payloadID] && !r.state.marked(payloadID) {
 			eventID = payloadID // payload event_id is authoritative
-		} else if keyID := string(message.Key); wanted[keyID] && !r.state.marked(keyID) {
+		} else if keyID := string(message.Key); wanted.replay[keyID] && !r.state.marked(keyID) {
 			eventID = keyID // fallback: unparsable values whose only signal is the key
 		}
 		if eventID == "" {
@@ -1169,22 +1213,37 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 			continue
 		}
 		if err := r.republish(ctx, message.Key, message.Value); err != nil {
+			r.republishFail.Add(1) // inclusive semantics unchanged (2026-08-15)
+			// REQ-PERM-1: a wanted error_code=permanent_error record gets ONE
+			// republish attempt in its lifetime; any failure closes it as a
+			// permanent closure (poison-pill policy). Non-permanent codes keep
+			// the legacy policy: only a live DeliveryError.Permanent rejection
+			// closes; transient failures retry next round. The one-shot check
+			// runs BEFORE the live-rejection check so a permanent_error record
+			// never reaches the legacy path (which would count replayed++).
 			var deliveryErr *outbox.DeliveryError
-			if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
-				// API-rejected events will never succeed on retry: mark them
-				// replayed so the round converges; the operator investigates
-				// via the DLQ record.
-				r.logger.Printf("permanent republish failure event_id=%s error=%v; marking replayed", eventID, err)
+			oneShot := wanted.oneShot[eventID]
+			liveRejected := !oneShot && errors.As(err, &deliveryErr) && deliveryErr.Permanent
+			if oneShot || liveRejected {
+				if oneShot {
+					r.logger.Printf("PERMANENT closure event_id=%s code=permanent_error one-shot republish attempt failed: %s; DLQ offset committed",
+						sanitizeLogField(eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
+				} else {
+					// Legacy live-rejection closure for non-permanent-code
+					// records: behavior unchanged (design §2.3), log modernized.
+					r.logger.Printf("PERMANENT closure event_id=%s republish rejected (permanent): %s; DLQ offset committed",
+						sanitizeLogField(eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
+				}
 				if markErr := r.state.Mark(eventID); markErr != nil {
 					return replayed, resolved, markErr
 				}
 				resolved[eventID] = true
-				r.republishFail.Add(1)
-				r.permanentRejections.Add(1)
-				replayed++
+				r.permanent.Add(1)
+				if liveRejected {
+					replayed++ // legacy return contribution preserved; the one-shot never counts (REQ-PERM-2)
+				}
 				continue
 			}
-			r.republishFail.Add(1)
 			r.logger.Printf("republish failed event_id=%s error=%v; will retry next round", eventID, err)
 			continue // found => stays pending, never marked unresolvable
 		}
@@ -1202,7 +1261,7 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 		// fetching the original). Mark unresolvable this round so
 		// commitResolved commits the DLQ offset — no attempt cap needed.
 		// Found-but-failed events (transient republish error) stay pending.
-		for eventID := range wanted {
+		for eventID := range wanted.replay {
 			if resolved[eventID] || found[eventID] {
 				continue
 			}

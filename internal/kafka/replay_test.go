@@ -1156,33 +1156,602 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	}
 }
 
-// TestReplayPermanentFailureConverges pins the anti-loop rule: an API-mode
-// permanent rejection is marked replayed so the round converges and the
-// operator investigates via the DLQ record instead of retrying forever.
+// AC-3 (REQ-PERM-1/2): a wanted error_code=permanent_error record whose
+// one-shot republish attempt is rejected with a permanent DeliveryError
+// converges in one round as a PERMANENT closure: the RunOnce return and
+// audit_dlq_replayed_total both stay 0 (the closure is never labeled
+// "replayed"), exactly one republish attempt happens in the record's
+// lifetime (round 2's re-read is a state-mark no-op), and the closure log
+// line carries the marker + reason without "marking replayed".
 func TestReplayPermanentFailureConverges(t *testing.T) {
-	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-p")}}
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
 	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-p")}}
 	state, err := LoadReplayState("")
 	if err != nil {
 		t.Fatal(err)
 	}
+	attempts := 0
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api rejected the event")}
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 1 || !state.Replayed["evt-p"] {
+		t.Fatalf("permanent closure must converge without replay: replayed=%d attempts=%d marked=%v", count, attempts, state.Replayed["evt-p"])
+	}
+	if len(dlq.commits) != 1 {
+		t.Fatalf("DLQ commits=%d, want 1 (closure commits the offset)", len(dlq.commits))
+	}
+	metrics := replayer.Metrics()
+	if metrics.DLQRecords != 1 || metrics.AcceptedScanned != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 || metrics.Pending != 0 {
+		t.Fatalf("metrics dlq=%d accepted=%d replayed=%d failures=%d pending=%d, want 1/1/0/1/0 (closure is not a replay)", metrics.DLQRecords, metrics.AcceptedScanned, metrics.Replayed, metrics.RepublishFailures, metrics.Pending)
+	}
+	if metrics.Permanent != 1 || metrics.Unresolvable != 0 || metrics.UnparsableMarks != 0 || metrics.AttemptsExhausted != 0 {
+		t.Fatalf("split counters permanent=%d unresolvable=%d unparsable=%d exhausted=%d, want 1/0/0/0 (the closure is its own resolution)", metrics.Permanent, metrics.Unresolvable, metrics.UnparsableMarks, metrics.AttemptsExhausted)
+	}
+	assertClosureLog(t, logs.String(), "evt-p", "code=permanent_error one-shot", "audit api rejected the event")
+	// Round 2 re-reads the DLQ record (the fake re-delivers it): the state
+	// mark makes it a no-op — no second attempt, only a re-commit.
+	dlq.index = 0
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 || attempts != 1 {
+		t.Fatalf("round 2 replayed=%d attempts=%d, want 0/1 (one-shot: exactly one attempt in the record's lifetime)", second, attempts)
+	}
+	if len(dlq.commits) != 2 {
+		t.Fatalf("DLQ commits=%d, want 2 (re-read record re-committed)", len(dlq.commits))
+	}
+}
+
+// assertClosureLog pins the REQ-PERM-2 closure-line contract: exactly one
+// log line carries the PERMANENT closure marker for eventID, with the
+// given discriminator (one-shot vs legacy live rejection) and the
+// sanitized failure reason, and it does NOT contain "marking replayed" —
+// the negative is local to the closure line (the unparsable anti-loop line
+// legitimately contains that phrase). Returns the closure line.
+func assertClosureLog(t *testing.T, logs, eventID, discriminator, reason string) string {
+	t.Helper()
+	var closureLines []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "PERMANENT closure") {
+			closureLines = append(closureLines, line)
+		}
+	}
+	if len(closureLines) != 1 {
+		t.Fatalf("expected exactly one PERMANENT closure line, got %d:\n%s", len(closureLines), logs)
+	}
+	line := closureLines[0]
+	for _, want := range []string{"event_id=" + eventID, discriminator, reason, "DLQ offset committed"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("closure line missing %q: %q", want, line)
+		}
+	}
+	if strings.Contains(line, "marking replayed") {
+		t.Fatalf("closure line must not say 'marking replayed': %q", line)
+	}
+	if strings.Count(line, "event_id="+eventID) != 1 {
+		t.Fatalf("closure line must mention the event exactly once: %q", line)
+	}
+	return line
+}
+
+// AC-1a (REQ-PERM-1): a wanted error_code=permanent_error record whose
+// one-shot republish attempt is rejected with a permanent DeliveryError
+// closes after exactly ONE attempt in its lifetime. The broker fixture
+// provides the commit evidence (round 1 commits offset 2; round 2's fresh
+// session starts at the committed offset and delivers nothing), and the
+// RunOnce return excludes the closure (REQ-PERM-2).
+func TestReplayPermanentCodeOneShotClosesOnPermanentRejection(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	var logs bytes.Buffer
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-p")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api rejected the event")}
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 1 || !state.Replayed["evt-p"] {
+		t.Fatalf("round 1 replayed=%d attempts=%d marked=%v, want 0/1/true (one-shot closure is not a replay)", count, attempts, state.Replayed["evt-p"])
+	}
+	if broker.committed != 2 {
+		t.Fatalf("DLQ committed offset=%d, want 2 (closure commits the DLQ offset)", broker.committed)
+	}
+	metrics := replayer.Metrics()
+	if metrics.Permanent != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 {
+		t.Fatalf("metrics permanent=%d replayed=%d failures=%d, want 1/0/1", metrics.Permanent, metrics.Replayed, metrics.RepublishFailures)
+	}
+	assertClosureLog(t, logs.String(), "evt-p", "code=permanent_error one-shot", "audit api rejected the event")
+	// Round 2: the fresh session starts at the committed offset, so nothing
+	// is re-delivered — the one-shot is closed in the broker's view too.
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 || attempts != 1 || broker.committed != 2 {
+		t.Fatalf("round 2 replayed=%d attempts=%d committed=%d, want 0/1/2 (no re-delivery, no re-attempt)", second, attempts, broker.committed)
+	}
+}
+
+// AC-1b (REQ-PERM-1 sub-case): a permanent_error record whose one-shot
+// attempt fails TRANSIENTLY (DeliveryError{Permanent:false}, or a raw
+// transport error) is still closed as permanent — the poison-pill closure
+// that today retries every round forever (E6). Identical assertions to
+// AC-1a, with the transient reason carried by the closure log line.
+func TestReplayPermanentCodeOneShotClosesOnTransientFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		reason string
+	}{
+		"delivery-error-transient": {
+			err:    &outbox.DeliveryError{Permanent: false, StatusCode: 503, Err: errors.New("audit api unavailable")},
+			reason: "audit api unavailable",
+		},
+		"plain-error": {
+			err:    errors.New("dial tcp: connection refused"),
+			reason: "dial tcp: connection refused",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+			accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-p")}}
+			state, err := LoadReplayState("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempts := 0
+			var logs bytes.Buffer
+			replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+				attempts++
+				return tc.err
+			}, log.New(&logs, "", 0))
+			replayer.drainTimeout = 20 * time.Millisecond
+			count, err := replayer.RunOnce(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 || attempts != 1 || !state.Replayed["evt-p"] || len(dlq.commits) != 1 {
+				t.Fatalf("round 1 replayed=%d attempts=%d marked=%v commits=%d, want 0/1/true/1", count, attempts, state.Replayed["evt-p"], len(dlq.commits))
+			}
+			metrics := replayer.Metrics()
+			if metrics.Permanent != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 {
+				t.Fatalf("metrics permanent=%d replayed=%d failures=%d, want 1/0/1", metrics.Permanent, metrics.Replayed, metrics.RepublishFailures)
+			}
+			assertClosureLog(t, logs.String(), "evt-p", "code=permanent_error one-shot", tc.reason)
+			// Round 2 re-reads the record; the mark makes it a no-op.
+			dlq.index = 0
+			second, err := replayer.RunOnce(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second != 0 || attempts != 1 {
+				t.Fatalf("round 2 replayed=%d attempts=%d, want 0/1 (one-shot: no re-attempt after closure)", second, attempts)
+			}
+			if len(dlq.commits) != 2 {
+				t.Fatalf("DLQ commits=%d, want 2 (re-read record re-committed)", len(dlq.commits))
+			}
+		})
+	}
+}
+
+// AC-1c (control): a non-permanent-code record (attempts_exhausted) with a
+// transient republish failure does NOT close: it stays pending (no mark, no
+// commit, Permanent stays 0) and is retried by round 2 — the transient-
+// retry contract for non-permanent codes is preserved (E8 control).
+func TestReplayNonPermanentCodeTransientFailureRetries(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-x", 1)}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-x")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("dial tcp: connection refused") // transient: not a closure
+		}
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 1 || state.Replayed["evt-x"] || broker.committed != 0 {
+		t.Fatalf("round 1 replayed=%d attempts=%d marked=%v committed=%d, want 0/1/false/0 (transient failure stays pending)", count, attempts, state.Replayed["evt-x"], broker.committed)
+	}
+	if metrics := replayer.Metrics(); metrics.Permanent != 0 {
+		t.Fatalf("Permanent=%d after round 1, want 0 (non-permanent code must not close on transient failure)", metrics.Permanent)
+	}
+	// Round 2: the pending record is re-delivered (fresh session from the
+	// committed offset) and the retry succeeds — republish calls == 2.
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || attempts != 2 || !state.Replayed["evt-x"] || broker.committed != 2 {
+		t.Fatalf("round 2 replayed=%d attempts=%d marked=%v committed=%d, want 1/2/true/2", count, attempts, state.Replayed["evt-x"], broker.committed)
+	}
+	if metrics := replayer.Metrics(); metrics.Permanent != 0 || metrics.Replayed != 1 {
+		t.Fatalf("metrics permanent=%d replayed=%d, want 0/1", metrics.Permanent, metrics.Replayed)
+	}
+}
+
+// AC-4 (REQ-PERM-1): a permanent_error record whose one-shot attempt
+// SUCCEEDS (e.g. a late-deployed schema makes the formerly-rejected event
+// acceptable) replays exactly as today: replayed=1, Permanent=0, exactly
+// one republish, marked, committed.
+func TestReplayPermanentCodeOneShotSucceeds(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-p")}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
 	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
-		return &outbox.DeliveryError{Permanent: true}
+		republished++
+		return nil
 	})
 	replayer.drainTimeout = 20 * time.Millisecond
 	count, err := replayer.RunOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || !state.Replayed["evt-p"] {
-		t.Fatalf("permanent failure must converge: replayed=%d marked=%v", count, state.Replayed["evt-p"])
+	if count != 1 || republished != 1 || !state.Replayed["evt-p"] || len(dlq.commits) != 1 {
+		t.Fatalf("round 1 replayed=%d republished=%d marked=%v commits=%d, want 1/1/true/1", count, republished, state.Replayed["evt-p"], len(dlq.commits))
 	}
 	metrics := replayer.Metrics()
-	if metrics.DLQRecords != 1 || metrics.AcceptedScanned != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 || metrics.Pending != 0 {
-		t.Fatalf("metrics dlq=%d accepted=%d replayed=%d failures=%d pending=%d, want 1/1/0/1/0 (permanent rejection is not a replay)", metrics.DLQRecords, metrics.AcceptedScanned, metrics.Replayed, metrics.RepublishFailures, metrics.Pending)
+	if metrics.Replayed != 1 || metrics.Permanent != 0 || metrics.RepublishFailures != 0 {
+		t.Fatalf("metrics replayed=%d permanent=%d failures=%d, want 1/0/0 (a successful one-shot is a replay)", metrics.Replayed, metrics.Permanent, metrics.RepublishFailures)
 	}
-	if metrics.PermanentRejections != 1 || metrics.Unresolvable != 0 || metrics.UnparsableMarks != 0 {
-		t.Fatalf("split counters permanent=%d unresolvable=%d unparsable=%d, want 1/0/0 (permanent rejection is its own resolution)", metrics.PermanentRejections, metrics.Unresolvable, metrics.UnparsableMarks)
+	// Round 2 is an idempotent no-op.
+	dlq.index = 0
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 || republished != 1 || len(dlq.commits) != 2 {
+		t.Fatalf("round 2 replayed=%d republished=%d commits=%d, want 0/1/2", second, republished, len(dlq.commits))
+	}
+}
+
+// S-1 (supplementary pin, design §2.3): a non-permanent-code record
+// (attempts_exhausted) whose republish is rejected with
+// DeliveryError.Permanent keeps the LEGACY closure: marked, permanent
+// counter, and the legacy replayed++ return contribution (count 1). Only
+// the one-shot path excludes the return (REQ-PERM-2).
+func TestReplayNonPermanentCodeLiveRejectionCloses(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-l", 1)}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-l")}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 422, Err: errors.New("audit api returned 422")}
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || !state.Replayed["evt-l"] || len(dlq.commits) != 1 {
+		t.Fatalf("legacy closure replayed=%d marked=%v commits=%d, want 1/true/1 (legacy return contribution preserved)", count, state.Replayed["evt-l"], len(dlq.commits))
+	}
+	metrics := replayer.Metrics()
+	if metrics.Permanent != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 {
+		t.Fatalf("metrics permanent=%d replayed=%d failures=%d, want 1/0/1", metrics.Permanent, metrics.Replayed, metrics.RepublishFailures)
+	}
+	line := assertClosureLog(t, logs.String(), "evt-l", "republish rejected (permanent)", "audit api returned 422")
+	if strings.Contains(line, "one-shot") {
+		t.Fatalf("legacy closure line must not say 'one-shot': %q", line)
+	}
+}
+
+// REQ-PERM-3: audit_dlq_attempts_exhausted_total is a per-round
+// collection-time traffic counter for error_code=attempts_exhausted
+// records: one round with one record counts 1; a re-delivery round counts
+// again (2 total); replay outcome is unchanged (E8 control).
+func TestReplayAttemptsExhaustedCounterCollection(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-x", 1)}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-x")}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		return nil
+	})
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("replayed=%d, want 1 (replay outcome unchanged)", count)
+	}
+	if metrics := replayer.Metrics(); metrics.AttemptsExhausted != 1 {
+		t.Fatalf("AttemptsExhausted=%d after round 1, want 1", metrics.AttemptsExhausted)
+	}
+	// Round 2 re-delivers the record (fake re-delivery): the traffic
+	// counter increments again, the resolution counters do not.
+	dlq.index = 0
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 {
+		t.Fatalf("round 2 replayed=%d, want 0 (idempotent)", second)
+	}
+	if metrics := replayer.Metrics(); metrics.AttemptsExhausted != 2 {
+		t.Fatalf("AttemptsExhausted=%d after round 2, want 2 (per-round collection semantics)", metrics.AttemptsExhausted)
+	}
+}
+
+// FM-1a (crash-injection pin): a crash between the one-shot republish
+// attempt and the durable state.Mark causes exactly ONE re-attempt after
+// recovery — the one-shot is per round in which the record is wanted, and
+// the closure becomes durable only once the mark persists. A panic is the
+// only honest simulation of this window (an error return is the DESIGNED
+// closure, not a crash).
+func TestReplayOneShotCrashBeforeMarkReattemptsOnce(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	first := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-p")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		panic("simulated crash after republish attempt, before state.Mark")
+	}, log.New(io.Discard, "", 0))
+	first.drainTimeout = 20 * time.Millisecond
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = first.RunOnce(context.Background())
+	}()
+	if recovered == nil {
+		t.Fatal("republish panic must propagate (the crash window is not an error return)")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts=%d after the crash, want 1", attempts)
+	}
+	onDisk, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Replayed["evt-p"] {
+		t.Fatal("state file must not contain the mark before it is durable")
+	}
+	if broker.committed != 0 || len(broker.commits) != 0 {
+		t.Fatalf("DLQ must be uncommitted after the crash: committed=%d commits=%d", broker.committed, len(broker.commits))
+	}
+	if metrics := first.Metrics(); metrics.Permanent != 0 || metrics.RepublishFailures != 0 {
+		t.Fatalf("closure counters must be untouched after the crash: permanent=%d failures=%d", metrics.Permanent, metrics.RepublishFailures)
+	}
+	// Reboot: fresh state + fresh sessions. The record is re-delivered
+	// (committed offset still 0) and the one-shot closure runs — attempts
+	// total 2 across both process lifetimes (at-least-once, at-most-once
+	// per round), then the closure is durable.
+	reloaded, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reboot := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-p")}, nil), reloaded, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api rejected the event")}
+	}, log.New(io.Discard, "", 0))
+	reboot.drainTimeout = 20 * time.Millisecond
+	count, err := reboot.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 2 {
+		t.Fatalf("reboot round replayed=%d attempts=%d, want 0/2 (exactly one re-attempt after recovery)", count, attempts)
+	}
+	if !reloaded.Replayed["evt-p"] || broker.committed != 2 {
+		t.Fatalf("reboot round must close durably: marked=%v committed=%d", reloaded.Replayed["evt-p"], broker.committed)
+	}
+	if metrics := reboot.Metrics(); metrics.Permanent != 1 || metrics.Replayed != 0 {
+		t.Fatalf("reboot metrics permanent=%d replayed=%d, want 1/0", metrics.Permanent, metrics.Replayed)
+	}
+}
+
+// FM-1b (crash during Mark, pre-durability): when the state mark fails to
+// persist, the closure counter must NOT increment (security F1 discipline
+// extended to the new counter), the record stays pending, and the next
+// round (fault removed) re-attempts and converges.
+func TestReplayOneShotMarkPersistFailureKeepsRecordPending(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-p")}}
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json")) // real path: the syncFile fault must be reachable
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.syncFile = func(string) error { return errors.New("injected file sync failure") }
+	attempts := 0
+	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api rejected the event")}
+	})
+	replayer.drainTimeout = 20 * time.Millisecond
+	if _, err := replayer.RunOnce(context.Background()); err == nil {
+		t.Fatal("round must abort on the injected mark persist failure")
+	}
+	if attempts != 1 || state.Replayed["evt-p"] || len(dlq.commits) != 0 {
+		t.Fatalf("round 1 attempts=%d marked=%v commits=%d, want 1/false/0 (record stays pending)", attempts, state.Replayed["evt-p"], len(dlq.commits))
+	}
+	if metrics := replayer.Metrics(); metrics.Permanent != 0 || metrics.RepublishFailures != 1 {
+		t.Fatalf("closure counter must not increment without a durable mark: permanent=%d failures=%d, want 0/1", metrics.Permanent, metrics.RepublishFailures)
+	}
+	// Fault removed; round 2 re-reads (fake re-delivery) and converges.
+	state.syncFile = nil
+	dlq.index = 0
+	accepted.index = 0
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 2 || !state.Replayed["evt-p"] || len(dlq.commits) != 1 {
+		t.Fatalf("round 2 replayed=%d attempts=%d marked=%v commits=%d, want 0/2/true/1 (round 1 committed nothing; round 2 commits the closed record)", count, attempts, state.Replayed["evt-p"], len(dlq.commits))
+	}
+	if metrics := replayer.Metrics(); metrics.Permanent != 1 {
+		t.Fatalf("Permanent=%d after round 2, want 1 (closure converges once the mark persists)", metrics.Permanent)
+	}
+}
+
+// FM-2a (FM-2 for the one-shot path): a crash AFTER the durable closure
+// mark but BEFORE the DLQ commit never re-attempts — the re-read record is
+// wanted=false and only re-committed (no double-attempt, no loss; mirrors
+// TestReplayCrashAfterMarkRebootDoesNotRepublish). The closure is also
+// excluded from the return even on the aborted round.
+func TestReplayOneShotCrashAfterMarkSkipsReattempt(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-p", 1, ErrorCodePermanentError)}}
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-p")}}
+	accepted.fetchErr = errors.New("injected accepted-topic transport failure after the closure mark")
+	first := newReplayerWithFactories(broker.freshDLQSession(), func() messageReader { return accepted }, state, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api rejected the event")}
+	}, log.New(io.Discard, "", 0))
+	first.drainTimeout = 20 * time.Millisecond
+	count, err := first.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("round must abort on the accepted transport failure (crash before DLQ commit)")
+	}
+	if count != 0 || attempts != 1 {
+		t.Fatalf("round 1 replayed=%d attempts=%d, want 0/1 (closure excluded from the return even on the aborted round)", count, attempts)
+	}
+	if broker.committed != 0 {
+		t.Fatalf("DLQ offsets must be uncommitted after the crash: committed=%d", broker.committed)
+	}
+	onDisk, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onDisk.Replayed["evt-p"] {
+		t.Fatal("the closure mark must survive the crash (durable fsync before the commit window)")
+	}
+	// Reboot: the re-read record is already closed — no re-attempt, only a
+	// re-commit, and no second closure log line.
+	reloaded, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	reboot := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-p")}, nil), reloaded, func(ctx context.Context, key, value []byte) error {
+		attempts++
+		return nil
+	}, log.New(&logs, "", 0))
+	reboot.drainTimeout = 20 * time.Millisecond
+	count, err = reboot.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || attempts != 1 || broker.committed != 2 {
+		t.Fatalf("reboot round replayed=%d attempts=%d committed=%d, want 0/1/2 (no re-attempt after the durable mark)", count, attempts, broker.committed)
+	}
+	if strings.Contains(logs.String(), "PERMANENT closure") {
+		t.Fatalf("reboot round must not emit a second closure line:\n%s", logs.String())
+	}
+}
+
+// Q3 (adversarial review): wantedEvents keeps oneShot ⊆ replay by
+// construction and pins the two exclusion conditions (wanted, !authBlocked)
+// in lockstep — a drift that silently shrinks the one-shot class is a
+// policy regression (permanent_error records retried forever again).
+func TestWantedEventsOneShotSubsetInvariant(t *testing.T) {
+	collected := []dlqRecord{
+		{eventID: "evt-p", errorCode: ErrorCodePermanentError, wanted: true},                    // one-shot class
+		{eventID: "evt-x", errorCode: ErrorCodeAttemptsExhausted, wanted: true},                 // normal replay
+		{eventID: "evt-u", errorCode: ErrorCodeUnparsable, wanted: true},                        // unknown/unparsable code replays normally
+		{eventID: "evt-a", errorCode: ErrorCodePermanentError, wanted: true, authBlocked: true}, // blocked: excluded
+		{eventID: "evt-done", errorCode: ErrorCodePermanentError, wanted: false},                // already marked: excluded
+	}
+	wanted := wantedEvents(collected)
+	wantReplay := map[string]bool{"evt-p": true, "evt-x": true, "evt-u": true}
+	wantOneShot := map[string]bool{"evt-p": true}
+	if !reflect.DeepEqual(wanted.replay, wantReplay) {
+		t.Fatalf("replay set=%v, want %v", wanted.replay, wantReplay)
+	}
+	if !reflect.DeepEqual(wanted.oneShot, wantOneShot) {
+		t.Fatalf("oneShot set=%v, want %v", wanted.oneShot, wantOneShot)
+	}
+	for id := range wanted.oneShot {
+		if !wanted.replay[id] {
+			t.Fatalf("invariant oneShot ⊆ replay violated for %s", id)
+		}
+	}
+}
+
+// M3/CWE-117 (security review): the PERMANENT closure lines sanitize the
+// attacker-influenced event_id (a forged DLQ Failure payload with a control
+// character must not forge a second log line), mirroring
+// TestReplayAuthBlockedLogSanitizesFields.
+func TestReplayPermanentClosureLogSanitizesEventID(t *testing.T) {
+	// The accepted original must carry a properly escaped JSON event_id so
+	// the scan takes the payload path (a raw-newline value would hit the
+	// unparsable anti-loop path instead of the closure).
+	forged := "evt\ninjected"
+	value, err := json.Marshal(map[string]string{"event_id": forged, "source_system": "crm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode(forged, 1, ErrorCodePermanentError)}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{{Key: []byte(forged), Value: value, Partition: 0, Offset: 1}}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		return errors.New("dial tcp: connection refused")
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	logText := logs.String()
+	closureLine := ""
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "PERMANENT closure") {
+			closureLine = line
+		}
+	}
+	if closureLine == "" {
+		t.Fatalf("closure line missing:\n%s", logText)
+	}
+	if strings.Contains(closureLine, "\n") {
+		t.Fatalf("closure line contains a raw newline (log forging): %q", closureLine)
+	}
+	if !strings.Contains(closureLine, "event_id=evt?injected") {
+		t.Fatalf("event_id control char not sanitized: %q", closureLine)
+	}
+	if strings.Contains(logText, "event_id=evt\ninjected") {
+		t.Fatalf("raw forged event_id reached the log:\n%s", logText)
 	}
 }
 
@@ -1393,8 +1962,8 @@ func TestReplayUnresolvableCounterSplit(t *testing.T) {
 		t.Fatalf("DLQ commits=%d, want 1 (commit behavior unchanged)", len(dlq.commits))
 	}
 	metrics := replayer.Metrics()
-	if metrics.Unresolvable != 1 || metrics.Replayed != 0 || metrics.PermanentRejections != 0 || metrics.UnparsableMarks != 0 {
-		t.Fatalf("metrics unresolvable=%d replayed=%d permanent=%d unparsable=%d, want 1/0/0/0", metrics.Unresolvable, metrics.Replayed, metrics.PermanentRejections, metrics.UnparsableMarks)
+	if metrics.Unresolvable != 1 || metrics.Replayed != 0 || metrics.Permanent != 0 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("metrics unresolvable=%d replayed=%d permanent=%d unparsable=%d, want 1/0/0/0", metrics.Unresolvable, metrics.Replayed, metrics.Permanent, metrics.UnparsableMarks)
 	}
 	logged := logs.String()
 	if !strings.Contains(logged, "unresolvable") || !strings.Contains(logged, "reason=original-not-found-in-accepted-topic") {
@@ -1420,15 +1989,15 @@ func TestReplayUnresolvableCounterSplit(t *testing.T) {
 }
 
 // T2 (AC-1): Metrics exposes distinct named counters (Replayed /
-// UnparsableMarks / PermanentRejections / Unresolvable) that are
+// UnparsableMarks / Permanent / Unresolvable / AttemptsExhausted) that are
 // independently addressable — a regression that re-conflates the paths into
 // one value cannot compile this test.
 func TestReplayMetricsNamedCountersIndependentlyAddressable(t *testing.T) {
 	metrics := ReplayerMetrics{
-		DLQRecords: 1, AcceptedScanned: 2, Replayed: 3, PermanentRejections: 4,
-		Unresolvable: 5, UnparsableMarks: 6, RepublishFailures: 7, Pending: 8,
+		DLQRecords: 1, AcceptedScanned: 2, Replayed: 3, Permanent: 4,
+		Unresolvable: 5, UnparsableMarks: 6, AttemptsExhausted: 7, RepublishFailures: 8, Pending: 9,
 	}
-	if metrics.Replayed != 3 || metrics.PermanentRejections != 4 || metrics.Unresolvable != 5 || metrics.UnparsableMarks != 6 {
+	if metrics.Replayed != 3 || metrics.Permanent != 4 || metrics.Unresolvable != 5 || metrics.UnparsableMarks != 6 || metrics.AttemptsExhausted != 7 {
 		t.Fatalf("named counter fields not independently addressable: %+v", metrics)
 	}
 }
@@ -1457,8 +2026,8 @@ func TestReplaySuccessfulRepublishCountsOnlyReplayed(t *testing.T) {
 		t.Fatalf("replayed=%d republished=%d, want 1/1", count, republished)
 	}
 	metrics := replayer.Metrics()
-	if metrics.Replayed != 1 || metrics.UnparsableMarks != 0 || metrics.PermanentRejections != 0 || metrics.Unresolvable != 0 {
-		t.Fatalf("metrics replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.Replayed, metrics.UnparsableMarks, metrics.PermanentRejections, metrics.Unresolvable)
+	if metrics.Replayed != 1 || metrics.UnparsableMarks != 0 || metrics.Permanent != 0 || metrics.Unresolvable != 0 {
+		t.Fatalf("metrics replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.Replayed, metrics.UnparsableMarks, metrics.Permanent, metrics.Unresolvable)
 	}
 }
 
@@ -1487,34 +2056,41 @@ func TestReplayUnparsableMarkIsNotReplayed(t *testing.T) {
 		t.Fatalf("unparsable convergence replayed=%d marked=%v commits=%d, want 1/true/1", count, state.Replayed["evt-u"], len(dlq.commits))
 	}
 	metrics := replayer.Metrics()
-	if metrics.UnparsableMarks != 1 || metrics.Replayed != 0 || metrics.PermanentRejections != 0 || metrics.Unresolvable != 0 {
-		t.Fatalf("metrics unparsable=%d replayed=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.UnparsableMarks, metrics.Replayed, metrics.PermanentRejections, metrics.Unresolvable)
+	if metrics.UnparsableMarks != 1 || metrics.Replayed != 0 || metrics.Permanent != 0 || metrics.Unresolvable != 0 {
+		t.Fatalf("metrics unparsable=%d replayed=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.UnparsableMarks, metrics.Replayed, metrics.Permanent, metrics.Unresolvable)
 	}
 }
 
 // T6 (AC-2): a mixed round with one event per resolution path increments
-// exactly the counter of its own path, the four first-resolution counters
-// sum to the round's first-resolution count, and a transient republish
-// failure increments none of them. The transient record stays pending and
-// the commit barrier never commits at/above its offset.
+// exactly the counter of its own path, the first-resolution counters sum to
+// the round's first-resolution count, and a transient republish failure of
+// a NON-permanent-code record increments none of them. The transient record
+// stays pending and the commit barrier never commits at/above its offset.
+// evt-p (error_code=permanent_error) pins the mixed-policy surface: its
+// transient failure closes under the one-shot policy, sharing the Permanent
+// counter with evt-c's legacy live rejection while contributing 0 to the
+// returned count (the return asymmetry in one round).
 func TestReplayMixedRoundSplitCountersAndCommitBarrier(t *testing.T) {
-	// Offsets 1..5 in one partition: evt-a republished (1), evt-b unparsable
-	// anti-loop (2), evt-c permanent rejection (3), evt-t transient failure
-	// (4, stays pending), evt-d unresolvable (5, absent from the accepted
-	// topic). The barrier commits only offsets below the pending evt-t (4),
-	// so evt-d at offset 5 stays uncommitted too.
+	// Offsets 1..6 in one partition: evt-a republished (1), evt-b unparsable
+	// anti-loop (2), evt-c legacy live-rejection closure (3), evt-t transient
+	// failure (4, stays pending), evt-d unresolvable (5, absent from the
+	// accepted topic), evt-p one-shot closure of a permanent_error record
+	// with a transient failure (6). The barrier commits only offsets below
+	// the pending evt-t (4), so evt-d at 5 and evt-p at 6 stay uncommitted.
 	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{
 		dlqMessageAt("evt-a", 1),
 		dlqMessageAt("evt-b", 2),
 		dlqMessageAt("evt-c", 3),
 		dlqMessageAt("evt-t", 4),
 		dlqMessageAt("evt-d", 5),
+		dlqMessageAtCode("evt-p", 6, ErrorCodePermanentError),
 	}}
 	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{
 		acceptedMessage("evt-a"),
 		{Key: []byte("evt-b"), Value: []byte("not-json"), Partition: 0, Offset: 2},
 		acceptedMessage("evt-c"),
 		acceptedMessage("evt-t"),
+		acceptedMessage("evt-p"),
 	}}
 	state, err := LoadReplayState("")
 	if err != nil {
@@ -1528,9 +2104,11 @@ func TestReplayMixedRoundSplitCountersAndCommitBarrier(t *testing.T) {
 			t.Fatal("republish must never be called for an unparsable value")
 			return nil
 		case "evt-c":
-			return &outbox.DeliveryError{Permanent: true}
+			return &outbox.DeliveryError{Permanent: true, StatusCode: 400, Err: errors.New("audit api returned 422")}
 		case "evt-t":
 			return errors.New("transient transport failure") // non-permanent: stays pending
+		case "evt-p":
+			return errors.New("dial tcp: connection refused") // permanent_error one-shot: transient failure still closes
 		default:
 			t.Fatalf("unexpected republish key=%s", key)
 			return nil
@@ -1541,23 +2119,28 @@ func TestReplayMixedRoundSplitCountersAndCommitBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Five first-resolutions: evt-a (replayed), evt-b (unparsable), evt-c
+	// (legacy closure, keeps its replayed++ return contribution), evt-d
+	// (unresolvable), evt-p (one-shot closure, excluded from the return).
+	// evt-t stays pending. count = 4: the one-shot closure is the only
+	// resolution that does not contribute to the returned count.
 	if count != 4 {
-		t.Fatalf("replayed=%d, want 4 (four first-resolutions; evt-t stays pending)", count)
+		t.Fatalf("replayed=%d, want 4 (five first-resolutions; evt-t pending; evt-p one-shot excluded from the return)", count)
 	}
 	metrics := replayer.Metrics()
-	if metrics.Replayed != 1 || metrics.UnparsableMarks != 1 || metrics.PermanentRejections != 1 || metrics.Unresolvable != 1 {
-		t.Fatalf("split counters replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/1/1/1", metrics.Replayed, metrics.UnparsableMarks, metrics.PermanentRejections, metrics.Unresolvable)
+	if metrics.Replayed != 1 || metrics.UnparsableMarks != 1 || metrics.Permanent != 2 || metrics.Unresolvable != 1 {
+		t.Fatalf("split counters replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/1/2/1 (one-shot + legacy share Permanent)", metrics.Replayed, metrics.UnparsableMarks, metrics.Permanent, metrics.Unresolvable)
 	}
-	if got := metrics.Replayed + metrics.UnparsableMarks + metrics.PermanentRejections + metrics.Unresolvable; got != 4 {
-		t.Fatalf("first-resolution sum=%d, want 4 (invariant: one counter per durable first resolution)", got)
+	if got := metrics.Replayed + metrics.UnparsableMarks + metrics.Permanent + metrics.Unresolvable; got != 5 {
+		t.Fatalf("first-resolution sum=%d, want 5 (invariant: one counter per durable first resolution)", got)
 	}
-	if metrics.RepublishFailures != 2 {
-		t.Fatalf("republishFailures=%d, want 2 (permanent + transient, inclusive semantics kept)", metrics.RepublishFailures)
+	if metrics.RepublishFailures != 3 {
+		t.Fatalf("republishFailures=%d, want 3 (legacy evt-c + transient evt-t + one-shot evt-p, inclusive semantics kept)", metrics.RepublishFailures)
 	}
 	if metrics.Pending != 0 {
 		t.Fatalf("pending=%d after round, want 0", metrics.Pending)
 	}
-	for _, id := range []string{"evt-a", "evt-b", "evt-c", "evt-d"} {
+	for _, id := range []string{"evt-a", "evt-b", "evt-c", "evt-d", "evt-p"} {
 		if !state.Replayed[id] {
 			t.Fatalf("%s must be marked replayed", id)
 		}
@@ -1566,7 +2149,8 @@ func TestReplayMixedRoundSplitCountersAndCommitBarrier(t *testing.T) {
 		t.Fatal("transient failure must never be marked replayed")
 	}
 	// Commit barrier: only offsets 1..3 (below the pending evt-t at 4) are
-	// committed; evt-d at offset 5 stays pending with evt-t.
+	// committed; evt-d at offset 5 and evt-p at offset 6 stay pending with
+	// evt-t.
 	if len(dlq.commits) != 3 {
 		t.Fatalf("DLQ commits=%d, want 3 (barrier: never commit at/above the pending offset)", len(dlq.commits))
 	}
