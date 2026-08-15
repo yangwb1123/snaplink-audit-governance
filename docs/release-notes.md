@@ -1,5 +1,56 @@
 # Release Notes
 
+## 2026-08-15 — gRPC ingest receive-size cap and per-field envelope limits (HTTP parity, internal/grpcapi)
+
+**写给运营（行为变化）：**
+
+- **gRPC 传输接收上限收紧到 512KB**：`Write`/`WriteBatch`/`WriteStream` 单条消息超过
+  `domain.MaxEventBytes*2` = 512KB 时返回 `ResourceExhausted`（此前继承 grpc-go 默认
+  4MB，是 HTTP 请求体上限的 8 倍——每条事件都会触发全量快照存储更新与摘要计算，
+  4MB 请求是纯存储/CPU 放大）。与 HTTP 表面对齐：`grpcapi.MaxRecvBytes` 由
+  `domain.MaxEventBytes` 派生，两侧上限不会漂移。
+- **新增逐字段上限**：所有逐字持久化进哈希链账本的 envelope 字符串字段（reason、
+  trace_id、actor.*、target.*、changed_fields 的 JSON 字符串、payload_ref、各类 ID）
+  超过 8KB 返回 `InvalidArgument`；`actor.roles` ≤ 64、`targets` ≤ 64、
+  `changed_fields` ≤ 256、`WriteBatch` ≤ 500 条，违规同样返回 `InvalidArgument`。
+  `payload_json` 不受 8KB 限制（仍受既有的 256KB 载荷上限与 512KB 传输上限约束）。
+- **WriteStream 逐消息跳过（仅尺寸类拒绝）**：尺寸/数量超限的消息被拒绝且**不产生回执**，
+  流保持打开；其余拒绝类别（key-framing、尾随 JSON、运行时错误）仍终止流。
+  客户端按 `event_id` 对账：收到回执 = 已入账，未收到 = 被拒（服务端日志含
+  截断的 `event_id` 前缀 + client_id/tenant 归属，供运营追踪）。
+- **WriteBatch 计数超限原子拒绝**：> 500 条在提交循环前拒绝，零部分提交；
+  批内逐事件尺寸违规保持既有部分提交语义（前缀已入账、线上回执丢弃——与
+  key-framing 语义一致，gRPC 错误响应不带消息体，客户端需读账本区分）。
+- **HTTP/gRPC 接受集不对称（有意为之）**：HTTP 只有整包 512KB 上限、无逐字段上限；
+  gRPC 严格更严（gRPC 接受集 ⊂ HTTP）。跨传输迁移/混部负载的生产者必须满足
+  gRPC 上限才能保证事件不丢。
+- **传输安全提醒（既存问题，后续方向跟踪）**：入站 gRPC 监听器默认无 TLS，
+  `authorization` 元数据明文过网。生产部署必须将 `AUDIT_GRPC_LISTEN` 置于
+  TLS 终结设施之后（或实现 `grpc.Creds` + `-check-config` 失败关闭门禁）。
+- **滚动部署**：纯服务端变更，无需配置/数据迁移；合规生产者（已在上述上限内）
+  无需改代码。混部窗口内旧节点仍接受超限请求。建议部署后监控
+  `"grpc stream: rejecting over-cap message"` 日志作为非合规生产者的早期信号。
+
+**写给开发（实现变化）：**
+
+- `internal/grpcapi/limits.go`（新增）：`MaxRecvBytes`、`MaxEnvelopeFieldBytes`、
+  `MaxActorRoles`/`MaxTargetsPerEvent`/`MaxChangedFields`、`MaxBatchEvents`、
+  哨兵 `ErrEnvelopeTooLarge`（包装 `domain.ErrInvalid`，经既有 `toStatus` 映射为
+  `InvalidArgument`）、表驱动 `validateEnvelopeCaps`（校验顺序确定：nil → 上限 →
+  occurred_at/actor/decode）与 `truncateEventID`（日志行内截断至 64 字节）。
+- `internal/grpcapi/server.go`：`fromProto` 在复制前调用 `validateEnvelopeCaps`；
+  `WriteBatch` 计数预检；`WriteStream` 对 `ErrEnvelopeTooLarge` 跳过并记录日志。
+- `cmd/audit-api/main.go`：`grpc.NewServer` 增加 `grpc.MaxRecvMsgSize(grpcapi.MaxRecvBytes)`。
+- 测试：AC-1 接线断言扩展（标识符 + `MaxRecvBytes == domain.MaxEventBytes*2`）、
+  AC-2 `TestFromProtoRejectsOversizedEnvelope`（字段/数量超限 + 精确边界 + 端到端
+  Write）、AC-3 `TestGRPCRejectsOverCapBatch`（501 条零部分提交 + 500 条全量提交）、
+  AC-4 `TestGRPCWriteStreamOverCapContinues`（跳过 + 回执 + `io.EOF` + 日志断言）、
+  以及传输层 `ResourceExhausted`（生产上限 harness）、批内成员部分提交、
+  skip-后-非尺寸-终止、nil Logger 守卫、HTTP 接受/gRPC 拒绝不对称等固定测试。
+- 已知限制（R1）：逐字段上限不约束 envelope 总量低于 512KB（最坏情况 ≈ 8.4MB），
+  此类消息在传输层被拒（`ResourceExhausted`）并终止流——grpc-go 固有行为；
+  后续方向可增加 per-envelope 总量上限使所有尺寸拒绝都可跳过。
+
 ## 2026-08-15 — gRPC ingest 拒绝首值后的尾随 JSON（严格单值解码，internal/grpcapi）
 
 **写给运营（行为变化）：**

@@ -115,6 +115,11 @@ func main() {
 		grpcServer = grpc.NewServer(
 			grpc.KeepaliveParams(grpcapi.KeepaliveParams()),
 			grpc.KeepaliveEnforcementPolicy(grpcapi.KeepaliveEnforcementPolicy()),
+			// Receive-size parity with the HTTP surface: a single gRPC ingest
+			// message is capped at the HTTP request-body cap (512KB) instead of
+			// grpc-go's 4MB default, so neither transport accepts a request the
+			// other rejects on size (8x storage/CPU amplification closed).
+			grpc.MaxRecvMsgSize(grpcapi.MaxRecvBytes),
 			grpc.ChainUnaryInterceptor(grpcapi.RecoveryUnaryServerInterceptor(logger)),
 			grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor(logger)),
 		)

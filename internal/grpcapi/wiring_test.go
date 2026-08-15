@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/snaplink/audit-governance/internal/domain"
 )
 
 // TestProductionWiringStatic pins AC-3: the production construction path in
@@ -22,6 +24,8 @@ func TestProductionWiringStatic(t *testing.T) {
 	text := string(source)
 	for _, want := range []string{
 		"grpc.KeepaliveParams(grpcapi.KeepaliveParams",
+		"grpc.KeepaliveEnforcementPolicy(grpcapi.KeepaliveEnforcementPolicy",
+		"grpc.MaxRecvMsgSize(grpcapi.MaxRecvBytes",
 		"grpc.ChainUnaryInterceptor(grpcapi.RecoveryUnaryServerInterceptor",
 		"grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor",
 		"grpcapi.RegisterHealth(",
@@ -41,5 +45,11 @@ func TestProductionWiringStatic(t *testing.T) {
 	}
 	if shutdown >= 0 && graceful >= 0 && shutdown > graceful {
 		t.Error("healthServer.Shutdown() must precede grpcServer.GracefulStop() (FR-2.3)")
+	}
+	// AC-1 (REQ-1): the configured gRPC receive cap is exactly the HTTP
+	// request-body cap (domain.MaxEventBytes*2), derived from the same
+	// constant so HTTP/gRPC parity cannot drift independently.
+	if MaxRecvBytes != domain.MaxEventBytes*2 {
+		t.Errorf("MaxRecvBytes=%d, want domain.MaxEventBytes*2=%d (HTTP request-body cap)", MaxRecvBytes, domain.MaxEventBytes*2)
 	}
 }

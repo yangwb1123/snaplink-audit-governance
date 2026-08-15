@@ -65,6 +65,15 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	if request == nil || len(request.GetEvents()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "events must not be empty")
 	}
+	// Pre-flight count cap: a batch beyond MaxBatchEvents is rejected before
+	// any fromProto call or Service.Ingest, so the violation can never
+	// partially commit. Per-envelope failures inside the loop keep the
+	// existing partial-commit semantics (valid prefix ledgered, wire receipts
+	// dropped).
+	if len(request.GetEvents()) > MaxBatchEvents {
+		return nil, status.Error(codes.InvalidArgument,
+			fmt.Sprintf("batch exceeds %d events, max %d", len(request.GetEvents()), MaxBatchEvents))
+	}
 	response := &auditv1.WriteBatchResponse{}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	commitCtx := context.WithoutCancel(ctx)
@@ -101,6 +110,17 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 		}
 		event, convertErr := fromProto(request.GetEvent())
 		if convertErr != nil {
+			if errors.Is(convertErr, ErrEnvelopeTooLarge) {
+				if s.Logger != nil {
+					// Size rejections are the only skip-and-continue class; the
+					// log line carries a truncated event_id prefix (never the
+					// full attacker-controlled value) plus principal
+					// attribution, and the missing receipt is the wire signal.
+					s.Logger.Printf("grpc stream: rejecting over-cap message client_id=%q tenant=%q event_id=%q: %v",
+						claims.ClientID, claims.TenantID, truncateEventID(request.GetEvent().GetEventId()), convertErr)
+				}
+				continue // no receipt; stream stays open; client reconciles by event_id
+			}
 			return s.statusError(convertErr)
 		}
 		receipt, ingestErr := s.Service.Ingest(context.WithoutCancel(stream.Context()), claims.TenantID, principal, event, request.GetWaitFor())
@@ -135,6 +155,12 @@ func (s *Server) authenticate(ctx context.Context, permission string) (auth.Clai
 func fromProto(input *auditv1.EventEnvelope) (domain.Event, error) {
 	if input == nil {
 		return domain.Event{}, fmt.Errorf("%w: event is required", domain.ErrInvalid)
+	}
+	// Per-field size/arity caps run before any field is copied into the
+	// ledger and before the occurred_at/actor/decode checks, so an envelope
+	// that is both over-cap and malformed reports the cap violation first.
+	if err := validateEnvelopeCaps(input); err != nil {
+		return domain.Event{}, err
 	}
 	if input.GetOccurredAt() == nil || input.GetOccurredAt().CheckValid() != nil {
 		return domain.Event{}, fmt.Errorf("%w: occurred_at is invalid", domain.ErrInvalid)
