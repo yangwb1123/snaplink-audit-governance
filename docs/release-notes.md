@@ -1,5 +1,21 @@
 # Release Notes
 
+## 2026-08-15 — 本地 HS256 密钥强度门禁：JWT 密钥 ≥32 字节 + 与服务密钥互斥 + `jwt_secret_length` 预检字段（internal/auth，local-hs256-mode-has-no-secret-strength-gate-whi-b3c8be60）
+
+**写给运营（行为变化）：**
+
+- **`AUDIT_JWT_SECRET` 必须 ≥32 字节**（256 位，与 HS256 密钥尺寸一致）且显式设置 `AUDIT_ALLOW_LOCAL_HS256=true` 时，低于 32 字节的密钥在**启动与 `-check-config` 预检均失败关闭**（错误 `local HS256 JWT secret must be at least 32 bytes`，退出码 1，不打印 `check_config=ok`）。此前仅要求非空，短密钥可被离线暴力破解：HS256 签名可用单个捕获令牌离线验证候选密钥，一旦恢复即可伪造任意声明（含 `platform-admin` → `audit:platform:cross_tenant` 跨租户读写）。请升级前将密钥轮换为 ≥32 字节；旧短密钥签发的既有令牌随升级作废（这正是门禁的目的）。
+- **JWT 密钥必须与 `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY` 不同**：同一字符串不得既用于伪造令牌，又用于签名校验点（破坏 VerifyIntegrity）或解密受保护字段/导出。
+- **预检新增 `jwt_secret_length` 字段**：`check_config=ok` 行在 `encryption_key_length` 之后新增该字段（无 JWT 信任源时为 0，仅输出长度、从不输出密钥值）；按前缀匹配该行的消费者不受影响。
+- 门禁为**纯长度**判定（无熵评分），≥32 字节即通过，确定且可测；`AllowDev` 无 JWT 密钥、JWKS/PEM 信任路径、worker 二进制行为不变。无配置/API/数据迁移；回滚 = 重新部署旧二进制。
+
+**写给开发（实现变化）：**
+
+- `internal/auth/verifier.go`：新增 `minJWTSecretBytes = 32` 常量；`ValidateConfiguration` 在互斥性检查（无 opt-in / 与 JWKS/PEM 共享）之后、信任源分支之前新增长度门禁（`hasSecret && a.AllowLocalHS256 && len(a.JWTSecret) < minJWTSecretBytes`，字节计长，错误消息由常量格式化，保留既有错误优先级）。该函数已统一覆盖全部认证路径：每请求（`AuthenticateTokenContext`）、启动（`prepareServer`）、CI（`runCheckConfig`），门禁在令牌解析与 dev-token 快捷路径之前触发。
+- `cmd/audit-api/main.go`：`check_config=ok` 新增无条件 `jwt_secret_length=%d`（值为 `len(authenticator.JWTSecret)`，未配置时为 0）；新增 `validateAuthConfig`（SEC-2 互斥性：JWT 密钥 ≠ 签名/加密密钥，因签署/加密密钥在 service 配置中，需在二进制层合流），由 `prepareServer` 与 `runCheckConfig` 共用。
+- 测试夹具迁移：全部 HS256 夹具改用各包共享的 ≥32 字节密钥常量（`testHMACSecret`/`testJWTSecret`，41 字节），覆盖 `internal/auth`、`cmd/audit-api`、`internal/httpapi`、`internal/grpcapi`、`internal/service`（含证据遗漏的 4 处：grpcapi 168/198、secrets_integration 247、main_test 368、server_test 3392/3535/3696）。
+- 新增测试：`TestValidateConfigurationRejectsShortHS256Secret`（AC-1 边界 31/32/33 + 多字节字节边界 16×é=32B 通过/15×é=30B 拒绝 + 优先级 + PEM 互斥单元）、`TestAuthenticateTokenContextRejectsShortHS256Secret`（AC-2 每请求门禁在解析前触发 + dev-token 失败关闭 + 合规密钥正向控制）、`TestRunCheckConfigRejectsShortJWTSecret`/`TestRunCheckConfigReportsJWTSecretLength`/`TestRunCheckConfigReportsZeroJWTLengthWhenUnset`/`TestCheckConfigJWTSecretStrengthParity`（AC-3 直接 + 子进程预检：退出码、错误标记、无泄漏、0-when-unset）、`TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets`（SEC-2）；跨二进制 `check_config=ok` 格式契约测试（env_consistency_test.go）同步更新。`python3 cli.py quality` 全绿。
+
 ## 2026-08-15 — JWKS 未知 kid 强制刷新放大修复：负缓存 + 每间隔一次强制刷新 + 锁外取数（internal/auth，unauthenticated-jwks-kid-miss-forced-refresh-amp-d0642ad1）
 
 **写给运营（行为变化）：**
