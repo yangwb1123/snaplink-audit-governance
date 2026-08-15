@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +13,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/minio/minio-go/v7"
 	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -56,6 +60,7 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 
 	buf.Reset()
 	external.S3UseSSL = true
+	external.ArchiveRetentionDays = 365
 	exit = runCheckConfig(logger, validConfig(), external, validAuthenticator())
 	if exit != 0 {
 		t.Fatalf("positive control exit=%d, want 0; log: %q", exit, buf.String())
@@ -116,11 +121,11 @@ func TestCheckConfigTransportLine(t *testing.T) {
 		wantVault string
 	}{
 		{"no external legs", runtimeconfig.SigningArchive{}, "local", "local"},
-		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true}, "tls", "local"},
-		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}, "http", "local"},
+		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365}, "tls", "local"},
+		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false, ArchiveRetentionDays: 365}, "http", "local"},
 		{"vault tls", runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints"}, "local", "tls"},
 		{"mixed s3 tls + vault tls", runtimeconfig.SigningArchive{
-			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true,
+			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365,
 			VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints",
 		}, "tls", "tls"},
 	}
@@ -157,6 +162,149 @@ func TestTransportErrorFailsCheckConfig(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "check_config=ok") {
 		t.Fatalf("check_config=ok must not be printed, got: %q", buf.String())
+	}
+}
+
+// TestRunCheckConfigRequiresArchiveRetentionDays pins the F1 leg-(i) wiring
+// fail-closed contract through the API's check-config path: an S3 archive
+// without a positive AUDIT_ARCHIVE_RETENTION_DAYS exits 1 naming the
+// variable and never prints check_config=ok — the API can never boot or pass
+// preflight toward an S3 store that writes without explicit per-object
+// retention.
+func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator())
+	if exit != 1 {
+		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, runtimeconfig.EnvArchiveRetentionDays) {
+		t.Fatalf("log must name %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, out)
+	}
+	if strings.Contains(out, "check_config=ok") {
+		t.Fatalf("check_config=ok must not be printed, got: %q", out)
+	}
+}
+
+// scriptedS3Client is a minimal archive.S3Client double for the API boot
+// probe tests: it models the bucket configuration states Ready inspects
+// (bucket exists, Object Lock enabled with a COMPLIANCE/365/DAYS default
+// retention, versioning enabled) without a real endpoint. bucketExistsHook
+// lets a test block at BucketExists until the probe context is cancelled.
+type scriptedS3Client struct {
+	bucket           bool
+	lockStatus       string
+	versioning       minio.BucketVersioningConfiguration
+	bucketExistsHook func(ctx context.Context) (bool, error)
+}
+
+func (c *scriptedS3Client) StatObject(context.Context, string, string, minio.StatObjectOptions) (minio.ObjectInfo, error) {
+	return minio.ObjectInfo{}, errors.New("scripted client: StatObject not used")
+}
+
+func (c *scriptedS3Client) PutObject(context.Context, string, string, io.Reader, int64, minio.PutObjectOptions) (minio.UploadInfo, error) {
+	return minio.UploadInfo{}, errors.New("scripted client: PutObject not used")
+}
+
+func (c *scriptedS3Client) GetObject(context.Context, string, string, minio.GetObjectOptions) (io.ReadCloser, error) {
+	return nil, errors.New("scripted client: GetObject not used")
+}
+
+func (c *scriptedS3Client) BucketExists(ctx context.Context, _ string) (bool, error) {
+	if c.bucketExistsHook != nil {
+		return c.bucketExistsHook(ctx)
+	}
+	return c.bucket, nil
+}
+
+func (c *scriptedS3Client) GetObjectLockConfig(context.Context, string) (string, *minio.RetentionMode, *uint, *minio.ValidityUnit, error) {
+	mode := minio.Compliance
+	validity := uint(365)
+	unit := minio.Days
+	return c.lockStatus, &mode, &validity, &unit, nil
+}
+
+func (c *scriptedS3Client) GetBucketVersioning(context.Context, string) (minio.BucketVersioningConfiguration, error) {
+	return c.versioning, nil
+}
+
+func lockedScriptedS3() *scriptedS3Client {
+	return &scriptedS3Client{
+		bucket:     true,
+		lockStatus: "Enabled",
+		versioning: minio.BucketVersioningConfiguration{Status: "Enabled"},
+	}
+}
+
+// TestProbeArchiveReady is the API boot-probe mirror of the worker's
+// TestProbeArchiveReady (F1 companion): the probe fails on a misconfigured
+// destination, passes on a healthy one, and skips unconfigured stores, so an
+// API pointed at a non-WORM-ready bucket fails fast at boot instead of
+// writing objects whose receipts claim WORM protection.
+func TestProbeArchiveReady(t *testing.T) {
+	t.Run("s3 misconfigured fails", func(t *testing.T) {
+		client := lockedScriptedS3()
+		client.lockStatus = "" // Object Lock disabled
+		s3 := archive.NewS3StoreWithClient(client, "worm-audit")
+		var buf bytes.Buffer
+		if err := probeArchiveReady(s3, log.New(&buf, "", 0)); err == nil {
+			t.Fatal("probe must fail on a misconfigured S3 store")
+		}
+		if !strings.Contains(buf.String(), "archive_ready=failed store=*archive.S3Store") {
+			t.Fatalf("log must identify the destination type, got: %q", buf.String())
+		}
+	})
+	t.Run("s3 healthy passes", func(t *testing.T) {
+		s3 := archive.NewS3StoreWithClient(lockedScriptedS3(), "worm-audit")
+		var buf bytes.Buffer
+		if err := probeArchiveReady(s3, log.New(&buf, "", 0)); err != nil {
+			t.Fatalf("probe must pass on a locked bucket: %v", err)
+		}
+		if !strings.Contains(buf.String(), "archive_ready=ok") {
+			t.Fatalf("log must report archive_ready=ok, got: %q", buf.String())
+		}
+	})
+	t.Run("unconfigured store skipped", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := log.New(&buf, "", 0)
+		if err := probeArchiveReady(&archive.FileStore{Dir: ""}, logger); err != nil {
+			t.Fatalf("empty-dir FileStore must be skipped, got error: %v", err)
+		}
+		if err := probeArchiveReady(nil, logger); err != nil {
+			t.Fatalf("nil store must be skipped, got error: %v", err)
+		}
+		if strings.Count(buf.String(), "archive_ready=skipped") != 2 {
+			t.Fatalf("log must report archive_ready=skipped twice, got: %q", buf.String())
+		}
+	})
+}
+
+// TestProbeArchiveReadyBoundedByTimeout is the API boot-probe mirror of the
+// worker's T7: a hung S3 endpoint must not block the boot probe beyond
+// archiveReadyTimeout. The hook blocks until the probe context is cancelled,
+// so the test is deterministic.
+func TestProbeArchiveReadyBoundedByTimeout(t *testing.T) {
+	client := lockedScriptedS3()
+	client.bucketExistsHook = func(ctx context.Context) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	s3 := archive.NewS3StoreWithClient(client, "worm-audit")
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	started := time.Now()
+	err := probeArchiveReady(s3, logger)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("probe must fail when the endpoint hangs")
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("probe elapsed=%v, want bounded by the 5s constant (4-8s)", elapsed)
+	}
+	if !strings.Contains(buf.String(), "archive_ready=failed") {
+		t.Fatalf("log must surface archive_ready=failed, got: %q", buf.String())
 	}
 }
 
@@ -229,7 +377,8 @@ func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
 	}
 	t.Run("s3 use ssl true with https endpoint", func(t *testing.T) {
 		out, err := run("AUDIT_S3_USE_SSL=true", "AUDIT_S3_ENDPOINT=https://s3.example.com",
-			"AUDIT_S3_BUCKET=worm", "AUDIT_S3_ACCESS_KEY=k", "AUDIT_S3_SECRET_KEY=s")
+			"AUDIT_S3_BUCKET=worm", "AUDIT_S3_ACCESS_KEY=k", "AUDIT_S3_SECRET_KEY=s",
+			runtimeconfig.EnvArchiveRetentionDays+"=365")
 		if err != nil {
 			t.Fatalf("check-config must exit 0: %v\n%s", err, out)
 		}
@@ -592,7 +741,7 @@ func TestWireExternal(t *testing.T) {
 		s := svc(t)
 		var buf bytes.Buffer
 		logger := log.New(&buf, "", 0)
-		external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+		external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
 		if err := wireExternal(logger, s, external, "", "", "worm", "s3.example.com:9000"); err != nil {
 			t.Fatal(err)
 		}

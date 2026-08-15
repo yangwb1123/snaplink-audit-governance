@@ -1,5 +1,53 @@
 # Release Notes
 
+## 2026-08-15 — S3 归档 WORM 门禁落地：Ready 强制 COMPLIANCE 默认留存 + 每次 Put 显式 COMPLIANCE 留存（internal-archive-b9e968b8）
+
+**写给运营（行为变化）：**
+
+- **归档就绪门禁收口（R-1/AC-1）**：`S3Store.Ready` 现在要求 Object Lock 桶的**默认留存规则为
+  COMPLIANCE 模式 + 正有效期（Days/Years > 0）**，否则失败关闭。此前仅检查 Object Lock
+  “Enabled”：GOVERNANCE 默认留存（持有 `s3:BypassGovernanceRetention` 的主体可删留存对象）、
+  无默认留存规则、或零有效期默认留存的桶都会让 worker/API 启动失败、`-check-config` 退出码 1
+  （不打印 `check_config=ok`）、`/readyz` 返回 503。两类错误文本互斥且指明修复：
+  - `no default retention`（R-3a）：桶无默认留存或有效期为 0/单位非法 → 需
+    `mc retention set --default compliance 365d <bucket>`（或 Years > 0）；
+  - `GOVERNANCE`（R-3b）：默认留存为非 COMPLIANCE 模式 → 需改为 COMPLIANCE。
+- **每次写入显式 COMPLIANCE 留存（F1 leg (i)）**：S3 归档现在要求配置
+  `AUDIT_ARCHIVE_RETENTION_DAYS`（正整数，如 365；上限 100 年）——缺失/为零时两个二进制
+  `-check-config` 与启动均失败关闭并指明该变量。配置后，每次 `Put` 都携带
+  `Mode=COMPLIANCE` + `RetainUntilDate=now+留存时长`，因此即使桶默认留存被移除/降级，写入窗口
+  内的对象仍受 COMPLIANCE 保护，`StatusArchived` 回执与探测时机无关。每次写入的留存会覆盖该
+  对象的桶默认值；请将 `AUDIT_ARCHIVE_RETENTION_DAYS` 设为合规要求时长（如 365）。
+- **API 启动即探测归档就绪（F1 companion）**：`audit-api` 与 worker 一样在启动时对有界
+  （5 秒）探测归档目的地，非 WORM-ready 桶（含上面的 R-3a/R-3b 状态）启动失败
+  （`archive ready: …`）；编排重启会在桶修复后恢复。`/readyz` 轮询探测不变。
+- **升级顺序**：先对每个既有桶跑 `./bin/audit-governance-worker -check-config`；R-3a/R-3b
+  报错的桶先 `mc retention set --default compliance 365d <bucket>`，并为两个二进制配置
+  `AUDIT_ARCHIVE_RETENTION_DAYS`（与桶默认一致或更长）再升级。已写对象留存固定在写入时刻，
+  不受后续配置变更影响；回滚 = 重新部署旧二进制（旧二进制接受所有既有配置）。
+
+**写给开发（实现变化）：**
+
+- `internal/archive`：`Ready` 消费 `GetObjectLockConfig` 全部返回值并新增 R-1 检查（缺省留存
+  → R-3a；非 COMPLIANCE 模式 → R-3b，经 `sanitizeModeEcho` 消毒回显：控制字符 → `?`、
+  上限 64 rune，防恶意 S3 端点日志注入 CWE-117）；`S3Store` 新增 `retainFor` 字段与
+  `NewS3StoreWithRetention`/`NewS3StoreRetention`（非正时长构造即失败），`Put` 在
+  `retainFor > 0` 时携带显式 COMPLIANCE 留存；`retainFor=0` 保持字节一致（leg (ii)）。
+- `internal/runtimeconfig`：新增 `AUDIT_ARCHIVE_RETENTION_DAYS`（`EnvArchiveRetentionDays`）
+  与 `SigningArchive.ArchiveRetentionDays`；`Archive()` 对 S3 归档强制正留存（≤ 36500 天），
+  经 `NewS3StoreRetention` 构造（seam 增加 `retainFor` 参数）。
+- `cmd/audit-api`/`cmd/audit-governance-worker`：新增 `-archive-retention-days` 标志（默认读
+  `AUDIT_ARCHIVE_RETENTION_DAYS`，非数字回退 0 → fail-closed）；API 新增有界启动探针
+  （`archiveReadyTimeout=5s`，worker 同款 `probeArchiveReady`）。
+- `test/e2e/fullstack.sh`：cutover 块导出 `AUDIT_ARCHIVE_RETENTION_DAYS`（默认 365，正数
+  guard），`deploy/docker-compose.verify.yml` 两个服务补 `AUDIT_ARCHIVE_RETENTION_DAYS: "365"`。
+- 测试：`fakeS3Client`/`scriptedS3Client` 增加 `lockMode/lockValidity/lockUnit`（默认
+  COMPLIANCE/365/DAYS），`fakeS3Client` 增加 `putOpts` 录制；AC-1 六行表 + 未知/恶意模式行、
+  AC-2 leg (i)（每次 Put 的 COMPLIANCE 留存下界断言 + 非正时长构造失败）、AC-3 两行
+  check-config 新错误类、API 启动探针镜像测试；`python3 cli.py quality` 全绿。
+
+# Release Notes
+
 ## 2026-08-15 — Verify 栈归档桶自举 COMPLIANCE 默认留存 + cutover 三态验证（test/e2e + deploy 配套）
 
 **写给运营（行为变化）：**

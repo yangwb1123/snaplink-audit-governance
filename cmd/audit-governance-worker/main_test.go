@@ -150,9 +150,15 @@ func TestHandleArchiveErrorCounterWriteFailureDoesNotMaskPassError(t *testing.T)
 // without a real endpoint (REQ-4). bucketExistsHook lets a test intercept the
 // probe — T7 blocks there until the probe context is cancelled.
 type scriptedS3Client struct {
-	bucket           bool
-	lockErr          error
-	lockStatus       string
+	bucket     bool
+	lockErr    error
+	lockStatus string
+	// lockMode/lockValidity/lockUnit are the bucket default retention rule
+	// reported by GetObjectLockConfig; lockedScriptedS3() defaults them to
+	// COMPLIANCE/365/DAYS (the only state Ready accepts, R-1).
+	lockMode         *minio.RetentionMode
+	lockValidity     *uint
+	lockUnit         *minio.ValidityUnit
 	versioning       minio.BucketVersioningConfiguration
 	bucketExistsHook func(ctx context.Context) (bool, error)
 }
@@ -180,7 +186,7 @@ func (c *scriptedS3Client) GetObjectLockConfig(context.Context, string) (string,
 	if c.lockErr != nil {
 		return "", nil, nil, nil, c.lockErr
 	}
-	return c.lockStatus, nil, nil, nil, nil
+	return c.lockStatus, c.lockMode, c.lockValidity, c.lockUnit, nil
 }
 
 func (c *scriptedS3Client) GetBucketVersioning(context.Context, string) (minio.BucketVersioningConfiguration, error) {
@@ -188,12 +194,20 @@ func (c *scriptedS3Client) GetBucketVersioning(context.Context, string) (minio.B
 }
 
 // lockedScriptedS3 returns a scripted client that Ready passes: bucket exists,
-// Object Lock "Enabled", versioning "Enabled" (the lockedFakeS3 equivalent).
+// Object Lock "Enabled" with a COMPLIANCE/365/DAYS default retention rule
+// (the only default-retention state Ready accepts, R-1), versioning
+// "Enabled" (the lockedFakeS3 equivalent).
 func lockedScriptedS3() *scriptedS3Client {
+	mode := minio.Compliance
+	validity := uint(365)
+	unit := minio.Days
 	return &scriptedS3Client{
-		bucket:     true,
-		lockStatus: "Enabled",
-		versioning: minio.BucketVersioningConfiguration{Status: "Enabled"},
+		bucket:       true,
+		lockStatus:   "Enabled",
+		lockMode:     &mode,
+		lockValidity: &validity,
+		lockUnit:     &unit,
+		versioning:   minio.BucketVersioningConfiguration{Status: "Enabled"},
 	}
 }
 
@@ -264,6 +278,20 @@ func TestRunCheckConfigProbesArchiveDestination(t *testing.T) {
 			return s3Store(func(c *scriptedS3Client) { c.versioning = minio.BucketVersioningConfiguration{} })
 		},
 			1, []string{"archive_ready=failed", "versioning"}, []string{"check_config=ok"}},
+		// AC-3/R-3: the two new deletability failure classes flow verbatim
+		// into check-config output with distinct, mutually exclusive markers
+		// naming the exact bucket setting to change.
+		{"governance default retention", func(t *testing.T) archive.Store {
+			mode := minio.Governance
+			validity := uint(365)
+			unit := minio.Days
+			return s3Store(func(c *scriptedS3Client) { c.lockMode, c.lockValidity, c.lockUnit = &mode, &validity, &unit })
+		},
+			1, []string{"archive_ready=failed", "GOVERNANCE", "default retention"}, []string{"check_config=ok", "no default retention"}},
+		{"no default retention", func(t *testing.T) archive.Store {
+			return s3Store(func(c *scriptedS3Client) { c.lockMode, c.lockValidity, c.lockUnit = nil, nil, nil })
+		},
+			1, []string{"archive_ready=failed", "no default retention", "COMPLIANCE"}, []string{"check_config=ok", "GOVERNANCE"}},
 		{"healthy s3", func(t *testing.T) archive.Store { return s3Store(func(*scriptedS3Client) {}) },
 			0, []string{"archive_ready=ok", "check_config=ok", "archive=s3"}, nil},
 		{"healthy file store", func(t *testing.T) archive.Store { return &archive.FileStore{Dir: t.TempDir()} },
@@ -293,6 +321,31 @@ func TestRunCheckConfigProbesArchiveDestination(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunCheckConfigRequiresArchiveRetentionDays pins the F1 leg-(i) wiring
+// fail-closed contract: with the real newArchiveStore seam (external.Archive),
+// an S3 archive without a positive AUDIT_ARCHIVE_RETENTION_DAYS is a check
+// failure that names the variable and never prints check_config=ok — so the
+// worker can never boot or pass preflight toward an S3 store that writes
+// without explicit per-object retention. The positive path (store
+// construction + transport reporting) is covered by the runtimeconfig and
+// API check-config tests; probing a live bucket is out of scope here.
+func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	exit := runCheckConfig(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, external)
+	if exit != 1 {
+		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, runtimeconfig.EnvArchiveRetentionDays) {
+		t.Fatalf("log must name %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, out)
+	}
+	if strings.Contains(out, "check_config=ok") {
+		t.Fatalf("check_config=ok must not be printed, got: %q", out)
 	}
 }
 

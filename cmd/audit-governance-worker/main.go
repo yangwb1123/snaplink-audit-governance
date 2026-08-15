@@ -48,6 +48,12 @@ func main() {
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
 	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint (AUDIT_S3_USE_SSL)")
+	// archiveRetentionDays is the per-object COMPLIANCE retention duration in
+	// days applied by every S3 archive Put (F1 leg (i), mandatory for an S3
+	// archive: a zero value makes runtimeconfig.SigningArchive.Archive fail
+	// closed, so the worker can never write objects without explicit
+	// retention). Shared with audit-api via runtimeconfig.EnvArchiveRetentionDays.
+	archiveRetentionDays := flag.Uint("archive-retention-days", uintEnv(runtimeconfig.EnvArchiveRetentionDays), "per-object COMPLIANCE retention for the S3 archive in days (AUDIT_ARCHIVE_RETENTION_DAYS; required when an S3 archive is configured, e.g. 365)")
 	allowInsecureVaultLoopback := flag.Bool("allow-insecure-vault-loopback", strictBoolEnv(runtimeconfig.EnvAllowInsecureVaultLoopback, false), "allow plaintext HTTP Vault only on loopback hosts (AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK)")
 	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, probe the archive destination (bounded; S3 touches the network), then exit without opening the state store or binding listeners")
@@ -73,7 +79,7 @@ func main() {
 		}
 	}
 	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention, StuckExportAge: *stuckExportAge}
-	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external))
 	}
@@ -363,6 +369,22 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+// uintEnv parses a non-negative integer environment variable, falling back
+// to 0 (which the S3 retention check then treats as unset/fail-closed) when
+// the value is missing, not an integer, or negative. A malformed value must
+// never kill the worker or bypass the fail-closed retention requirement.
+func uintEnv(name string) uint {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return uint(parsed)
 }
 
 // intEnv parses an integer environment variable, falling back to the given

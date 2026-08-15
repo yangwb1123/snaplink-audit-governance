@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/security"
@@ -47,7 +48,7 @@ func TestArchiveSelection(t *testing.T) {
 		t.Fatalf("default archive type=%T, want *archive.FileStore", store)
 	}
 
-	cfg = SigningArchive{ArchiveDir: "/tmp/archive", S3Endpoint: "localhost:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	cfg = SigningArchive{ArchiveDir: "/tmp/archive", S3Endpoint: "localhost:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
 	store, err = cfg.Archive()
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +60,46 @@ func TestArchiveSelection(t *testing.T) {
 	cfg = SigningArchive{S3Endpoint: "localhost:9000"}
 	if _, err := cfg.Archive(); err == nil {
 		t.Fatal("partial s3 config must fail")
+	}
+}
+
+// TestArchiveRequiresPositiveRetentionDays pins the F1 leg-(i) wiring
+// fail-closed contract: an S3 archive without a positive
+// AUDIT_ARCHIVE_RETENTION_DAYS is a configuration error (never a silent
+// no-retention default), and a duration beyond the 100-year cap is rejected
+// so retainFor stays overflow-safe.
+func TestArchiveRequiresPositiveRetentionDays(t *testing.T) {
+	base := SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	if _, err := base.Archive(); err == nil || !strings.Contains(err.Error(), EnvArchiveRetentionDays) {
+		t.Fatalf("archive without retention days must fail naming %s, got: %v", EnvArchiveRetentionDays, err)
+	}
+
+	over := base
+	over.ArchiveRetentionDays = maxArchiveRetentionDays + 1
+	if _, err := over.Archive(); err == nil || !strings.Contains(err.Error(), "exceeds the maximum") {
+		t.Fatalf("archive beyond the cap must fail, got: %v", err)
+	}
+}
+
+// TestArchivePassesRetentionDaysToConstructor pins that the seam receives the
+// resolved retainFor derived from ArchiveRetentionDays, so per-object
+// COMPLIANCE retention reaches the store (F1 leg (i) end-to-end).
+func TestArchivePassesRetentionDaysToConstructor(t *testing.T) {
+	var capturedRetainFor time.Duration
+	original := newS3Store
+	newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
+		capturedRetainFor = retainFor
+		return archive.NewS3StoreWithClient(nil, bucket), nil
+	}
+	t.Cleanup(func() { newS3Store = original })
+
+	cfg := fullS3(t, "s3.example.com:9000", false)
+	cfg.ArchiveRetentionDays = 2
+	if _, err := cfg.Archive(); err != nil {
+		t.Fatal(err)
+	}
+	if capturedRetainFor != 48*time.Hour {
+		t.Fatalf("seam retainFor=%v, want 48h", capturedRetainFor)
 	}
 }
 
@@ -138,13 +179,17 @@ func TestEnvNameConstants(t *testing.T) {
 	if EnvAllowInsecureVaultLoopback != "AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK" {
 		t.Fatalf("EnvAllowInsecureVaultLoopback=%q", EnvAllowInsecureVaultLoopback)
 	}
+	if EnvArchiveRetentionDays != "AUDIT_ARCHIVE_RETENTION_DAYS" {
+		t.Fatalf("EnvArchiveRetentionDays=%q", EnvArchiveRetentionDays)
+	}
 }
 
-// fullS3 returns a SigningArchive with a complete S3 leg and a non-default
-// encryption key so default-secret and partiality branches never trigger.
+// fullS3 returns a SigningArchive with a complete S3 leg (including the
+// mandatory per-object retention days, F1) and a non-default encryption key
+// so default-secret and partiality branches never trigger.
 func fullS3(t *testing.T, endpoint string, useSSL bool) SigningArchive {
 	t.Helper()
-	return SigningArchive{EncryptionKey: "test-encryption-key", S3Endpoint: endpoint, S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: useSSL}
+	return SigningArchive{EncryptionKey: "test-encryption-key", S3Endpoint: endpoint, S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: useSSL, ArchiveRetentionDays: 365}
 }
 
 // fullVault returns a SigningArchive with a complete Vault leg and a
@@ -184,7 +229,7 @@ func TestArchiveResolvesS3TransportUseSSL(t *testing.T) {
 			var capturedUseSSL bool
 			swapped := false
 			original := newS3Store
-			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*archive.S3Store, error) {
+			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
 				capturedEndpoint, capturedUseSSL = endpoint, useSSL
 				swapped = true
 				return archive.NewS3StoreWithClient(nil, bucket), nil
@@ -424,7 +469,7 @@ func TestTransportMatchesResolvedStores(t *testing.T) {
 		t.Run("s3/"+row.endpoint+"/"+row.want, func(t *testing.T) {
 			var builtUseSSL bool
 			original := newS3Store
-			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*archive.S3Store, error) {
+			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
 				builtUseSSL = useSSL
 				return archive.NewS3StoreWithClient(nil, bucket), nil
 			}
@@ -535,7 +580,7 @@ func TestS3PlaintextNonLoopbackPermitted(t *testing.T) {
 	for _, endpoint := range []string{"s3.example.com:9000", "http://s3.example.com:9000", "minio:9000"} {
 		t.Run(endpoint, func(t *testing.T) {
 			original := newS3Store
-			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*archive.S3Store, error) {
+			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
 				return archive.NewS3StoreWithClient(nil, bucket), nil
 			}
 			t.Cleanup(func() { newS3Store = original })

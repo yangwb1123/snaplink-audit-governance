@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/security"
@@ -27,7 +28,18 @@ const (
 	EnvDevSecrets                 = "AUDIT_ALLOW_DEV_SECRETS"
 	EnvS3UseSSL                   = "AUDIT_S3_USE_SSL"
 	EnvAllowInsecureVaultLoopback = "AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK"
+	// EnvArchiveRetentionDays is the per-object COMPLIANCE retention duration
+	// (in days) applied by every S3 archive Put. Mandatory for an S3 archive:
+	// a zero value is a fail-closed configuration error, so production wiring
+	// can never reach an S3 store that writes objects without explicit
+	// retention (the ingest-path drift neutralizer, F1).
+	EnvArchiveRetentionDays = "AUDIT_ARCHIVE_RETENTION_DAYS"
 )
+
+// maxArchiveRetentionDays caps the retention duration at 100 years so
+// retainFor and RetainUntilDate stay sane and overflow-safe
+// (time.Duration(days)*24*time.Hour is exact below the cap).
+const maxArchiveRetentionDays = 36500
 
 // SigningArchive carries the optional external-infrastructure settings.
 type SigningArchive struct {
@@ -45,6 +57,12 @@ type SigningArchive struct {
 	// label (REQ-TLS-1). Zero value preserves today's plaintext default for
 	// documented local-dev endpoints (localhost:19010, deploy/ minio:9000).
 	S3UseSSL bool
+	// ArchiveRetentionDays is the per-object COMPLIANCE retention duration in
+	// days applied by every S3 archive Put (shared by both binaries via
+	// EnvArchiveRetentionDays). Zero is rejected for an S3 archive by
+	// Archive(): production wiring can never reach an S3 store that writes
+	// without explicit retention.
+	ArchiveRetentionDays uint
 	// AllowInsecureVaultLoopback permits plaintext http Vault only on
 	// loopback hosts, mirroring the JWKS allowlist (REQ-TLS-4). The opt-in
 	// never widens past loopback.
@@ -52,10 +70,11 @@ type SigningArchive struct {
 }
 
 // newS3Store is the constructor seam for Archive(). Production behavior is
-// exactly archive.NewS3Store; tests override it to capture the resolved
-// useSSL flag or to inject a scripted client via archive.NewS3StoreWithClient.
-var newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*archive.S3Store, error) {
-	return archive.NewS3Store(endpoint, accessKey, secretKey, bucket, useSSL)
+// exactly archive.NewS3StoreRetention (per-object COMPLIANCE retention
+// applied by every Put); tests override it to capture the resolved useSSL
+// flag or to inject a scripted client via archive.NewS3StoreWithClient.
+var newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
+	return archive.NewS3StoreRetention(endpoint, accessKey, secretKey, bucket, useSSL, retainFor)
 }
 
 // Signer returns the configured checkpoint signer (Vault Transit when all
@@ -99,7 +118,20 @@ func (s SigningArchive) Archive() (archive.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newS3Store(endpoint, s.S3AccessKey, s.S3SecretKey, s.S3Bucket, useSSL)
+	// F1 leg (i) wiring: an S3 archive without a positive retention duration
+	// is a fail-closed configuration error (before any client construction).
+	// Without explicit per-object retention, an object written while the
+	// bucket default is absent/downgraded is deletable even though the
+	// receipt claims StatusArchived; with it, every Put is COMPLIANCE-retained
+	// for ArchiveRetentionDays regardless of bucket-default drift.
+	if s.ArchiveRetentionDays == 0 {
+		return nil, fmt.Errorf("s3 archive requires a positive retention duration: set %s (e.g. 365 for one year of COMPLIANCE retention on every archived object); without it every object would be deletable if the bucket default is absent or downgraded", EnvArchiveRetentionDays)
+	}
+	if s.ArchiveRetentionDays > maxArchiveRetentionDays {
+		return nil, fmt.Errorf("s3 archive retention duration %d days exceeds the maximum of %d: set %s to at most 100 years", s.ArchiveRetentionDays, maxArchiveRetentionDays, EnvArchiveRetentionDays)
+	}
+	retainFor := time.Duration(s.ArchiveRetentionDays) * 24 * time.Hour
+	return newS3Store(endpoint, s.S3AccessKey, s.S3SecretKey, s.S3Bucket, useSSL, retainFor)
 }
 
 // resolveS3Transport returns the minio-ready endpoint (scheme stripped), the

@@ -2,7 +2,13 @@
 // local file store mirrors the append-only semantics with O_EXCL creation,
 // read-only permissions and fsync; the S3 store targets an Object Lock
 // bucket (versioning + retention), where deletion becomes a version marker
-// instead of physical removal.
+// instead of physical removal. The S3 store enforces the WORM guarantee:
+// Ready requires Object Lock enabled, a bucket default retention rule of
+// COMPLIANCE mode with positive validity (DAYS > 0 or YEARS > 0), and
+// versioning enabled — a GOVERNANCE or no/zero-validity default is a
+// readiness failure, so a misconfigured bucket cannot silently degrade the
+// guarantee. Stores built with a positive retainFor additionally write every
+// object with explicit per-object COMPLIANCE retention.
 package archive
 
 import (
@@ -14,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -225,11 +232,23 @@ type s3Client = S3Client
 // for byte-identical retries: an existing object is read back and compared
 // (mirroring FileStore.verifyExistingObject), so a corrupted or tampered
 // object is rejected loudly instead of being reported as archived. Ready
-// verifies the bucket actually has Object Lock and versioning enabled, so a
-// misconfigured bucket cannot silently degrade the WORM guarantee.
+// enforces the WORM guarantee: it requires the bucket to have Object Lock
+// enabled, a default retention rule of COMPLIANCE mode with positive
+// validity (DAYS > 0 or YEARS > 0), and versioning enabled — a GOVERNANCE or
+// no/zero-validity default is a readiness failure, so a misconfigured bucket
+// cannot silently degrade the WORM guarantee.
+//
+// retainFor is the per-object COMPLIANCE retention duration applied by Put
+// when positive: every object written inherits explicit COMPLIANCE retention
+// until now+retainFor at write time, so the StatusArchived receipt is true
+// regardless of bucket-default drift. Zero means leg-(ii)-only: Put sends no
+// explicit retention and objects inherit the Ready-enforced bucket default.
+// Zero is legal at the archive level for tests and legacy construction;
+// production wiring (runtimeconfig) never reaches it for an S3 archive.
 type S3Store struct {
-	client s3Client
-	bucket string
+	client    s3Client
+	bucket    string
+	retainFor time.Duration
 }
 
 // minioS3Client adapts *minio.Client to S3Client. The concrete GetObject
@@ -265,9 +284,43 @@ func (m *minioS3Client) GetBucketVersioning(ctx context.Context, bucketName stri
 
 // NewS3StoreWithClient builds an S3Store over an already-constructed client.
 // It exists so tests can inject a scripted client (see S3Client); production
-// callers use NewS3Store, whose signature and behavior are unchanged.
+// callers use NewS3Store, whose signature and behavior are unchanged. The
+// store is leg-(ii)-only (retainFor=0): Put sends no explicit retention and
+// objects inherit the Ready-enforced COMPLIANCE bucket default.
 func NewS3StoreWithClient(client S3Client, bucket string) *S3Store {
 	return &S3Store{client: client, bucket: bucket}
+}
+
+// NewS3StoreWithRetention builds an S3Store over an already-constructed
+// client with per-object COMPLIANCE retention applied by every Put. It
+// returns an error when retainFor <= 0 — a zero or negative duration is a
+// configuration error, never a silent no-retention default (the caller must
+// opt into leg (ii) explicitly via NewS3StoreWithClient).
+func NewS3StoreWithRetention(client S3Client, bucket string, retainFor time.Duration) (*S3Store, error) {
+	if retainFor <= 0 {
+		return nil, fmt.Errorf("archive retention duration must be positive, got %v", retainFor)
+	}
+	return &S3Store{client: client, bucket: bucket, retainFor: retainFor}, nil
+}
+
+// NewS3StoreRetention builds the Object Lock archive backed by an
+// S3-compatible endpoint with per-object COMPLIANCE retention applied by
+// every Put. retainFor must be positive (same fail-closed contract as
+// NewS3StoreWithRetention): production wiring never reaches an S3 archive
+// that writes without explicit retention. The bucket itself is verified by
+// Ready.
+func NewS3StoreRetention(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*S3Store, error) {
+	if retainFor <= 0 {
+		return nil, fmt.Errorf("archive retention duration must be positive, got %v", retainFor)
+	}
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create s3 client: %w", err)
+	}
+	return &S3Store{client: &minioS3Client{client: client}, bucket: bucket, retainFor: retainFor}, nil
 }
 
 // NewS3Store builds the Object Lock archive backed by an S3-compatible
@@ -300,7 +353,15 @@ func (s *S3Store) Put(ctx context.Context, key string, data []byte) error {
 	// 此刻 key 被证明不存在。写入后必须读回校验（verifyAfterWrite），关闭
 	// Stat→Put 的 TOCTOU 窗口：并发写入者在窗口内抢先落盘的内容绝不会被
 	// 当作“已验证”而静默返回 nil。
-	if _, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"}); err != nil {
+	// 当 retainFor > 0（leg (i)）时每次写入都携带显式 COMPLIANCE 留存：即使
+	// 桶默认留存被移除/降级，写入窗口内的对象也受 COMPLIANCE 保护，
+	// StatusArchived 回执与写入时刻的保护状态无关（F1 漂移窗口关闭）。
+	opts := minio.PutObjectOptions{ContentType: "application/json"}
+	if s.retainFor > 0 {
+		opts.Mode = minio.Compliance
+		opts.RetainUntilDate = time.Now().Add(s.retainFor)
+	}
+	if _, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), opts); err != nil {
 		return fmt.Errorf("s3 put %s: %w", key, err)
 	}
 	return s.verifyAfterWrite(ctx, key, data)
@@ -380,12 +441,26 @@ func (s *S3Store) Ready(ctx context.Context) error {
 	// Object Lock (and its mandatory versioning) an overwrite or delete is
 	// physically possible, so the archive silently loses immutability.
 	// Ready must fail on a misconfigured bucket instead of trusting it.
-	enabled, _, _, _, err := s.client.GetObjectLockConfig(ctx, s.bucket)
+	enabled, mode, validity, unit, err := s.client.GetObjectLockConfig(ctx, s.bucket)
 	if err != nil {
 		return fmt.Errorf("archive bucket %s has no object lock configuration: %w", s.bucket, err)
 	}
 	if enabled != "Enabled" {
 		return fmt.Errorf("archive bucket %s object lock is not enabled", s.bucket)
+	}
+	// R-1 (AC-1): the WORM guarantee requires the bucket default retention to
+	// be COMPLIANCE with positive validity. Every Put without explicit
+	// retention inherits this default at write time, so a GOVERNANCE, absent,
+	// or zero-validity default leaves every archived object deletable and
+	// must fail Ready closed. Two distinct, mutually exclusive error classes:
+	// R-3a (no/zero default retention or invalid unit) and R-3b (any
+	// non-COMPLIANCE mode).
+	if mode == nil || validity == nil || unit == nil || *validity == 0 ||
+		(*unit != minio.Days && *unit != minio.Years) {
+		return fmt.Errorf("archive bucket %s has no default retention rule with positive validity: set the bucket default retention to COMPLIANCE mode with validity > 0 (Days > 0 or Years > 0); without it, every archived object is deletable by any principal with s3:DeleteObject", s.bucket)
+	}
+	if *mode != minio.Compliance {
+		return fmt.Errorf("archive bucket %s default retention mode is %s, not COMPLIANCE: GOVERNANCE-mode default retention lets principals with s3:BypassGovernanceRetention delete retained objects; set the bucket default retention mode to COMPLIANCE", s.bucket, sanitizeModeEcho(*mode))
 	}
 	versioning, err := s.client.GetBucketVersioning(ctx, s.bucket)
 	if err != nil {
@@ -395,4 +470,34 @@ func (s *S3Store) Ready(ctx context.Context) error {
 		return fmt.Errorf("archive bucket %s does not have versioning enabled", s.bucket)
 	}
 	return nil
+}
+
+// maxModeEchoRunes bounds the R-3b diagnostic echo of the backend-reported
+// retention mode. The value is attacker-influenced: minio-go parses Mode
+// from GetObjectLockConfig XML without IsValid() on read, and XML character
+// data may carry control characters, so a hostile S3-compatible endpoint
+// could otherwise inject log lines or unbounded output via this echo
+// (CWE-117). Legitimate modes pass through unchanged and stay actionable.
+const maxModeEchoRunes = 64
+
+// sanitizeModeEcho renders a retention mode for operator diagnostics without
+// log injection: control characters are replaced with '?' and the value is
+// capped at maxModeEchoRunes runes. Legitimate modes (GOVERNANCE, COMPLIANCE,
+// vendor-specific strings) pass through unchanged, so the R-3b echo stays
+// actionable while the raw backend value can never reach a log verbatim.
+// Mirrors the per-package sanitizer precedent (kafka.sanitizeLogField,
+// runtimeconfig.sanitizeAddr); consolidating into a shared package is a
+// non-goal.
+func sanitizeModeEcho(mode minio.RetentionMode) string {
+	sanitized := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, string(mode))
+	runes := []rune(sanitized)
+	if len(runes) > maxModeEchoRunes {
+		runes = runes[:maxModeEchoRunes]
+	}
+	return string(runes)
 }

@@ -64,6 +64,12 @@ func main() {
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
 	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint (AUDIT_S3_USE_SSL)")
+	// archiveRetentionDays is the per-object COMPLIANCE retention duration in
+	// days applied by every S3 archive Put (F1 leg (i), mandatory for an S3
+	// archive: a zero value makes runtimeconfig.SigningArchive.Archive fail
+	// closed, so the API can never write objects without explicit retention).
+	// Shared with audit-governance-worker via runtimeconfig.EnvArchiveRetentionDays.
+	archiveRetentionDays := flag.Uint("archive-retention-days", uintEnv(runtimeconfig.EnvArchiveRetentionDays), "per-object COMPLIANCE retention for the S3 archive in days (AUDIT_ARCHIVE_RETENTION_DAYS; required when an S3 archive is configured, e.g. 365)")
 	allowInsecureVaultLoopback := flag.Bool("allow-insecure-vault-loopback", strictBoolEnv(runtimeconfig.EnvAllowInsecureVaultLoopback, false), "allow plaintext HTTP Vault only on loopback hosts (AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK)")
 	flag.Parse()
 
@@ -75,7 +81,7 @@ func main() {
 		logger.Printf("warning=development_secrets_enabled")
 	}
 	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets}
-	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
+	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external, authenticator))
@@ -92,6 +98,15 @@ func main() {
 	logSecretWarnings(logger, svc.Config)
 	if err := wireExternal(logger, svc, external, *vaultTransitKey, *vaultAddr, *s3Bucket, *s3Endpoint); err != nil {
 		logger.Fatalf("%v", err)
+	}
+	// F1 companion: the API now probes the archive destination at boot, with
+	// worker parity (bounded by archiveReadyTimeout, fail-fast on a
+	// non-WORM-ready destination). The primary write path (ingest) archives
+	// without a per-request probe; this one-time check plus leg (i)
+	// per-object retention closes the drift window: every object written by
+	// this process is COMPLIANCE-retained regardless of probe recency.
+	if err := probeArchiveReady(svc.Config.Archive, logger); err != nil {
+		logger.Fatalf("archive ready: %v", err)
 	}
 	if err := bootstrap(svc, *bootstrapTenant); err != nil {
 		logger.Fatalf("bootstrap: %v", err)
@@ -160,6 +175,31 @@ func main() {
 		grpcServer.GracefulStop()
 	}
 	_ = st.Close()
+}
+
+// archiveReadyTimeout bounds the boot archive readiness probe so a hung or
+// black-holed S3 endpoint can never block startup indefinitely. Mirrors the
+// worker's constant (worker parity for the probe contract, REQ-1).
+const archiveReadyTimeout = 5 * time.Second
+
+// probeArchiveReady probes a configured archive destination under
+// archiveReadyTimeout and logs the outcome. Unconfigured destinations (nil or
+// an empty-dir FileStore) are skipped, mirroring /readyz via archive.Configured
+// (OQ-1). The caller decides the failure handling: main fails fast at startup
+// (logger.Fatalf); the worker additionally re-probes per pass.
+func probeArchiveReady(store archive.Store, logger *log.Logger) error {
+	if !archive.Configured(store) {
+		logger.Printf("archive_ready=skipped")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), archiveReadyTimeout)
+	defer cancel()
+	if err := store.Ready(ctx); err != nil {
+		logger.Printf("archive_ready=failed store=%T error=%v", store, err)
+		return err
+	}
+	logger.Printf("archive_ready=ok")
+	return nil
 }
 
 // wireExternal attaches the resolved external signer and archive to the
@@ -412,4 +452,20 @@ func intEnv(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// uintEnv parses a non-negative integer environment variable, falling back
+// to 0 (which the S3 retention check then treats as unset/fail-closed) when
+// the value is missing, not an integer, or negative. A malformed value must
+// never kill the API or bypass the fail-closed retention requirement.
+func uintEnv(name string) uint {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return uint(parsed)
 }

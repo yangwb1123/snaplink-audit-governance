@@ -70,7 +70,9 @@ checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
 worker 的会做一次有界归档目的地探测——S3 触网且要求桶已启用 Object Lock、
 versioning，且默认留存为 **COMPLIANCE + 正有效期**（R-1，2026-08-15：无默认
 留存/GOVERNANCE/零有效期桶均失败关闭，错误分别含 `no default retention`/
-`GOVERNANCE` 并指明 `mc retention set --default compliance 365d` 修复），本地
+`GOVERNANCE` 并指明 `mc retention set --default compliance 365d` 修复）；S3
+归档还强制配置 `AUDIT_ARCHIVE_RETENTION_DAYS`（正整数，缺失/为零即配置错误，
+每次 Put 携带显式 COMPLIANCE 留存，F1）；本地
 归档做可写性探测，失败退出码 1；预检与启动使用相同的认证校验规则）：
 
 ```sh

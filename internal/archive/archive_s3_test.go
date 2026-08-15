@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -37,10 +38,20 @@ type fakeS3Client struct {
 	// simulates a concurrent writer between the stat and the verify GET.
 	putHook func(objectName string, data []byte) []byte
 
+	// lockMode/lockValidity/lockUnit are the bucket default retention rule
+	// reported by GetObjectLockConfig. lockedFakeS3() defaults them to
+	// COMPLIANCE/365/DAYS (the only state Ready accepts); tests script the
+	// deletability states (nil default, GOVERNANCE, zero validity, invalid
+	// unit, hostile mode) by mutating them.
+	lockMode     *minio.RetentionMode
+	lockValidity *uint
+	lockUnit     *minio.ValidityUnit
+
 	// Recording (all under mu).
 	putCalls int
-	putData  [][]byte // bytes received by each PutObject (copies)
-	gets     [][]byte // bytes served by each GetObject (copies)
+	putData  [][]byte                 // bytes received by each PutObject (copies)
+	putOpts  []minio.PutObjectOptions // options received by each PutObject
+	gets     [][]byte                 // bytes served by each GetObject (copies)
 }
 
 func (f *fakeS3Client) StatObject(_ context.Context, bucketName, objectName string, _ minio.StatObjectOptions) (minio.ObjectInfo, error) {
@@ -64,7 +75,7 @@ func (f *fakeS3Client) StatObject(_ context.Context, bucketName, objectName stri
 	return minio.ObjectInfo{Key: objectName}, nil
 }
 
-func (f *fakeS3Client) PutObject(_ context.Context, _, objectName string, reader io.Reader, _ int64, _ minio.PutObjectOptions) (minio.UploadInfo, error) {
+func (f *fakeS3Client) PutObject(_ context.Context, _, objectName string, reader io.Reader, _ int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return minio.UploadInfo{}, err
@@ -77,6 +88,7 @@ func (f *fakeS3Client) PutObject(_ context.Context, _, objectName string, reader
 	f.objects[objectName] = append([]byte(nil), data...)
 	f.putCalls++
 	f.putData = append(f.putData, append([]byte(nil), data...))
+	f.putOpts = append(f.putOpts, opts)
 	return minio.UploadInfo{Key: objectName}, nil
 }
 
@@ -108,7 +120,7 @@ func (f *fakeS3Client) GetObjectLockConfig(_ context.Context, _ string) (string,
 	if f.lockErr != nil {
 		return "", nil, nil, nil, f.lockErr
 	}
-	return f.lockStatus, nil, nil, nil, nil
+	return f.lockStatus, f.lockMode, f.lockValidity, f.lockUnit, nil
 }
 
 func (f *fakeS3Client) GetBucketVersioning(_ context.Context, _ string) (minio.BucketVersioningConfiguration, error) {
@@ -117,12 +129,22 @@ func (f *fakeS3Client) GetBucketVersioning(_ context.Context, _ string) (minio.B
 	return f.versioning, nil
 }
 
+// lockedFakeS3 returns a scripted client that Ready passes: bucket exists,
+// Object Lock "Enabled" with a COMPLIANCE/365/DAYS default retention rule
+// (the only default-rentention state Ready accepts, R-1), versioning
+// "Enabled".
 func lockedFakeS3() *fakeS3Client {
+	mode := minio.Compliance
+	validity := uint(365)
+	unit := minio.Days
 	return &fakeS3Client{
-		objects:    map[string][]byte{},
-		bucket:     true,
-		lockStatus: "Enabled",
-		versioning: minio.BucketVersioningConfiguration{Status: "Enabled"},
+		objects:      map[string][]byte{},
+		bucket:       true,
+		lockStatus:   "Enabled",
+		lockMode:     &mode,
+		lockValidity: &validity,
+		lockUnit:     &unit,
+		versioning:   minio.BucketVersioningConfiguration{Status: "Enabled"},
 	}
 }
 
@@ -167,39 +189,197 @@ func TestS3StorePutVerifiesExistingObjectBytes(t *testing.T) {
 
 // TestS3StoreReadyVerifiesObjectLockAndVersioning pins the readiness
 // contract: a bucket without Object Lock configuration, without lock enabled,
-// or without versioning must fail Ready so /readyz surfaces the WORM
-// misconfiguration instead of silently accepting a mutable archive.
+// without versioning, or whose default retention rule is not COMPLIANCE with
+// positive validity (R-1) must fail Ready so /readyz surfaces the WORM
+// misconfiguration instead of silently accepting a mutable archive. The
+// deletability states (no default, GOVERNANCE, zero validity, invalid unit,
+// unknown/hostile mode) each fail with a distinct, actionable error class
+// (R-3a vs R-3b) that is mutually exclusive by marker.
 func TestS3StoreReadyVerifiesObjectLockAndVersioning(t *testing.T) {
+	const bucket = "worm-audit"
+	u32 := func(v uint) *uint { return &v }
+	mode := func(m minio.RetentionMode) *minio.RetentionMode { return &m }
+	unit := func(u minio.ValidityUnit) *minio.ValidityUnit { return &u }
+
 	t.Run("misconfigured buckets fail", func(t *testing.T) {
 		cases := []struct {
-			name    string
-			mutate  func(*fakeS3Client)
-			wantErr string
+			name       string
+			mutate     func(*fakeS3Client)
+			wantErr    string
+			notWantErr string
+			wantBucket bool
 		}{
-			{"missing bucket", func(f *fakeS3Client) { f.bucket = false }, "does not exist"},
-			{"no lock config", func(f *fakeS3Client) { f.lockErr = errors.New("NoSuchObjectLockConfiguration") }, "no object lock configuration"},
-			{"lock disabled", func(f *fakeS3Client) { f.lockStatus = "" }, "not enabled"},
-			{"versioning disabled", func(f *fakeS3Client) { f.versioning = minio.BucketVersioningConfiguration{} }, "versioning"},
+			{"missing bucket", func(f *fakeS3Client) { f.bucket = false }, "does not exist", "", false},
+			{"no lock config", func(f *fakeS3Client) { f.lockErr = errors.New("NoSuchObjectLockConfiguration") }, "no object lock configuration", "", false},
+			{"lock disabled", func(f *fakeS3Client) { f.lockStatus = "" }, "not enabled", "", false},
+			{"versioning disabled", func(f *fakeS3Client) { f.versioning = minio.BucketVersioningConfiguration{} }, "versioning", "", false},
+			// R-3a class: no/zero default retention or invalid unit.
+			{"no default retention rule", func(f *fakeS3Client) { f.lockMode, f.lockValidity, f.lockUnit = nil, nil, nil },
+				"no default retention", "GOVERNANCE", true},
+			{"zero-day default retention", func(f *fakeS3Client) { f.lockValidity = u32(0) },
+				"no default retention", "GOVERNANCE", true},
+			{"invalid validity unit", func(f *fakeS3Client) { f.lockUnit = unit("MONTHS") },
+				"no default retention", "GOVERNANCE", true},
+			// R-3b class: any non-COMPLIANCE mode with positive validity.
+			{"governance default retention", func(f *fakeS3Client) { f.lockMode = mode(minio.Governance) },
+				"GOVERNANCE", "no default retention", true},
+			{"unknown non-compliance mode", func(f *fakeS3Client) { f.lockMode = mode("CUSTOM") },
+				"CUSTOM", "no default retention", true},
+			// F2: a hostile backend can report a mode carrying control chars;
+			// the R-3b echo must sanitize it (no raw newline/ESC, bounded
+			// length) while staying actionable and marker-exclusive.
+			{"hostile mode with control chars", func(f *fakeS3Client) { f.lockMode = mode("GOVERNANCE\ninjected\x1b[31m") },
+				"default retention", "no default retention", true},
 		}
 		for _, test := range cases {
 			t.Run(test.name, func(t *testing.T) {
 				client := lockedFakeS3()
 				test.mutate(client)
-				store := &S3Store{client: client, bucket: "worm-audit"}
+				store := &S3Store{client: client, bucket: bucket}
 				err := store.Ready(context.Background())
 				if err == nil {
 					t.Fatal("Ready must fail on a misconfigured bucket")
 				}
-				if !bytes.Contains([]byte(err.Error()), []byte(test.wantErr)) {
-					t.Fatalf("Ready error=%v, want mention of %q", err, test.wantErr)
+				msg := err.Error()
+				if !strings.Contains(msg, test.wantErr) {
+					t.Fatalf("Ready error=%q, want mention of %q", msg, test.wantErr)
+				}
+				if test.notWantErr != "" && strings.Contains(msg, test.notWantErr) {
+					t.Fatalf("Ready error=%q must NOT contain %q (marker exclusivity R-3)", msg, test.notWantErr)
+				}
+				if test.wantBucket && !strings.Contains(msg, bucket) {
+					t.Fatalf("Ready error=%q must name the bucket %q (AC-3)", msg, bucket)
+				}
+				if strings.Contains(msg, "\n") || strings.Contains(msg, "\x1b") {
+					t.Fatalf("Ready error=%q must not carry raw control characters (log injection, CWE-117)", msg)
+				}
+				if len([]rune(msg)) > 512 {
+					t.Fatalf("Ready error length=%d exceeds the bounded 512 runes", len([]rune(msg)))
 				}
 			})
 		}
 	})
 	t.Run("properly locked bucket is ready", func(t *testing.T) {
-		store := &S3Store{client: lockedFakeS3(), bucket: "worm-audit"}
+		store := &S3Store{client: lockedFakeS3(), bucket: bucket}
 		if err := store.Ready(context.Background()); err != nil {
 			t.Fatalf("locked bucket must be ready: %v", err)
+		}
+	})
+	t.Run("compliance positive validity is the only accepted default", func(t *testing.T) {
+		u32 := func(v uint) *uint { return &v }
+		mode := func(m minio.RetentionMode) *minio.RetentionMode { return &m }
+		unit := func(u minio.ValidityUnit) *minio.ValidityUnit { return &u }
+		cases := []struct {
+			name   string
+			mutate func(*fakeS3Client)
+		}{
+			{"compliance positive days", func(f *fakeS3Client) {
+				f.lockMode, f.lockValidity, f.lockUnit = mode(minio.Compliance), u32(365), unit(minio.Days)
+			}},
+			{"compliance positive years", func(f *fakeS3Client) {
+				f.lockMode, f.lockValidity, f.lockUnit = mode(minio.Compliance), u32(2), unit(minio.Years)
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				client := lockedFakeS3()
+				tc.mutate(client)
+				store := &S3Store{client: client, bucket: bucket}
+				if err := store.Ready(context.Background()); err != nil {
+					t.Fatalf("Ready must accept COMPLIANCE with positive validity: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// TestS3StorePutCarriesPerObjectRetention pins AC-2 leg (i) (F1): a store
+// built with a positive retainFor writes every object with explicit
+// COMPLIANCE retention reaching at least now+retainFor, so the StatusArchived
+// receipt is true regardless of bucket-default drift (probe timing becomes
+// irrelevant to the write's protection). The lower-bound assertion cannot
+// false-fail on execution time. A zero/negative retainFor is a fail-closed
+// construction error; the legacy constructors (retainFor=0) record no
+// explicit retention — leg (ii) — never a silent unprotected default.
+func TestS3StorePutCarriesPerObjectRetention(t *testing.T) {
+	const (
+		bucket = "worm-audit"
+		key    = "events/demo/evt.json"
+	)
+	payload := []byte(`{"event_id":"evt"}`)
+
+	t.Run("every put carries compliance retention reaching now+retainFor", func(t *testing.T) {
+		client := lockedFakeS3()
+		retainFor := 24 * time.Hour
+		store, err := NewS3StoreWithRetention(client, bucket, retainFor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		keys := []string{key, "events/demo/evt2.json"}
+		for _, k := range keys {
+			if err := store.Put(context.Background(), k, payload); err != nil {
+				t.Fatalf("put %s: %v", k, err)
+			}
+		}
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		if len(client.putOpts) != 2 {
+			t.Fatalf("putOpts recorded=%d, want 2", len(client.putOpts))
+		}
+		for i, opts := range client.putOpts {
+			if opts.Mode != minio.Compliance {
+				t.Fatalf("put %d opts.Mode=%q, want COMPLIANCE", i, opts.Mode)
+			}
+			if opts.RetainUntilDate.IsZero() || opts.RetainUntilDate.Before(now.Add(retainFor)) {
+				t.Fatalf("put %d RetainUntilDate=%v, want >= now+%v", i, opts.RetainUntilDate, retainFor)
+			}
+			if opts.ContentType != "application/json" {
+				t.Fatalf("put %d ContentType=%q, want application/json", i, opts.ContentType)
+			}
+		}
+	})
+
+	t.Run("fail-closed construction rejects non-positive retainFor", func(t *testing.T) {
+		client := lockedFakeS3()
+		for _, bad := range []time.Duration{0, -time.Hour} {
+			if _, err := NewS3StoreWithRetention(client, bucket, bad); err == nil {
+				t.Fatalf("NewS3StoreWithRetention(%v) must fail closed", bad)
+			}
+		}
+	})
+
+	t.Run("legacy construction is leg ii and records no explicit retention", func(t *testing.T) {
+		// NewS3StoreWithClient (and &S3Store{} literals) keep retainFor=0:
+		// Put sends no explicit retention and objects inherit the
+		// Ready-enforced COMPLIANCE bucket default. This pins "never a silent
+		// unprotected default" — production wiring (runtimeconfig) can never
+		// reach this state for an S3 archive.
+		client := lockedFakeS3()
+		store := NewS3StoreWithClient(client, bucket)
+		if err := store.Put(context.Background(), key, payload); err != nil {
+			t.Fatal(err)
+		}
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		if len(client.putOpts) != 1 {
+			t.Fatalf("putOpts recorded=%d, want 1", len(client.putOpts))
+		}
+		if client.putOpts[0].Mode != "" || !client.putOpts[0].RetainUntilDate.IsZero() {
+			t.Fatalf("legacy put opts=%+v, want no explicit retention (leg ii)", client.putOpts[0])
+		}
+	})
+
+	t.Run("sanitizeModeEcho bounds hostile mode echoes", func(t *testing.T) {
+		if got := sanitizeModeEcho(minio.RetentionMode("GOVERNANCE\ninjected\x1b[31m")); strings.Contains(got, "\n") || strings.Contains(got, "\x1b") {
+			t.Fatalf("sanitizeModeEcho must strip control chars, got %q", got)
+		}
+		if got := sanitizeModeEcho(minio.RetentionMode("COMPLIANCE")); got != "COMPLIANCE" {
+			t.Fatalf("sanitizeModeEcho must pass legitimate modes through, got %q", got)
+		}
+		long := strings.Repeat("A", 200)
+		if got := sanitizeModeEcho(minio.RetentionMode(long)); len([]rune(got)) > maxModeEchoRunes {
+			t.Fatalf("sanitizeModeEcho must cap at %d runes, got %d", maxModeEchoRunes, len([]rune(got)))
 		}
 	})
 }

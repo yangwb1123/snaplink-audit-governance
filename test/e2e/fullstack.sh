@@ -148,6 +148,15 @@ export AUDIT_S3_ENDPOINT="localhost:19010"   # minio 发布到宿主的端口
 # AUDIT_S3_BUCKET 按腿覆盖（见 checkconfig_expect）
 export AUDIT_S3_ACCESS_KEY="audit-local"
 export AUDIT_S3_SECRET_KEY="audit-local-change-me"
+# F1（2026-08-15）：S3 归档的每次 Put 都携带显式 COMPLIANCE 留存，时长由
+# AUDIT_ARCHIVE_RETENTION_DAYS 决定（必须为正，缺失/为零即 fail-closed 配置
+# 错误——门禁二进制下 -check-config 会因此退出 1）。这里与 verify 栈一致用
+# 365 天；guard 保证变量缺失时给出可操作报错而不是静默失败。
+export AUDIT_ARCHIVE_RETENTION_DAYS="${AUDIT_ARCHIVE_RETENTION_DAYS:-365}"
+if ! [ "$AUDIT_ARCHIVE_RETENTION_DAYS" -gt 0 ] 2>/dev/null; then
+  log "FAIL: AUDIT_ARCHIVE_RETENTION_DAYS must be a positive integer (per-object COMPLIANCE retention for the S3 archive)"
+  exit 1
+fi
 
 checkconfig_expect() { # bucket want_marker forbid_marker want_rc
   local bucket="$1" want="$2" forbid="$3" wantrc="$4" rc
