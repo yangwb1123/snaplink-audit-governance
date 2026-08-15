@@ -35,6 +35,17 @@ const (
 	// is rejected through the forced-refresh budget path with identical
 	// fetch counts, but is never retained (bounded memory).
 	maxNegatedKidBytes = 64
+	// minJWTSecretBytes is the minimum local HS256 HMAC key size (256-bit,
+	// matching the HS256 key size). Length is measured in bytes: Go string
+	// length is byte length, which is the brute-force domain for an HMAC key.
+	// The gate is deliberately length-only (no entropy scoring): "a >=32-byte
+	// secret passes" is deterministic and testable, which an entropy
+	// heuristic would not be. This is intentionally stronger than the
+	// service-secret policy (resolveSecrets), which fail-fasts on
+	// empty/default/shared but has no numeric minimum: a short HS256 secret
+	// is an offline-brute-forceable trust boundary, so a numeric minimum is
+	// warranted here.
+	minJWTSecretBytes = 32
 )
 
 // errKeyNotFound is the fail-closed rejection for a kid absent from a JWKS
@@ -109,6 +120,9 @@ func (a Authenticator) ValidateConfiguration() error {
 	}
 	if hasSecret && (hasRemote || hasPublicKey) {
 		return fmt.Errorf("local HS256 cannot share an asymmetric trust configuration")
+	}
+	if hasSecret && a.AllowLocalHS256 && len(a.JWTSecret) < minJWTSecretBytes {
+		return fmt.Errorf("local HS256 JWT secret must be at least %d bytes", minJWTSecretBytes)
 	}
 	if hasRemote {
 		return validateJWKSURL(a.JWKSURL, a.AllowInsecureJWKSLoopback)

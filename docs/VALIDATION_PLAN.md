@@ -40,7 +40,12 @@ Authorization: Bearer dev:demo:tenant-auditor
 false（自 2026-08-06 起默认即为 false：开发认证默认失败关闭，只有显式
 `AUDIT_ALLOW_DEV_AUTH=true` 才启用）。允许的签名算法为 EdDSA/Ed25519、ES256/384/512、RS256、PS256。
 仅本机需要测试 HS256 时，必须同时设置 `AUDIT_JWT_SECRET` 和
-`AUDIT_ALLOW_LOCAL_HS256=true`，且不得设置 JWKS 或 PEM 公钥。
+`AUDIT_ALLOW_LOCAL_HS256=true`，且不得设置 JWKS 或 PEM 公钥。自
+2026-08-15 起 `AUDIT_JWT_SECRET` 必须至少 32 字节（256 位，与 HS256
+密钥尺寸一致；低于 32 字节在启动与 `-check-config` 预检均失败关闭，
+错误为 `local HS256 JWT secret must be at least 32 bytes`），且必须与
+`AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY` 不同（同一字符串不得既
+伪造令牌又签名校验点或解密受保护字段）。
 
 client_credentials Token 可不含 tenant_id。验证前应为每租户注册来源及
 `allowed_client_ids`，确保 `(client_id, source_system)` 只匹配一个租户；
@@ -87,7 +92,10 @@ AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker 
 关闭）的配置会失败；`-allow-dev-auth` 单独无法满足预检（仅环境变量
 `AUDIT_ALLOW_DEV_AUTH=true` 可白名单开发认证，失败时输出
 `auth=dev_auth_flag_not_allowlisted` 指明原因）；本机开发栈须在运行时
-环境（而非仅 CI 预检步骤）显式设置 `AUDIT_ALLOW_DEV_AUTH=true`。
+环境（而非仅 CI 预检步骤）显式设置 `AUDIT_ALLOW_DEV_AUTH=true`。自
+2026-08-15 起 API 的 `check_config=ok` 行在 `encryption_key_length` 后
+新增 `jwt_secret_length` 字段（无 JWT 信任源时为 0，仅输出长度、不输出
+密钥值）。
 
 ## 验证顺序
 

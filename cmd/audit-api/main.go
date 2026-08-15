@@ -236,7 +236,7 @@ func wireExternal(logger *log.Logger, svc *service.Service, external runtimeconf
 // pre-server startup path is unit-testable; error text matches what main
 // previously emitted directly.
 func prepareServer(logger *log.Logger, svc *service.Service, authenticator auth.Authenticator, otlpEndpoint, listen string) (*http.Server, *telemetry.Tracer, error) {
-	if err := authenticator.ValidateConfiguration(); err != nil {
+	if err := validateAuthConfig(authenticator, svc.Config); err != nil {
 		return nil, nil, fmt.Errorf("invalid authentication configuration: %w", err)
 	}
 	if authenticator.AllowDev && !devAuthAllowlisted() {
@@ -352,7 +352,7 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 	if devAuthGateFailed {
 		logger.Printf("check_config=fail auth=dev_auth_flag_not_allowlisted: development auth (-allow-dev-auth) requires AUDIT_ALLOW_DEV_AUTH=true in the environment")
 	}
-	if err := authenticator.ValidateConfiguration(); err != nil {
+	if err := validateAuthConfig(authenticator, svc.Config); err != nil {
 		logger.Printf("invalid authentication configuration: %v", err)
 		return 1
 	}
@@ -388,8 +388,27 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 		logger.Printf("transport: %v", transportErr)
 		return 1
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport)
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d jwt_secret_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), len(authenticator.JWTSecret), signerName, archiveName, s3Transport, vaultTransport)
 	return 0
+}
+
+// validateAuthConfig applies the shared authentication-configuration checks
+// used by both startup (prepareServer) and preflight (runCheckConfig): the
+// authenticator must pass auth.ValidateConfiguration (trust-source rules,
+// including the local-HS256 32-byte minimum), and the local HS256 secret
+// must be distinct from the signing and encryption secrets (SEC-2) so a
+// single operator-chosen string cannot simultaneously forge tokens and
+// checkpoint signatures or decrypt protected fields and exports. The auth
+// package cannot enforce distinctness itself: the signing/encryption
+// secrets live in service config, so the join point is here in the binary.
+func validateAuthConfig(authenticator auth.Authenticator, cfg service.Config) error {
+	if err := authenticator.ValidateConfiguration(); err != nil {
+		return err
+	}
+	if authenticator.JWTSecret != "" && (authenticator.JWTSecret == cfg.SigningSecret || authenticator.JWTSecret == cfg.EncryptionKey) {
+		return fmt.Errorf("local HS256 JWT secret must be distinct from the signing and encryption secrets")
+	}
+	return nil
 }
 
 // logSecretWarnings reports loudly whenever a well-known development secret

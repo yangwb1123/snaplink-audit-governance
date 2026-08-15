@@ -89,7 +89,7 @@ func TestHTTPIngestClientDisconnectKeepsEvent(t *testing.T) {
 		sawCancel:      make(chan struct{}),
 	}
 	svc.Config.Signer = signer
-	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
 	defer server.Close()
 
 	// Event 1 establishes the stream with one pending hash (no seal).

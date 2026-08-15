@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,8 +29,14 @@ import (
 // auth.Authenticator fails ValidateConfiguration ("no JWT verification trust
 // source is configured"), so every check-config table that must reach the
 // external-transport checks uses JWTSecret + AllowLocalHS256.
+//
+// testJWTSecret is a >=32-byte local HS256 key so every authenticator
+// fixture passes the minJWTSecretBytes gate in ValidateConfiguration; it
+// must stay >=32 bytes.
+const testJWTSecret = "test-secret-0123456789abcdefghijklmnopqrs"
+
 func validAuthenticator() auth.Authenticator {
-	return auth.Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	return auth.Authenticator{JWTSecret: testJWTSecret, AllowLocalHS256: true}
 }
 
 func validConfig() service.Config {
@@ -365,7 +372,7 @@ func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
 	baseEnv := []string{
 		"AUDIT_SIGNING_SECRET=test-secret",
 		"AUDIT_ENCRYPTION_KEY=test-key",
-		"AUDIT_JWT_SECRET=jwt-secret",
+		"AUDIT_JWT_SECRET=" + testJWTSecret,
 		"AUDIT_ALLOW_LOCAL_HS256=true",
 	}
 	run := func(env ...string) (string, error) {
@@ -603,7 +610,7 @@ func mustList(t *testing.T, svc *service.Service) []domain.Tenant {
 // auditable marker and never prints check_config=ok; with the environment
 // variable present the same config passes.
 func TestRunCheckConfigDevAuthGate(t *testing.T) {
-	authn := auth.Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true, AllowDev: true}
+	authn := auth.Authenticator{JWTSecret: testJWTSecret, AllowLocalHS256: true, AllowDev: true}
 	t.Setenv(envDevAuth, "")
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
@@ -651,6 +658,141 @@ func TestRunCheckConfigInvalidAuth(t *testing.T) {
 	}
 }
 
+// TestRunCheckConfigRejectsShortJWTSecret is AC-3 (direct): a local HS256
+// config whose secret is shorter than 32 bytes fails preflight with exit 1,
+// the specific minimum-length marker, and no check_config=ok.
+func TestRunCheckConfigRejectsShortJWTSecret(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	authn := auth.Authenticator{JWTSecret: "short", AllowLocalHS256: true}
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn)
+	if exit != 1 {
+		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid authentication configuration") || !strings.Contains(out, "at least 32 bytes") {
+		t.Fatalf("log must carry the minimum-length marker, got: %q", out)
+	}
+	if strings.Contains(out, "check_config=ok") {
+		t.Fatalf("check_config=ok must not be printed, got: %q", out)
+	}
+}
+
+// TestRunCheckConfigReportsJWTSecretLength is AC-3 (direct): a compliant
+// >=32-byte HS256 secret passes preflight and check_config=ok reports
+// jwt_secret_length alongside the existing length metrics, never the value.
+// F-2 pins the positional contract: jwt_secret_length sits between
+// encryption_key_length and signer, and its value is an integer length
+// (a %s-formatted field or a wrong slot fails here).
+func TestRunCheckConfigReportsJWTSecretLength(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator())
+	if exit != 0 {
+		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	okLine := checkConfigOKLine(out)
+	if okLine == "" {
+		t.Fatalf("check_config=ok must be printed, got: %q", out)
+	}
+	posSigning := strings.Index(okLine, "signing_secret_length=")
+	posEnc := strings.Index(okLine, "encryption_key_length=")
+	posJWT := strings.Index(okLine, "jwt_secret_length=")
+	posSigner := strings.Index(okLine, "signer=")
+	if !(posSigning >= 0 && posSigning < posEnc && posEnc < posJWT && posJWT < posSigner) {
+		t.Fatalf("check_config=ok field order must be signing_secret_length < encryption_key_length < jwt_secret_length < signer, got: %q", okLine)
+	}
+	rest := okLine[posJWT+len("jwt_secret_length="):]
+	if space := strings.Index(rest, " "); space >= 0 {
+		rest = rest[:space]
+	}
+	if n, err := strconv.Atoi(rest); err != nil || n != len(testJWTSecret) {
+		t.Fatalf("jwt_secret_length must be an integer length, got %q: %v", rest, err)
+	}
+	if strings.Contains(out, testJWTSecret) {
+		t.Fatalf("secret values must never be printed, got: %q", out)
+	}
+}
+
+// TestRunCheckConfigReportsZeroJWTLengthWhenUnset is F-3 (REQ-6): the
+// jwt_secret_length field is unconditional — 0 when no JWT trust source is
+// configured (JWKS-only and dev-only configs) — never omitted and never the
+// value.
+func TestRunCheckConfigReportsZeroJWTLengthWhenUnset(t *testing.T) {
+	cases := []struct {
+		name  string
+		authn auth.Authenticator
+	}{
+		{"jwks-only", auth.Authenticator{JWKSURL: "https://issuer.example/jwks"}},
+		{"dev-only", auth.Authenticator{AllowDev: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The dev-only cell needs the environment allowlist, or the
+			// flag-only dev-auth gate fails the preflight by design.
+			t.Setenv(envDevAuth, "true")
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, tc.authn)
+			if exit != 0 {
+				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+			}
+			okLine := checkConfigOKLine(buf.String())
+			if okLine == "" || !strings.Contains(okLine, "jwt_secret_length=0") {
+				t.Fatalf("check_config=ok must report jwt_secret_length=0 when unset, got: %q", buf.String())
+			}
+		})
+	}
+}
+
+// TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets is SEC-2: the
+// local HS256 secret must be distinct from the signing and encryption
+// secrets, so one operator-chosen string cannot both forge tokens and sign
+// checkpoints or decrypt protected fields and exports. The distinctness
+// check runs after the length gate, so the fixture secret is >=32 bytes.
+func TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets(t *testing.T) {
+	signing := strings.Repeat("s", 32)
+	encryption := strings.Repeat("k", 32)
+	cfg := service.Config{SigningSecret: signing, EncryptionKey: encryption, AllowDevSecrets: true}
+	cases := []struct {
+		name   string
+		secret string
+	}{
+		{"equals-signing-secret", signing},
+		{"equals-encryption-key", encryption},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			authn := auth.Authenticator{JWTSecret: tc.secret, AllowLocalHS256: true}
+			exit := runCheckConfig(logger, cfg, runtimeconfig.SigningArchive{}, authn)
+			if exit != 1 {
+				t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
+			}
+			out := buf.String()
+			if !strings.Contains(out, "invalid authentication configuration") || !strings.Contains(out, "distinct from the signing and encryption secrets") {
+				t.Fatalf("log must carry the distinctness marker, got: %q", out)
+			}
+			if strings.Contains(out, "check_config=ok") {
+				t.Fatalf("check_config=ok must not be printed, got: %q", out)
+			}
+		})
+	}
+}
+
+// checkConfigOKLine returns the check_config=ok line from a runCheckConfig
+// log buffer, or "" when the preflight never reached the ok line.
+func checkConfigOKLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "check_config=ok") {
+			return line
+		}
+	}
+	return ""
+}
+
 // TestPrepareServer covers the pre-server startup path: a valid
 // authentication config builds the HTTP server with tracing disabled for an
 // empty OTLP endpoint; a zero-value authenticator and a flag-only dev-auth
@@ -660,7 +802,7 @@ func TestPrepareServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := auth.Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	valid := auth.Authenticator{JWTSecret: testJWTSecret, AllowLocalHS256: true}
 	t.Run("valid config builds server", func(t *testing.T) {
 		var buf bytes.Buffer
 		server, tracer, err := prepareServer(log.New(&buf, "", 0), svc, valid, "", ":0")
@@ -685,10 +827,24 @@ func TestPrepareServer(t *testing.T) {
 	})
 	t.Run("dev auth flag-only fails", func(t *testing.T) {
 		t.Setenv(envDevAuth, "")
-		devAuth := auth.Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true, AllowDev: true}
+		devAuth := auth.Authenticator{JWTSecret: testJWTSecret, AllowLocalHS256: true, AllowDev: true}
 		_, _, err := prepareServer(log.New(io.Discard, "", 0), svc, devAuth, "", ":0")
 		if err == nil || !strings.Contains(err.Error(), "AUDIT_ALLOW_DEV_AUTH") {
 			t.Fatalf("err=%v, want the dev-auth allowlist error", err)
+		}
+	})
+	t.Run("jwt secret shared with signing secret fails", func(t *testing.T) {
+		// SEC-2 startup parity: the same distinctness check that fails
+		// -check-config must fail prepareServer, so CI cannot bless a
+		// config the runtime would reject.
+		signing := strings.Repeat("s", 32)
+		sharedSvc, err := service.New(nil, service.Config{SigningSecret: signing, EncryptionKey: strings.Repeat("k", 32), AllowDevSecrets: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = prepareServer(log.New(io.Discard, "", 0), sharedSvc, auth.Authenticator{JWTSecret: signing, AllowLocalHS256: true}, "", ":0")
+		if err == nil || !strings.Contains(err.Error(), "distinct from the signing and encryption secrets") {
+			t.Fatalf("err=%v, want the distinctness error", err)
 		}
 	})
 }

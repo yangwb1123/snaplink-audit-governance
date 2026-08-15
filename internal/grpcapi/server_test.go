@@ -35,6 +35,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// testJWTSecret is the shared >=32-byte local HS256 test key for the gRPC
+// JWT harness: the registered authenticator and signGRPCJWT must use the
+// same constant so minted tokens verify. It must stay >=32 bytes or the
+// harness fails the ValidateConfiguration gate.
+const testJWTSecret = "test-secret-0123456789abcdefghijklmnopqrs"
+
 func TestWriteAndBatchOverGRPC(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -152,8 +158,8 @@ func mintGRPCJWT(t *testing.T, subject, tenantID string, roles []string) string 
 }
 
 // signGRPCJWT signs an arbitrary claim payload with the harness's shared
-// test-secret (HS256, at+jwt header), so tests can mint tokens with the
-// claim under either alias (tenant_id or tenant).
+// testJWTSecret (>=32 bytes, HS256, at+jwt header), so tests can mint tokens
+// with the claim under either alias (tenant_id or tenant).
 func signGRPCJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]any{"alg": "HS256", "typ": "at+jwt"})
@@ -165,7 +171,7 @@ func signGRPCJWT(t *testing.T, payload map[string]any) string {
 		t.Fatal(err)
 	}
 	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
-	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac := hmac.New(sha256.New, []byte(testJWTSecret))
 	_, _ = mac.Write([]byte(signed))
 	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
@@ -195,7 +201,7 @@ func newGRPCJWTHarness(t *testing.T) (*store.Store, auditv1.IngestClient) {
 	}
 	listener := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
-	Register(grpcServer, svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true})
+	Register(grpcServer, svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true})
 	go func() { _ = grpcServer.Serve(listener) }()
 	t.Cleanup(grpcServer.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))

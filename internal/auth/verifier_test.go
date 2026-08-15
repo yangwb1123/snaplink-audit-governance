@@ -124,18 +124,65 @@ func TestRemoteJWKSRejectsNoneHMACAndUnlistedAlgorithms(t *testing.T) {
 }
 
 func TestLocalHMACIsExplicitAndMutuallyExclusive(t *testing.T) {
-	token := signHMAC(t, validJWTClaims(), []byte("local-secret"))
-	withoutOptIn := Authenticator{JWTSecret: "local-secret"}
+	token := signHMAC(t, validJWTClaims(), []byte(testHMACSecret))
+	withoutOptIn := Authenticator{JWTSecret: testHMACSecret}
 	if _, err := withoutOptIn.AuthenticateToken(token); err == nil {
 		t.Fatal("HS256 worked without explicit local opt-in")
 	}
-	localOnly := Authenticator{JWTSecret: "local-secret", AllowLocalHS256: true}
+	localOnly := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	if _, err := localOnly.AuthenticateToken(token); err != nil {
 		t.Fatalf("explicit local HS256 failed: %v", err)
 	}
-	mixed := Authenticator{JWTSecret: "local-secret", AllowLocalHS256: true, JWKSURL: "https://issuer.example/jwks"}
+	mixed := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true, JWKSURL: "https://issuer.example/jwks"}
 	if _, err := mixed.AuthenticateToken(token); err == nil {
 		t.Fatal("mixed symmetric and remote trust configuration was accepted")
+	}
+}
+
+// TestValidateConfigurationRejectsShortHS256Secret is AC-1: a local HS256
+// trust source whose JWTSecret is shorter than minJWTSecretBytes (32 bytes)
+// is rejected with the exact minimum-length error, at the exact boundary
+// (31 bytes fails; 32 and 33 pass), and without disturbing the existing
+// error precedence (no opt-in, and mutual exclusivity with an asymmetric
+// trust source, both keep their original errors). The message is formatted
+// from the constant, so the "at least 32 bytes" substring cannot drift.
+func TestValidateConfigurationRejectsShortHS256Secret(t *testing.T) {
+	if err := (Authenticator{JWTSecret: "short", AllowLocalHS256: true}).ValidateConfiguration(); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("short secret must be rejected with the minimum-length error, got: %v", err)
+	}
+	// Boundary: 31 bytes fails, 32 and 33 pass.
+	if err := (Authenticator{JWTSecret: strings.Repeat("s", 31), AllowLocalHS256: true}).ValidateConfiguration(); err == nil {
+		t.Fatal("31-byte secret must be rejected")
+	}
+	if err := (Authenticator{JWTSecret: strings.Repeat("s", 32), AllowLocalHS256: true}).ValidateConfiguration(); err != nil {
+		t.Fatalf("32-byte secret must pass: %v", err)
+	}
+	if err := (Authenticator{JWTSecret: strings.Repeat("s", 33), AllowLocalHS256: true}).ValidateConfiguration(); err != nil {
+		t.Fatalf("33-byte secret must pass: %v", err)
+	}
+	// Byte-vs-rune boundary (F-1/SEC-6): the gate measures bytes, not runes.
+	// 16 multibyte runes are 32 bytes and must pass; 15 runes (30 bytes)
+	// must fail. A rune-counting implementation would invert both cells.
+	if err := (Authenticator{JWTSecret: strings.Repeat("é", 16), AllowLocalHS256: true}).ValidateConfiguration(); err != nil {
+		t.Fatalf("16-rune (32-byte) multibyte secret must pass the byte gate: %v", err)
+	}
+	if err := (Authenticator{JWTSecret: strings.Repeat("é", 15), AllowLocalHS256: true}).ValidateConfiguration(); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("15-rune (30-byte) multibyte secret must be rejected as too short, got: %v", err)
+	}
+	// Precedence: no opt-in keeps the original error; a shared asymmetric
+	// trust source keeps the mutual-exclusivity error (gate placed after
+	// check 2 and the exclusivity check).
+	if err := (Authenticator{JWTSecret: "short"}).ValidateConfiguration(); err == nil || !strings.Contains(err.Error(), "explicit local-only opt-in") {
+		t.Fatalf("no-opt-in must keep the original error, got: %v", err)
+	}
+	if err := (Authenticator{JWTSecret: "short", AllowLocalHS256: true, JWKSURL: "https://issuer.example/jwks"}).ValidateConfiguration(); err == nil || !strings.Contains(err.Error(), "cannot share an asymmetric trust configuration") {
+		t.Fatalf("mutual exclusivity must keep the original error, got: %v", err)
+	}
+	// Local-PEM variant of the same precedence branch (F-9): a short secret
+	// shared with a local public key hits the same check-4 branch as the
+	// JWKS variant, before the length gate.
+	if err := (Authenticator{JWTSecret: "short", AllowLocalHS256: true, JWTPublicKeyPEM: "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"}).ValidateConfiguration(); err == nil || !strings.Contains(err.Error(), "cannot share an asymmetric trust configuration") {
+		t.Fatalf("mutual exclusivity with a local public key must keep the original error, got: %v", err)
 	}
 }
 

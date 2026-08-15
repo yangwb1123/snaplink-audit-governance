@@ -43,29 +43,33 @@ func TestEnvConsistencyAcrossBinaries(t *testing.T) {
 }
 
 // TestCheckConfigOkLineShapeIdenticalAcrossBinaries pins C6/F11: both
-// binaries must print the byte-identical check_config=ok format string
-// (same fields, same order). The exact literal is extracted from each main
-// and compared, so a drift in either file — field order, names, or the
-// transport suffixes — fails the gate.
+// binaries must print the same check_config=ok field set and order for the
+// fields they share (signing/encryption lengths, signer, archive, transport
+// labels). The audit-api line is a deliberate superset: it also reports
+// jwt_secret_length (the local HS256 trust-source metric) because the API
+// carries an authenticator; the worker has no JWT trust source, so its line
+// is unchanged. The exact literals are extracted from each main and compared
+// so a drift in either file — field order, names, or the transport
+// suffixes — fails the gate.
 func TestCheckConfigOkLineShapeIdenticalAcrossBinaries(t *testing.T) {
-	binaries := []string{
-		filepath.Join("..", "..", "cmd", "audit-api", "main.go"),
-		filepath.Join("..", "..", "cmd", "audit-governance-worker", "main.go"),
+	apiSrc, err := os.ReadFile(filepath.Join("..", "..", "cmd", "audit-api", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerSrc, err := os.ReadFile(filepath.Join("..", "..", "cmd", "audit-governance-worker", "main.go"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	formatRe := regexp.MustCompile(`"check_config=ok[^"]*"`)
-	var formats []string
-	for _, rel := range binaries {
-		src, err := os.ReadFile(rel)
-		if err != nil {
-			t.Fatal(err)
-		}
-		match := formatRe.FindString(string(src))
-		if match == "" {
-			t.Fatalf("%s must contain the check_config=ok format literal", rel)
-		}
-		formats = append(formats, match)
+	apiFormat := formatRe.FindString(string(apiSrc))
+	workerFormat := formatRe.FindString(string(workerSrc))
+	if apiFormat == "" || workerFormat == "" {
+		t.Fatal("both binaries must contain the check_config=ok format literal")
 	}
-	if formats[0] != formats[1] {
-		t.Errorf("check_config=ok format strings differ between binaries:\n  %s\n  %s", formats[0], formats[1])
+	// The worker line is unchanged; the API line is exactly the worker line
+	// with jwt_secret_length inserted after encryption_key_length.
+	wantAPILine := strings.Replace(workerFormat, "encryption_key_length=%d ", "encryption_key_length=%d jwt_secret_length=%d ", 1)
+	if apiFormat != wantAPILine {
+		t.Errorf("check_config=ok format strings must agree except for the API-only jwt_secret_length field:\n  api:    %s\n  worker: %s", apiFormat, workerFormat)
 	}
 }

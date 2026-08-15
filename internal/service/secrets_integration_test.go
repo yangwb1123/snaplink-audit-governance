@@ -210,12 +210,16 @@ func TestStrictBoolEnvParseBoolLiteralsAndEmpty(t *testing.T) {
 	}
 }
 
+// jwtSecret is the local HS256 key for the check-config trust-source
+// cells: >=32 bytes so it satisfies the minJWTSecretBytes gate in
+// ValidateConfiguration.
+const jwtSecret = "jwt-secret-0123456789abcdefghijklmnopqrs" // 40 bytes
+
 // TestPreflightPrecedenceCells pins QA-3: the check-config dev-auth gate is
 // an environment-only allowlist. The flag can never satisfy it (AC-3 key
 // pin), so every cell with runtime dev auth enabled and no env allowlist
 // exits non-zero, and the only passing cells have the env allowlist present.
 func TestPreflightPrecedenceCells(t *testing.T) {
-	const jwtSecret = "jwt-secret-0123456789abcdef" // >16 bytes, satisfies the service guard
 	cells := []struct {
 		name         string
 		flags        []string
@@ -264,6 +268,48 @@ func TestPreflightPrecedenceCells(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCheckConfigJWTSecretStrengthParity is AC-3 (subprocess): the real
+// audit-api binary -check-config fails non-zero with the specific
+// minimum-length marker when AUDIT_JWT_SECRET is short under
+// AUDIT_ALLOW_LOCAL_HS256=true, and passes with check_config=ok reporting
+// jwt_secret_length alongside signing_secret_length for a >=32-byte secret.
+// No secret values are ever printed.
+func TestCheckConfigJWTSecretStrengthParity(t *testing.T) {
+	base := append(withStrongSecretsEnv(), "AUDIT_ALLOW_LOCAL_HS256=true")
+	short := append([]string{}, base...)
+	short = append(short, "AUDIT_JWT_SECRET=short")
+	cmd := exec.Command(apiBin, "-check-config")
+	cmd.Env = short
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("short JWT secret must fail check-config; output:\n%s", out)
+	}
+	for _, want := range []string{"invalid authentication configuration", "at least 32 bytes"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "check_config=ok") {
+		t.Fatalf("check_config=ok must not be printed for a short secret; output:\n%s", out)
+	}
+	strong := append([]string{}, base...)
+	strong = append(strong, "AUDIT_JWT_SECRET="+jwtSecret)
+	cmd = exec.Command(apiBin, "-check-config")
+	cmd.Env = strong
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compliant JWT secret must pass check-config: %v\n%s", err, out)
+	}
+	for _, want := range []string{"check_config=ok", "signing_secret_length=", "jwt_secret_length="} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), jwtSecret) {
+		t.Fatalf("secret values must never be printed; output:\n%s", out)
 	}
 }
 

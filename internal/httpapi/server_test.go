@@ -35,6 +35,13 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
+// testJWTSecret is the shared >=32-byte local HS256 test key for the HTTP
+// harness: every Authenticator fixture and mintRestoreJWT must use the same
+// constant so minted tokens verify against the configured trust source. It
+// must stay >=32 bytes or every HS256 fixture fails the ValidateConfiguration
+// gate.
+const testJWTSecret = "test-secret-0123456789abcdefghijklmnopqrs"
+
 func testHTTPServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	server, _ := testHTTPServerWithStore(t)
@@ -69,7 +76,7 @@ func testHTTPServerWithStore(t *testing.T) (*httptest.Server, *store.Store) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), st
+	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), st
 }
 
 // mintRestoreJWT mints a locally-signable HS256 JWT so HTTP tests can
@@ -89,7 +96,7 @@ func mintRestoreJWT(t *testing.T, subject, tenantID string, roles []string) stri
 		t.Fatal(err)
 	}
 	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
-	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac := hmac.New(sha256.New, []byte(testJWTSecret))
 	_, _ = mac.Write([]byte(signed))
 	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
@@ -2585,7 +2592,7 @@ func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
 	defer server.Close()
 
 	event := domain.Event{EventID: "strip-evt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 2, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "strip-op-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "strip-idem-1", Payload: map[string]any{"resource": "invoice", "email": "alice@example.test", "nested": map[string]any{"note__search_digest": "sd2:nested", "keep": "yes"}}}
@@ -2756,7 +2763,7 @@ func timelineStripFixture(t *testing.T) (*httptest.Server, *service.Service) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
 	event := domain.Event{EventID: "strip-evt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 2, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "strip-op-1", AggregateType: "invoice", AggregateID: "inv-1", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "strip-idem-1", Payload: map[string]any{"resource": "invoice", "email": "alice@example.test", "nested": map[string]any{"note__search_digest": "sd2:nested", "keep": "yes"}}}
 	postTestEvent(t, server.URL, "dev:tenant-a:service:crm", event)
 	return server, svc
@@ -3389,7 +3396,7 @@ func TestHTTPPlatformEscapeHatchRejectsKeyFramingTenant(t *testing.T) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
 	defer server.Close()
 
 	event := domain.Event{EventID: "http-kft-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), OperationID: "http-kft-op", Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "http-kft-idem", Payload: map[string]any{"value": 1}}
@@ -3532,7 +3539,7 @@ func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
 	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0))
+	server := NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0))
 	// Auth rejection happens before any handler logic: the rejected claims
 	// appended nothing to the self-audit trail (count unchanged from the
 	// CreateTenant seed action).
@@ -3693,7 +3700,7 @@ func testHTTPServerWithBackend(t *testing.T, backend *scriptedStoreBackend) (*ht
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: "test-secret", AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), svc
+	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), svc
 }
 
 // httpReadSeedEvent is the standard event for HTTP read-endpoint tests: it

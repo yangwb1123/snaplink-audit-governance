@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,6 +12,12 @@ import (
 	"testing"
 	"time"
 )
+
+// testHMACSecret is the shared >=32-byte local HS256 test key (256-bit,
+// matching minJWTSecretBytes): signJWT and every Authenticator fixture must
+// use the same constant so minted tokens verify against the configured trust
+// source. It must stay >=32 bytes or every HS256 fixture fails the gate.
+const testHMACSecret = "test-secret-0123456789abcdefghijklmnopqrs"
 
 func TestDevTokenClaims(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
@@ -43,7 +50,7 @@ func TestDevAuthRejectsWithoutOptIn(t *testing.T) {
 }
 
 func TestJWTClientIdentityUsesClientIDOrAZP(t *testing.T) {
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	base := map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix()}
 	withClientID := cloneClaims(base)
 	withClientID["client_id"] = "snaplink-commerce"
@@ -68,7 +75,7 @@ func TestJWTRejectsConflictingClientIdentityClaims(t *testing.T) {
 		"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 		"client_id": "snaplink-commerce", "azp": "attacker-client",
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected conflicting client_id and azp to be rejected")
 	}
 }
@@ -78,7 +85,7 @@ func TestJWTRejectsMalformedClientIdentityClaim(t *testing.T) {
 		"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 		"client_id": []string{"snaplink-commerce"}, "azp": "snaplink-commerce",
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected a non-string client_id to be rejected")
 	}
 }
@@ -91,7 +98,7 @@ func TestJWTRejectsWhitespacePaddedSubject(t *testing.T) {
 	payload := map[string]any{
 		"sub": " service-subject ", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected a whitespace-padded sub to be rejected")
 	}
 }
@@ -100,7 +107,7 @@ func TestJWTRejectsNonStringSubject(t *testing.T) {
 	payload := map[string]any{
 		"sub": []string{"service-subject"}, "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected a non-string sub to be rejected")
 	}
 }
@@ -109,7 +116,7 @@ func TestJWTRejectsMissingSubject(t *testing.T) {
 	payload := map[string]any{
 		"tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil {
 		t.Fatal("expected a missing sub to be rejected")
 	}
 }
@@ -121,7 +128,7 @@ func TestJWTRejectsMissingExpiry(t *testing.T) {
 	payload := map[string]any{
 		"sub": "service-subject", "tenant_id": "tenant-a",
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "exp") {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "exp") {
 		t.Fatalf("missing exp was not rejected: %v", err)
 	}
 }
@@ -130,7 +137,7 @@ func TestJWTRejectsPaddedTenantIDClaim(t *testing.T) {
 	// Mirrors the padded-sub rejection: a padded or control-character
 	// tenant_id must fail authentication (not reach the envelope-mismatch
 	// 422 comparison with confusing raw-string equality).
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	cases := []map[string]any{
 		{"sub": "service-subject", "tenant_id": " tenant-a", "exp": time.Now().Add(time.Hour).Unix()},
 		{"sub": "service-subject", "tenant_id": "tenant-a\t", "exp": time.Now().Add(time.Hour).Unix()},
@@ -155,7 +162,7 @@ func TestJWTSubjectSurvivesStrictParsing(t *testing.T) {
 	payload := map[string]any{
 		"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 	}
-	claims, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload))
+	claims, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload))
 	if err != nil {
 		t.Fatalf("valid sub must authenticate: %v", err)
 	}
@@ -165,7 +172,7 @@ func TestJWTSubjectSurvivesStrictParsing(t *testing.T) {
 	payload = map[string]any{
 		"tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
 	}
-	if _, err := (Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "token must contain sub") {
+	if _, err := (Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}).AuthenticateToken(signJWT(t, payload)); err == nil || !strings.Contains(err.Error(), "token must contain sub") {
 		t.Fatalf("missing sub error = %v, want preserved message", err)
 	}
 }
@@ -174,7 +181,7 @@ func TestDevAuthRejectedDespiteConfiguredTrustSource(t *testing.T) {
 	// Genuinely new coverage: with a real trust source configured and
 	// AllowDev=false, rejection must come from the dev gate, not the
 	// missing-trust-source path exercised by (Authenticator{}) today.
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	if _, err := authenticator.AuthenticateToken("dev:tenant-a:auditor"); err == nil {
 		t.Fatal("dev token must be rejected when AllowDev is false")
 	} else if strings.Contains(err.Error(), "no JWT verification trust source is configured") {
@@ -235,7 +242,7 @@ func TestDevAuthRejectsKeyFramingSubjects(t *testing.T) {
 // exact generic claim-invalid text for every class (no charset oracle).
 // Empty claims stay legal (platform escape-hatch: TenantID == "").
 func TestJWTRejectsKeyFramingTenantClaims(t *testing.T) {
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	for _, name := range []string{"tenant_id", "tenant"} {
 		for _, bad := range []string{"a/b", `a\b`, "a\x1fb", "a b", "\x00", "\n", " a"} {
 			payload := map[string]any{"sub": "service-subject", name: bad, "exp": time.Now().Add(time.Hour).Unix()}
@@ -281,7 +288,7 @@ func TestDevAuthAcceptedWhenAllowlisted(t *testing.T) {
 	if err := (Authenticator{AllowDev: true}).ValidateConfiguration(); err != nil {
 		t.Fatalf("AllowDev alone must remain a valid runtime trust source: %v", err)
 	}
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true, AllowDev: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true, AllowDev: true}
 	claims, err := authenticator.AuthenticateToken("dev:tenant-a:auditor")
 	if err != nil {
 		t.Fatalf("allowlisted dev auth must accept dev tokens: %v", err)
@@ -367,7 +374,7 @@ func TestDevTokenPlatformRequiresPlatformAdminRole(t *testing.T) {
 // non-Platform (tenant context preserved, privilege absent) — the same shape
 // as the fixed dev path, so neither trust path can drift.
 func TestJWTPlatformTenantWithAuditorRoleIsNotPlatform(t *testing.T) {
-	authenticator := Authenticator{JWTSecret: "test-secret", AllowLocalHS256: true}
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
 	payload := map[string]any{
 		"sub":       "subject-a",
 		"tenant_id": "platform",
@@ -399,6 +406,32 @@ func TestJWTPlatformTenantWithAuditorRoleIsNotPlatform(t *testing.T) {
 	}
 }
 
+// TestAuthenticateTokenContextRejectsShortHS256Secret is AC-2: the
+// ValidateConfiguration gate fires before any token parsing or signature
+// verification, so a short-secret HS256 config rejects even a well-formed
+// token (gate at auth.go precedes parseJWT), and fails closed under AllowDev
+// with a dev token. Positive control: a compliant 32-byte secret
+// authenticates a valid signed token.
+func TestAuthenticateTokenContextRejectsShortHS256Secret(t *testing.T) {
+	short := Authenticator{JWTSecret: "short", AllowLocalHS256: true}
+	if _, err := short.AuthenticateTokenContext(context.Background(), "not-a-token"); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("per-request gate must fire before parsing, got: %v", err)
+	}
+	// Fail-closed with dev mode: a weak HS256 trust source blocks the
+	// process even when dev tokens are enabled.
+	dev := Authenticator{JWTSecret: "short", AllowLocalHS256: true, AllowDev: true}
+	if _, err := dev.AuthenticateToken("dev:tenant-a:auditor"); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("dev fail-closed must surface the length error, got: %v", err)
+	}
+	// Positive control: a compliant secret authenticates a valid token.
+	strong := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
+	payload := map[string]any{"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix()}
+	claims, err := strong.AuthenticateToken(signJWT(t, payload))
+	if err != nil || claims.TenantID != "tenant-a" {
+		t.Fatalf("compliant secret must authenticate a valid token: claims=%+v err=%v", claims, err)
+	}
+}
+
 func signJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]any{"alg": "HS256", "typ": "at+jwt"})
@@ -410,7 +443,7 @@ func signJWT(t *testing.T, payload map[string]any) string {
 		t.Fatal(err)
 	}
 	signed := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
-	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac := hmac.New(sha256.New, []byte(testHMACSecret))
 	_, _ = mac.Write([]byte(signed))
 	return signed + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
