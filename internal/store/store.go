@@ -446,7 +446,7 @@ func (f *fileBackend) Save(data *Snapshot) error {
 	// at the deepest pre-existing directory: ancestors above it already
 	// have durable dentries and must not be re-synced (fsutil_test.go pins
 	// the root==dir collapse to exactly one sync).
-	root := deepestExistingAncestor(parent)
+	root := fsutil.DeepestExistingAncestor(parent)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
 	}
@@ -509,28 +509,6 @@ func (f *fileBackend) Save(data *Snapshot) error {
 	return nil
 }
 
-// deepestExistingAncestor returns the deepest directory on the path to dir
-// that already exists before this Save runs (walking upward with os.Stat;
-// the filesystem root always exists and terminates the walk). Only these
-// directories have durable dentries already; every directory between the
-// returned root and dir is created by this Save and must itself be synced
-// after the rename. A Stat error other than "confirmed present" is treated
-// as not-existing: over-syncing a pre-existing ancestor is harmless (one
-// extra fsync), while under-syncing a freshly created intermediate would
-// reopen the M-12 window — the probe can therefore never compromise
-// durability.
-func deepestExistingAncestor(dir string) string {
-	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
-		if _, err := os.Stat(d); err == nil {
-			return d
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			return d // filesystem root always exists
-		}
-	}
-}
-
 // restoreSnapshot rewrites the previously persisted snapshot over the
 // target path (best-effort "no rename visible" after a post-rename
 // chain-sync failure in Save). It follows the same write → file.Sync →
@@ -576,7 +554,7 @@ func (f *fileBackend) restoreSnapshot() {
 	if syncDir == nil {
 		syncDir = fsutil.SyncDir
 	}
-	_ = fsutil.SyncDirChain(deepestExistingAncestor(filepath.Dir(f.path)), filepath.Dir(f.path), syncDir)
+	_ = fsutil.SyncDirChain(fsutil.DeepestExistingAncestor(filepath.Dir(f.path)), filepath.Dir(f.path), syncDir)
 }
 
 func cloneSnapshot(data *Snapshot) (*Snapshot, error) {

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -68,11 +69,11 @@ func Configured(store Store) bool {
 type FileStore struct {
 	Dir string
 
-	// syncDir is the per-directory fsync hook used by Put's directory-chain
-	// durability step. It defaults to fsutil.SyncDir; tests replace it to
-	// record the ordered sync set or fault-inject a specific path. Nil at
-	// construction (all production literals), so there is no constructor
-	// and no exported surface change.
+	// syncDir is the per-directory fsync hook used by Put's and Ready's
+	// directory-chain durability step. It defaults to fsutil.SyncDir; tests
+	// replace it to record the ordered sync set or fault-inject a specific
+	// path. Nil at construction (all production literals), so there is no
+	// constructor and no exported surface change.
 	syncDir func(path string) error
 
 	// mu serializes Put/Get so the create→write→sync→remove critical
@@ -82,6 +83,14 @@ type FileStore struct {
 	// the "nil ⇒ durable" contract. It also prevents torn reads of an
 	// object mid-write.
 	mu sync.Mutex
+
+	// rootState tracks whether this instance created the archive root and
+	// whether its parent dentry has been confirmed durable (see rootState).
+	// A single atomic.Value keeps the fields consistent for the lock-free
+	// Ready and the locked Put without a data race; lost updates between
+	// concurrent observations are benign (any recorded missingBase is a
+	// valid chain root that covers the parent).
+	rootState atomic.Value
 }
 
 // containedPath validates key against the archive-root containment contract
@@ -103,6 +112,75 @@ func containedPath(dir, key string) (string, error) {
 	return filepath.Join(dir, clean), nil
 }
 
+// rootState is the durability bookkeeping for the archive root within one
+// FileStore instance. missingBase is the deepest existing ancestor observed
+// when this instance last saw the root missing — the chain root that covers
+// every directory created since (including the fresh root's own dentry in
+// its parent); missingSeen records that observation. parentDurable records
+// that a chain sync reaching missingBase has since succeeded, so later
+// operations may terminate the chain at the configured root again.
+//
+// A root that pre-existed this instance (missingSeen false) is treated as
+// durable per the scope guard: steady-state chains keep terminating at the
+// configured root. A root created by this instance whose covering sync
+// failed keeps missingBase in the chain until one sync succeeds, so a
+// nil-returning Put can never treat a non-durable root as durable (M-12).
+type rootState struct {
+	missingBase   string
+	missingSeen   bool
+	parentDurable bool
+}
+
+// loadRootState returns the current root durability state.
+func (f *FileStore) loadRootState() rootState {
+	if v := f.rootState.Load(); v != nil {
+		return v.(rootState)
+	}
+	return rootState{}
+}
+
+// observeRootMissing records that this operation observed the archive root
+// missing before its MkdirAll: the root is (being) created within this
+// instance's lifetime, probed is the deepest existing ancestor whose child
+// was created, and the parent dentry is unconfirmed until a chain reaching
+// probed succeeds.
+func (f *FileStore) observeRootMissing(probed string) {
+	st := f.loadRootState()
+	st.missingSeen = true
+	st.missingBase = probed
+	st.parentDurable = false
+	f.rootState.Store(st)
+}
+
+// markRootDurable records that a chain sync reaching the root's parent
+// dentry just succeeded.
+func (f *FileStore) markRootDurable() {
+	st := f.loadRootState()
+	st.parentDurable = true
+	f.rootState.Store(st)
+}
+
+// chainRoot returns the chain root for the durability sync. probed is the
+// deepest existing ancestor of f.Dir observed before this operation's
+// MkdirAll: when it lies above f.Dir the root is (being) created by this
+// operation, so the chain must extend through the parent to make the fresh
+// root's dentry durable (M-12). When the root pre-exists, the chain
+// terminates at f.Dir — unless this instance itself observed the root
+// missing earlier and has not yet confirmed the parent dentry durable (a
+// failed first attempt created the root but its covering sync never
+// succeeded): then the chain extends to the originally observed deepest
+// existing ancestor, so every directory created since is covered.
+func (f *FileStore) chainRoot(probed string) string {
+	if probed != f.Dir {
+		return probed
+	}
+	st := f.loadRootState()
+	if st.missingSeen && !st.parentDurable {
+		return st.missingBase
+	}
+	return f.Dir
+}
+
 func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
 	path, err := containedPath(f.Dir, key)
 	if err != nil {
@@ -110,6 +188,18 @@ func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// REQ-2: chain root = deepest ancestor that pre-exists this Put, probed
+	// BEFORE MkdirAll so a freshly created archive root is included in the
+	// sync chain (its dentry inside the parent must be durable for
+	// "nil ⇒ durable", M-12). When f.Dir pre-exists the probe returns f.Dir
+	// and the chain is unchanged (root == dir collapses to one sync); a root
+	// this instance created earlier without confirming the parent dentry
+	// durable keeps the parent in the chain (see chainRoot).
+	probed := fsutil.DeepestExistingAncestor(f.Dir)
+	root := f.chainRoot(probed)
+	if probed != f.Dir {
+		f.observeRootMissing(probed)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
@@ -152,16 +242,24 @@ func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
 	// reports success (M-12): a crash right after close can otherwise lose
 	// the object from a power failure even though the file itself was
 	// synced. Directory fsync is per-directory, so the object's immediate
-	// parent and every ancestor up to the archive root must each be synced,
-	// leaf-to-root; the mutex guarantees no concurrent retry can observe or
-	// remove the object mid-sync.
+	// parent and every ancestor up to the chain root must each be synced,
+	// leaf-to-root; the chain root is the deepest pre-existing ancestor
+	// probed before MkdirAll when this Put created the archive root, and
+	// the configured f.Dir otherwise. The mutex guarantees no concurrent
+	// retry can observe or remove the object mid-sync.
 	syncDir := f.syncDir
 	if syncDir == nil {
 		syncDir = fsutil.SyncDir
 	}
-	if err := fsutil.SyncDirChain(f.Dir, filepath.Dir(path), syncDir); err != nil {
+	if err := fsutil.SyncDirChain(root, filepath.Dir(path), syncDir); err != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("sync directory chain for %s: %w", path, err)
+	}
+	// A chain whose root is above the configured root covered the parent
+	// dentry; once that succeeds the root is durable for subsequent
+	// operations (chainRoot terminates at f.Dir again).
+	if root != f.Dir {
+		f.markRootDurable()
 	}
 	return nil
 }
@@ -198,6 +296,17 @@ func (f *FileStore) Ready(_ context.Context) error {
 	if f.Dir == "" {
 		return fmt.Errorf("archive directory is not configured")
 	}
+	// REQ-3: probe before MkdirAll so a root freshly created by this Ready
+	// is included in the sync chain; its dentry inside the parent is made
+	// durable (M-12). A pre-existing root collapses to one sync (root ==
+	// dir), so steady-state readiness does not re-sync ancestors above the
+	// configured root; a root this instance created earlier without a
+	// confirmed parent dentry keeps the parent in the chain (chainRoot).
+	probed := fsutil.DeepestExistingAncestor(f.Dir)
+	root := f.chainRoot(probed)
+	if probed != f.Dir {
+		f.observeRootMissing(probed)
+	}
 	probe := filepath.Join(f.Dir, ".ready-probe")
 	if err := os.MkdirAll(f.Dir, 0o750); err != nil {
 		return err
@@ -205,7 +314,24 @@ func (f *FileStore) Ready(_ context.Context) error {
 	if err := os.WriteFile(probe, []byte("ok"), 0o640); err != nil {
 		return err
 	}
-	return os.Remove(probe)
+	if err := os.Remove(probe); err != nil {
+		return err
+	}
+	// The probe-file removal — and, when the root is fresh, the root's own
+	// dentry inside its parent — must be durable before Ready reports
+	// ready: a non-durable root is not ready, so a chain-sync failure here
+	// fails Ready closed.
+	syncDir := f.syncDir
+	if syncDir == nil {
+		syncDir = fsutil.SyncDir
+	}
+	if err := fsutil.SyncDirChain(root, f.Dir, syncDir); err != nil {
+		return fmt.Errorf("sync archive root %s: %w", f.Dir, err)
+	}
+	if root != f.Dir {
+		f.markRootDurable()
+	}
+	return nil
 }
 
 // S3Client is the subset of the minio client used by S3Store. The interface

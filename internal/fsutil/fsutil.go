@@ -77,3 +77,24 @@ func SyncDirChain(root, dir string, syncDir func(string) error) error {
 	}
 	return nil
 }
+
+// DeepestExistingAncestor returns the deepest directory on the path to dir
+// that already exists (walking upward with os.Stat; the filesystem root
+// always exists and terminates the walk). Only these directories have
+// durable dentries already; every directory between the returned root and
+// dir is created by the caller's MkdirAll and must itself be synced after
+// creation. A Stat error other than "confirmed present" is treated as
+// not-existing: over-syncing a pre-existing ancestor is harmless (one extra
+// fsync), while under-syncing a freshly created intermediate would reopen
+// the M-12 window — the probe can therefore never compromise durability.
+func DeepestExistingAncestor(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return d // filesystem root always exists
+		}
+	}
+}
