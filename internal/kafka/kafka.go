@@ -391,6 +391,13 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 		if errors.As(err, &deliveryErr) && deliveryErr.Permanent {
 			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
 		}
+		// 域边界拒绝（occurred_at 超出账本时间窗）与 4xx 语义拒绝同级：没有
+		// 重试价值，立即死信，避免对这类毒消息烧掉 max-attempts 次退避。
+		// 预修复前已入账的超范围事件由此获得自描述 trace（错误文本携带
+		// 时间窗），而不是等到 attempts_exhausted。
+		if errors.Is(err, domain.ErrOccurredAtOutOfRange) {
+			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
+		}
 		// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；否则
 		// 退避并重试同一条消息（背压；API 按 event_id 幂等，重试不会
 		// 产生重复事实）。

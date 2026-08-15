@@ -80,6 +80,15 @@ func (s *Store) Insert(ctx context.Context, event domain.Event) error {
 	if event.StreamID == "" || event.Sequence <= 0 || event.Hash == "" {
 		return ErrNotLedgered
 	}
+	// Ledger-horizon guard: defense in depth for events committed before the
+	// domain gate (REQ-2) existed. ClickHouse DateTime64(3,'UTC') cannot index
+	// an out-of-range occurred_at; rejecting here (before payload encoding and
+	// before any DB access) lets the consumer classify the class as permanent
+	// and dead-letter it on the first attempt instead of burning retries. The
+	// nil-*Store probe proves this guard precedes DB access.
+	if event.OccurredAt.Before(domain.MinOccurredAt) || event.OccurredAt.After(domain.MaxOccurredAt) {
+		return fmt.Errorf("insert projection: %w", domain.ErrOccurredAtOutOfRange)
+	}
 	payload, err := domain.CanonicalJSON(event.Payload)
 	if err != nil {
 		return fmt.Errorf("encode payload: %w", err)

@@ -158,3 +158,43 @@ func TestClickHouseRejectsPreLedgerRow(t *testing.T) {
 		t.Fatalf("projection contains %d row(s) for pre-ledger event, want 0", count)
 	}
 }
+
+// TestInsertRejectsOutOfRangeOccurredAt is AC-3: the ledger-horizon guard
+// precedes payload encoding and DB access. An out-of-range occurred_at on a
+// ledgered-shaped event fails with domain.ErrOccurredAtOutOfRange even on a
+// zero-value *Store (nil db) — the guard provably runs before any database
+// round-trip — so the consumer can classify the class as permanent. Presence
+// precedence is preserved: missing chain state still returns ErrNotLedgered
+// first, regardless of occurred_at.
+//
+// Note: the in-range success path (ledgered shape, time.Now().UTC()) is
+// covered by TestClickHouseProjectionIntegration; a nil-*Store probe cannot
+// exercise it because an in-range event proceeds to the DB exec step, which
+// is exactly what the guard is designed to skip only for the rejected class.
+func TestInsertRejectsOutOfRangeOccurredAt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"year 1800 (below floor)", time.Date(1800, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"year 2300 (above ceiling)", time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := ledgeredFixture("occ-guard-probe")
+			event.OccurredAt = tc.at
+			var store *Store // nil db: any DB touch would panic
+			if err := store.Insert(context.Background(), event); !errors.Is(err, domain.ErrOccurredAtOutOfRange) {
+				t.Fatalf("Insert() error = %v, want ErrOccurredAtOutOfRange", err)
+			}
+		})
+	}
+	t.Run("presence precedence", func(t *testing.T) {
+		event := ledgeredFixture("occ-guard-precedence")
+		event.OccurredAt = time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)
+		event.StreamID = ""
+		var store *Store
+		if err := store.Insert(context.Background(), event); !errors.Is(err, ErrNotLedgered) {
+			t.Fatalf("Insert() error = %v, want ErrNotLedgered (presence guard first)", err)
+		}
+	})
+}

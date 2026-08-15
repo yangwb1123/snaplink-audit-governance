@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -138,9 +139,35 @@ func TestConsumerDeadLettersUnparsableMessage(t *testing.T) {
 	}
 }
 
-// T1: a permanent error (outbox.DeliveryError{Permanent}) is dead-lettered on
-// the first attempt with error_code=permanent_error and the partition offset
-// advances past the poison message.
+// T1b (AC-3): a domain.ErrOccurredAtOutOfRange-wrapped projection failure is
+// classified permanent and dead-lettered on the first attempt with
+// error_code=permanent_error and the partition advances — zero retries/backoff
+// (the projector must not burn max-attempts on an out-of-range occurred_at).
+func TestConsumerDeadLettersOccurredAtOutOfRangeOnFirstAttempt(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	ingested := 0
+	runConsumer(t, reader, func(_ context.Context, event domain.Event) error {
+		ingested++
+		// 复刻 projection.Store.Insert 的守卫包装形态（无 DeliveryError）。
+		if event.EventID == "evt-1" {
+			return fmt.Errorf("insert projection: %w", domain.ErrOccurredAtOutOfRange)
+		}
+		return nil
+	}, WithDLQ(reader), WithMaxAttempts(3))
+	if ingested != 2 {
+		t.Fatalf("ingested=%d, want 2 (poison message dead-lettered on first attempt)", ingested)
+	}
+	if reader.committedOffset != 2 {
+		t.Fatalf("committedOffset=%d, want 2 (partition must advance past the poison message)", reader.committedOffset)
+	}
+	if len(reader.published) != 1 {
+		t.Fatalf("published=%d, want 1", len(reader.published))
+	}
+	failure := reader.published[0]
+	if failure.EventID != "evt-1" || failure.ErrorCode != ErrorCodePermanentError || failure.ErrorMessage == "" {
+		t.Fatalf("published failure=%+v, want event_id=evt-1 code=%s with self-describing message", failure, ErrorCodePermanentError)
+	}
+}
 func TestConsumerDeadLettersPermanentErrorAndAdvancesPartition(t *testing.T) {
 	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
 	ingested := 0

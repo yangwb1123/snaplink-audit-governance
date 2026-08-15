@@ -40,6 +40,23 @@ var (
 	// Rejecting instead of silently re-labelling prevents a writer from
 	// attributing an event to a tenant it has no authority for (422).
 	ErrTenantMismatch = errors.New("tenant mismatch")
+	// ErrOccurredAtOutOfRange marks an event whose occurred_at falls outside the
+	// ledger horizon [MinOccurredAt, MaxOccurredAt] (ClickHouse DateTime64
+	// projection range). It wraps ErrInvalid so existing programmatic ErrInvalid
+	// handling keeps working, while HTTP mapping (422) and the projector's
+	// permanent-error classification can distinguish the class.
+	ErrOccurredAtOutOfRange = fmt.Errorf("%w: occurred_at out of range", ErrInvalid)
+)
+
+// MinOccurredAt / MaxOccurredAt bound the ledger horizon to the ClickHouse
+// DateTime64 platform contract (documented range 1900-01-01 00:00:00 ..
+// 2299-12-31 23:59:59.99999999; column precision 3 ⇒ .999 ceiling). The
+// immutable ledger must never commit a fact the projection tier cannot index;
+// every ingest surface funnels through ValidateBasic, so the bound is enforced
+// before any durable commit.
+var (
+	MinOccurredAt = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	MaxOccurredAt = time.Date(2299, 12, 31, 23, 59, 59, 999_000_000, time.UTC)
 )
 
 // Event is the canonical audit fact accepted from a source system. Payload is
@@ -437,6 +454,14 @@ func (e Event) ValidateBasic() error {
 	}
 	if e.OccurredAt.IsZero() {
 		return fmt.Errorf("%w: occurred_at is required", ErrInvalid)
+	}
+	// Zero-check stays first (a zero time.Time is below the floor and must keep
+	// reporting "occurred_at is required"). Range is then judged on the UTC
+	// instant, matching Store.Insert's event.OccurredAt.UTC() binding.
+	if e.OccurredAt.Before(MinOccurredAt) || e.OccurredAt.After(MaxOccurredAt) {
+		return fmt.Errorf("%w: occurred_at %v is outside the ledger horizon [%s, %s]",
+			ErrOccurredAtOutOfRange, e.OccurredAt.UTC().Format(time.RFC3339Nano),
+			MinOccurredAt.Format(time.RFC3339), MaxOccurredAt.Format(time.RFC3339))
 	}
 	if e.Actor.ID == "" {
 		return fmt.Errorf("%w: actor.id is required", ErrInvalid)

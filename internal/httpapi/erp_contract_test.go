@@ -247,7 +247,8 @@ func TestERPContractBatchRejectsColonAggregate(t *testing.T) {
 
 	status, body := postEvents(t, server, []domain.Event{good, bad})
 	// ErrInvalid → 400（statusForError 唯一映射；422 仅限 ErrSchemaNotFound /
-	// ErrTenantMismatch）。
+	// ErrTenantMismatch / ErrOccurredAtOutOfRange——occurred_at 超出账本时间窗
+	// 属语义级合同拒绝，见 server.go statusForError/errorBody 的哨兵优先分支）。
 	if status != http.StatusBadRequest {
 		t.Fatalf("batch status=%d body=%v (must be 400 invalid_request)", status, body)
 	}
@@ -302,4 +303,66 @@ func stringsContains(v any, needle string) bool {
 	}
 	msg, _ := inner["message"].(string)
 	return bytes.Contains([]byte(msg), []byte(needle))
+}
+
+// M0-5c（本方向）：单条 POST /api/v1/events 携带 occurred_at 超出账本时间窗
+// （year 2300）时返回 422 + error.code=occurred_at_out_of_range（statusForError
+// 的哨兵分支先于 ErrInvalid 匹配；见 server.go）。事件不产生任何 receipt。
+func TestERPSingleRejectsOutOfRangeOccurredAt(t *testing.T) {
+	server := erpTestHTTPServer(t)
+	defer server.Close()
+	event := erpEvent("erp-evt-occ-single", "idem-occ-single", map[string]any{"order": "PO-1007"})
+	event.OccurredAt = time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	result := postTestEvent(t, server.URL, "dev:tenant-a:service:sverp-web", event)
+	if result.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("single status=%d code=%q message=%q (must be 422)", result.Status, result.Code, result.Message)
+	}
+	if result.Code != "occurred_at_out_of_range" {
+		t.Fatalf("single code=%q, want occurred_at_out_of_range", result.Code)
+	}
+}
+
+// M0-5d（本方向）：批内第 2 条事件 occurred_at 超出账本时间窗时返回 422 +
+// error.code=occurred_at_out_of_range，同样首错截断：receipts 前缀 =
+// [已入账的 good, 零值 bad（not_attempted 证据）]。第 1 条已入账，发送端
+// 不得整批重投。
+func TestERPContractBatchRejectsOutOfRangeOccurredAt(t *testing.T) {
+	server := erpTestHTTPServer(t)
+	defer server.Close()
+	good := erpEvent("erp-evt-occ-a", "idem-occ-a", map[string]any{"order": "PO-1008"})
+	bad := erpEvent("erp-evt-occ-b", "idem-occ-b", map[string]any{"order": "PO-1008"})
+	bad.OccurredAt = time.Date(1800, 1, 1, 0, 0, 0, 0, time.UTC) // 低于 floor
+
+	status, body := postEvents(t, server, []domain.Event{good, bad})
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("batch status=%d body=%v (must be 422)", status, body)
+	}
+	code, _ := body["error"].(map[string]any)["error"].(map[string]any)["code"].(string)
+	if code != "occurred_at_out_of_range" {
+		t.Fatalf("batch error.code=%q, want occurred_at_out_of_range", code)
+	}
+	receipts, _ := body["receipts"].([]any)
+	if len(receipts) != 2 {
+		t.Fatalf("expected 2 receipts (accepted + zero-value), got %v", body)
+	}
+	firstReceipt, _ := receipts[0].(map[string]any)
+	if firstReceipt["event_id"] != "erp-evt-occ-a" || firstReceipt["status"] != "accepted" {
+		t.Fatalf("first receipt must be the accepted event, got %v", firstReceipt)
+	}
+	secondReceipt, _ := receipts[1].(map[string]any)
+	if eventID, _ := secondReceipt["event_id"].(string); eventID != "" {
+		t.Fatalf("second receipt must be the zero-value (not_attempted), got %v", secondReceipt)
+	}
+	// 第 1 条已入账（receipt 可查）。
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events/erp-evt-occ-a?tenant_id=tenant-a", nil)
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:auditor")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("accepted event must be queryable, status=%d", response.StatusCode)
+	}
 }

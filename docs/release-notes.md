@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-08-15 — `occurred_at` 账本时间窗收口：入账前拒绝超范围时间戳（internal/domain，bound-occurredat-at-the-domain-boundary）
+
+**写给运营（行为变化）：**
+
+- **`occurred_at` 必须在 `[1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z]` 内**（ClickHouse `DateTime64(3,'UTC')` 投影层的平台契约范围）。此前该字段只校验非零：year 1800 / year 2300 的事件被 202 接受并**持久写入不可变账本**，但投影 INSERT 在 ClickHouse 侧永久失败——重试 8 次后死信 `attempts_exhausted`，事件对在线查询面永久不可见且入账时无任何报错。现在超范围事件在**域边界**被拒：HTTP 单条返回 **422 `occurred_at_out_of_range`**，批端点返回 422 并按 ERP 契约首错截断（已入账 receipts 作前缀返回，坏事件零值 receipt，`not_attempted` 语义不变）；outbox 写入与 gRPC 共享同一 `ValidateBasic` 边界，同样在写库前拒绝。**需要生产方动作**：将 `occurred_at` 校正到时间窗内；新事件永不落库。
+- **历史合规回填（早于 1900 年）被拒**：此类时间戳无论如何都无法被投影层索引（ClickHouse `DateTime64` 下限），拒绝是平台契约的既定取舍；OpenAPI `occurred_at` 描述已带时间窗，新生产方客户端侧即失败。
+- **预修复前已入账的超范围事实保留在账本中（不可变性，无数据迁移）**：投影器现在对这类事实**首次尝试即死信** `permanent_error`（错误文本自带时间窗，自描述 trace），不再烧 8 次退避后 `attempts_exhausted`。部署后观察 DLQ 的一次性 `permanent_error` 峰值属预期。
+- **无存储迁移**；回滚 = 重新部署旧二进制（旧二进制重新接受超范围时间戳，缺陷随之回归，请同步升级生产方）。
+
+**写给开发（实现变化）：**
+
+- `internal/domain/models.go`：新增导出常量 `MinOccurredAt`/`MaxOccurredAt`（`time.Date(1900,1,1,…)` / `time.Date(2299,12,31,23,59,59,999ms,…)`，注释引用 ClickHouse `DateTime64` 平台契约）与哨兵 `ErrOccurredAtOutOfRange`（`%w` 包装 `ErrInvalid`，`errors.Is(err, ErrInvalid)` 对所有既有调用方保持成立）；`ValidateBasic` 在零值检查之后新增范围检查（顺序冻结：零值仍报 "occurred_at is required"；按 UTC 时刻裁决，与 `Store.Insert` 的 `event.OccurredAt.UTC()` 绑定一致）。
+- `internal/projection/projection.go`：`Store.Insert` 在存在性守卫之后、payload 编码/DB 访问之前新增同一范围守卫（预修复账本事实的纵深防御；nil-`*Store` 探针证明守卫先于 DB 访问，`ErrNotLedgered` 优先级不变）。
+- `internal/kafka/kafka.go`：consumer 将 `domain.ErrOccurredAtOutOfRange` 归类为永久错误，首次尝试即死信 `ErrorCodePermanentError`（`internal/kafka` 已导入 `internal/domain`，无新依赖边）。
+- `internal/httpapi/server.go`：`statusForError`/`errorBody` 在 `ErrInvalid` 分支**之前**插入哨兵分支（顺序承载：哨兵包装 `ErrInvalid`，顺序颠倒会塌缩回 400 `invalid_request`）→ 422 `occurred_at_out_of_range`。
+- `api/openapi/openapi.yaml`（+ `api/asyncapi/asyncapi.yaml` 镜像）：`Event.occurred_at` 描述与单条/批端点 422 响应描述带时间窗与拒绝语义。`api/proto/audit.proto` 未动（生成物需 protoc 再生成，超出范围）。
+- 测试：`models_test.go` 新增边界表（拒绝 year 1800/floor−1ms/ceiling+1ms/year 2300/`+08:00` 偏移按 UTC 时刻裁决；接受 floor/ceiling 含边界；零值消息不变）；`occurred_at_boundary_test.go` 新增 service 层无变异探针（快照前后不变 + 后续合法入账成功）；`projection_test.go` 新增 nil-`*Store` 守卫探针与存在性优先级；`kafka_test.go` 新增首次尝试即死信探针；`erp_contract_test.go` 新增单条/批 422 契约测试并刷新 422 注释；`openapi_contract_test.go` 断言 OpenAPI 描述文本。
+
 ## 2026-08-15 — 流帧组件拒绝 `:`：aggregate 帧与租户 ID 层的冒号注入收口（internal/domain，internal-domain-6c1ab500）
 
 **写给运营（行为变化）：**

@@ -1190,6 +1190,11 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 func errorBody(status int, err error, r *http.Request) map[string]any {
 	code := "internal_error"
 	switch {
+	case errors.Is(err, domain.ErrOccurredAtOutOfRange):
+		// occurred_at 超出账本时间窗：语义级合同拒绝（与 tenant_mismatch /
+		// schema_not_found 同级），必须先于 ErrInvalid 匹配——该哨兵包装了
+		// ErrInvalid，顺序颠倒会塌缩回 400 invalid_request。
+		code = "occurred_at_out_of_range"
 	case errors.Is(err, domain.ErrInvalid):
 		code = "invalid_request"
 	case errors.Is(err, domain.ErrUnauthorized):
@@ -1218,6 +1223,9 @@ func errorBody(status int, err error, r *http.Request) map[string]any {
 
 func statusForError(err error) int {
 	switch {
+	case errors.Is(err, domain.ErrOccurredAtOutOfRange):
+		// 同 errorBody：哨兵先于 ErrInvalid 匹配，保持 422 分类。
+		return http.StatusUnprocessableEntity
 	case errors.Is(err, domain.ErrInvalid):
 		return http.StatusBadRequest
 	case errors.Is(err, domain.ErrUnauthorized):

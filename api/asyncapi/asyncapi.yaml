@@ -86,7 +86,7 @@ components:
         event_type: { type: string }
         schema_id: { type: string }
         schema_version: { type: integer, minimum: 1 }
-        occurred_at: { type: string, format: date-time }
+        occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }
         received_at: { type: string, format: date-time }
         operation_id: { type: string }
         causation_id: { type: string }
