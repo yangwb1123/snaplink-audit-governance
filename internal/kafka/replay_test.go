@@ -2218,6 +2218,295 @@ func TestReplaySustainedIngestCutsRoundOffWithoutMarking(t *testing.T) {
 	}
 }
 
+// AC-1 (regression: replay key-fallback overrides a valid conflicting payload
+// event_id, closing the wrong DLQ record): an accepted message whose payload
+// carries a VALID but unwanted event_id must never be resolved by its Kafka
+// key fallback — the payload is authoritative, so a stale key cannot close a
+// DLQ record whose original is a different event (the wrong-record close).
+// Two phases: (1) a sustained-ingest round (delay=45ms < window=100ms, three
+// messages, scan cap 2x100ms fires before a quiet window => drained=false)
+// scans the conflicting message first and skips all three (fixed code: the
+// fallback is gated on an empty payload probe; unmodified code replays the
+// conflicting key and fails phase 1 immediately); (2) once the topic goes
+// quiet the record converges as unresolvable via the drain path only, the
+// DLQ offset is committed exactly once, and the loss signal fires — with no
+// replayed/unparsable/permanent log lines. AC-4: the on-disk state file
+// never marks A during the mismatched-key scan and carries exactly one mark
+// after the drain convergence.
+func TestReplayConflictingPayloadKeyFallbackConvergesUnresolvable(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("A")}}
+	// Message 1 is the bug trigger: Key="A" (matches the wanted DLQ record)
+	// but Value carries a valid conflicting payload event_id "B". Messages 2
+	// and 3 keep the cadence inside the 2x window so the round is a CUT-OFF
+	// (drained=false), not a drain — the conflicting message is guaranteed
+	// scanned before the cap fires (E11 pattern; §8.1 corrected fixture).
+	accepted := &fakeReplayReader{topic: TopicAccepted, delay: 45 * time.Millisecond, messages: []kafka.Message{
+		{Key: []byte("A"), Value: []byte(`{"event_id":"B","source_system":"crm"}`), Partition: 0, Offset: 1},
+		{Key: []byte("o2"), Value: []byte(`{"event_id":"other-2","source_system":"crm"}`), Partition: 0, Offset: 2},
+		{Key: []byte("o3"), Value: []byte(`{"event_id":"other-3","source_system":"crm"}`), Partition: 0, Offset: 3},
+	}}
+	statePath := filepath.Join(t.TempDir(), "state")
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var republished []kafka.Message
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		republished = append(republished, kafka.Message{Key: key, Value: value})
+		return nil
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 100 * time.Millisecond
+
+	// onDiskMarkLines returns the state-file lines that mark A (AC-4): the
+	// file is created only by the first Mark, so a missing file is no marks.
+	onDiskMarkLines := func() []string {
+		t.Helper()
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			t.Fatal(err)
+		}
+		var marks []string
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if strings.Contains(line, `"event_id":"A"`) {
+				marks = append(marks, line)
+			}
+		}
+		return marks
+	}
+
+	// Phase 1 (sustained ingest, drained=false): the conflicting message is
+	// scanned and skipped; nothing is marked, nothing is committed, and the
+	// on-disk state file carries no mark for A. Unmodified code replays the
+	// key "A" here (republished==1, Replayed==1, commits==1) — the buggy-code
+	// discriminator.
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("phase 1 replayed=%d, want 0 (conflicting valid payload must not fall back to the key)", count)
+	}
+	if len(republished) != 0 {
+		t.Fatalf("phase 1 republished=%d, want 0 (event B injected under key A must never be re-published as A)", len(republished))
+	}
+	if state.Replayed["A"] {
+		t.Fatal("phase 1: A must not be marked replayed (its original was never matched)")
+	}
+	if metrics := replayer.Metrics(); metrics.Replayed != 0 || metrics.Unresolvable != 0 || metrics.UnparsableMarks != 0 || metrics.Permanent != 0 {
+		t.Fatalf("phase 1 metrics replayed=%d unresolvable=%d unparsable=%d permanent=%d, want 0/0/0/0", metrics.Replayed, metrics.Unresolvable, metrics.UnparsableMarks, metrics.Permanent)
+	}
+	if len(dlq.commits) != 0 {
+		t.Fatalf("phase 1 DLQ commits=%d, want 0 (nothing reached a durable decision)", len(dlq.commits))
+	}
+	if got := replayer.acceptedSeen.Load(); got != 3 {
+		t.Fatalf("phase 1 acceptedSeen=%d, want 3 (all three messages scanned inside the bounded round)", got)
+	}
+	if marks := onDiskMarkLines(); len(marks) != 0 {
+		t.Fatalf("phase 1 on-disk marks for A=%v, want none (state file must never record the mismatched-key scan)", marks)
+	}
+
+	// Phase 2 (quiet -> drain): the same record converges as unresolvable
+	// via the drain path only — marked once, committed once at offset 1, with
+	// the AuditDLQUnresolvableDrop signal and no replay/anti-loop/permanent
+	// log lines, and exactly one durable mark in the state file (AC-4).
+	accepted.index = len(accepted.messages) // topic now quiet: drain on the first window
+	dlq.index = 0
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("phase 2 replayed=%d, want 1 (drain convergence)", count)
+	}
+	if len(republished) != 0 {
+		t.Fatalf("phase 2 republished=%d, want 0 (unresolvable convergence must never republish)", len(republished))
+	}
+	if metrics := replayer.Metrics(); metrics.Replayed != 0 || metrics.Unresolvable != 1 || metrics.UnparsableMarks != 0 || metrics.Permanent != 0 {
+		t.Fatalf("phase 2 metrics replayed=%d unresolvable=%d unparsable=%d permanent=%d, want 0/1/0/0", metrics.Replayed, metrics.Unresolvable, metrics.UnparsableMarks, metrics.Permanent)
+	}
+	if !state.Replayed["A"] {
+		t.Fatal("phase 2: A must be marked replayed by the drain convergence")
+	}
+	if len(dlq.commits) != 1 || dlq.commits[0].Offset != 1 {
+		t.Fatalf("phase 2 DLQ commits=%v, want exactly one commit at offset 1 (drain path only; the wrong record must never be closed)", dlq.commits)
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "unresolvable event_id=A reason=original-not-found-in-accepted-topic") {
+		t.Fatalf("phase 2 log missing the unresolvable loss signal:\n%s", logText)
+	}
+	for _, forbidden := range []string{"replayed event_id=A", "marking replayed to avoid loop", "PERMANENT closure"} {
+		if strings.Contains(logText, forbidden) {
+			t.Fatalf("phase 2 log must not contain %q:\n%s", forbidden, logText)
+		}
+	}
+	if marks := onDiskMarkLines(); len(marks) != 1 {
+		t.Fatalf("phase 2 on-disk marks for A=%v, want exactly one durable mark line", marks)
+	}
+}
+
+// F-1 (regression hardening, two-wanted-ID interplay): a message whose
+// payload event_id is wanted-but-already-marked must NOT fall back to a
+// wanted-unmarked Kafka key — the payload stays authoritative, no second
+// mark is written, and the key's DLQ record must never be closed by the
+// wrong message (the pinned consequence of R2). A was marked in a prior
+// round; the DLQ wants A@1 and K@2; the accepted topic carries one relevant
+// message: Key="K" (wanted, unmarked) but payload event_id "A" (wanted in
+// an earlier round, now marked). Fixed code skips it, so K converges
+// unresolvable on the quiet round. Buggy (pre-guard) code replays the key
+// "K", marks K replayed, and commits K@2 — the wrong-record close.
+func TestReplayWantedMarkedPayloadDoesNotFallBackToUnmarkedKey(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("A", 1), dlqMessageAt("K", 2)}}
+	// Message 1 is the trigger: Key="K" (wanted, unmarked) but a VALID
+	// payload event_id "A" that a prior round already durably marked.
+	// Messages 2 and 3 keep the E11 sustained-ingest cadence so the round
+	// is a CUT-OFF (drained=false), not a drain.
+	accepted := &fakeReplayReader{topic: TopicAccepted, delay: 45 * time.Millisecond, messages: []kafka.Message{
+		{Key: []byte("K"), Value: []byte(`{"event_id":"A","source_system":"crm"}`), Partition: 0, Offset: 1},
+		{Key: []byte("o2"), Value: []byte(`{"event_id":"other-2","source_system":"crm"}`), Partition: 0, Offset: 2},
+		{Key: []byte("o3"), Value: []byte(`{"event_id":"other-3","source_system":"crm"}`), Partition: 0, Offset: 3},
+	}}
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Mark("A"); err != nil { // A converged in a prior round
+		t.Fatal(err)
+	}
+	var republished []kafka.Message
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		republished = append(republished, kafka.Message{Key: key, Value: value})
+		return nil
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 100 * time.Millisecond
+
+	commitsContain := func(offset int64) bool {
+		t.Helper()
+		for _, c := range dlq.commits {
+			if c.Offset == offset {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Phase 1 (sustained-ingest cutoff round): the conflicting message is
+	// scanned and skipped — nothing replayed, K unmarked, K@2 NOT committed.
+	// A@1 (already durably marked) MAY be committed by the barrier below the
+	// first pending record K@2, so the assertion is membership, not count.
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("phase 1 replayed=%d, want 0 (marked payload must not fall back to the unmarked key)", count)
+	}
+	if len(republished) != 0 {
+		t.Fatalf("phase 1 republished=%d, want 0 (the wrong message must never be re-published as K)", len(republished))
+	}
+	if state.Replayed["K"] {
+		t.Fatal("phase 1: K must not be marked (its original was never matched)")
+	}
+	if metrics := replayer.Metrics(); metrics.Replayed != 0 || metrics.Unresolvable != 0 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("phase 1 metrics replayed=%d unresolvable=%d unparsable=%d, want 0/0/0", metrics.Replayed, metrics.Unresolvable, metrics.UnparsableMarks)
+	}
+	if commitsContain(2) {
+		t.Fatalf("phase 1 commits=%v, must not contain K@2 (offset 2): the barrier must leave K pending", dlq.commits)
+	}
+
+	// Phase 2 (quiet -> drain): K converges as unresolvable via the drain
+	// path only — marked once, committed once at offset 2, with the loss
+	// signal and no replay line.
+	accepted.index = len(accepted.messages) // topic now quiet: drain on the first window
+	dlq.index = 0
+	commitsBefore := len(dlq.commits)
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("phase 2 replayed=%d, want 1 (drain convergence)", count)
+	}
+	if len(republished) != 0 {
+		t.Fatalf("phase 2 republished=%d, want 0 (unresolvable convergence must never republish)", len(republished))
+	}
+	if metrics := replayer.Metrics(); metrics.Replayed != 0 || metrics.Unresolvable != 1 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("phase 2 metrics replayed=%d unresolvable=%d unparsable=%d, want 0/1/0", metrics.Replayed, metrics.Unresolvable, metrics.UnparsableMarks)
+	}
+	if !state.Replayed["K"] {
+		t.Fatal("phase 2: K must be marked replayed by the drain convergence")
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "unresolvable event_id=K reason=original-not-found-in-accepted-topic") {
+		t.Fatalf("phase 2 log missing the unresolvable loss signal for K:\n%s", logText)
+	}
+	if strings.Contains(logText, "replayed event_id=K") {
+		t.Fatalf("phase 2 log must not contain a replay line for K:\n%s", logText)
+	}
+	newCommits := dlq.commits[commitsBefore:]
+	if !commitsContain(2) {
+		t.Fatalf("phase 2 new commits=%v, want K@2 (offset 2) committed via the drain path", newCommits)
+	}
+}
+
+// F-2 (regression hardening, ordering): a conflicting message (key matches,
+// payload carries a valid but unwanted event_id) that precedes the REAL
+// original in the accepted topic must not suppress it — only the conflicting
+// message is skipped, the real original still resolves by payload and is
+// re-published byte-for-byte. Buggy (pre-guard) code would republish the
+// conflicting message first (event B under key A), mark A replayed, and
+// commit A's DLQ record — silently losing the real original.
+func TestReplayConflictingMessageDoesNotSuppressRealOriginal(t *testing.T) {
+	realOriginal := []byte(`{"event_id":"A","source_system":"crm"}`)
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("A")}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{
+		{Key: []byte("A"), Value: []byte(`{"event_id":"B","source_system":"crm"}`), Partition: 0, Offset: 1},
+		{Key: []byte("A"), Value: realOriginal, Partition: 0, Offset: 2},
+	}}
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var republished []kafka.Message
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		republished = append(republished, kafka.Message{Key: key, Value: value})
+		return nil
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond // fast quiet window: the scan drains after both messages
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("replayed=%d, want 1 (the real original must be recovered)", count)
+	}
+	if len(republished) != 1 || !bytes.Equal(republished[0].Value, realOriginal) {
+		t.Fatalf("republished=%v, want exactly the real original %s (never the conflicting event B)", republished, realOriginal)
+	}
+	if metrics := replayer.Metrics(); metrics.Replayed != 1 || metrics.Unresolvable != 0 {
+		t.Fatalf("metrics replayed=%d unresolvable=%d, want 1/0", metrics.Replayed, metrics.Unresolvable)
+	}
+	if !state.Replayed["A"] {
+		t.Fatal("A must be marked replayed")
+	}
+	if len(dlq.commits) != 1 || dlq.commits[0].Offset != 1 {
+		t.Fatalf("DLQ commits=%v, want exactly one commit at offset 1 (A's record closed by the real recovery)", dlq.commits)
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "replayed event_id=A") {
+		t.Fatalf("log missing the replay line:\n%s", logText)
+	}
+	if strings.Contains(logText, "unresolvable event_id=A") {
+		t.Fatalf("log must not contain the unresolvable line (the original WAS found):\n%s", logText)
+	}
+}
+
 // AC-6 (failure mode: transport error): a non-drain FetchMessage error
 // aborts the round with NO DLQ commits — even events already resolved stay
 // pending (at-least-once; the state file keeps replay idempotent) — and the

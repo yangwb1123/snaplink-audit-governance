@@ -1,5 +1,39 @@
 # Release Notes
 
+## 2026-08-15 — Replay 重放分类不再被 Kafka key 覆盖有效冲突 payload event_id（internal/kafka）
+
+**写给运营（行为变化）：**
+
+- **重放分类以 payload event_id 为准，key 仅作空探针回退**：`scanAccepted` 扫描
+  accepted topic 时，若消息 payload 携带**有效但非 wanted** 的 `event_id`，不再回退到
+  匹配的 Kafka key 重放该消息——此前 `event_id="B"` 的消息若 key 恰好等于 wanted
+  的 `A`，会被当作 `A` 重放并错误闭环 `A` 的 DLQ 记录（真实的 `A` 原事件若已过期，
+  该记录被静默关闭且 `AuditDLQUnresolvableDrop` 永不触发）。现在该消息被跳过，`A`
+  的 DLQ 记录在 drain 时按 unresolvable 收敛：日志
+  `unresolvable event_id=A reason=original-not-found-in-accepted-topic`、
+  `audit_dlq_unresolvable_total` 递增、DLQ offset 提交一次。
+- **无配置、无指标、无 API 变更**：行为与 asyncapi.yaml 契约一致（key MUST equal
+  payload 的 event_id）；key 匹配 + 值不可解析（空探针）的 anti-loop 收敛不变。
+  回滚 = 重新部署旧二进制。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`scanAccepted` 的 key 回退分支增加 `payloadID == ""`
+  守卫（与 `deadLetterUnparsable` 形状一致，D1 一行 diff），文档注释同步声明空探针
+  守卫；其余分支（anti-loop、republish、永久/一次性闭环、drain-unresolvable、提交
+  屏障、状态格式、指标词汇）逐字节不变。
+- 回归测试：新增 `TestReplayConflictingPayloadKeyFallbackConvergesUnresolvable`
+  （两阶段：sustained-ingest cutoff 轮无任何标记/提交，topic 静默后 drain 路径仅一次
+  提交 offset 1 + 一次 durable mark；未修复代码在阶段 1 即失败）；AC-4 断言 on-disk
+  状态文件在冲突扫描期间无 `A` 标记、收敛后恰一条标记；既有回归针（空 key 按 payload
+  提交、key 不匹配按 payload 解析、unparsable anti-loop、崩溃后不重放）全部原样通过。
+- 边界加固：`TestReplayWantedMarkedPayloadDoesNotFallBackToUnmarkedKey`（已标记的
+  payload event_id 不回退到未标记 key，K 走 drain-unresolvable 收敛，K@2 不被错误
+  闭环）、`TestReplayConflictingMessageDoesNotSuppressRealOriginal`（冲突消息在真实
+  原事件之前时只跳过冲突消息，真实原事件仍按 payload 逐字节重放）、以及消费端兄弟
+  规则子测试 `payload event_id wins over non-empty stale key on unparsable`——三个
+  测试在未修复代码上均失败（区分器验证过）。
+
 ## 2026-08-15 — DLQ replay 尊重 Failure.ErrorCode：permanent_error 一次性闭环 + 诚实的 replayed + 按码指标（internal/kafka + cmd/audit-kafka-dlq-replay）
 
 **写给运营（行为变化）：**

@@ -463,6 +463,26 @@ func TestConsumerNeverPublishesEmptyEventID(t *testing.T) {
 			t.Fatalf("commits=%d, want 1", len(reader.commits))
 		}
 	})
+	t.Run("payload event_id wins over non-empty stale key on unparsable", func(t *testing.T) {
+		// Sibling-rule mirror of the replayer fix (R5): a NON-empty Kafka
+		// key carrying a DIFFERENT (stale) event_id must never override a
+		// usable payload probe when dead-lettering an unparsable message —
+		// the key applies only when the probe is empty.
+		reader := &fakeReader{messages: []kafka.Message{{Key: []byte("stale"), Value: []byte(`{"event_id":"real","schema_version":"bad"}`), Partition: 0, Offset: 1}}}
+		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+			t.Fatal("unparsable message must not reach ingest")
+			return nil
+		}, WithDLQ(reader))
+		if reader.publishCalls != 1 || len(reader.published) != 1 {
+			t.Fatalf("publishCalls=%d published=%v, want 1 record", reader.publishCalls, reader.published)
+		}
+		if reader.published[0].EventID != "real" {
+			t.Fatalf("published event_id=%q, want real (payload probe, never the stale key %q)", reader.published[0].EventID, "stale")
+		}
+		if len(reader.commits) != 1 {
+			t.Fatalf("commits=%d, want 1", len(reader.commits))
+		}
+	})
 	t.Run("blank payload event_id on permanent dead-letter skips publish", func(t *testing.T) {
 		reader := &fakeReader{messages: []kafka.Message{validMessage("", 1)}}
 		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {

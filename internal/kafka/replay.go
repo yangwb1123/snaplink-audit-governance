@@ -1142,9 +1142,13 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 }
 
 // scanAccepted walks the accepted topic from its first retained offset and
-// re-publishes every message whose payload event_id (authoritative) or key
-// (fallback for unparsable values) matches a wanted event ID. Replay is
-// idempotent: events already in the state file are skipped. A key-matched
+// re-publishes every message whose payload event_id (authoritative) or,
+// only when the payload probe is empty, the key (fallback for unparsable
+// values) matches a wanted event ID. The key fallback never overrides a
+// valid payload event_id, even a conflicting one: a message whose payload
+// carries a non-empty but unwanted event_id is skipped, so a DLQ record
+// whose only trace is a stale key cannot close the wrong DLQ record. Replay
+// is idempotent: events already in the state file are skipped. A key-matched
 // but value-unparsable message is marked replayed with a log line, mirroring
 // the consumer's anti-loop rule.
 //
@@ -1194,8 +1198,8 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted wantedSet) (int, map
 		eventID := ""
 		if payloadID != "" && wanted.replay[payloadID] && !r.state.marked(payloadID) {
 			eventID = payloadID // payload event_id is authoritative
-		} else if keyID := string(message.Key); wanted.replay[keyID] && !r.state.marked(keyID) {
-			eventID = keyID // fallback: unparsable values whose only signal is the key
+		} else if keyID := string(message.Key); payloadID == "" && wanted.replay[keyID] && !r.state.marked(keyID) {
+			eventID = keyID // fallback only when the payload probe is empty (unparsable values whose only signal is the key; mirrors deadLetterUnparsable)
 		}
 		if eventID == "" {
 			continue
