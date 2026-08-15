@@ -565,6 +565,12 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("persisted", "op-persisted", time.Unix(1_700_000_010, 0).UTC()), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
+	// The file backend holds a process-lifetime flock on <path>.lock: the
+	// reopen must wait for the first store to Close (a real restart
+	// releases the flock via process death).
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := store.Open(statePath)
 	if err != nil {
 		t.Fatal(err)

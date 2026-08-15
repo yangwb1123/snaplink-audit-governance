@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -737,12 +738,18 @@ var (
 	workerBinOnce sync.Once
 	workerBinPath string
 	workerBinErr  error
+
+	apiBinOnce sync.Once
+	apiBinPath string
+	apiBinErr  error
 )
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if workerBinPath != "" {
-		_ = os.RemoveAll(filepath.Dir(workerBinPath))
+	for _, bin := range []string{workerBinPath, apiBinPath} {
+		if bin != "" {
+			_ = os.RemoveAll(filepath.Dir(bin))
+		}
 	}
 	os.Exit(code)
 }
@@ -764,6 +771,26 @@ func buildWorkerBinary() (string, error) {
 		}
 	})
 	return workerBinPath, workerBinErr
+}
+
+// buildAuditAPIBinary compiles the real audit-api binary once per test
+// process into a private temp directory (the buildWorkerBinary twin), so the
+// cross-process state-lock tests can exercise the shared <path>.lock mutual
+// exclusion end-to-end in both directions (worker-vs-api and api-vs-worker).
+func buildAuditAPIBinary() (string, error) {
+	apiBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "audit-api-test-")
+		if err != nil {
+			apiBinErr = err
+			return
+		}
+		apiBinPath = filepath.Join(dir, "audit-api")
+		cmd := exec.Command("go", "build", "-o", apiBinPath, "github.com/snaplink/audit-governance/cmd/audit-api")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			apiBinErr = fmt.Errorf("go build audit-api binary: %w: %s", err, out)
+		}
+	})
+	return apiBinPath, apiBinErr
 }
 
 // TestCheckConfigSubprocessExitCodes is T1e (AC-1): the real binary's
@@ -1009,5 +1036,191 @@ func TestStartupVaultHTTPFatal(t *testing.T) {
 	}
 	if strings.Contains(string(out), "check_config=ok") {
 		t.Fatalf("startup output must not contain check_config=ok, got: %s", out)
+	}
+}
+
+// --- Cross-process state-lock subprocess tests (T4: AC-1/AC-2) ---
+
+// waitForStateLock polls <path>.lock until a live process holds the
+// exclusive flock AND the holder identity metadata is written (non-empty),
+// making holder readiness deterministic: the poll only returns once a
+// challenger would observe EWOULDBLOCK with an identifiable holder. Our poll
+// fd's brief flock (when the holder is not yet there) is released on close
+// and can never steal the holder's own lock.
+func waitForStateLock(t *testing.T, lockPath string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("open lock file %s: %v", lockPath, err)
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		locked := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
+		_ = f.Close()
+		if locked {
+			if raw, err := os.ReadFile(lockPath); err == nil && len(strings.TrimSpace(string(raw))) > 0 {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("holder never acquired the state lock on %s", lockPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// runLockedChallenger starts a real binary on an already-locked state path
+// and asserts the AC-1/AC-2 behavior (Correction 3): non-zero exit within a
+// bounded window, output naming the locked path and the holder (pid + exe
+// base), presence of the pre-open state_backend=file marker, and absence of
+// every post-open running marker — the challenger never reached a running
+// state. holderPID/holderExeBase come from the started holder command.
+func runLockedChallenger(t *testing.T, binary, statePath string, holderPID int, holderExeBase string, env []string, args ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, append([]string{"-state", statePath}, args...)...)
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("challenger must exit non-zero on a locked state path, output: %s", out)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("challenger did not fail fast (bounded window exceeded), output: %s", out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "state_backend=file") {
+		t.Fatalf("challenger must reach openStore (pre-open marker), got: %s", s)
+	}
+	if !strings.Contains(s, "is locked by another audit process") || !strings.Contains(s, statePath) {
+		t.Fatalf("challenger output must name the locked state path, got: %s", s)
+	}
+	wantHolder := fmt.Sprintf("locked by another audit process (pid %d (%s, started ", holderPID, holderExeBase)
+	if !strings.Contains(s, wantHolder) {
+		t.Fatalf("challenger output must name the holder (want %q), got: %s", wantHolder, s)
+	}
+	for _, marker := range []string{"signer=", "archive=", "archive_ready=", "tenant=", "listen=", "grpc_listen="} {
+		if strings.Contains(s, marker) {
+			t.Fatalf("challenger must not reach a running state (contains %q), got: %s", marker, s)
+		}
+	}
+}
+
+// stopHolderGracefully SIGTERMs the holder and asserts a graceful exit
+// (exit 0 via the binaries' signal.NotifyContext / stop-channel shutdown
+// paths, which close the store and release the lock).
+func stopHolderGracefully(t *testing.T, holder *exec.Cmd, holderOut *bytes.Buffer) {
+	t.Helper()
+	if err := holder.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = holder.Process.Kill()
+		t.Fatalf("signal holder: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- holder.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("holder must exit gracefully on SIGTERM: %v\n%s", err, holderOut.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = holder.Process.Kill()
+		t.Fatalf("holder did not exit within 10s of SIGTERM\n%s", holderOut.String())
+	}
+}
+
+// stateLockLeg runs one T4 subprocess leg: start holderBin on a fresh temp
+// -state path, wait deterministically until it holds <path>.lock with
+// identity metadata, start challengerBin on the same path and assert the
+// lock refusal (AC-1/AC-2), then SIGTERM the holder and assert graceful
+// exit. holderEnv/challengerEnv extend each subprocess's environment.
+func stateLockLeg(t *testing.T, name, holderBin, challengerBin, holderExeBase string, holderEnv, challengerEnv []string, holderArgs, challengerArgs []string) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		dir := t.TempDir()
+		statePath := filepath.Join(dir, "state.json")
+
+		holder := exec.Command(holderBin, append([]string{"-state", statePath, "-archive", filepath.Join(dir, "archive")}, holderArgs...)...)
+		holder.Env = append(os.Environ(), holderEnv...)
+		var holderOut bytes.Buffer
+		holder.Stdout = &holderOut
+		holder.Stderr = &holderOut
+		if err := holder.Start(); err != nil {
+			t.Fatalf("start holder %s: %v", holderBin, err)
+		}
+		waited := false
+		defer func() {
+			if !waited {
+				_ = holder.Process.Kill()
+				_ = holder.Wait()
+			}
+		}()
+		waitForStateLock(t, statePath+".lock")
+
+		runLockedChallenger(t, challengerBin, statePath, holder.Process.Pid, holderExeBase, challengerEnv, challengerArgs...)
+
+		waited = true
+		stopHolderGracefully(t, holder, &holderOut)
+	})
+}
+
+// TestFileBackendLockCrossProcess is T4 (AC-1/AC-2): two real binaries on
+// one -state path — worker-vs-api in both directions and worker-vs-worker —
+// refuse the second writer with the actionable lock error naming the path
+// and holder, never reach a running state, and exit non-zero within a
+// bounded window; the holder exits gracefully on SIGTERM. The API holder
+// requires AUDIT_ALLOW_DEV_AUTH=true in its environment (Correction 4).
+func TestFileBackendLockCrossProcess(t *testing.T) {
+	workerBin, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	apiBin, err := buildAuditAPIBinary()
+	if err != nil {
+		t.Skipf("audit-api binary unavailable: %v", err)
+	}
+
+	stateLockLeg(t, "worker holder, api challenger", workerBin, apiBin, "audit-governance-worker",
+		nil, []string{"AUDIT_ALLOW_DEV_AUTH=true"},
+		[]string{"-allow-dev-secrets", "-interval=1h"},
+		[]string{"-allow-dev-secrets", "-allow-dev-auth", "-listen=127.0.0.1:0"})
+	stateLockLeg(t, "api holder, worker challenger", apiBin, workerBin, "audit-api",
+		[]string{"AUDIT_ALLOW_DEV_AUTH=true"}, nil,
+		[]string{"-allow-dev-secrets", "-allow-dev-auth", "-listen=127.0.0.1:0"},
+		[]string{"-allow-dev-secrets", "-interval=1h"})
+	stateLockLeg(t, "worker holder, worker challenger", workerBin, workerBin, "audit-governance-worker",
+		nil, nil,
+		[]string{"-allow-dev-secrets", "-interval=1h"},
+		[]string{"-allow-dev-secrets", "-interval=1h"})
+}
+
+// TestCheckConfigUnaffectedByStateLock is the T3 subprocess leg (REQ-1):
+// -check-config never opens the store, so it must exit 0 and report
+// check_config=ok even while the state lock is held by a live writer.
+func TestCheckConfigUnaffectedByStateLock(t *testing.T) {
+	binary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	// Hold the flock ourselves: deterministic, no subprocess race.
+	lockFile, err := os.OpenFile(statePath+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	out, err := exec.Command(binary, "-check-config", "-state", statePath, "-archive", filepath.Join(dir, "archive"), "-allow-dev-secrets").CombinedOutput()
+	if err != nil {
+		t.Fatalf("-check-config must exit 0 while the state lock is held: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "check_config=ok") {
+		t.Fatalf("-check-config must report check_config=ok, got: %s", out)
 	}
 }

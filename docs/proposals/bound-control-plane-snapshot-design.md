@@ -443,7 +443,16 @@ commit; `docs/BENCHMARKS.md` records K-sensitivity before and after Increment 2.
 ## 11. Non-goals (unchanged from the requirements spec)
 
 - Ingest status-error handling (already fixed; separate direction).
-- Cross-process optimistic locking / version CAS on the file backend.
+- Version CAS / optimistic locking inside the file snapshot JSON. (The file backend
+  now enforces a single live writer instead: `store.Open` holds a process-lifetime
+  exclusive advisory flock on the sidecar `<path>.lock` (`0o600`, `O_NOFOLLOW`,
+  `LOCK_EX|LOCK_NB` with bounded retry; the `lockReplayState` pattern in
+  `internal/kafka/replay.go`), released on `Close` or process death — no stale-lock
+  cleanup. A second `audit-api`/`audit-governance-worker` on the same `-state` path
+  fails at startup with `store.ErrStateFileLocked` naming the path and holder.
+  flock is advisory and filesystem-dependent (NFS caveat): the file backend remains
+  a single-node mode; the PostgreSQL backend (version CAS) remains the multi-replica
+  path.)
 - Export format/encryption, legal-hold logic, outbox relay, Kafka DLQ replay, OpenAPI surface.
 - Archive write semantics (WORM verification, read-back) or object keys.
 - Background GC/purge of receipts or segments — receipts + hash chain are retained by design.

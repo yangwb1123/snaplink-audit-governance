@@ -42,6 +42,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - `go run ./cmd/audit-outbox-relay -once` 消费业务库 `audit_outbox` 待投递记录并写入审计 API；成功标记 delivered，失败按指数退避重试，超过上限或遇到客户端错误死信。
 - `go run ./cmd/audit-kafka-dlq-replay -once` 恢复死信事件（从 accepted topic 按 key 找回原消息重发或经 API 重新接入，状态文件去重）。
 - 默认本地状态保存到 `./data/state.json`，归档保存到 `./data/archive`。
+- 文件模式状态强制单写者：`store.Open` 在 `<path>.lock` 上持有进程生命周期排他 flock（flock 为 advisory 且依赖文件系统，NFS 上不可靠），同一 `-state` 路径的第二个实例（audit-api 或 audit-governance-worker）启动即报错退出；多实例部署必须使用 PostgreSQL 后端（乐观版本锁）。
 - 设置 `AUDIT_POSTGRES_DSN`（或 `-postgres-dsn`）后，控制面状态快照保存在 PostgreSQL 单行表 `audit_state_snapshot`（迁移 `004_state_snapshot.sql`），支持多副本共享；乐观版本锁防止丢失更新，`Store.Update` 内做有界 jitter 重试（3 次、5–25ms 指数退避 + 抖动，闭包在新鲜快照上重跑），重试耗尽返回 503 `snapshot_conflict`；`/readyz` 同时探测 store（PostgreSQL 不可达 → 503 `store_unavailable`）与归档目标。
 - 接入、幂等、租户隔离、Schema 校验、分段哈希链、查询、操作回放、导出、Legal Hold、完整性验证和恢复申请已实现。
 - 哈希链证据链分三层：事件 prev_hash 链 → 段 Merkle Root + 签名 checkpoint → 跨段聚合 Merkle（governance worker 周期生成，`VerifyIntegrity` 逐层验证）。

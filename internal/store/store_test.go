@@ -31,7 +31,11 @@ func TestFileBackendPersistAndReload(t *testing.T) {
 		t.Fatalf("state file not persisted: %v", err)
 	}
 
-	// 新实例必须从磁盘恢复。
+	// 新实例必须从磁盘恢复（先 Close 释放 <path>.lock 上的排他 flock；
+	// 真实重启时内核会在进程退出时自动释放）。
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
 	second, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +87,10 @@ func TestFileBackendUpdateRollbackOnError(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// 重开后 ghost 也不在磁盘上。
+	// 重开后 ghost 也不在磁盘上（先 Close 释放排他 flock）。
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

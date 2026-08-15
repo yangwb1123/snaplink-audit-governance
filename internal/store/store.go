@@ -297,7 +297,7 @@ func (s *Store) Ready(ctx context.Context) error {
 func (s *Store) Flush() error { return nil }
 
 // Close releases backend resources (for example the PostgreSQL connection
-// pool). File-backed stores have nothing to release.
+// pool, or the file backend's exclusive advisory lock on <path>.lock).
 func (s *Store) Close() error {
 	if closer, ok := s.backend.(io.Closer); ok {
 		return closer.Close()
@@ -355,6 +355,12 @@ type fileBackend struct {
 	data *Snapshot
 	path string
 
+	// lock is the exclusive advisory flock on <path>.lock, held for the
+	// backend's lifetime and released by Close (the kernel also releases it
+	// on process death — no stale-lock cleanup). Nil for in-memory backends
+	// (path == "") and for direct test constructions.
+	lock io.Closer
+
 	// syncDir is the per-directory fsync hook used by Save's post-rename
 	// durability step (mirrors archive.FileStore.syncDir). It defaults to
 	// fsutil.SyncDir; tests replace it to record the ordered sync set or
@@ -363,20 +369,54 @@ type fileBackend struct {
 	syncDir func(path string) error
 }
 
+// openFileBackend builds a file-backed store. For a non-empty path it first
+// creates the parent directory (0o750, the same mode Save uses) and then
+// acquires the process-lifetime exclusive advisory flock on <path>.lock, so
+// a second live writer on the same state path (another audit-api or
+// audit-governance-worker) is refused at open with ErrStateFileLocked — the
+// stale-load/clobber cycle is unreachable by construction. The lock is
+// released on any post-acquisition error path so a failed Open never leaks
+// it, and by Close (or process death) for a successful Open. In-memory mode
+// (path == "") acquires no lock and touches no file.
 func openFileBackend(path string) (*fileBackend, error) {
-	data := NewSnapshot()
-	if path != "" {
-		contents, err := os.ReadFile(path)
-		if err == nil && len(contents) > 0 {
-			if err := decodeSnapshot(contents, data); err != nil {
-				return nil, err
-			}
-			data.normalize()
-		} else if err != nil && !os.IsNotExist(err) {
+	f := &fileBackend{data: NewSnapshot(), path: path}
+	if path == "" {
+		return f, nil // pure in-memory mode: no lock, no directory, no file
+	}
+	// REQ-1: create the parent before lock acquisition so the lock file can
+	// exist before the first Save (Save's own MkdirAll is unchanged).
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create state directory for %s: %w", path, err)
+	}
+	lock, err := acquireStateLock(path)
+	if err != nil {
+		return nil, err // ErrStateFileLocked-wrapped on contention
+	}
+	f.lock = lock
+	contents, err := os.ReadFile(path)
+	if err == nil && len(contents) > 0 {
+		if err := decodeSnapshot(contents, f.data); err != nil {
+			_ = lock.Close() // release before returning the decode error
 			return nil, err
 		}
+		f.data.normalize()
+	} else if err != nil && !os.IsNotExist(err) {
+		_ = lock.Close()
+		return nil, err
 	}
-	return &fileBackend{data: data, path: path}, nil
+	return f, nil
+}
+
+// Close releases the advisory flock and the lock file descriptor. It is safe
+// on backends without a lock (in-memory mode, direct test constructions): a
+// nil handle is tolerated. The kernel additionally releases the flock when
+// the process dies, so a crashed holder never leaves a stale lock — no
+// stale-lock detection or cleanup is needed.
+func (f *fileBackend) Close() error {
+	if f.lock == nil {
+		return nil
+	}
+	return f.lock.Close()
 }
 
 func (f *fileBackend) Load() (*Snapshot, error) {

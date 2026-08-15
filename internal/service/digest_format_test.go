@@ -305,7 +305,13 @@ func TestCrossFormatDigestLargeIntParityAfterRestart(t *testing.T) {
 	}
 
 	// Simulate a restart: the store reloads the snapshot, so the stored
-	// plaintext is a json.Number, not the original int64.
+	// plaintext is a json.Number, not the original int64. The first store
+	// must Close first — the file backend holds a process-lifetime flock on
+	// <path>.lock, so a second Open on the same path is refused while it is
+	// open (a real restart releases the flock via process death).
+	if err := svc.Store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloaded := openServiceAt(t, path)
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
 	for _, tc := range []struct {
