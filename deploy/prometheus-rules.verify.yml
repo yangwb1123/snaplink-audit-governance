@@ -29,6 +29,17 @@ groups:
           summary: Dead-letter replay is failing
           description: "{{ $value }} replay republish failures in the last 15 minutes. Transient failures retry next round; permanent ones need operator action."
 
+      # 不可解析丢弃告警：事件被判定为 unresolvable 并提交 DLQ offset 后永久丢弃
+      # （accepted topic 保留期过期或 topic 重建导致原事件不存在）。这是账本证据的
+      # 永久丢失信号，必须人工确认 retention / 重建事件。
+      - alert: AuditDLQUnresolvableDrop
+        expr: increase(audit_dlq_unresolvable_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Dead-lettered events dropped as unresolvable (permanent loss)
+          description: "{{ $value }} dead-lettered events were resolved as unresolvable in the last 15m (original not found in the accepted topic) and their DLQ offsets were committed. This is a permanent loss of ledger evidence; check accepted-topic retention and topic recreation."
+
   - name: audit-slo
     # docs/SLO_ALERTS.md §2 告警规则 → audit-api /metrics 指标。
     # 完整性与签名失败独立于错误预算（安全事件）。

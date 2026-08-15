@@ -410,6 +410,7 @@ def cmd_quality() -> int:
     from checks.contract_fields import run as contract_fields
     from checks.dev_auth_manifest import run as dev_auth_manifest
     from checks.replay_round_reset import run as replay_round_reset
+    from checks.prometheus_rules import run as prometheus_rules
     from checks.proto_sync import run as proto_sync
     from checks.route_contract import run as route_contract
     from checks.sensitive_logging import run as sensitive_logging
@@ -422,6 +423,7 @@ def cmd_quality() -> int:
                     proto_sync,  # proto drift guard: fails fast, before the ~95s Go stages
                     dev_auth_manifest, tenant_consistency, stream_consistency,
                     replay_round_reset,
+                    prometheus_rules,
                     sensitive_logging,
                     cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):
         if command() != 0:

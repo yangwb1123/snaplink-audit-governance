@@ -95,18 +95,32 @@ func main() {
 // the audit-api /metrics endpoint, so Prometheus can alert on DLQ traffic.
 func serveMetrics(address string, replayer *kafka.Replayer, logger *log.Logger) {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		dlqRecords, acceptedSeen, replayed, republishFailures, pending := replayer.Metrics()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "audit_dlq_records_total %d\n", dlqRecords)
-		fmt.Fprintf(w, "audit_dlq_accepted_scanned_total %d\n", acceptedSeen)
-		fmt.Fprintf(w, "audit_dlq_replayed_total %d\n", replayed)
-		fmt.Fprintf(w, "audit_dlq_republish_failures_total %d\n", republishFailures)
-		fmt.Fprintf(w, "audit_dlq_pending %d\n", pending)
+		fmt.Fprint(w, metricsText(replayer.Metrics()))
 	})
 	server := &http.Server{Addr: address}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Printf("metrics listen=%s error=%v", address, err)
 	}
+}
+
+// metricsText renders the replay resolution counters in the Prometheus text
+// format. The line order is pinned (golden-tested, T7): the three split
+// resolution counters sit between replayed and republish_failures, so the
+// original five lines keep their positions for dashboards that parse by
+// position and the new lines stay deterministic for tests and dashboards.
+func metricsText(m kafka.ReplayerMetrics) string {
+	return fmt.Sprintf(
+		"audit_dlq_records_total %d\n"+
+			"audit_dlq_accepted_scanned_total %d\n"+
+			"audit_dlq_replayed_total %d\n"+
+			"audit_dlq_permanent_rejections_total %d\n"+
+			"audit_dlq_unresolvable_total %d\n"+
+			"audit_dlq_unparsable_marks_total %d\n"+
+			"audit_dlq_republish_failures_total %d\n"+
+			"audit_dlq_pending %d\n",
+		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.PermanentRejections,
+		m.Unresolvable, m.UnparsableMarks, m.RepublishFailures, m.Pending)
 }
 
 func envOr(name, fallback string) string {

@@ -616,19 +616,36 @@ const maxScanWindows = 2
 // re-scan idempotent, and committing the accepted scan position would make
 // new DLQ records miss older original messages.
 type Replayer struct {
-	dlqReader     messageReader
-	dlqNew        func() messageReader // per-round DLQ reader recreation (F1)
-	accepted      messageReader
-	acceptedNew   func() messageReader // per-round accepted reader recreation (REQ-1)
-	republish     RepublishFunc
-	state         *ReplayState
-	logger        *log.Logger
-	drainTimeout  time.Duration
-	dlqRecords    atomic.Uint64
-	acceptedSeen  atomic.Uint64
-	replayed      atomic.Uint64
-	republishFail atomic.Uint64
-	pending       atomic.Uint64
+	dlqReader    messageReader
+	dlqNew       func() messageReader // per-round DLQ reader recreation (F1)
+	accepted     messageReader
+	acceptedNew  func() messageReader // per-round accepted reader recreation (REQ-1)
+	republish    RepublishFunc
+	state        *ReplayState
+	logger       *log.Logger
+	drainTimeout time.Duration
+	dlqRecords   atomic.Uint64
+	acceptedSeen atomic.Uint64
+	// replayed counts only successful re-publishes (resolution path a).
+	// Every other first-resolution path has its own counter below, so the
+	// metric never conflates a replay with a convergence (REQ-1).
+	replayed atomic.Uint64
+	// permanentRejections counts API-rejected events marked replayed to
+	// converge the round (path c): a permanent republish failure is a
+	// permanent loss of the ledger evidence — alertable via republishFail,
+	// but never a replay.
+	permanentRejections atomic.Uint64
+	// unresolvable counts drained-unresolvable events (path d): the original
+	// is absent from the accepted topic (retention expiry or recreation),
+	// the DLQ offset is committed, and the event is dropped — a permanent
+	// loss signal surfaced by the AuditDLQUnresolvableDrop alert.
+	unresolvable atomic.Uint64
+	// unparsableMarks counts anti-loop marks for key-matched accepted
+	// messages whose value carries no canonical event_id (path b): neither
+	// a replay nor a loss, but a first resolution that must stay observable.
+	unparsableMarks atomic.Uint64
+	republishFail   atomic.Uint64
+	pending         atomic.Uint64
 }
 
 // NewReplayer creates the DLQ and accepted-topic readers. The DLQ reader
@@ -710,10 +727,34 @@ func newReplayerWithFactories(dlqNew, acceptedNew func() messageReader, state *R
 	return &Replayer{dlqReader: dlqNew(), dlqNew: dlqNew, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
-// Metrics returns (dlqRecords, acceptedScanned, replayed, republishFailures,
-// pending) for the /metrics endpoint.
-func (r *Replayer) Metrics() (dlqRecords, acceptedScanned, replayed, republishFailures, pending uint64) {
-	return r.dlqRecords.Load(), r.acceptedSeen.Load(), r.replayed.Load(), r.republishFail.Load(), r.pending.Load()
+// ReplayerMetrics is the /metrics snapshot of the replay counters. Every DLQ
+// event that reaches a durable first resolution increments exactly one of
+// Replayed / UnparsableMarks / PermanentRejections / Unresolvable; a
+// transient republish failure increments none of them (the record stays
+// pending for the next round).
+type ReplayerMetrics struct {
+	DLQRecords          uint64 // DLQ Failure records collected
+	AcceptedScanned     uint64 // accepted-topic messages scanned
+	Replayed            uint64 // successful re-publishes only
+	PermanentRejections uint64 // permanent republish failures (converged, never a replay)
+	Unresolvable        uint64 // drained-unresolvable drops (permanent loss)
+	UnparsableMarks     uint64 // anti-loop marks for key-matched unparsable messages
+	RepublishFailures   uint64 // transient + permanent republish failures (inclusive)
+	Pending             uint64 // wanted events pending in the current round
+}
+
+// Metrics returns the replay resolution counters for the /metrics endpoint.
+func (r *Replayer) Metrics() ReplayerMetrics {
+	return ReplayerMetrics{
+		DLQRecords:          r.dlqRecords.Load(),
+		AcceptedScanned:     r.acceptedSeen.Load(),
+		Replayed:            r.replayed.Load(),
+		PermanentRejections: r.permanentRejections.Load(),
+		Unresolvable:        r.unresolvable.Load(),
+		UnparsableMarks:     r.unparsableMarks.Load(),
+		RepublishFailures:   r.republishFail.Load(),
+		Pending:             r.pending.Load(),
+	}
 }
 
 // RunOnce performs one replay round: drain the currently available DLQ
@@ -1011,7 +1052,7 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 				return replayed, resolved, err
 			}
 			resolved[eventID] = true
-			r.replayed.Add(1)
+			r.unparsableMarks.Add(1)
 			replayed++
 			continue
 		}
@@ -1027,7 +1068,7 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 				}
 				resolved[eventID] = true
 				r.republishFail.Add(1)
-				r.replayed.Add(1)
+				r.permanentRejections.Add(1)
 				replayed++
 				continue
 			}
@@ -1058,7 +1099,7 @@ func (r *Replayer) scanAccepted(ctx context.Context, wanted map[string]bool) (in
 				return replayed, resolved, err
 			}
 			resolved[eventID] = true
-			r.replayed.Add(1)
+			r.unresolvable.Add(1)
 			replayed++
 		}
 	}

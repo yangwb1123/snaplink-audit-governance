@@ -1,5 +1,53 @@
 # Release Notes
 
+## 2026-08-15 — DLQ replay: 拆分解析计数，unresolvable 永久丢失可告警（internal/kafka + cmd/audit-kafka-dlq-replay + deploy）
+
+**写给运营（行为变化）：**
+
+- **`audit_dlq_replayed_total` 语义收紧**：该计数器现在只统计成功重发。
+  2026-08-11 的“语义扩展”（把 unparsable/permanent-failure/converged-
+  unresolvable 收敛都计入 replayed）被本变更取代。
+- **新增三个解析计数器**：`audit_dlq_unresolvable_total`（原事件在 accepted
+  topic 中不存在——保留期过期或 topic 重建——DLQ offset 已提交、事件被永久
+  丢弃）、`audit_dlq_permanent_rejections_total`（API 永久拒绝、标记收敛不再
+  重试）、`audit_dlq_unparsable_marks_total`（key 匹配但 value 不可解析的
+  反循环标记）。每条 DLQ 记录的首次解析只递增其中一个计数器；瞬态失败不递增
+  任何计数器。
+- **新告警 `AuditDLQUnresolvableDrop`（severity: warning）**：15 分钟内
+  `audit_dlq_unresolvable_total` 增长即触发。unresolvable 丢弃此前只留下
+  `unresolvable event_id=...` 日志行，对告警不可见；现在 15 分钟内可见，
+  收到告警请人工确认 accepted-topic retention / 重建事件。
+- **存量仪表盘注意**：依赖 `audit_dlq_replayed_total` 的看板在部署后会出现
+  台阶式下降（收敛路径迁移到三个新计数器）。仓库内无其他消费者依赖旧语义
+  （告警集从未使用该指标）。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/replay.go`：`Replayer` 新增 `permanentRejections` /
+  `unresolvable` / `unparsableMarks` 三个 `atomic.Uint64`；`scanAccepted`
+  四个解析路径各递增且仅递增一个计数器（成功重发→`replayed`、反循环标记→
+  `unparsableMarks`、永久拒绝→`permanentRejections`、drained-unresolvable→
+  `unresolvable`）；`republishFail` 保持瞬态+永久的全量语义。
+- `Replayer.Metrics()` 改为返回具名结构 `kafka.ReplayerMetrics`（8 字段）；
+  `cmd/audit-kafka-dlq-replay/main.go` 的 `/metrics` 渲染抽为纯函数
+  `metricsText`，三个新指标行固定在 `audit_dlq_replayed_total` 与
+  `audit_dlq_republish_failures_total` 之间；`Content-Type`、`/metrics`
+  路径、daemon-only 挂载均不变。
+- `deploy/prometheus-rules.verify.yml` 新增 `AuditDLQUnresolvableDrop`
+  （`increase(audit_dlq_unresolvable_total[15m]) > 0`，severity warning）；
+  新静态门禁 `checks/prometheus_rules.py` 接入 `cli.py cmd_quality`，校验
+  alert 名/expr/severity/annotations，防止规则漂移（修复前文件失败、修复后
+  通过，`checks/test_prometheus_rules.py` 覆盖）。
+- 行为零变化保证：`RunOnce`/`scanAccepted` 返回值、`replay round done
+  replayed=%d` 日志、`commitResolved` 提交纪律、`republish_failures_total`
+  语义、AsyncAPI 契约均不变；`checks/replay_round_reset.py` 保持通过。
+
+**回归测试：** `internal/kafka/replay_test.go` 新增 T1..T6（unresolvable /
+permanent / 成功重发 / 反循环标记 / 混合轮次精确计数 + 提交屏障不变式）；
+`cmd/audit-kafka-dlq-replay/main_test.go` 新增 `metricsText` golden 测试
+（T7）；`checks/test_prometheus_rules.py` 覆盖门禁正反例（T8）；
+`python3 cli.py quality` 全绿（T9）。
+
 ## 2026-08-13 — Ingest 回执状态转换失败改为失败关闭，不再上报未持久化的 Indexed/Archived（internal/service）
 
 **写给运营（行为变化）：**
@@ -926,6 +974,8 @@ AC-5（服务层五字段拒绝、快照全键可解析、密封流完整性全�
 - **`audit_dlq_replayed_total` 语义扩展**：该计数器现在也包含
   converged-unresolvable 事件（与既有的 unparsable/permanent-failure
   收敛路径一致）；其余四个计数器不变。可对该日志模式加告警。
+  **（已被 2026-08-15 的拆分计数变更取代：`audit_dlq_replayed_total` 恢复
+  为仅统计成功重发，收敛路径拆分为三个独立计数器并新增 unresolvable 告警。）**
 - **持续灌入下扫描有界**：一轮扫描最多持续 2×drainTimeout（默认 10 秒）；
   若 topic 一直不安静，轮次被截断（cut-off），未确认的记录保持 pending、
   绝不误标记，下一轮重试。只有“整整一个安静窗口内无消息”才算扫描完成。

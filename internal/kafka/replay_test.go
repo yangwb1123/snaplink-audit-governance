@@ -1170,9 +1170,12 @@ func TestReplayPermanentFailureConverges(t *testing.T) {
 	if count != 1 || !state.Replayed["evt-p"] {
 		t.Fatalf("permanent failure must converge: replayed=%d marked=%v", count, state.Replayed["evt-p"])
 	}
-	dlqRecords, acceptedSeen, replayed, republishFailures, pending := replayer.Metrics()
-	if dlqRecords != 1 || acceptedSeen != 1 || replayed != 1 || republishFailures != 1 || pending != 0 {
-		t.Fatalf("metrics dlq=%d accepted=%d replayed=%d failures=%d pending=%d, want 1/1/1/1/0", dlqRecords, acceptedSeen, replayed, republishFailures, pending)
+	metrics := replayer.Metrics()
+	if metrics.DLQRecords != 1 || metrics.AcceptedScanned != 1 || metrics.Replayed != 0 || metrics.RepublishFailures != 1 || metrics.Pending != 0 {
+		t.Fatalf("metrics dlq=%d accepted=%d replayed=%d failures=%d pending=%d, want 1/1/0/1/0 (permanent rejection is not a replay)", metrics.DLQRecords, metrics.AcceptedScanned, metrics.Replayed, metrics.RepublishFailures, metrics.Pending)
+	}
+	if metrics.PermanentRejections != 1 || metrics.Unresolvable != 0 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("split counters permanent=%d unresolvable=%d unparsable=%d, want 1/0/0 (permanent rejection is its own resolution)", metrics.PermanentRejections, metrics.Unresolvable, metrics.UnparsableMarks)
 	}
 }
 
@@ -1347,6 +1350,223 @@ func TestReplayUnresolvableRecordConvergesWithBoundedScans(t *testing.T) {
 	}
 	if got := replayer.acceptedSeen.Load(); got != 3 {
 		t.Fatalf("acceptedSeen=%d, want 3 (round 2 must not scan)", got)
+	}
+}
+
+// T1 (AC-1): a drained round whose wanted event is absent from the accepted
+// scan yields Unresolvable=1 and Replayed=0 on the split metrics, while DLQ
+// offset commit behavior stays unchanged (one commit; a second round is a
+// no-op that only re-commits).
+func TestReplayUnresolvableCounterSplit(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-x")}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{
+		{Key: []byte("k1"), Value: []byte(`{"event_id":"other-1","source_system":"crm"}`), Partition: 0, Offset: 1},
+	}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	replayer := newReplayerWithReadersAndLogger(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		t.Fatal("republish must never be called: no accepted message matches evt-x")
+		return nil
+	}, log.New(&logs, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("replayed=%d, want 1 (unresolvable record converges in one round)", count)
+	}
+	if !state.Replayed["evt-x"] {
+		t.Fatal("absent original must be marked replayed")
+	}
+	if len(dlq.commits) != 1 {
+		t.Fatalf("DLQ commits=%d, want 1 (commit behavior unchanged)", len(dlq.commits))
+	}
+	metrics := replayer.Metrics()
+	if metrics.Unresolvable != 1 || metrics.Replayed != 0 || metrics.PermanentRejections != 0 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("metrics unresolvable=%d replayed=%d permanent=%d unparsable=%d, want 1/0/0/0", metrics.Unresolvable, metrics.Replayed, metrics.PermanentRejections, metrics.UnparsableMarks)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "unresolvable") || !strings.Contains(logged, "reason=original-not-found-in-accepted-topic") {
+		t.Fatalf("log missing unresolvable evidence, got:\n%s", logged)
+	}
+	// Round 2: evt-x is already marked, so no counter increments; the
+	// re-read DLQ record is only re-committed (2 total).
+	dlq.index = 0
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 {
+		t.Fatalf("second round replayed=%d, want 0 (idempotent)", second)
+	}
+	after := replayer.Metrics()
+	if after.Unresolvable != 1 || after.Replayed != 0 {
+		t.Fatalf("second round must not increment split counters: unresolvable=%d replayed=%d, want 1/0", after.Unresolvable, after.Replayed)
+	}
+	if len(dlq.commits) != 2 {
+		t.Fatalf("DLQ commits=%d, want 2 (re-read record re-committed, never re-resolved)", len(dlq.commits))
+	}
+}
+
+// T2 (AC-1): Metrics exposes distinct named counters (Replayed /
+// UnparsableMarks / PermanentRejections / Unresolvable) that are
+// independently addressable — a regression that re-conflates the paths into
+// one value cannot compile this test.
+func TestReplayMetricsNamedCountersIndependentlyAddressable(t *testing.T) {
+	metrics := ReplayerMetrics{
+		DLQRecords: 1, AcceptedScanned: 2, Replayed: 3, PermanentRejections: 4,
+		Unresolvable: 5, UnparsableMarks: 6, RepublishFailures: 7, Pending: 8,
+	}
+	if metrics.Replayed != 3 || metrics.PermanentRejections != 4 || metrics.Unresolvable != 5 || metrics.UnparsableMarks != 6 {
+		t.Fatalf("named counter fields not independently addressable: %+v", metrics)
+	}
+}
+
+// T4 (AC-2): a successful republish round counts Replayed=1 and leaves all
+// three split counters at zero — audit_dlq_replayed_total means successful
+// re-publishes only.
+func TestReplaySuccessfulRepublishCountsOnlyReplayed(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-a")}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{acceptedMessage("evt-a")}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
+	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	})
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 1 {
+		t.Fatalf("replayed=%d republished=%d, want 1/1", count, republished)
+	}
+	metrics := replayer.Metrics()
+	if metrics.Replayed != 1 || metrics.UnparsableMarks != 0 || metrics.PermanentRejections != 0 || metrics.Unresolvable != 0 {
+		t.Fatalf("metrics replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.Replayed, metrics.UnparsableMarks, metrics.PermanentRejections, metrics.Unresolvable)
+	}
+}
+
+// T5 (AC-2): a key-matched accepted message with a non-canonical value
+// takes the anti-loop mark path: UnparsableMarks=1 and Replayed=0 — the
+// mark is a convergence, not a replay.
+func TestReplayUnparsableMarkIsNotReplayed(t *testing.T) {
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-u")}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{
+		{Key: []byte("evt-u"), Value: []byte("not-json"), Partition: 0, Offset: 1},
+	}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		t.Fatal("republish must never be called for an unparsable value")
+		return nil
+	})
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || !state.Replayed["evt-u"] || len(dlq.commits) != 1 {
+		t.Fatalf("unparsable convergence replayed=%d marked=%v commits=%d, want 1/true/1", count, state.Replayed["evt-u"], len(dlq.commits))
+	}
+	metrics := replayer.Metrics()
+	if metrics.UnparsableMarks != 1 || metrics.Replayed != 0 || metrics.PermanentRejections != 0 || metrics.Unresolvable != 0 {
+		t.Fatalf("metrics unparsable=%d replayed=%d permanent=%d unresolvable=%d, want 1/0/0/0", metrics.UnparsableMarks, metrics.Replayed, metrics.PermanentRejections, metrics.Unresolvable)
+	}
+}
+
+// T6 (AC-2): a mixed round with one event per resolution path increments
+// exactly the counter of its own path, the four first-resolution counters
+// sum to the round's first-resolution count, and a transient republish
+// failure increments none of them. The transient record stays pending and
+// the commit barrier never commits at/above its offset.
+func TestReplayMixedRoundSplitCountersAndCommitBarrier(t *testing.T) {
+	// Offsets 1..5 in one partition: evt-a republished (1), evt-b unparsable
+	// anti-loop (2), evt-c permanent rejection (3), evt-t transient failure
+	// (4, stays pending), evt-d unresolvable (5, absent from the accepted
+	// topic). The barrier commits only offsets below the pending evt-t (4),
+	// so evt-d at offset 5 stays uncommitted too.
+	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{
+		dlqMessageAt("evt-a", 1),
+		dlqMessageAt("evt-b", 2),
+		dlqMessageAt("evt-c", 3),
+		dlqMessageAt("evt-t", 4),
+		dlqMessageAt("evt-d", 5),
+	}}
+	accepted := &fakeReplayReader{topic: TopicAccepted, messages: []kafka.Message{
+		acceptedMessage("evt-a"),
+		{Key: []byte("evt-b"), Value: []byte("not-json"), Partition: 0, Offset: 2},
+		acceptedMessage("evt-c"),
+		acceptedMessage("evt-t"),
+	}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := newReplayerWithReaders(dlq, accepted, state, func(ctx context.Context, key, value []byte) error {
+		switch string(key) {
+		case "evt-a":
+			return nil
+		case "evt-b":
+			t.Fatal("republish must never be called for an unparsable value")
+			return nil
+		case "evt-c":
+			return &outbox.DeliveryError{Permanent: true}
+		case "evt-t":
+			return errors.New("transient transport failure") // non-permanent: stays pending
+		default:
+			t.Fatalf("unexpected republish key=%s", key)
+			return nil
+		}
+	})
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("replayed=%d, want 4 (four first-resolutions; evt-t stays pending)", count)
+	}
+	metrics := replayer.Metrics()
+	if metrics.Replayed != 1 || metrics.UnparsableMarks != 1 || metrics.PermanentRejections != 1 || metrics.Unresolvable != 1 {
+		t.Fatalf("split counters replayed=%d unparsable=%d permanent=%d unresolvable=%d, want 1/1/1/1", metrics.Replayed, metrics.UnparsableMarks, metrics.PermanentRejections, metrics.Unresolvable)
+	}
+	if got := metrics.Replayed + metrics.UnparsableMarks + metrics.PermanentRejections + metrics.Unresolvable; got != 4 {
+		t.Fatalf("first-resolution sum=%d, want 4 (invariant: one counter per durable first resolution)", got)
+	}
+	if metrics.RepublishFailures != 2 {
+		t.Fatalf("republishFailures=%d, want 2 (permanent + transient, inclusive semantics kept)", metrics.RepublishFailures)
+	}
+	if metrics.Pending != 0 {
+		t.Fatalf("pending=%d after round, want 0", metrics.Pending)
+	}
+	for _, id := range []string{"evt-a", "evt-b", "evt-c", "evt-d"} {
+		if !state.Replayed[id] {
+			t.Fatalf("%s must be marked replayed", id)
+		}
+	}
+	if state.Replayed["evt-t"] {
+		t.Fatal("transient failure must never be marked replayed")
+	}
+	// Commit barrier: only offsets 1..3 (below the pending evt-t at 4) are
+	// committed; evt-d at offset 5 stays pending with evt-t.
+	if len(dlq.commits) != 3 {
+		t.Fatalf("DLQ commits=%d, want 3 (barrier: never commit at/above the pending offset)", len(dlq.commits))
+	}
+	for i, message := range dlq.commits {
+		if want := int64(i + 1); message.Offset != want {
+			t.Fatalf("commit[%d] offset=%d, want %d (no pending record may be leapfrogged)", i, message.Offset, want)
+		}
 	}
 }
 
@@ -1911,8 +2131,8 @@ func TestReplayResetFailureAbortsRound(t *testing.T) {
 		if len(state.Replayed) != 0 || len(dlq.commits) != 0 {
 			t.Fatalf("aborted round must not mark or commit: state=%v commits=%d", state.Replayed, len(dlq.commits))
 		}
-		if _, _, _, _, pending := replayer.Metrics(); pending != 0 {
-			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", pending)
+		if m := replayer.Metrics(); m.Pending != 0 {
+			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", m.Pending)
 		}
 	})
 	t.Run("accepted reader close failure", func(t *testing.T) {
@@ -1939,8 +2159,8 @@ func TestReplayResetFailureAbortsRound(t *testing.T) {
 		if len(state.Replayed) != 0 || len(dlq.commits) != 0 {
 			t.Fatalf("aborted round must not mark or commit: state=%v commits=%d", state.Replayed, len(dlq.commits))
 		}
-		if _, _, _, _, pending := replayer.Metrics(); pending != 0 {
-			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", pending)
+		if m := replayer.Metrics(); m.Pending != 0 {
+			t.Fatalf("pending=%d after aborted round, want 0 (no stale metric)", m.Pending)
 		}
 	})
 }
