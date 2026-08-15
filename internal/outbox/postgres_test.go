@@ -449,3 +449,67 @@ VALUES ('pg-relay-receipt-1', 'tenant-a', 'pg-relay-receipt-idem', $1, now(), 'p
 		t.Fatalf("delivered_at=%v, want set", deliveredAt)
 	}
 }
+
+// TestPostgresInsertRejectsOversized is AC-3: no oversized jsonb row can be
+// written through the SDK. Skipped unless AUDIT_TEST_POSTGRES_DSN points at a
+// disposable database; reset pattern matches TestPostgresStoreIntegration.
+func TestPostgresInsertRejectsOversized(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_POSTGRES_DSN to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+		t.Fatalf("reset outbox: %v", err)
+	}
+
+	// Oversized insert fails with ErrInvalid before any SQL; the caller
+	// rolls back its transaction (caller-owned-tx contract) and nothing is
+	// persisted — the row count for that event_id stays 0.
+	oversized := sizedEvent(t, domain.MaxEventBytes+1)
+	oversized.EventID, oversized.IdempotencyKey = "pg-oversized-1", "pg-oversized-idem-1"
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Insert(ctx, tx, oversized)
+	if !errors.Is(err, domain.ErrInvalid) {
+		tx.Rollback()
+		t.Fatalf("oversized Insert = %v, want ErrInvalid", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM audit_outbox WHERE event_id = $1`, oversized.EventID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("oversized event must not persist, rows=%d", n)
+	}
+
+	// In-bounds fixtures then land normally, and the whole table never holds
+	// a payload over the bound. The in-bounds fixture is comfortably inside
+	// the cap: jsonb text re-serialization can shift octet_length near the
+	// boundary (FM-11), so the exact-boundary witness is AC-2 in Go, where
+	// byte precision is controllable.
+	good := outboxEvent("pg-inbounds-1", "pg-inbounds-idem-1")
+	if err := Insert(ctx, db, good); err != nil {
+		t.Fatalf("in-bounds Insert: %v", err)
+	}
+	var maxPayload int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(max(octet_length(payload::text)), 0) FROM audit_outbox`).Scan(&maxPayload); err != nil {
+		t.Fatal(err)
+	}
+	if maxPayload > domain.MaxEventBytes {
+		t.Fatalf("max payload octet_length=%d, want <= %d", maxPayload, domain.MaxEventBytes)
+	}
+}

@@ -1,5 +1,20 @@
 # Release Notes
 
+## 2026-08-15 — outbox 写入拒绝超限 payload：`Insert` 在任意 SQL 之前按 `domain.MaxEventBytes` 收口（internal/outbox，outbox-insert-accepts-unbounded-payloads-enabling-table-bloat）
+
+**写给运营（行为变化）：**
+
+- **outbox 写入现在拒绝超限事件**：`outbox.Insert` 在 `json.Marshal(event)` 之后、任何 SQL 之前检查完整事件编码长度；`len(encoded) > domain.MaxEventBytes`（256 KiB）时返回 `domain.ErrInvalid`（`payload exceeds 262144 bytes`），不写任何行、不触发 `ON CONFLICT` 分类。此前超限事件会照常落库，随后被 audit API 以 422 拒绝并在首次轮询即死信（`status='failed'`），成为**永久存储垃圾**（无任何清理任务）并放大 relay 每轮批内内存（100 行 × 无界 payload）。现在新超限行不可能产生：relay 批内存上界约为 100 × 256 KiB ≈ 25 MiB，存储增长有界。
+- **边界语义与 ingest 侧一致**：严格 `>`，编码恰好 256 KiB 的事件照常接受；写入路径（幂等 `ON CONFLICT DO NOTHING`、冲突分类、nil/`ErrConflict` 契约）对界内事件逐字节不变。
+- **方向是有意收紧（NFR-3）**：outbox 度量的是**完整事件编码**（relay 实际 POST 的字节），而 ingest 侧（`service.go:975`）只度量 canonical payload；即使运营把 API 侧 `Config.MaxEventBytes` 调大，outbox 仍以常量 `domain.MaxEventBytes` 为界——SDK 可能拒绝 API 会接受的事件，但**永远不会**入队一个必然因大小死信的行。日志中可能出现两个不同数字（API 报配置值、outbox 报常量值），属预期。
+- **遗留超限行不受影响**（预防性修复）：已存在的超限行仍会被 relay 照常 POST 并死信；无清理/压缩任务，无存储迁移。**行为回退点**：对遗留超限行的字节级重插，旧二进制返回 nil（幂等重复），新二进制返回 `ErrInvalid`——仅影响对永久垃圾的重试，快速失败更安全。
+- **无存储迁移、无配置变更、无 API/route/proto 变更**；回滚 = 重新部署旧二进制（旧二进制重新接受超限写入，缺陷随之回归，请同步升级生产方）。
+
+**写给开发（实现变化）：**
+
+- `internal/outbox/sdk.go`：`Insert` 在 marshal 成功检查之后、`const query`/`ExecContext` 之前新增 4 行守卫 `if len(encoded) > domain.MaxEventBytes { return fmt.Errorf("%w: payload exceeds %d bytes", domain.ErrInvalid, domain.MaxEventBytes) }`——`%w` 包装 `domain.ErrInvalid`（与既有 `tenant_id is required` 同款），与 `ErrConflict` 可经 `errors.Is` 区分；复用已导出的 `domain.MaxEventBytes` 常量，无新 import、无新依赖边、无新导出符号。
+- 测试：`internal/outbox/sdk_test.go` 新增共享 `sizedEvent` 辅助（运行时从 `domain.MaxEventBytes` 推导精确字节数，杜绝字面量漂移，AC-4）与 `TestInsertRejectsOversizedPayloadBeforeSQL`（AC-1：超限拒绝且零 SQL）、`TestInsertPayloadSizeBoundary`（AC-2：恰在界接受且单次往返、+1 字节拒绝且零 SQL）；`internal/outbox/postgres_test.go` 新增 `TestPostgresInsertRejectsOversized`（AC-3：`AUDIT_TEST_POSTGRES_DSN` 门控，超限插入 ErrInvalid + 回滚后行数 0，界内 fixture 落库后 `max(octet_length(payload::text))` ≤ 常量）。既有测试套件（幂等/冲突分类/键帧拒绝）原样保留以钉死界内行为不变。
+
 ## 2026-08-15 — gRPC ingest 监听器 TLS + 失败关闭的 `check-config` 门禁（internal/grpcapi + cmd/audit-api，add-tls-grpc-creds-to-the-grpc-ingest-listener）
 
 **写给运营（行为变化）：**

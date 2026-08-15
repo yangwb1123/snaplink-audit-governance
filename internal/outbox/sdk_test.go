@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,222 @@ func TestInsertRejectsKeyFramingFields(t *testing.T) {
 		if fake.query != "" || len(fake.args) != 0 {
 			t.Errorf("%s: Insert touched the DB for an invalid event: %q %#v", tc.name, fake.query, fake.args)
 		}
+	}
+}
+
+// sizedEvent builds an event whose json.Marshal output is exactly target
+// bytes. The "pad" payload key adds a fixed framing overhead plus the string
+// length, so the required padding is derived from domain.MaxEventBytes at
+// runtime — the check must reference the exported constant (AC-4), never a
+// literal, matching service.go:975's use of the same constant. Framing is
+// deterministic: encoding/json sorts map keys and the fixture's time.Time is a
+// single value marshaled twice; "x" repeats are ASCII, so there is no
+// HTML-escaping variance.
+func sizedEvent(t *testing.T, target int) domain.Event {
+	t.Helper()
+	event := outboxEvent("outbox-size", "idem-size")
+	event.Payload["pad"] = strings.Repeat("x", target)
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overhead := len(encoded) - target // fixed framing + "pad" key
+	if overhead < 0 || overhead > target {
+		t.Fatalf("padding budget impossible: overhead %d, target %d", overhead, target)
+	}
+	event.Payload["pad"] = strings.Repeat("x", target-overhead)
+	encoded, err = json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != target {
+		t.Fatalf("sizing not deterministic: got %d, want %d", len(encoded), target)
+	}
+	return event
+}
+
+// sizedEventRune is the F1 variant of sizedEvent: it sizes the encoded
+// output to at most target bytes using a multi-byte pad rune (3 bytes per
+// rune for '界'), so the byte measure and the rune measure decouple — the
+// witness a rune-counting regression would silently pass. The returned
+// event's encoded length is in (target-width, target], within one rune of
+// the target; exact byte precision stays AC-2's ASCII job, where the two
+// measures coincide. Framing is deterministic exactly as in sizedEvent.
+func sizedEventRune(t *testing.T, target int, pad rune) domain.Event {
+	t.Helper()
+	padStr := string(pad)
+	width := len(padStr)
+	event := outboxEvent("outbox-size-mb", "idem-size-mb")
+	event.Payload["pad"] = strings.Repeat(padStr, target/width)
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overhead := len(encoded) - (target/width)*width // fixed framing + "pad" key
+	if overhead < 0 || overhead > target {
+		t.Fatalf("padding budget impossible: overhead %d, target %d", overhead, target)
+	}
+	event.Payload["pad"] = strings.Repeat(padStr, (target-overhead)/width)
+	encoded, err = json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > target || len(encoded) <= target-width {
+		t.Fatalf("sizing not within one rune of target: got %d bytes, want in (%d, %d]", len(encoded), target-width, target)
+	}
+	return event
+}
+
+// TestInsertRejectsOversizedMultiBytePayload pins F1: the guard measures
+// the encoded byte length (len([]byte), FR-3 / service.go:975), not the
+// rune count. Multi-byte runes (3 bytes each) decouple the two measures: a
+// regression to rune-counting would accept payloads up to ~3x the bound and
+// re-open the oversized dead-lettering/bloat defect this change closes. The
+// precondition assertions prove the witness — bytes over the bound while
+// runes stay under it — so only a byte-counting guard can reject.
+func TestInsertRejectsOversizedMultiBytePayload(t *testing.T) {
+	event := sizedEventRune(t, domain.MaxEventBytes+len("界"), '界')
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= domain.MaxEventBytes {
+		t.Fatalf("precondition: encoded bytes %d must exceed bound %d", len(encoded), domain.MaxEventBytes)
+	}
+	if runes := len([]rune(string(encoded))); runes >= domain.MaxEventBytes {
+		t.Fatalf("precondition: rune count %d must stay under bound %d, otherwise this test cannot distinguish byte from rune counting", runes, domain.MaxEventBytes)
+	}
+	fake := &fakeExecer{}
+	err = Insert(context.Background(), fake, event)
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Insert = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("payload exceeds %d bytes", domain.MaxEventBytes)) {
+		t.Fatalf("message must report the constant bound: %v", err)
+	}
+	if fake.query != "" || len(fake.args) != 0 {
+		t.Fatalf("oversized Insert must not touch the DB: %q %#v", fake.query, fake.args)
+	}
+}
+
+// TestInsertAcceptsMultiBytePayloadAtBound mirrors AC-2 with multi-byte
+// runes: an event whose encoded byte length is at or within one rune below
+// domain.MaxEventBytes is accepted on the single-round-trip hot path. Byte
+// length is what the guard measures; the rune count (roughly a third of the
+// bytes) is irrelevant to it.
+func TestInsertAcceptsMultiBytePayloadAtBound(t *testing.T) {
+	event := sizedEventRune(t, domain.MaxEventBytes, '界')
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > domain.MaxEventBytes {
+		t.Fatalf("precondition: encoded bytes %d must stay at or under bound %d", len(encoded), domain.MaxEventBytes)
+	}
+	fake := &fakeExecer{}
+	if err := Insert(context.Background(), fake, event); err != nil {
+		t.Fatalf("at-bound multi-byte event must be accepted: %v", err)
+	}
+	if fake.query == "" || len(fake.args) != 5 {
+		t.Fatalf("at-bound Insert must reach the INSERT: %q %#v", fake.query, fake.args)
+	}
+	if payload, ok := fake.args[3].(string); !ok || payload == "" {
+		t.Fatalf("at-bound payload must be non-empty text, got %T", fake.args[3])
+	}
+}
+
+// TestInsertMarshalErrorPrecedesSizeCheck pins FM-3: an unmarshalable
+// payload (NaN) surfaces the raw json.Marshal error — never the size
+// rejection — and no SQL executes. The size guard sits after the
+// marshal-success check (sdk.go), so a reorder (size check first, or
+// measuring the payload map instead of the encoding) fails here.
+func TestInsertMarshalErrorPrecedesSizeCheck(t *testing.T) {
+	event := outboxEvent("outbox-nan", "idem-nan")
+	event.Payload["v"] = math.NaN()
+	fake := &fakeExecer{}
+	err := Insert(context.Background(), fake, event)
+	if err == nil {
+		t.Fatal("NaN payload must fail json.Marshal")
+	}
+	if strings.Contains(err.Error(), "payload exceeds") {
+		t.Fatalf("marshal error must precede the size check, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NaN") {
+		t.Fatalf("raw marshal error must surface (json: unsupported value: NaN), got: %v", err)
+	}
+	if fake.query != "" || len(fake.args) != 0 {
+		t.Fatalf("marshal failure must not touch the DB: %q %#v", fake.query, fake.args)
+	}
+}
+
+// TestInsertOversizedReinsertRejectedRegardlessOfExistingRow pins FM-4/FM-5:
+// an oversized event is rejected with ErrInvalid before any SQL even when a
+// byte-identical legacy row already exists (pre-fix this returned nil as an
+// idempotent duplicate, or ErrConflict through classification). The pre-SQL
+// guard makes ON CONFLICT classification unreachable for oversized events,
+// so no probe query may run.
+func TestInsertOversizedReinsertRejectedRegardlessOfExistingRow(t *testing.T) {
+	event := sizedEvent(t, domain.MaxEventBytes+1)
+	fake := &fakeTx{execResult: fakeZeroResult{}, rows: []fakeRow{rowStatusIdentical(StatusPending, true)}}
+	err := Insert(context.Background(), fake, event)
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized re-insert = %v, want ErrInvalid (legacy duplicates previously returned nil)", err)
+	}
+	if len(fake.queries) != 0 {
+		t.Fatalf("oversized re-insert must not reach classification: %d statements: %v", len(fake.queries), fake.queries)
+	}
+}
+
+// TestInsertRejectsOversizedPayloadBeforeSQL is AC-1: an event whose full
+// encoding exceeds domain.MaxEventBytes must be rejected with
+// errors.Is(err, domain.ErrInvalid) before any SQL executes — no statement,
+// no jsonb row, no ON CONFLICT classification path.
+func TestInsertRejectsOversizedPayloadBeforeSQL(t *testing.T) {
+	event := sizedEvent(t, domain.MaxEventBytes+1)
+	fake := &fakeExecer{}
+	err := Insert(context.Background(), fake, event)
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Insert = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("payload exceeds %d bytes", domain.MaxEventBytes)) {
+		t.Fatalf("message must report the constant bound: %v", err)
+	}
+	if fake.query != "" || len(fake.args) != 0 {
+		t.Fatalf("oversized Insert must not touch the DB: %q %#v", fake.query, fake.args)
+	}
+}
+
+// TestInsertPayloadSizeBoundary is AC-2 (and pins AC-4): exactly
+// domain.MaxEventBytes is accepted with the single round-trip hot path;
+// one byte over is rejected with ErrInvalid before any SQL. The threshold is
+// the exported domain.MaxEventBytes symbol computed at test time — never a
+// literal — matching service.go:975's use of the same constant (via the
+// config default at service.go:123-124); any drift to a different literal
+// changes the computed boundary and fails this test immediately.
+func TestInsertPayloadSizeBoundary(t *testing.T) {
+	atBound := sizedEvent(t, domain.MaxEventBytes)
+	fake := &fakeExecer{}
+	if err := Insert(context.Background(), fake, atBound); err != nil {
+		t.Fatalf("event at exactly MaxEventBytes must be accepted: %v", err)
+	}
+	if fake.query == "" || len(fake.args) != 5 {
+		t.Fatalf("at-bound Insert must reach the INSERT: %q %#v", fake.query, fake.args)
+	}
+	if payload, ok := fake.args[3].(string); !ok || payload == "" {
+		t.Fatalf("at-bound payload must be non-empty text, got %T", fake.args[3])
+	}
+
+	over := sizedEvent(t, domain.MaxEventBytes+1)
+	fake = &fakeExecer{}
+	err := Insert(context.Background(), fake, over)
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("+1 byte must be rejected with ErrInvalid, got %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("payload exceeds %d bytes", domain.MaxEventBytes)) {
+		t.Fatalf("message must report the constant bound: %v", err)
+	}
+	if fake.query != "" || len(fake.args) != 0 {
+		t.Fatalf("+1 byte Insert must not touch the DB: %q %#v", fake.query, fake.args)
 	}
 }
 

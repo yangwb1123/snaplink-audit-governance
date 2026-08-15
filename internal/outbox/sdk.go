@@ -85,6 +85,14 @@ func Insert(ctx context.Context, tx Execer, event domain.Event) error {
 	if err != nil {
 		return err
 	}
+	// FR-1/FR-3 (FM-1): reject before any SQL — matches the ingest cap
+	// (service.go:975, itself defaulting to domain.MaxEventBytes at 123-124).
+	// The measure is the full event encoding (what the relay actually POSTs),
+	// so the outbox bound is at-least-as-strict as the payload-only ingest cap
+	// (NFR-3); the exported constant keeps the two caps from drifting.
+	if len(encoded) > domain.MaxEventBytes {
+		return fmt.Errorf("%w: payload exceeds %d bytes", domain.ErrInvalid, domain.MaxEventBytes)
+	}
 	const query = `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
 VALUES ($1, $2, $3, $4, $5, 'pending', 0, now())
 ON CONFLICT DO NOTHING`
