@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-08-15 — JWKS 未知 kid 强制刷新放大修复：负缓存 + 每间隔一次强制刷新 + 锁外取数（internal/auth，unauthenticated-jwks-kid-miss-forced-refresh-amp-d0642ad1）
+
+**写给运营（行为变化）：**
+
+- **未知 kid 不再按个触发 IdP 拉取**：此前每个不同的未知 `kid` 令牌都会强制一次 JWKS 拉取（N 个未知 kid → N+1 次，且未签名令牌即可触发），可被未认证流量放大成 IdP 负载。现在：同一刷新间隔内，任意数量的未知 kid 合计最多 **1 次初始拉取 + 1 次强制刷新**（跨 W 个间隔 ≤ 1+W 次，与 kid 数量无关）；最近被记为缺失的 kid 在间隔内再次出现时**零网络拉取**直接拒绝（负缓存，TTL 与刷新间隔一致，每 URL 上限 256 条 FIFO）。
+- **认证不再被慢拉取阻塞（head-of-line 修复）**：JWKS 拉取不再持有缓存互斥锁——缓存集仍新鲜时，合法令牌的认证即时完成，不再排队等待在途的（可能被攻击者卡住的）拉取；拉取本身单飞（每 URL 同时最多一个在途请求），等待方受调用方 context 约束。
+- **键轮换行为不变**：新轮换入的 kid 仍触发间隔内那一次允许的强制刷新并被采纳；出现在刷新后集合中的 kid 永不被负缓存。IdP 故障时 last-known-good 集继续服务已知 kid（stale-on-outage 不变）；未知 kid 仍 fail-closed 拒绝，错误文本与以前逐字节一致（HTTP 401 / gRPC Unauthenticated）。
+- **无配置、无 API、无数据迁移**；回滚 = 重新部署旧二进制。唯一可感知的变化是：未知 kid 的拒绝不再伴随每次拉取，以及合法认证不再被慢/阻塞的 JWKS 拉取拖住。
+
+**写给开发（实现变化）：**
+
+- `internal/auth/verifier.go`：`jwksCacheEntry` 增加有界负缓存（`negCache`/`negOrder`，FIFO 上限 `negativeCacheCap=256`，kid 长度 > `maxNegatedKidBytes=64` 不保留）与强制刷新预算时间戳 `forcedAt`（与 `fetchedAt` 独立，成功强制刷新不重开预算窗口）；`sync.Mutex` → `sync.RWMutex`；拉取改为单飞 `beginFetch`/`finishFetch`（`fetchOutcome`，锁外 I/O，panic 安全，join 等待受调用方 ctx 约束）。`remoteVerificationKey` 重构为“只读取集 → kid 命中/缺失判定 → FR-1/FR-2 门控”，缺失路径先为**空缓存**做一次初始拉取（保留既有旋转测试的 initial+forced 语义），再走 `refreshForMissingKid`：负命中直接拒绝、预算耗尽 check-then-negate（并发刷新已落地该 kid 时直接服务且不写入负缓存）、预算可用时消耗预算并单飞强制刷新。`uniqueKey` 对空集与零匹配返回 `errKeyNotFound` 哨兵（消息与歧义 kid 错误逐字节一致），歧义 kid（重复 kid 的畸形集合）拒绝但不消耗预算、不写入负缓存。无新增依赖；`auth.go`、公开 API、路由、配置零改动。
+- 测试（`internal/auth/verifier_test.go`）：新增 A1a（100 个不同 kid → 恰 2 次拉取 + 重放负缓存 kid 零拉取 + 拒绝文本一致）、A1a-evic（300 个 kid 触发 FIFO 上限且拉取数不变）、A1b（每间隔 ≤ 1 次强制刷新 + 负条目过期后重放恰多一次拉取）、A2（慢拉取不阻塞新鲜集合法认证，< 1s）、A3（预算窗口不被攻击流量重置）、S1（并发初始拉取单飞去重）、S2（join 等待受调用方 ctx 约束）、S3（并发轮换至多一次瞬态拒绝 + 刷新落地后零拉取服务 + check-then-negate 单元）、F5（leader ctx 取消后预算仍被消耗）、S5（歧义 kid 不消耗预算）、长 kid 不驻留内存、拉取 panic 后单飞状态可恢复；攻击令牌 helper 带非空签名段（空签名段在头部即被拒，测试否则真空）。三个既有缓存/轮换/宕机测试原样通过；`python3 cli.py quality` 全绿。
+
 ## 2026-08-15 — S3 归档 WORM 门禁落地：Ready 强制 COMPLIANCE 默认留存 + 每次 Put 显式 COMPLIANCE 留存（internal-archive-b9e968b8）
 
 **写给运营（行为变化）：**

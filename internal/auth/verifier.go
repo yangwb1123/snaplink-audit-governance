@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,17 +24,64 @@ const (
 	jwksFetchTimeout          = 5 * time.Second
 	// defaultJWKSRefreshInterval bounds JWKS staleness between refetches.
 	defaultJWKSRefreshInterval = 10 * time.Minute
+	// negativeCacheCap bounds the per-URL negative cache so a distinct-kid
+	// flood cannot grow memory without bound. Eviction is FIFO; an evicted
+	// entry can cause at most one fetch and only after the forced-refresh
+	// budget (forcedAt) has elapsed, so the fetch bound is preserved
+	// (FR-1/FR-2).
+	negativeCacheCap = 256
+	// maxNegatedKidBytes caps the size of a kid retained in the negative
+	// cache. Real JWKS kids are short; a flood of tokens with oversized kids
+	// is rejected through the forced-refresh budget path with identical
+	// fetch counts, but is never retained (bounded memory).
+	maxNegatedKidBytes = 64
 )
 
-// jwksCacheEntry holds one parsed JWKS set per JWKS URL. The mutex is held
-// across the fetch, so concurrent authentications single-flight the request:
-// an unauthenticated attacker flooding garbage tokens can never amplify
-// fetches to the identity provider beyond one in flight per URL.
+// errKeyNotFound is the fail-closed rejection for a kid absent from a JWKS
+// set. Its message is intentionally identical to the ambiguous-kid error
+// text so every unknown-kid rejection is observably the same as today
+// ("an unknown kid is rejected exactly as today"); the error VALUE differs
+// only so the kid-miss gate can tell a genuine miss from a duplicate-kid
+// set (which must not consume the forced-refresh budget).
+var errKeyNotFound = errors.New("JWKS kid must identify exactly one key")
+
+// fetchOutcome carries the result of one single-flight JWKS fetch. The
+// leader writes set/err under the entry lock and then closes done; joiners
+// read the fields after receiving from done (channel close provides
+// happens-before), so no lock is ever held across the network fetch (FR-3).
+type fetchOutcome struct {
+	done chan struct{}
+	set  jwk.Set
+	err  error
+}
+
+// jwksCacheEntry holds one parsed JWKS set per JWKS URL. The entry lock
+// guards every field below but is never held across the network fetch:
+// fresh-set reads take a brief read lock (FR-3a), all fetches funnel
+// through one single-flight outcome (at most one fetch in flight per URL,
+// FR-3b), and joiners wait bounded by their own context (FR-3c). The
+// negative cache records kids known to be absent from the last fetched set
+// so repeat kid-misses are rejected with no network fetch (FR-1), and
+// forcedAt rate-limits kid-miss forced refreshes to one per interval per
+// URL (FR-2).
 type jwksCacheEntry struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	set       jwk.Set
 	fetchedAt time.Time
 	ttl       time.Duration
+	// negCache maps a kid known to be absent from the last fetched set to
+	// the expiry of that knowledge (insertion time + ttl). Consulted only
+	// after a uniqueKey miss, so a kid that a later refresh brings into the
+	// set is never falsely rejected (rotation path).
+	negCache map[string]time.Time
+	negOrder []string // FIFO insertion order for negativeCacheCap eviction
+	negCap   int
+	// forcedAt is when the last kid-miss forced refresh was permitted. A
+	// new forced refresh is permitted only after the refresh interval has
+	// elapsed (FR-2). Independent of fetchedAt: a successful forced refresh
+	// re-stamps fetchedAt without reopening the forced-refresh budget.
+	forcedAt time.Time
+	inflight *fetchOutcome // non-nil while a fetch is in flight (FR-3b)
 }
 
 // jwksCache maps JWKS URL to its cache entry. A process uses one trust
@@ -185,24 +233,65 @@ func (a Authenticator) remoteVerificationKey(ctx context.Context, header verifie
 	if header.keyID == "" {
 		return nil, fmt.Errorf("remote JWKS token requires kid")
 	}
-	set, err := a.cachedJWKS(ctx, false)
+	entry := a.cacheEntry()
+
+	// FR-3a: read the current set without waiting on any in-flight fetch.
+	entry.mu.RLock()
+	set := entry.set
+	fresh := set != nil && time.Since(entry.fetchedAt) < entry.ttl
+	entry.mu.RUnlock()
+
+	key, err := uniqueKey(set, header.keyID)
+	if err == nil && fresh {
+		// Fast path: the kid is present in a fresh set; the token is served
+		// without touching the network and without contending with any
+		// in-flight fetch.
+		if err := validateRemoteKey(key, header.algorithm.String()); err != nil {
+			return nil, err
+		}
+		return key, nil
+	}
+	if errors.Is(err, errKeyNotFound) {
+		// Genuine miss: prime an empty cache first (this preserves the
+		// initial-fetch + forced-refresh sequence the pinned rotation test
+		// relies on), then run the FR-1/FR-2 gate.
+		if set == nil {
+			set, err = a.cachedJWKS(ctx, false)
+			if err != nil {
+				return nil, err
+			}
+			key, err = uniqueKey(set, header.keyID)
+		}
+		if errors.Is(err, errKeyNotFound) {
+			key, err = a.refreshForMissingKid(ctx, header.keyID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err != nil {
+		// Ambiguous kid (present more than once) or any other lookup
+		// failure: reject without a fetch, without consuming the
+		// forced-refresh budget, and without recording the kid as missing.
 		return nil, err
 	}
-	key, err := uniqueKey(set, header.keyID)
+	// The kid is present in the current set: run the normal TTL freshness
+	// refresh when due so rotations are adopted and stale-on-outage is
+	// preserved. A refreshed set that dropped the kid falls through to the
+	// gated miss path.
+	refreshed, refreshErr := a.cachedJWKS(ctx, false)
+	if refreshErr != nil {
+		return nil, refreshErr
+	}
+	key, err = uniqueKey(refreshed, header.keyID)
+	if errors.Is(err, errKeyNotFound) {
+		key, err = a.refreshForMissingKid(ctx, header.keyID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err != nil {
-		// The kid is missing from the cached set: a rotation may have
-		// happened between refreshes. Force exactly one refresh; a still-
-		// missing kid is rejected (fail-closed) instead of being served
-		// with a stale key.
-		set, err = a.cachedJWKS(ctx, true)
-		if err != nil {
-			return nil, err
-		}
-		key, err = uniqueKey(set, header.keyID)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	if err := validateRemoteKey(key, header.algorithm.String()); err != nil {
 		return nil, err
@@ -215,25 +304,210 @@ func (a Authenticator) remoteVerificationKey(ctx context.Context, header verifie
 // refresh). On a fetch failure the last known-good set is served when one
 // exists (stale-on-outage: an IdP outage is not a total auth outage, and
 // staleness is bounded by the refresh interval); a set that never fetched
-// keeps the fail-closed behavior.
+// keeps the fail-closed behavior. All fetches — initial, TTL refresh, and
+// forced — funnel through one single-flight outcome per URL, so at most one
+// fetch is in flight at a time (FR-3b); a fresh-set read never waits on an
+// in-flight fetch (FR-3a); joiners wait bounded by their own context
+// (FR-3c).
 func (a Authenticator) cachedJWKS(ctx context.Context, force bool) (jwk.Set, error) {
-	entryValue, _ := jwksCache.LoadOrStore(a.JWKSURL, &jwksCacheEntry{ttl: a.jwksRefreshInterval()})
-	entry := entryValue.(*jwksCacheEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !force && entry.set != nil && time.Since(entry.fetchedAt) < entry.ttl {
-		return entry.set, nil
+	entry := a.cacheEntry()
+	if !force {
+		entry.mu.RLock()
+		if entry.set != nil && time.Since(entry.fetchedAt) < entry.ttl {
+			set := entry.set
+			entry.mu.RUnlock()
+			return set, nil
+		}
+		entry.mu.RUnlock()
 	}
-	set, err := a.fetchJWKS(ctx)
+	outcome, leader := entry.beginFetch()
+	if leader {
+		// The fetch runs inside an inner closure so finishFetch (deferred)
+		// completes before the outcome is read below: a deferred call at
+		// this level would run only after the return expression had already
+		// captured the still-empty outcome fields.
+		var (
+			set jwk.Set
+			err error
+		)
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					// A panic inside the fetch must not wedge the single-flight
+					// slot or clobber a last-known-good set: record the outcome
+					// as failed, then re-panic to the caller.
+					entry.finishFetch(outcome, nil, fmt.Errorf("fetch JWKS: panic"))
+					panic(recovered)
+				}
+				entry.finishFetch(outcome, set, err)
+			}()
+			set, err = a.fetchJWKS(ctx)
+		}()
+	} else {
+		select {
+		case <-outcome.done:
+		case <-ctx.Done():
+			// FR-3c: a joiner's wait is bounded by its own context. The
+			// caller's deadline has expired by definition here, and the
+			// subsequent signature verification is itself ctx-bounded, so
+			// serving the stale set could not succeed anyway; return the
+			// caller's error honestly.
+			return nil, ctx.Err()
+		}
+	}
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
+	if outcome.err != nil && entry.set != nil {
+		return entry.set, nil // stale-on-outage, unchanged
+	}
+	return outcome.set, outcome.err
+}
+
+// cacheEntry returns the per-URL cache entry, creating it (with an empty
+// negative cache) on first use.
+func (a Authenticator) cacheEntry() *jwksCacheEntry {
+	entryValue, _ := jwksCache.LoadOrStore(a.JWKSURL, &jwksCacheEntry{
+		ttl: a.jwksRefreshInterval(), negCache: map[string]time.Time{}, negCap: negativeCacheCap,
+	})
+	return entryValue.(*jwksCacheEntry)
+}
+
+// beginFetch claims the single-flight slot for one fetch, or joins the
+// in-flight one. It holds the lock only for pointer bookkeeping (never
+// I/O) and cannot be starved by the read-heavy fresh-set fast path (Go's
+// RWMutex is writer-preferring).
+func (e *jwksCacheEntry) beginFetch() (*fetchOutcome, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.inflight != nil {
+		return e.inflight, false
+	}
+	outcome := &fetchOutcome{done: make(chan struct{})}
+	e.inflight = outcome
+	return outcome, true
+}
+
+// finishFetch publishes one fetch result and releases the single-flight
+// slot. The set is stored and fetchedAt re-stamped only on success; forcedAt
+// is deliberately untouched so a successful forced refresh does not reopen
+// the forced-refresh budget (FR-2).
+func (e *jwksCacheEntry) finishFetch(outcome *fetchOutcome, set jwk.Set, err error) {
+	e.mu.Lock()
+	outcome.set = set
+	outcome.err = err
+	if err == nil {
+		e.set = set
+		e.fetchedAt = time.Now()
+	}
+	e.inflight = nil
+	close(outcome.done)
+	e.mu.Unlock()
+}
+
+// refreshForMissingKid is the gated kid-miss path (FR-1, FR-2):
+//   - kid recorded as known-missing -> reject with no fetch;
+//   - budget exhausted -> reject and record the kid as known-missing
+//     (fail-closed), unless a concurrent forced refresh has just landed the
+//     kid in the current set, in which case the key is served and never
+//     negated (rotation safety);
+//   - budget available -> consume it, run one forced refresh (single-flight),
+//     re-look-up; a still-missing kid is recorded as known-missing; a kid the
+//     refreshed set contains is returned and never negatively cached.
+func (a Authenticator) refreshForMissingKid(ctx context.Context, kid string) (jwk.Key, error) {
+	entry := a.cacheEntry()
+	now := time.Now()
+	entry.mu.Lock()
+	if entry.negatedLocked(kid, now) {
+		entry.mu.Unlock()
+		return nil, errKeyNotFound
+	}
+	if !entry.forcedBudgetLocked(now) {
+		// Budget exhausted: before recording the kid as missing, re-check
+		// the current set — a concurrent forced refresh may have just
+		// landed this kid. A kid present in the set is never negated.
+		if key, matches := entry.lookupLocked(kid); matches > 0 {
+			entry.mu.Unlock()
+			if matches == 1 {
+				return key, nil
+			}
+			return nil, errKeyNotFound // ambiguous kid: no fetch, no negation
+		}
+		entry.negateLocked(kid, now)
+		entry.mu.Unlock()
+		return nil, errKeyNotFound
+	}
+	entry.forcedAt = now // the window is not reset by any later miss (FR-2)
+	entry.mu.Unlock()
+	set, err := a.cachedJWKS(ctx, true) // may join an in-flight fetch; wait bounded by ctx
 	if err != nil {
-		if entry.set != nil {
-			return entry.set, nil
+		return nil, err
+	}
+	key, err := uniqueKey(set, kid)
+	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			entry.mu.Lock()
+			entry.negateLocked(kid, time.Now())
+			entry.mu.Unlock()
 		}
 		return nil, err
 	}
-	entry.set = set
-	entry.fetchedAt = time.Now()
-	return set, nil
+	return key, nil
+}
+
+// negatedLocked reports whether kid is recorded as known-missing at now.
+func (e *jwksCacheEntry) negatedLocked(kid string, now time.Time) bool {
+	expiry, ok := e.negCache[kid]
+	return ok && now.Before(expiry)
+}
+
+// forcedBudgetLocked reports whether a kid-miss forced refresh is permitted
+// at now (at most one per refresh interval per URL, FR-2).
+func (e *jwksCacheEntry) forcedBudgetLocked(now time.Time) bool {
+	return e.forcedAt.IsZero() || now.Sub(e.forcedAt) >= e.ttl
+}
+
+// negateLocked records kid as known-missing for one refresh interval. The
+// original expiry is kept on re-presentation (FR-1 records for one interval;
+// the rejection still holds through the forced-refresh budget). Oversized
+// kids are never retained (bounded memory).
+func (e *jwksCacheEntry) negateLocked(kid string, now time.Time) {
+	if len(kid) > maxNegatedKidBytes {
+		return
+	}
+	if _, ok := e.negCache[kid]; ok {
+		return
+	}
+	if len(e.negCache) >= e.negCap {
+		oldest := e.negOrder[0]
+		e.negOrder = e.negOrder[1:]
+		delete(e.negCache, oldest)
+	}
+	e.negCache[kid] = now.Add(e.ttl)
+	e.negOrder = append(e.negOrder, kid)
+}
+
+// lookupLocked finds kid in the current set, reporting how many keys match.
+func (e *jwksCacheEntry) lookupLocked(kid string) (jwk.Key, int) {
+	if e.set == nil {
+		return nil, 0
+	}
+	var found jwk.Key
+	matches := 0
+	for index := 0; index < e.set.Len(); index++ {
+		key, ok := e.set.Key(index)
+		if !ok {
+			continue
+		}
+		keyID, ok := key.KeyID()
+		if ok && keyID == kid {
+			found = key
+			matches++
+		}
+	}
+	if matches == 1 {
+		return found, 1
+	}
+	return nil, matches
 }
 
 func (a Authenticator) jwksRefreshInterval() time.Duration {
@@ -244,6 +518,9 @@ func (a Authenticator) jwksRefreshInterval() time.Duration {
 }
 
 func uniqueKey(set jwk.Set, wantedID string) (jwk.Key, error) {
+	if set == nil {
+		return nil, errKeyNotFound
+	}
 	var found jwk.Key
 	matches := 0
 	for index := 0; index < set.Len(); index++ {
@@ -257,7 +534,10 @@ func uniqueKey(set jwk.Set, wantedID string) (jwk.Key, error) {
 			matches++
 		}
 	}
-	if matches != 1 {
+	if matches == 0 {
+		return nil, errKeyNotFound
+	}
+	if matches > 1 {
 		return nil, fmt.Errorf("JWKS kid must identify exactly one key")
 	}
 	return found, nil
