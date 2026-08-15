@@ -28,6 +28,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 	"github.com/snaplink/audit-governance/internal/telemetry"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 )
 
@@ -55,6 +56,8 @@ func main() {
 	bootstrapTenant := flag.String("bootstrap-tenant", envOr("AUDIT_BOOTSTRAP_TENANT", "demo"), "create a local bootstrap tenant when missing")
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
+	grpcTLSCert := flag.String("grpc-tls-cert", os.Getenv("AUDIT_GRPC_TLS_CERT"), "PEM certificate path for the gRPC ingest listener (must be set together with -grpc-tls-key)")
+	grpcTLSKey := flag.String("grpc-tls-key", os.Getenv("AUDIT_GRPC_TLS_KEY"), "PEM private key path for the gRPC ingest listener (must be set together with -grpc-tls-cert)")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("AUDIT_OTLP_ENDPOINT"), "OTLP/HTTP trace endpoint such as http://jaeger:4318; empty disables tracing")
 	vaultAddr := flag.String("vault-addr", os.Getenv("AUDIT_VAULT_ADDR"), "HashiCorp Vault address; with token+transit key, checkpoint signatures go through the Transit engine")
 	vaultToken := flag.String("vault-token", os.Getenv("AUDIT_VAULT_TOKEN"), "Vault token for the Transit signer")
@@ -84,7 +87,7 @@ func main() {
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
-		os.Exit(runCheckConfig(logger, cfg, external, authenticator))
+		os.Exit(runCheckConfig(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey))
 	}
 	st, err := openStore(*statePath, *postgresDSN, logger)
 	if err != nil {
@@ -119,6 +122,20 @@ func main() {
 	var healthServer *health.Server
 	var grpcListener net.Listener
 	if *grpcListen != "" {
+		// REQ-4: the startup path applies the same fail-closed transport gate
+		// as -check-config through the shared resolveGRPCTransport helper (so
+		// preflight and runtime cannot diverge) before any listener is bound;
+		// TLS credentials are loaded exactly once and reused for grpc.Creds.
+		grpcTransport, grpcCreds, transportErr := resolveGRPCTransport(*grpcListen, *grpcTLSCert, *grpcTLSKey)
+		if transportErr != nil {
+			logger.Fatalf("%v", transportErr)
+		}
+		// F3 parity: when the explicit dev/verify-stack allowlist re-opens a
+		// non-loopback plaintext listener, warn loudly so the opt-in is never
+		// invisible in production logs.
+		if grpcTransport == "insecure" && !loopbackListenAddr(*grpcListen) {
+			logger.Printf("warning: %s=true: the gRPC ingest listener serves plaintext on a non-loopback address (%s) — verify-stack/dev-only, never production: the ingest bearer token would travel in clear", grpcInsecureAllowlistEnv, *grpcListen)
+		}
 		grpcListener, err = net.Listen("tcp", *grpcListen)
 		if err != nil {
 			logger.Fatalf("listen gRPC: %v", err)
@@ -127,7 +144,7 @@ func main() {
 		// they also contain panics from any inner interceptors added later.
 		// Keepalive is transport-level only (FR-3.4): RPC semantics,
 		// authentication, and message framing are untouched.
-		grpcServer = grpc.NewServer(
+		grpcServerOptions := []grpc.ServerOption{
 			grpc.KeepaliveParams(grpcapi.KeepaliveParams()),
 			grpc.KeepaliveEnforcementPolicy(grpcapi.KeepaliveEnforcementPolicy()),
 			// Receive-size parity with the HTTP surface: a single gRPC ingest
@@ -137,7 +154,14 @@ func main() {
 			grpc.MaxRecvMsgSize(grpcapi.MaxRecvBytes),
 			grpc.ChainUnaryInterceptor(grpcapi.RecoveryUnaryServerInterceptor(logger)),
 			grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor(logger)),
-		)
+		}
+		// TLS is the only transport credential on the listener: grpc-go then
+		// rejects plaintext (h2c) clients at the handshake (REQ-2.3), so the
+		// authorization bearer metadata is never sent on a plaintext channel.
+		if grpcCreds != nil {
+			grpcServerOptions = append(grpcServerOptions, grpc.Creds(grpcCreds))
+		}
+		grpcServer = grpc.NewServer(grpcServerOptions...)
 		grpcapi.Register(grpcServer, svc, authenticator)
 		// bootstrap() completed before server construction, so health can report
 		// SERVING immediately (FR-2.2); the handle is kept so the shutdown path
@@ -341,7 +365,11 @@ func envOr(name, fallback string) string {
 // The dev-auth allowlist is environment-only: -allow-dev-auth alone can never
 // satisfy the preflight (AC-3), so a flag-only CI invocation fails with an
 // auditable marker instead of blessing a config that diverges from startup.
-func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator) int {
+// grpcListen/grpcTLSCert/grpcTLSKey are the resolved gRPC listener inputs:
+// runCheckConfig applies the same fail-closed transport gate as startup
+// (REQ-4, shared resolveGRPCTransport) and reports transport_grpc on the ok
+// line.
+func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey string) int {
 	svc, err := service.New(nil, cfg)
 	if err != nil {
 		logger.Printf("invalid secrets: %v", err)
@@ -388,7 +416,19 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 		logger.Printf("transport: %v", transportErr)
 		return 1
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d jwt_secret_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), len(authenticator.JWTSecret), signerName, archiveName, s3Transport, vaultTransport)
+	// REQ-3 (transport_grpc gate): runs after the secret/auth/external checks
+	// and before check_config=ok. A non-loopback plaintext gRPC listener
+	// without TLS and without the env-only allowlist fails closed with the
+	// auditable marker naming both variables; partial TLS and unreadable/
+	// mismatched PEM pairs are hard errors (REQ-3.2/3.3). The ok line gains
+	// the unconditional final transport_grpc=<tls|insecure|disabled> field
+	// (REQ-3.4), keeping check-config a pure function of resolved config.
+	grpcTransport, _, transportGRPCErr := resolveGRPCTransport(grpcListen, grpcTLSCert, grpcTLSKey)
+	if transportGRPCErr != nil {
+		logger.Printf("%v", transportGRPCErr)
+		return 1
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d jwt_secret_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), len(authenticator.JWTSecret), signerName, archiveName, s3Transport, vaultTransport, grpcTransport)
 	return 0
 }
 
@@ -459,6 +499,91 @@ func strictBoolValue(name, value string) (parsed, present bool, err error) {
 // flag alone can never satisfy the preflight gate (AC-3).
 func devAuthAllowlisted() bool {
 	return strictBoolEnv(envDevAuth, false)
+}
+
+// grpcInsecureAllowlistEnv is the explicit dev/verify-stack escape hatch for
+// a non-loopback plaintext gRPC ingest listener (F3 parity:
+// AUDIT_ALLOW_INSECURE_API_URL gates AUDIT_OUTBOX_API_URL; this gates
+// AUDIT_GRPC_LISTEN). It is environment-only — deliberately no
+// -allow-insecure-grpc-* flag, exactly like F3 — so a flag alone can never
+// satisfy an allowlist gate (AC-3). Never set in production: the ingest
+// authorization bearer token would otherwise travel in clear.
+const grpcInsecureAllowlistEnv = "AUDIT_ALLOW_INSECURE_GRPC_LISTEN"
+
+// loopbackListenAddr reports whether addr binds explicitly to a loopback
+// interface: localhost or a loopback IP (127.x, ::1). Fail-closed
+// conservatism for the server side: an empty host (":50051" binds all
+// interfaces), a wildcard IP (0.0.0.0), and Docker host-gateway aliases
+// (host.docker.internal / gateway.docker.internal are gateway aliases, not
+// loopback) all resolve to non-loopback, so a listener can never be assumed
+// loopback unless it says so explicitly. Mirrors outbox.loopbackHost intent
+// while staying conservative for listen addresses.
+func loopbackListenAddr(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
+}
+
+// grpcAllowlisted reports whether the env-only insecure gRPC allowlist is
+// strictly satisfied (REQ-1.3/1.4): a present-but-malformed value is a hard
+// error (never fail-open), and any strictly-parsed value other than true is
+// treated as not-allowlisted (fail closed).
+func grpcAllowlisted() (bool, error) {
+	parsed, present, err := strictBoolValue(grpcInsecureAllowlistEnv, os.Getenv(grpcInsecureAllowlistEnv))
+	if err != nil {
+		return false, err
+	}
+	return present && parsed, nil
+}
+
+// resolveGRPCTransport is the single fail-closed gate implementation shared
+// by -check-config and startup (REQ-4): it resolves the gRPC ingest
+// listener's transport configuration into the deterministic transport_grpc
+// label ("tls"|"insecure"|"disabled") plus, when TLS is configured, the
+// grpc transport credentials. It fails closed on every unsafe combination:
+// non-loopback plaintext without the env-only allowlist, partial cert/key
+// pairs (REQ-1.2), unreadable/mismatched PEM files, and a malformed
+// allowlist value. Sharing one helper structurally prevents preflight/runtime
+// divergence and double TLS loads.
+func resolveGRPCTransport(grpcListen, tlsCert, tlsKey string) (label string, creds credentials.TransportCredentials, err error) {
+	certSet := tlsCert != ""
+	keySet := tlsKey != ""
+	if certSet != keySet {
+		return "", nil, fmt.Errorf("partial TLS configuration: -grpc-tls-cert and -grpc-tls-key must be set together (AUDIT_GRPC_TLS_CERT/AUDIT_GRPC_TLS_KEY)")
+	}
+	// REQ-3.3: TLS files are validated whenever either path is non-empty,
+	// even when the listener is unset, so typos fail preflight early. No
+	// expiry/time checks (REQ-7): check-config stays deterministic.
+	if certSet {
+		loaded, loadErr := grpcapi.ServerCredentials(tlsCert, tlsKey)
+		if loadErr != nil {
+			return "", nil, fmt.Errorf("gRPC TLS: %w", loadErr)
+		}
+		creds = loaded
+	}
+	if grpcListen == "" {
+		return "disabled", creds, nil
+	}
+	if creds != nil {
+		return "tls", creds, nil
+	}
+	if loopbackListenAddr(grpcListen) {
+		return "insecure", nil, nil
+	}
+	allowlisted, allowErr := grpcAllowlisted()
+	if allowErr != nil {
+		return "", nil, allowErr
+	}
+	if allowlisted {
+		return "insecure", nil, nil
+	}
+	return "", nil, fmt.Errorf("check_config=fail grpc=plaintext_without_allowlist: AUDIT_GRPC_LISTEN=%q binds a non-loopback interface without TLS; set AUDIT_GRPC_TLS_CERT/AUDIT_GRPC_TLS_KEY, or AUDIT_ALLOW_INSECURE_GRPC_LISTEN=true for local verification stacks only (never production: the ingest bearer token would travel in clear)", grpcListen)
 }
 
 func intEnv(name string, fallback int) int {

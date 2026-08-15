@@ -1,5 +1,22 @@
 # Release Notes
 
+## 2026-08-15 — gRPC ingest 监听器 TLS + 失败关闭的 `check-config` 门禁（internal/grpcapi + cmd/audit-api，add-tls-grpc-creds-to-the-grpc-ingest-listener）
+
+**写给运营（行为变化）：**
+
+- **入站 gRPC 监听器支持原生 TLS（推荐）**：新增 `-grpc-tls-cert` / `-grpc-tls-key`（env `AUDIT_GRPC_TLS_CERT` / `AUDIT_GRPC_TLS_KEY`，均为 PEM 文件路径，必须成对设置）。配置后监听器只接受 TLS 握手（grpc-go 在握手层拒绝明文 h2c 客户端），`authorization` bearer 元数据不再明文过网（RFC 6750 §1；此前 release-notes 已知问题「入站 gRPC 监听器默认无 TLS」由此关闭）。
+- **失败关闭的 preflight 门禁**：`-check-config` 现在对 gRPC 监听器做传输校验，且**启动路径使用同一门禁**（preflight 与 runtime 不可能分歧）：非 loopback 监听（`AUDIT_GRPC_LISTEN` 含 `:50051`、`0.0.0.0:…`、任意主机名）在**未配 TLS 且未显式放行**时，preflight/启动均失败（exit 1，marker `check_config=fail grpc=plaintext_without_allowlist`，命名 `AUDIT_GRPC_LISTEN` 与 `AUDIT_ALLOW_INSECURE_GRPC_LISTEN`），启动在绑定任何端口之前中止。
+- **三条受支持的生产/验证部署路径**：(a) 原生 TLS——`AUDIT_GRPC_TLS_CERT`/`AUDIT_GRPC_TLS_KEY`（首选）；(b) TLS 终结设施 + 仅回环监听——`AUDIT_GRPC_LISTEN=127.0.0.1:…`（回环例外，与 F3 `AUDIT_ALLOW_INSECURE_API_URL` 同款语义）；(c) 显式不安全放行——`AUDIT_ALLOW_INSECURE_GRPC_LISTEN=true` **仅限本地 verify 栈**（环境变量专用、无对应 flag；严格布尔解析，`tru` 等畸形值 exit 1 命名变量，无 fail-open 路径）。生产环境绝不设置 (c)。
+- **`check_config=ok` 行新增末位无条件字段 `transport_grpc=<tls|insecure|disabled>`**（在 `transport_vault` 之后），监听器未配置时固定为 `disabled`；输出与退出码为解析后配置的纯函数，跨运行字节一致（不校验证书有效期，保持确定性）。
+- **verify 栈配套（同 commit 落地）**：`deploy/docker-compose.verify.yml` 已为 `audit-api` 设置 `AUDIT_ALLOW_INSECURE_GRPC_LISTEN: "true"`（仅本机隔离网络），`19051:50051` 发布端口与 `test/e2e/fullstack.sh` 的明文 grpcwrite 客户端继续可用。
+- **无 wire/契约变更、无存储迁移**；回滚 = 取消 env 或重新部署旧二进制（旧二进制恢复非 loopback 明文监听，缺陷随之回归，请同步升级生产方与 verify 栈）。
+
+**写给开发（实现变化）：**
+
+- `internal/grpcapi/tls.go`（新增）：导出 `ServerCredentials(certFile, keyFile) (credentials.TransportCredentials, error)`（`tls.LoadX509KeyPair` + `credentials.NewTLS`，无 MinVersion/密套覆写、无网络访问；错误返回不内置日志，preflight 与启动同文案）。
+- `cmd/audit-api/main.go`：新增 `-grpc-tls-cert`/`-grpc-tls-key` flag（env 默认同款模式）；新增 `loopbackListenAddr`（空主机 `:50051`/通配 IP/Docker host-gateway 别名一律非回环，fail-closed）、`grpcAllowlisted`（`strictBoolValue` 严格解析）与单一共享门禁 `resolveGRPCTransport`（返回 label + creds + err，preflight 与启动共用，杜绝分歧与双份 TLS 加载）；启动在 `net.Listen` 前应用同一门禁，TLS 时 `grpc.Creds` 追加进既有 keepalive/容量/恢复选项集（panic-recovery 仍最外层）；`runCheckConfig` 签名新增 3 个 gRPC 输入并在 `check_config=ok` 前落地门禁；部分 TLS（cert xor key）、PEM 不可读/不匹配、畸形 allowlist 均为硬错误（即便监听器未配置也校验 TLS 文件）。
+- 测试：`internal/grpcapi/tls_test.go`（`TestServerCredentials` 单元 + `TestGRPCTLSWriteEndToEnd` A1 + `TestGRPCTLSRejectsPlaintextClient` A2，自签名证书测试内生成、无入库私钥）；`cmd/audit-api/main_test.go`（`TestLoopbackListenAddr`、`TestRunCheckConfigGRPCPlaintextFailsClosed` A3 全矩阵、`TestRunCheckConfigGRPCDeterministic` A4、`TestRunCheckConfigGRPCFieldPosition` 位置契约、`TestStrictBoolEnvSubprocessGRPCGate` 子进程 + 跨运行确定性、`TestStartupGRPCPlaintextFatal` REQ-4 启动一致）；`internal/grpcapi/wiring_test.go` 静态钉新增 `grpcapi.ServerCredentials(`、`grpc.Creds(`、`-grpc-tls-cert`、`-grpc-tls-key`。
+
 ## 2026-08-15 — 归档键改用单射可逆编码：丢损 safeName 折叠消失（internal/fsutil，lossy-safename-archive-key-framing-collapses）
 
 **写给运营（行为变化）：**

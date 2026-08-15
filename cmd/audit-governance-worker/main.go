@@ -348,7 +348,11 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 		logger.Printf("transport: %v", transportErr)
 		return 1
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport)
+	// transport_grpc is the gRPC ingest listener's transport label; the worker
+	// has no gRPC listener, so it is unconditionally "disabled", keeping the
+	// ok-line field set/order byte-identical in shape to the API's line (C6:
+	// CI compares API and worker outputs).
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport, "disabled")
 	return 0
 }
 

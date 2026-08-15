@@ -11,11 +11,12 @@ import (
 
 // TestProductionWiringStatic pins AC-3: the production construction path in
 // cmd/audit-api/main.go must compose the exported grpcapi pieces — chain
-// interceptors, keepalive parameters, health registration, SERVING after
-// bootstrap, and health drain before GracefulStop. It fails closed on
-// identifier removal. It is intentionally identifier-level (not
-// line-number-level) so formatting or line moves do not break it; AC-1 and
-// AC-2 exercise the same construction path empirically (AC-3.3 cross-check).
+// interceptors, keepalive parameters, TLS server credentials, health
+// registration, SERVING after bootstrap, and health drain before
+// GracefulStop. It fails closed on identifier removal. It is intentionally
+// identifier-level (not line-number-level) so formatting or line moves do not
+// break it; AC-1 and AC-2 exercise the same construction path empirically
+// (AC-3.3 cross-check).
 func TestProductionWiringStatic(t *testing.T) {
 	source, err := os.ReadFile(filepath.Join("..", "..", "cmd", "audit-api", "main.go"))
 	if err != nil {
@@ -30,6 +31,15 @@ func TestProductionWiringStatic(t *testing.T) {
 		"grpc.ChainStreamInterceptor(grpcapi.RecoveryStreamServerInterceptor",
 		"grpcapi.RegisterHealth(",
 		"grpcapi.MarkServing(",
+		// TLS wiring (A1 companion): the production construction path must keep
+		// loading server credentials through the exported grpcapi seam and
+		// pass them to grpc.Creds, and the -grpc-tls-cert/-grpc-tls-key flags
+		// must exist — the static pins fail closed on identifier removal, so
+		// the transport can never silently drop back to plaintext.
+		"grpcapi.ServerCredentials(",
+		"grpc.Creds(",
+		"-grpc-tls-cert",
+		"-grpc-tls-key",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("production construction path missing %q", want)

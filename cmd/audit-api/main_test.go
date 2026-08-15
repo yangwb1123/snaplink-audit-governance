@@ -3,10 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +58,7 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator())
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -68,7 +75,7 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 	buf.Reset()
 	external.S3UseSSL = true
 	external.ArchiveRetentionDays = 365
-	exit = runCheckConfig(logger, validConfig(), external, validAuthenticator())
+	exit = runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
 	if exit != 0 {
 		t.Fatalf("positive control exit=%d, want 0; log: %q", exit, buf.String())
 	}
@@ -98,7 +105,7 @@ func TestRunCheckConfigVaultFailFast(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
 			external := runtimeconfig.SigningArchive{VaultAddr: tc.addr, VaultToken: "t", VaultTransitKey: "audit-checkpoints", AllowInsecureVaultLoopback: tc.allow}
-			exit := runCheckConfig(logger, validConfig(), external, validAuthenticator())
+			exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
 			if exit != tc.wantExit {
 				t.Fatalf("exit=%d, want %d; log: %q", exit, tc.wantExit, buf.String())
 			}
@@ -140,7 +147,7 @@ func TestCheckConfigTransportLine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
-			exit := runCheckConfig(logger, validConfig(), tc.external, validAuthenticator())
+			exit := runCheckConfig(logger, validConfig(), tc.external, validAuthenticator(), "", "", "")
 			if exit != 0 {
 				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 			}
@@ -163,7 +170,7 @@ func TestTransportErrorFailsCheckConfig(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000"} // partial S3
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator())
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -182,7 +189,7 @@ func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator())
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -614,7 +621,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 	t.Setenv(envDevAuth, "")
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn)
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -624,7 +631,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 	}
 	buf.Reset()
 	t.Setenv(envDevAuth, "true")
-	exit = runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn)
+	exit = runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
 	if exit != 0 || !strings.Contains(buf.String(), "check_config=ok") {
 		t.Fatalf("exit=%d, want 0 with check_config=ok; log: %q", exit, buf.String())
 	}
@@ -635,7 +642,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 func TestRunCheckConfigInvalidSecrets(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, service.Config{}, runtimeconfig.SigningArchive{}, validAuthenticator())
+	exit := runCheckConfig(logger, service.Config{}, runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "")
 	if exit != 1 || !strings.Contains(buf.String(), "invalid secrets") {
 		t.Fatalf("exit=%d, want 1 with invalid secrets; log: %q", exit, buf.String())
 	}
@@ -649,7 +656,7 @@ func TestRunCheckConfigInvalidSecrets(t *testing.T) {
 func TestRunCheckConfigInvalidAuth(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, auth.Authenticator{})
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, auth.Authenticator{}, "", "", "")
 	if exit != 1 || !strings.Contains(buf.String(), "invalid authentication configuration") {
 		t.Fatalf("exit=%d, want 1 with invalid auth; log: %q", exit, buf.String())
 	}
@@ -665,7 +672,7 @@ func TestRunCheckConfigRejectsShortJWTSecret(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	authn := auth.Authenticator{JWTSecret: "short", AllowLocalHS256: true}
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn)
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -687,7 +694,7 @@ func TestRunCheckConfigRejectsShortJWTSecret(t *testing.T) {
 func TestRunCheckConfigReportsJWTSecretLength(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator())
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "")
 	if exit != 0 {
 		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 	}
@@ -734,7 +741,7 @@ func TestRunCheckConfigReportsZeroJWTLengthWhenUnset(t *testing.T) {
 			t.Setenv(envDevAuth, "true")
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
-			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, tc.authn)
+			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, tc.authn, "", "", "")
 			if exit != 0 {
 				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 			}
@@ -767,7 +774,7 @@ func TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
 			authn := auth.Authenticator{JWTSecret: tc.secret, AllowLocalHS256: true}
-			exit := runCheckConfig(logger, cfg, runtimeconfig.SigningArchive{}, authn)
+			exit := runCheckConfig(logger, cfg, runtimeconfig.SigningArchive{}, authn, "", "", "")
 			if exit != 1 {
 				t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 			}
@@ -942,4 +949,351 @@ func TestWireExternal(t *testing.T) {
 			t.Fatalf("no provider log expected, got: %q", buf.String())
 		}
 	})
+}
+
+// writeTestTLSFiles generates a self-signed localhost cert/key pair into a
+// private temp dir and returns the PEM paths (test fixture; no checked-in
+// private key). Shared by the check-config TLS cells and the subprocess gate
+// tests.
+func writeTestTLSFiles(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "server.crt")
+	keyFile = filepath.Join(dir, "server.key")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+// TestLoopbackListenAddr pins REQ-3.1's fail-closed loopback determination
+// for the server side: localhost and loopback IPs qualify; empty-host
+// (":50051" binds all interfaces), wildcard IPs, other hostnames and the
+// Docker host-gateway aliases never do — so a listener can never be assumed
+// loopback unless it says so explicitly.
+func TestLoopbackListenAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:50051", true},
+		{"localhost:50051", true},
+		{"[::1]:50051", true},
+		{"localhost", true},
+		{":50051", false},
+		{"0.0.0.0:50051", false},
+		{"[::]:50051", false},
+		{"host.docker.internal:50051", false},
+		{"gateway.docker.internal:50051", false},
+		{"audit-api:50051", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := loopbackListenAddr(tc.addr); got != tc.want {
+			t.Errorf("loopbackListenAddr(%q)=%v, want %v", tc.addr, got, tc.want)
+		}
+	}
+}
+
+// TestRunCheckConfigGRPCPlaintextFailsClosed is A3: check-config exits 1
+// when grpc-listen is set without TLS and without the explicit insecure
+// allowlist (marker naming both variables, no check_config=ok), and exits 0
+// with TLS configured or the allowlist set. Covers every cell of the
+// deterministic gate matrix (REQ-3), including the REQ-3.3 cell where a
+// broken/partial TLS pair fails even when the listener is disabled.
+func TestRunCheckConfigGRPCPlaintextFailsClosed(t *testing.T) {
+	certFile, keyFile := writeTestTLSFiles(t)
+	cases := []struct {
+		name      string
+		listen    string
+		cert, key string
+		allow     string // env value; "" = unset
+		wantExit  int
+		wantLabel string   // transport_grpc value on the ok line (exit 0 cells)
+		wantText  []string // required substrings (exit 1 cells)
+	}{
+		{
+			name:   "non-loopback plaintext without allowlist fails closed",
+			listen: ":50051", wantExit: 1,
+			wantText: []string{"check_config=fail grpc=plaintext_without_allowlist", "AUDIT_GRPC_LISTEN", grpcInsecureAllowlistEnv},
+		},
+		{
+			name:   "non-loopback plaintext with allowlist passes",
+			listen: ":50051", allow: "true", wantExit: 0, wantLabel: "insecure",
+		},
+		{
+			name:   "tls pair passes",
+			listen: ":50051", cert: certFile, key: keyFile, wantExit: 0, wantLabel: "tls",
+		},
+		{
+			name:   "loopback plaintext passes without allowlist",
+			listen: "127.0.0.1:50051", wantExit: 0, wantLabel: "insecure",
+		},
+		{
+			name:   "cert-only is a hard error even with allowlist",
+			listen: ":50051", cert: certFile, allow: "true", wantExit: 1,
+			wantText: []string{"partial TLS configuration", "-grpc-tls-cert", "-grpc-tls-key"},
+		},
+		{
+			name:   "key-only is a hard error",
+			listen: ":50051", key: keyFile, wantExit: 1,
+			wantText: []string{"partial TLS configuration"},
+		},
+		{
+			name:   "unreadable pem pair is a hard error",
+			listen: ":50051", cert: "/nonexistent/server.crt", key: "/nonexistent/server.key", wantExit: 1,
+			wantText: []string{"gRPC TLS:"},
+		},
+		{
+			name:   "tls files validated even when listener disabled",
+			listen: "", cert: "/nonexistent/server.crt", key: "/nonexistent/server.key", wantExit: 1,
+			wantText: []string{"gRPC TLS:"},
+		},
+		{
+			name:   "listener disabled reports disabled",
+			listen: "", wantExit: 0, wantLabel: "disabled",
+		},
+		{
+			name:   "malformed allowlist is a hard error",
+			listen: ":50051", allow: "tru", wantExit: 1,
+			wantText: []string{grpcInsecureAllowlistEnv, "not a valid boolean"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(grpcInsecureAllowlistEnv, tc.allow)
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key)
+			if exit != tc.wantExit {
+				t.Fatalf("exit=%d, want %d; log: %q", exit, tc.wantExit, buf.String())
+			}
+			out := buf.String()
+			if tc.wantExit == 1 {
+				for _, want := range tc.wantText {
+					if !strings.Contains(out, want) {
+						t.Fatalf("log must contain %q, got: %q", want, out)
+					}
+				}
+				if strings.Contains(out, "check_config=ok") {
+					t.Fatalf("check_config=ok must not be printed, got: %q", out)
+				}
+			} else if !strings.Contains(out, "transport_grpc="+tc.wantLabel) {
+				t.Fatalf("ok line must report transport_grpc=%s, got: %q", tc.wantLabel, out)
+			}
+		})
+	}
+}
+
+// TestRunCheckConfigGRPCDeterministic is A4: two invocations of
+// runCheckConfig with identical configuration produce byte-identical output
+// and equal exit codes, across the TLS, allowlisted-plaintext and disabled
+// cells (prefixless logger, per REQ-5.4).
+func TestRunCheckConfigGRPCDeterministic(t *testing.T) {
+	certFile, keyFile := writeTestTLSFiles(t)
+	cells := []struct {
+		name, listen, cert, key, allow string
+	}{
+		{"tls", ":50051", certFile, keyFile, ""},
+		{"allowlisted plaintext", ":50051", "", "", "true"},
+		{"disabled", "", "", "", ""},
+	}
+	for _, cell := range cells {
+		t.Run(cell.name, func(t *testing.T) {
+			t.Setenv(grpcInsecureAllowlistEnv, cell.allow)
+			run := func() (int, string) {
+				var buf bytes.Buffer
+				exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), cell.listen, cell.cert, cell.key)
+				return exit, buf.String()
+			}
+			exit1, out1 := run()
+			exit2, out2 := run()
+			if exit1 != exit2 {
+				t.Fatalf("exit codes differ across runs: %d vs %d", exit1, exit2)
+			}
+			if out1 != out2 {
+				t.Fatalf("output differs across runs:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", out1, out2)
+			}
+		})
+	}
+}
+
+// TestRunCheckConfigGRPCFieldPosition pins REQ-3.4/REQ-5.2: transport_grpc
+// is the final unconditional ok-line field after transport_vault, its value
+// comes only from {tls, insecure, disabled}, and it is never omitted when
+// the listener is unset (disabled).
+func TestRunCheckConfigGRPCFieldPosition(t *testing.T) {
+	certFile, keyFile := writeTestTLSFiles(t)
+	cases := []struct {
+		name, listen, cert, key, allow, want string
+	}{
+		{"disabled", "", "", "", "", "disabled"},
+		{"loopback insecure", "127.0.0.1:50051", "", "", "", "insecure"},
+		{"allowlisted insecure", ":50051", "", "", "true", "insecure"},
+		{"tls", ":50051", certFile, keyFile, "", "tls"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(grpcInsecureAllowlistEnv, tc.allow)
+			var buf bytes.Buffer
+			exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key)
+			if exit != 0 {
+				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+			}
+			okLine := checkConfigOKLine(buf.String())
+			if okLine == "" {
+				t.Fatalf("check_config=ok must be printed, got: %q", buf.String())
+			}
+			posS3 := strings.Index(okLine, "transport_s3=")
+			posVault := strings.Index(okLine, "transport_vault=")
+			posGRPC := strings.Index(okLine, "transport_grpc=")
+			if !(posS3 >= 0 && posS3 < posVault && posVault < posGRPC) {
+				t.Fatalf("field order must be transport_s3 < transport_vault < transport_grpc, got: %q", okLine)
+			}
+			value := okLine[posGRPC+len("transport_grpc="):]
+			if value != "tls" && value != "insecure" && value != "disabled" {
+				t.Fatalf("transport_grpc value %q not in the fixed set, got: %q", value, okLine)
+			}
+			if value != tc.want {
+				t.Fatalf("transport_grpc=%s, want %s; got: %q", value, tc.want, okLine)
+			}
+			if !strings.HasSuffix(okLine, "transport_grpc="+value) {
+				t.Fatalf("transport_grpc must be the final field, got: %q", okLine)
+			}
+		})
+	}
+}
+
+// TestStrictBoolEnvSubprocessGRPCGate is A3's subprocess leg (via the real
+// built binary): AUDIT_GRPC_LISTEN=:50051 without TLS fails check-config
+// with the auditable marker; the env-only allowlist (strict "true") passes
+// with transport_grpc=insecure; a malformed allowlist exits 1 naming the
+// variable (FM-1). Also cross-checks REQ-5.4 determinism: two runs with
+// identical env produce identical exit codes and marker content.
+func TestStrictBoolEnvSubprocessGRPCGate(t *testing.T) {
+	binary, err := buildAPIBinary()
+	if err != nil {
+		t.Skipf("api binary unavailable: %v", err)
+	}
+	baseEnv := []string{
+		"AUDIT_SIGNING_SECRET=test-secret",
+		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_JWT_SECRET=" + testJWTSecret,
+		"AUDIT_ALLOW_LOCAL_HS256=true",
+	}
+	run := func(env ...string) (string, error) {
+		cmd := exec.Command(binary, "-check-config")
+		cmd.Env = append(os.Environ(), baseEnv...)
+		cmd.Env = append(cmd.Env, env...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	t.Run("non-loopback plaintext fails closed", func(t *testing.T) {
+		out, err := run("AUDIT_GRPC_LISTEN=:50051")
+		if err == nil {
+			t.Fatalf("check-config must exit 1, output: %s", out)
+		}
+		for _, want := range []string{"check_config=fail grpc=plaintext_without_allowlist", "AUDIT_GRPC_LISTEN", grpcInsecureAllowlistEnv} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("output must contain %q, got: %s", want, out)
+			}
+		}
+		if strings.Contains(out, "check_config=ok") {
+			t.Fatalf("check_config=ok must not be printed, got: %s", out)
+		}
+	})
+	t.Run("allowlist true passes", func(t *testing.T) {
+		out, err := run("AUDIT_GRPC_LISTEN=:50051", grpcInsecureAllowlistEnv+"=true")
+		if err != nil {
+			t.Fatalf("check-config must exit 0: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "check_config=ok") || !strings.Contains(out, "transport_grpc=insecure") {
+			t.Fatalf("output must report check_config=ok with transport_grpc=insecure, got: %s", out)
+		}
+	})
+	t.Run("malformed allowlist names the variable", func(t *testing.T) {
+		out, err := run("AUDIT_GRPC_LISTEN=:50051", grpcInsecureAllowlistEnv+"=tru")
+		if err == nil {
+			t.Fatalf("check-config must exit 1 on a malformed allowlist, output: %s", out)
+		}
+		if !strings.Contains(out, grpcInsecureAllowlistEnv) || !strings.Contains(out, "not a valid boolean") {
+			t.Fatalf("output must name the variable and the parse failure, got: %s", out)
+		}
+	})
+	t.Run("deterministic across runs", func(t *testing.T) {
+		env := []string{"AUDIT_GRPC_LISTEN=:50051", grpcInsecureAllowlistEnv + "=true"}
+		out1, err1 := run(env...)
+		out2, err2 := run(env...)
+		if (err1 == nil) != (err2 == nil) {
+			t.Fatalf("exit codes differ across runs: %v vs %v", err1, err2)
+		}
+		// The real binary prefixes LstdFlags|Lmicroseconds timestamps
+		// (REQ-5.4); strip to the first check_config marker per line.
+		strip := func(s string) string {
+			var lines []string
+			for _, line := range strings.Split(s, "\n") {
+				if i := strings.Index(line, "check_config"); i >= 0 {
+					lines = append(lines, line[i:])
+				}
+			}
+			return strings.Join(lines, "\n")
+		}
+		if strip(out1) != strip(out2) {
+			t.Fatalf("marker content differs across runs:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", strip(out1), strip(out2))
+		}
+	})
+}
+
+// TestStartupGRPCPlaintextFatal is REQ-4.1/4.2: startup fails fast through
+// the logger path (non-zero exit, actionable text naming the opt-in) when a
+// non-loopback plaintext gRPC listener is configured without TLS and without
+// the allowlist, proving preflight and runtime agree and that no listener is
+// ever bound for a config the gate rejects (no listen= line).
+func TestStartupGRPCPlaintextFatal(t *testing.T) {
+	binary, err := buildAPIBinary()
+	if err != nil {
+		t.Skipf("api binary unavailable: %v", err)
+	}
+	cmd := exec.Command(binary, "-state", filepath.Join(t.TempDir(), "state.json"))
+	cmd.Env = append(os.Environ(),
+		"AUDIT_SIGNING_SECRET=test-secret",
+		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_JWT_SECRET="+testJWTSecret,
+		"AUDIT_ALLOW_LOCAL_HS256=true",
+		"AUDIT_GRPC_LISTEN=:50051",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("startup with a non-loopback plaintext gRPC listener must exit non-zero, output: %s", out)
+	}
+	text := string(out)
+	if !strings.Contains(text, grpcInsecureAllowlistEnv) || !strings.Contains(text, "plaintext_without_allowlist") {
+		t.Fatalf("startup must surface the actionable gate text naming the opt-in, got: %s", text)
+	}
+	if strings.Contains(text, "listen=") {
+		t.Fatalf("startup must fail before binding listeners, got: %s", text)
+	}
 }

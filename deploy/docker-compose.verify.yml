@@ -8,6 +8,12 @@ services:
     environment:
       AUDIT_LISTEN: ":8089"
       AUDIT_GRPC_LISTEN: ":50051"
+      # 传输门禁的显式放行（dev-only）：verify 栈内 gRPC ingest 监听器走容器
+      # 网络明文（:50051 非 loopback），authorization bearer 元数据仅在本机
+      # 隔离网络（audit_verify）内传输；check-config/启动时非 loopback 明文
+      # 监听默认失败关闭，生产环境必须使用 TLS（AUDIT_GRPC_TLS_CERT/KEY），
+      # 绝不设置此变量（与 AUDIT_ALLOW_INSECURE_API_URL 同款 F3 门禁）。
+      AUDIT_ALLOW_INSECURE_GRPC_LISTEN: "true"
       AUDIT_STATE_PATH: /var/lib/audit/state.json
       AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
       # 验证栈明示：允许从残留文件状态切到 PostgreSQL 快照（防数据丢失保护
