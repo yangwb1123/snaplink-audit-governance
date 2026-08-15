@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snaplink/audit-governance/internal/kafka"
 )
 
 // Regression tests for the consumer binary's flag/env wiring (REQ-6):
@@ -47,6 +50,35 @@ func runBinary(t *testing.T, args ...string) (string, int) {
 	}
 	cmd.Env = clean
 	output, err := cmd.CombinedOutput()
+	exit := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exit = exitErr.ExitCode()
+		} else {
+			t.Fatalf("run consumer: %v", err)
+		}
+	}
+	return string(output), exit
+}
+
+// runBinaryCtx is the deadline-kill variant of runBinary (design F2): the
+// consumer never exits on an unreachable broker (kafka-go dials lazily and
+// retries forever), so tests that only assert on startup output kill the
+// process after the deadline and assert on the accumulated output, never on
+// the exit code. Same env filtering as runBinary — tests must pass explicit
+// flags for anything the harness does not strip (e.g. -token "" for the
+// empty-token case, F-07).
+func runBinaryCtx(t *testing.T, ctx context.Context, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, consumerBin, args...)
+	var clean []string
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "AUDIT_KAFKA_") {
+			clean = append(clean, entry)
+		}
+	}
+	cmd.Env = clean
+	output, err := cmd.CombinedOutput() // returns accumulated output when the deadline kills the process
 	exit := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -133,5 +165,102 @@ func TestEnvOrFallback(t *testing.T) {
 	t.Setenv("AUDIT_KAFKA_TOPIC", "audit.events.accepted.v1")
 	if got := envOr("AUDIT_KAFKA_TOPIC", "fallback-topic"); got != "audit.events.accepted.v1" {
 		t.Fatalf("envOr = %q, want env value", got)
+	}
+}
+
+// AC-7.1.1/7.1.2 + AC-7.4.1 (F2 harness): with an empty token the binary
+// prints the REQ-7.1 warning (substrings AUDIT_OUTBOX_TOKEN is empty and 401)
+// BEFORE any consumption — asserted on captured output only, never on the
+// exit code: the process blocks on the unreachable broker (kafka-go dials
+// lazily and retries forever) and is killed by the deadline.
+func TestConsumerWarnsOnEmptyToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "")
+	if !strings.Contains(output, "AUDIT_OUTBOX_TOKEN is empty") || !strings.Contains(output, "401") {
+		t.Fatalf("warning missing from output:\n%s", output)
+	}
+}
+
+// AC-7.4.2/AC-7.1.3: a non-empty explicit token produces no warning (no
+// false positive; -token is passed explicitly so the test is hermetic
+// against an inherited AUDIT_OUTBOX_TOKEN — the harness strips only
+// AUDIT_KAFKA_*, F-07).
+func TestConsumerSilentWithToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "some-token")
+	if strings.Contains(output, "AUDIT_OUTBOX_TOKEN is empty") {
+		t.Fatalf("unexpected warning with a token set:\n%s", output)
+	}
+	if !strings.Contains(output, "brokers=localhost:9092") {
+		t.Fatalf("startup log missing:\n%s", output)
+	}
+}
+
+// F-03/F-07: the loopback default (http://localhost:8089) passes the F3
+// transport gate and starts normally (no api-url error), warning only on the
+// token state.
+func TestConsumerLoopbackAPIURLDefaultsPass(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "some-token")
+	if strings.Contains(output, "api-url:") {
+		t.Fatalf("loopback api-url must pass the F3 gate:\n%s", output)
+	}
+}
+
+// F3: a non-loopback plaintext http api-url fails closed at startup — the
+// ingest bearer token must never travel in clear (RFC 6750 §1). The test
+// env strips AUDIT_ALLOW_INSECURE_API_URL (and all other vars) so the gate
+// is exercised without the dev/verify-stack opt-in.
+func TestConsumerRejectsNonLoopbackPlaintextAPIURL(t *testing.T) {
+	cmd := exec.Command(consumerBin, "-brokers", "localhost:9092", "-api-url", "http://example.invalid", "-token", "some-token")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("non-loopback plaintext http api-url must fail at startup:\n%s", output)
+	}
+	if !strings.Contains(string(output), "api-url:") || !strings.Contains(string(output), "HTTPS") {
+		t.Fatalf("startup guard message missing:\n%s", output)
+	}
+}
+
+// F3 opt-in: with AUDIT_ALLOW_INSECURE_API_URL=true the non-loopback
+// plaintext http api-url starts (dev/verify-stack only) with a loud warning
+// that the bearer token travels in clear.
+func TestConsumerInsecureAPIURLOptInWarns(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, consumerBin, "-brokers", "localhost:9092", "-api-url", "http://example.invalid", "-token", "some-token")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "AUDIT_ALLOW_INSECURE_API_URL=true"}
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("consumer must still run (killed by deadline), output:\n%s", output)
+	}
+	if !strings.Contains(string(output), "plaintext HTTP") || !strings.Contains(string(output), "verify-stack/dev-only") {
+		t.Fatalf("opt-in warning missing:\n%s", output)
+	}
+}
+
+// AC-7.2.3: metricsText renders the consumer counters in the pinned order
+// with the new audit_consumer_unauthorized_total line (golden — a reorder
+// or a name change fails this test).
+func TestConsumerMetricsTextGolden(t *testing.T) {
+	metrics := kafka.ConsumerMetrics{
+		IngestFailures:    1,
+		DeadLettered:      2,
+		Unauthorized:      3,
+		DLQPublished:      4,
+		MessagesCommitted: 5,
+	}
+	want := "" +
+		"audit_consumer_ingest_failures_total 1\n" +
+		"audit_consumer_dead_lettered_total 2\n" +
+		"audit_consumer_unauthorized_total 3\n" +
+		"audit_consumer_dlq_published_total 4\n" +
+		"audit_consumer_messages_committed_total 5\n"
+	if got := metricsText(metrics); got != want {
+		t.Fatalf("metricsText mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }

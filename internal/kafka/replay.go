@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -646,6 +647,25 @@ type Replayer struct {
 	unparsableMarks atomic.Uint64
 	republishFail   atomic.Uint64
 	pending         atomic.Uint64
+	// authBlocked counts error_code=unauthorized DLQ records held blocked
+	// (per-round increments, mirroring dlqRecords semantics): a counter that
+	// never falls, exported as audit_dlq_auth_blocked_total.
+	authBlocked atomic.Uint64
+	// authBlockedPending is the gauge of blocked records collected by the
+	// LATEST round (audit_dlq_auth_blocked): it reflects the current blocked
+	// backlog, falls to 0 once a round collects none (drained or flag
+	// re-admitted them), and is the only signal for a STATIC backlog —
+	// blocked records are excluded from the wanted set, so audit_dlq_pending
+	// stays 0 in blocked-only rounds.
+	authBlockedPending atomic.Uint64
+	// replayAuthBlocked gates the block: default off (= the operator has not
+	// acknowledged the credential is fixed) holds unauthorized records
+	// pending; on, they are re-admitted to the wanted set and replay normally.
+	replayAuthBlocked atomic.Bool
+	// authBlockedDetailBudget is the per-round budget for the per-record
+	// auth-blocked detail log lines (H1: the full backlog must never flood
+	// the log); the round summary line always reports the total.
+	authBlockedDetailBudget atomic.Uint64
 }
 
 // NewReplayer creates the DLQ and accepted-topic readers. The DLQ reader
@@ -727,11 +747,59 @@ func newReplayerWithFactories(dlqNew, acceptedNew func() messageReader, state *R
 	return &Replayer{dlqReader: dlqNew(), dlqNew: dlqNew, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
+// maxAuthBlockedLogDetails bounds the per-round per-record auth-blocked log
+// detail lines. The blocked backlog can reach millions of records (the exact
+// incident scenario: a rotated token dead-letters the whole accepted stream);
+// logging every record every round would flood the log at ~3k lines/s. The
+// first records of each round get a detail line, and the round summary
+// always reports the total (H1).
+const maxAuthBlockedLogDetails = 10
+
+// SetReplayAuthBlocked re-admits error_code=unauthorized DLQ records to the
+// replay set. Call only after the ingest credential is verified working;
+// while the credential is still broken each round re-publishes once and the
+// consumer re-dead-letters (visible via AuditDLQTraffic and
+// AuditDLQAuthBlocked).
+func (r *Replayer) SetReplayAuthBlocked(enabled bool) {
+	r.replayAuthBlocked.Store(enabled)
+}
+
+// authBlockedCount reports how many collected records are held auth-blocked.
+func authBlockedCount(collected []dlqRecord) int {
+	blocked := 0
+	for _, record := range collected {
+		if record.authBlocked {
+			blocked++
+		}
+	}
+	return blocked
+}
+
+// sanitizeLogField strips control characters (log-forging defense, CWE-117:
+// an attacker-influenced DLQ field must never inject lines into the replay
+// log) and truncates the value to limit runes, bounding log growth. Used for
+// attacker-influenced fields echoed by the auth-blocked log line.
+func sanitizeLogField(value string, limit int) string {
+	sanitized := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, value)
+	runes := []rune(sanitized)
+	if len(runes) > limit {
+		runes = runes[:limit]
+	}
+	return string(runes)
+}
+
 // ReplayerMetrics is the /metrics snapshot of the replay counters. Every DLQ
 // event that reaches a durable first resolution increments exactly one of
 // Replayed / UnparsableMarks / PermanentRejections / Unresolvable; a
 // transient republish failure increments none of them (the record stays
-// pending for the next round).
+// pending for the next round). AuthBlocked increments per round a blocked
+// record is re-collected; AuthBlockedPending is the latest-round blocked
+// backlog gauge.
 type ReplayerMetrics struct {
 	DLQRecords          uint64 // DLQ Failure records collected
 	AcceptedScanned     uint64 // accepted-topic messages scanned
@@ -741,6 +809,8 @@ type ReplayerMetrics struct {
 	UnparsableMarks     uint64 // anti-loop marks for key-matched unparsable messages
 	RepublishFailures   uint64 // transient + permanent republish failures (inclusive)
 	Pending             uint64 // wanted events pending in the current round
+	AuthBlocked         uint64 // error_code=unauthorized records held blocked (per-round increments)
+	AuthBlockedPending  uint64 // blocked records collected by the latest round (gauge)
 }
 
 // Metrics returns the replay resolution counters for the /metrics endpoint.
@@ -754,6 +824,8 @@ func (r *Replayer) Metrics() ReplayerMetrics {
 		UnparsableMarks:     r.unparsableMarks.Load(),
 		RepublishFailures:   r.republishFail.Load(),
 		Pending:             r.pending.Load(),
+		AuthBlocked:         r.authBlocked.Load(),
+		AuthBlockedPending:  r.authBlockedPending.Load(),
 	}
 }
 
@@ -796,6 +868,17 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	collected, err := r.collectFailures(ctx)
 	if err != nil && !isDrained(ctx, err) {
 		return 0, err
+	}
+	// Auth-blocked records (error_code=unauthorized, block enabled) are
+	// excluded from the wanted set below but stay pending as commit
+	// barriers. Surface them as the latest-round backlog gauge and one
+	// bounded summary line per round (per-record detail lines are budgeted
+	// in collectFailures, H1). The gauge is set even on the early path so a
+	// blocked-only round is observable via audit_dlq_auth_blocked even
+	// though audit_dlq_pending stays 0.
+	r.authBlockedPending.Store(uint64(authBlockedCount(collected)))
+	if blocked := r.authBlockedPending.Load(); blocked > 0 {
+		r.logger.Printf("dlq round: %d auth-blocked records pending (fix AUDIT_OUTBOX_TOKEN before replay)", blocked)
 	}
 	wanted := wantedEvents(collected)
 	if len(wanted) == 0 {
@@ -889,17 +972,25 @@ func (r *Replayer) drainWindow() time.Duration {
 
 // dlqRecord is one collected DLQ failure with its parsed event ID.
 type dlqRecord struct {
-	message kafka.Message
-	eventID string
-	wanted  bool
+	message   kafka.Message
+	eventID   string
+	errorCode string
+	wanted    bool
+	// authBlocked marks an error_code=unauthorized record held blocked this
+	// round: excluded from the wanted set (scanAccepted and the
+	// drain-to-unresolvable loop never touch it) yet kept wanted=true so the
+	// commit barrier keeps its offset pending (never marked, never
+	// committed, never resolvable) until the credential is fixed and
+	// -replay-auth-blocked re-admits it.
+	authBlocked bool
 }
 
 // wantedEvents returns the set of collected event IDs not yet marked
-// replayed.
+// replayed and not held auth-blocked.
 func wantedEvents(collected []dlqRecord) map[string]bool {
 	wanted := map[string]bool{}
 	for _, record := range collected {
-		if record.wanted {
+		if record.wanted && !record.authBlocked {
 			wanted[record.eventID] = true
 		}
 	}
@@ -928,7 +1019,7 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 	// pending; no commit may cross it.
 	firstPending := map[partitionKey]int64{}
 	for _, record := range collected {
-		if record.wanted && !resolved[record.eventID] {
+		if record.authBlocked || (record.wanted && !resolved[record.eventID]) {
 			key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
 			if offset, ok := firstPending[key]; !ok || record.message.Offset < offset {
 				firstPending[key] = record.message.Offset
@@ -936,8 +1027,8 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 		}
 	}
 	for _, record := range collected {
-		if record.wanted && !resolved[record.eventID] {
-			continue // transient failure: keep the record pending
+		if record.authBlocked || (record.wanted && !resolved[record.eventID]) {
+			continue // auth-blocked: config-fixable, stays pending until the credential is restored (or -replay-auth-blocked)
 		}
 		key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
 		if pending, ok := firstPending[key]; ok && record.message.Offset >= pending {
@@ -964,6 +1055,10 @@ func isDrained(ctx context.Context, err error) bool {
 func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 	drainCtx, cancel := context.WithTimeout(ctx, r.drainWindow())
 	defer cancel()
+	// Per-round budget for the per-record auth-blocked detail log lines:
+	// the first maxAuthBlockedLogDetails blocked records of THIS round get a
+	// detail line; every round still counts and summarizes the total.
+	r.authBlockedDetailBudget.Store(0)
 	var collected []dlqRecord
 	for {
 		message, err := r.dlqReader.FetchMessage(drainCtx)
@@ -978,7 +1073,24 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 		if decodeErr == nil {
 			r.dlqRecords.Add(1)
 			record.eventID = failure.EventID
+			record.errorCode = failure.ErrorCode
 			record.wanted = !r.state.marked(failure.EventID)
+			// error_code=unauthorized is config-fixable: while the operator has
+			// not acknowledged the credential is fixed (-replay-auth-blocked
+			// off, the default), the record is blocked — excluded from the
+			// wanted set, never marked, never committed. The per-record detail
+			// line is budgeted (H1); the echoed fields are sanitized because
+			// the DLQ topic is an untrusted input boundary (M3/CWE-117).
+			record.authBlocked = failure.ErrorCode == ErrorCodeUnauthorized &&
+				record.wanted && !r.replayAuthBlocked.Load()
+			if record.authBlocked {
+				r.authBlocked.Add(1)
+				if r.authBlockedDetailBudget.Add(1) <= maxAuthBlockedLogDetails {
+					r.logger.Printf("dlq record auth-blocked topic=%s partition=%d offset=%d event_id=%s error=%s (fix AUDIT_OUTBOX_TOKEN before replay)",
+						r.dlqReader.Config().Topic, message.Partition, message.Offset,
+						sanitizeLogField(failure.EventID, 64), sanitizeLogField(failure.ErrorMessage, 200))
+				}
+			}
 		} else {
 			r.logger.Printf("dlq record unparsable topic=%s partition=%d offset=%d error=%v", r.dlqReader.Config().Topic, message.Partition, message.Offset, decodeErr)
 		}

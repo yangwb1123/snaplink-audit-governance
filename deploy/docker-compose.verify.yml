@@ -65,6 +65,11 @@ services:
     environment:
       AUDIT_KAFKA_BROKERS: redpanda:9092
       AUDIT_OUTBOX_API_URL: http://audit-api:8089
+      # F3 传输门禁的显式放行（dev-only）：verify 栈内 audit-api 走容器网络
+      # 明文 HTTP（http://audit-api:8089 非 loopback），ingest bearer token
+      # 仅在本机隔离网络（audit_verify）内传输；二进制启动时非 loopback
+      # 明文 http 默认失败关闭，生产环境必须使用 https，绝不设置此变量。
+      AUDIT_ALLOW_INSECURE_API_URL: "true"
       AUDIT_OUTBOX_TOKEN: ${AUDIT_OUTBOX_TOKEN:-dev:demo:service}
       AUDIT_KAFKA_METRICS: ":9092"
     depends_on:
@@ -82,6 +87,10 @@ services:
       AUDIT_KAFKA_BROKERS: redpanda:9092
       AUDIT_DLQ_REPLAY_STATE: /var/lib/audit/dlq-replay-state.json
       AUDIT_DLQ_REPLAY_METRICS: ":9093"
+      # Kafka 重发模式（无 -api-url），不涉 F3 传输门禁。不带
+      # -replay-auth-blocked（默认关）：error_code=unauthorized 的 DLQ 记录
+      # 保持 auth-blocked（不重放、不提交、计入 audit_dlq_auth_blocked*），
+      # 直到凭证修复后由排空流程显式启用该 flag。
     depends_on:
       - redpanda
     restart: unless-stopped

@@ -61,6 +61,15 @@ func main() {
 		relay.Deliver = kafkaProducer.Deliver
 		logger.Printf("delivery=kafka brokers=%s topic=%s", *kafkaBrokers, kafka.TopicAccepted)
 	} else {
+		// F3 (RFC 6750 §1): the ingest bearer token must never travel over
+		// plaintext http except to loopback targets (or the explicit
+		// dev/verify-stack opt-in). Fails closed before any delivery.
+		if err := outbox.ValidateAPIURL(*apiURL, outbox.InsecureAPIURLAllowed()); err != nil {
+			logger.Fatalf("api-url: %v", err)
+		}
+		if outbox.InsecureAPIURLAllowed() && outbox.IsInsecureHTTPURL(*apiURL) {
+			logger.Printf("warning: %s=true: the ingest bearer token is sent over plaintext HTTP (%s) — verify-stack/dev-only, never production", outbox.APIURLInsecureEnv, *apiURL)
+		}
 		if strings.TrimSpace(*token) == "" {
 			logger.Printf("warning: AUDIT_OUTBOX_TOKEN is empty; the audit API will reject every delivery (401) and the backlog will retry until attempts are exhausted — set the token before starting")
 		}

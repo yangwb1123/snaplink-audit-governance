@@ -67,10 +67,10 @@ func HTTPDeliverer(apiURL, token string, client *http.Client) DeliverFunc {
 				Receipt domain.EventReceipt `json:"receipt"`
 			}
 			if err := json.NewDecoder(io.LimitReader(response.Body, maxReceiptBytes)).Decode(&envelope); err != nil {
-				return nil, unverified(response.Status, fmt.Errorf("receipt body decode failed: %v", err))
+				return nil, unverified(response.StatusCode, response.Status, fmt.Errorf("receipt body decode failed: %v", err))
 			}
 			if err := verifyReceipt(event, envelope.Receipt); err != nil {
-				return nil, unverified(response.Status, err)
+				return nil, unverified(response.StatusCode, response.Status, err)
 			}
 			return &envelope.Receipt, nil
 		}
@@ -81,15 +81,18 @@ func HTTPDeliverer(apiURL, token string, client *http.Client) DeliverFunc {
 		permanent := response.StatusCode >= 400 && response.StatusCode < 500 &&
 			response.StatusCode != http.StatusUnauthorized &&
 			response.StatusCode != http.StatusTooManyRequests
-		return nil, &DeliveryError{Permanent: permanent, Err: fmt.Errorf("audit api returned %s", response.Status)}
+		return nil, &DeliveryError{Permanent: permanent, StatusCode: response.StatusCode,
+			Err: fmt.Errorf("audit api returned %s", response.Status)}
 	}
 }
 
 // unverified classifies a 2xx that cannot be proven as a receipt-verified
 // delivery: retryable, never permanent (a 2xx gives no evidence the API
-// rejected the event).
-func unverified(status string, reason error) error {
-	return &DeliveryError{Permanent: false,
+// rejected the event). The status code is threaded through so the field is
+// honest about the transport result (a 2xx is never 401, so classification
+// is unaffected).
+func unverified(statusCode int, status string, reason error) error {
+	return &DeliveryError{Permanent: false, StatusCode: statusCode,
 		Err: fmt.Errorf("audit api returned %s without a verified receipt: %v", status, reason)}
 }
 

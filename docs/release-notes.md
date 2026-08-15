@@ -1,5 +1,99 @@
 # Release Notes
 
+## 2026-08-15 — 401 类死信持久判别 + 无盲重放（`-replay-auth-blocked`）+ api-url 明文传输门禁
+
+**写给运营（行为变化）：**
+
+- **空/轮换 ingest token 现在有独立的失败信号**：`audit-kafka-consumer` 启动时若
+  `AUDIT_OUTBOX_TOKEN` 为空会立即打印警告（与 relay 对齐），且 401 类重试耗尽的消息
+  死信为 `error_code="unauthorized"`（此前与 API 故障一样是 `attempts_exhausted`），
+  单独计数 `audit_consumer_unauthorized_total`。新增两条告警：
+  `AuditDLQAuthBlocked`（15m 窗口内新的 401 类死信）与 `AuditDLQAuthBlockedBacklog`
+  （replay 侧 `audit_dlq_auth_blocked` 积压 gauge > 0 —— 阻塞记录不计入
+  `audit_dlq_pending`，`AuditDLQBacklog` 看不到它）。两条告警都依赖对应二进制挂载
+  `/metrics`（`AUDIT_KAFKA_METRICS` / `AUDIT_DLQ_REPLAY_METRICS`，默认关闭；
+  `-once` 模式不挂载 /metrics）。
+- **`audit-kafka-dlq-replay` 不再盲重放 `unauthorized` 记录**：新 `-replay-auth-blocked`
+  flag（默认**关**）——默认状态下 `error_code="unauthorized"` 的 DLQ 记录被
+  auth-blocked：不重放、不标记、不提交（提交屏障保持其 offset pending），每轮计数
+  `audit_dlq_auth_blocked_total`（计数器，逐轮递增）并更新积压 gauge
+  `audit_dlq_auth_blocked`（最新一轮阻塞数，排空后归零）。flag 打开 = 运营者确认凭证
+  已修复，阻塞记录恢复重放。**排空后必须把 flag 从常驻配置中移除**，恢复保护。
+- **api-url 明文传输门禁（F3，RFC 6750 §1）**：三个客户端二进制（consumer / relay /
+  replay HTTP 模式）启动时校验 `-api-url`/`AUDIT_OUTBOX_API_URL`：非 loopback 的
+  `http://` 直接启动失败（bearer token 明文过网）；https 与 loopback（localhost /
+  127.0.0.1 / ::1 / host.docker.internal）放行；本地验证栈显式设置
+  `AUDIT_ALLOW_INSECURE_API_URL=true` 放行并打印醒目警告。**升级前必须处理**：现有
+  部署若用非 loopback 明文 http，须先加 `AUDIT_ALLOW_INSECURE_API_URL=true` 或改用
+  https，否则新二进制启动即失败。verify compose 已加该变量并标注 dev-only。
+
+**事故处置 runbook（401 类死信 / token 轮换 / IdP 故障）：**
+
+1. 观察 `AuditDLQAuthBlocked` / `AuditDLQAuthBlockedBacklog`（或
+   `audit_consumer_unauthorized_total` 增长）。**先区分凭证问题与 IdP/JWKS 故障**：
+   401 可能来自空/错 `AUDIT_OUTBOX_TOKEN`，也可能来自 IdP/JWKS 不可达或过期公钥
+   （M4）——查 `audit-api` 日志与 `AUDIT_JWKS_URL` 可用性，不要只换 token。
+2. 修复凭证（consumer 的 `AUDIT_OUTBOX_TOKEN`，以及 relay 的对应 token）；确认
+   `AuditDLQAuthBlocked` 不再增长、`audit_consumer_unauthorized_total` 停增。
+3. 用 `-once` 单轮排空：`audit-kafka-dlq-replay -once -replay-auth-blocked`（Kafka
+   重发模式也可用；HTTP 模式确保 `-api-url`/`-token` 正确），观察
+   `audit_dlq_auth_blocked` 归零。常驻实例则临时加 flag 重启，排空后移除。
+4. 若 `audit_dlq_auth_blocked > 0` 但凭证健康且无新死信：检查 DLQ topic 中是否有
+   伪造/残留的 `error_code="unauthorized"` 记录（明文 Kafka 可被注入，H2）——确认
+   对应事件在 accepted topic 有原文后，再用 flag 排空或人工清理。
+5. 排空后确认 `AuditDLQAuthBlockedBacklog` 清除；从常驻配置移除 flag。
+
+**滚动部署与回滚顺序（含混部一次性盲重放窗口）：**
+
+- **上线顺序（必须）**：① 先全部升级 replay 二进制（flag 默认关——旧版 consumer 尚
+  不会写出 `unauthorized` 记录，因此新 replay 对旧版能产生的所有记录行为与旧版逐字节
+  一致，零风险步）→ ② 再全部升级 consumer（开始写入 `unauthorized` 分类）→ ③ 最后
+  应用规则文件。**顺序反了 = 一次性盲重放窗口**：新 consumer 写出的 `unauthorized`
+  记录若被仍在运行的旧 replay 实例（不认识 error_code，盲重放一切）先取到，会被**盲
+  重放一次**并提交——每个记录只有一次窗口，无法重阻塞。新 replay 全量就位后，后续
+  记录才受保护。
+- **既有 DLQ 记录**：升级前已存在的 `attempts_exhausted` 记录（含实际由 401 引起的）
+  无法追溯重分类，首次新版本运行会被照常重放一次（状态维持原状，AC-7.3.3）。
+- **回滚顺序**：① 先关闭所有实例上的 `-replay-auth-blocked`（若开着）→ ② 回滚
+  consumer（停止新分类）→ ③ 最后回滚 replay：**回滚到旧 replay 时，仍处于阻塞的
+  积压记录会被旧版一次性盲重放**——凭证已修复则自动收敛（等于排空）；凭证仍坏则
+  回到改动前行为（每轮盲重放循环）。不想接受盲重放的，先在②之前用 flag 排空积压
+  （`audit_dlq_auth_blocked` 归零）。状态文件格式未变，双向兼容；回滚时同步移除
+  两条新告警规则（引用缺失指标的规则惰性但应清理）。
+- **flag 开启窗口**：flag 仅在事故处置时开（凭证修复后），不要作为常驻配置；凭证仍
+  坏时开启会每轮重发一次阻塞记录并由 consumer 重新死信（`AuditDLQTraffic` 持续触发），
+  属预期且有界（轮间隔）。
+
+**写给开发（实现变化）：**
+
+- `internal/outbox`：`DeliveryError` 新增 `StatusCode int`（分类点与 2xx-unverified
+  路径填充，非 HTTP 错误为 0）；新增 `ValidateAPIURL`/`IsInsecureHTTPURL`/
+  `InsecureAPIURLAllowed`（F3 门禁，镜像 `internal/auth.validateJWKSURL` 的 loopback
+  规则与 `AUDIT_ALLOW_INSECURE_API_URL` 逃生口）。
+- `internal/kafka`：新增 `ErrorCodeUnauthorized = "unauthorized"`（AsyncAPI free
+  string，契约不变）；`Consumer.consume` 达到重试上限时按 `DeliveryError.StatusCode
+  == 401` 分类并递增 `Unauthorized` 计数（非 401/非 DeliveryError 退化为
+  `attempts_exhausted`，FM-2）；`Replayer` 新增 `dlqRecord.errorCode/authBlocked`、
+  `SetReplayAuthBlocked`、`authBlocked` 计数器 + `authBlockedPending` gauge；阻塞记录
+  被 `wantedEvents` 排除且被提交屏障保持 pending（两个谓词同一判定，F-02）；逐记录
+  阻塞日志按轮限流（每轮最多 10 条详情 + 1 条总数汇总，H1），日志字段经控制字符清洗
+  与长度截断（M3/CWE-117）。`RunOnce` 的重置顺序未动，`replay_round_reset` 门禁
+  不受影响。
+- `cmd/audit-kafka-consumer`：启动空 token 警告（parity）；`metricsText` 抽出并新增
+  `audit_consumer_unauthorized_total` 行（golden 固定顺序）。
+- `cmd/audit-kafka-dlq-replay`：新增 `-replay-auth-blocked` flag（对常驻与 `-once`
+  两个实例都生效）；`metricsText` 追加 `audit_dlq_auth_blocked_total` /
+  `audit_dlq_auth_blocked` 两行（T7 两个 golden 同变更更新）；flag 开启且 HTTP 模式
+  token 为空时额外警告（F7）。
+- `cmd/audit-outbox-relay`：HTTP 分支增加 F3 门禁与 opt-in 警告。
+- `deploy/prometheus-rules.verify.yml`：`audit-dlq` 组新增 `AuditDLQAuthBlocked` /
+  `AuditDLQAuthBlockedBacklog`；`checks/prometheus_rules.py` 将其钉死（expr/severity/
+  注解 + YAML 解析）。
+- 测试：AC-7.1.x/7.2.x/7.3.x/7.4.x + 新 AC-D1（flag 恢复重放）/AC-D2（golden 更新）
+  + F-01（StatusCode 端到端填充）/F-02（混合分区阻塞×屏障两种顺序）/F-05（401 后
+  自愈、无 DLQ 时 401 计数）/F-06（词汇钉死）/F-03（阻塞积压 gauge 语义）/H1（详情
+  日志限流）/M3（日志字段清洗）/F3（URL 门禁单元 + 二进制级启动失败/opt-in 警告）。
+
 ## 2026-08-15 — gRPC ingest receive-size cap and per-field envelope limits (HTTP parity, internal/grpcapi)
 
 **写给运营（行为变化）：**

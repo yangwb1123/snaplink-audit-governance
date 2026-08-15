@@ -352,6 +352,75 @@ func TestHTTPDeliverer(t *testing.T) {
 	}
 }
 
+// F-01: DeliveryError.StatusCode is populated at the classification site so
+// the consumer can discriminate 401 (credential problem) from other
+// retryable classes without parsing the message. A refactor that drops the
+// field silently degrades 401 classification to attempts_exhausted — this
+// test pins the end-to-end population.
+func TestHTTPDelivererPopulatesStatusCode(t *testing.T) {
+	newStatusServer := func(status int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+	}
+	event := domain.Event{EventID: "status-code-test"}
+	assertCode := func(server *httptest.Server, wantCode int, wantPermanent bool) {
+		t.Helper()
+		_, err := HTTPDeliverer(server.URL, "token", nil)(context.Background(), event)
+		if err == nil {
+			t.Fatalf("status %d must fail", wantCode)
+		}
+		var deliveryErr *DeliveryError
+		if !errors.As(err, &deliveryErr) {
+			t.Fatalf("status %d error=%v, want *DeliveryError", wantCode, err)
+		}
+		if deliveryErr.StatusCode != wantCode {
+			t.Fatalf("status %d: StatusCode=%d, want %d", wantCode, deliveryErr.StatusCode, wantCode)
+		}
+		if deliveryErr.Permanent != wantPermanent {
+			t.Fatalf("status %d: Permanent=%v, want %v", wantCode, deliveryErr.Permanent, wantPermanent)
+		}
+	}
+	cases := []struct {
+		status    int
+		permanent bool
+	}{
+		{http.StatusUnauthorized, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+		{http.StatusForbidden, true},
+		{http.StatusConflict, true},
+	}
+	for _, tc := range cases {
+		server := newStatusServer(tc.status)
+		assertCode(server, tc.status, tc.permanent)
+		server.Close()
+	}
+	// 2xx-unverified receipt: StatusCode is threaded through (data honesty —
+	// a 2xx is never 401, so classification is unaffected) and stays
+	// retryable.
+	unverifiedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // empty body: no receipt to verify
+	}))
+	defer unverifiedServer.Close()
+	_, err := HTTPDeliverer(unverifiedServer.URL, "token", nil)(context.Background(), event)
+	var deliveryErr *DeliveryError
+	if !errors.As(err, &deliveryErr) {
+		t.Fatalf("2xx-unverified error=%v, want *DeliveryError", err)
+	}
+	if deliveryErr.StatusCode != http.StatusOK || deliveryErr.Permanent {
+		t.Fatalf("2xx-unverified StatusCode=%d Permanent=%v, want 200/false", deliveryErr.StatusCode, deliveryErr.Permanent)
+	}
+	// Non-HTTP failure: no DeliveryError at all, StatusCode stays 0.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close() // connect-refused transport error
+	_, err = HTTPDeliverer(closedURL, "token", nil)(context.Background(), event)
+	if err == nil || errors.As(err, &deliveryErr) {
+		t.Fatalf("transport error=%v, want plain non-DeliveryError", err)
+	}
+}
+
 func TestHTTPDelivererTrailingSlash(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/events" {

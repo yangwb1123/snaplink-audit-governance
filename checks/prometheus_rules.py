@@ -1,28 +1,67 @@
-"""Static gate: the shipped Prometheus rules must alert on the
-unresolvable-drop permanent-loss path.
+"""Static gate: the shipped Prometheus rules must keep the DLQ alert set
+pinned so every permanent-loss / config-fixable path stays visible.
 
-REQ-4/REQ-5: `deploy/prometheus-rules.verify.yml` group `audit-dlq` must
-contain the `AuditDLQUnresolvableDrop` alert with the exact expr
-`increase(audit_dlq_unresolvable_total[15m]) > 0`, `severity: warning`, and
-annotations documenting the permanent-loss meaning. Before the split
-resolution counters landed, unresolvable drops were counted as `replayed`
-and invisible to alerting; a future change that re-conflates the paths,
-renames the alert, or loosens the expr would silently reintroduce that
-alert gap. This gate fails on the pre-change rule file and passes once
-REQ-4 lands.
+Pinned alerts (all in group `audit-dlq` of deploy/prometheus-rules.verify.yml):
 
-The gate is intentionally narrow and stdlib-only: it scans the YAML text
-for the alert block and asserts the pinned expr/severity/annotations. It
-does not import PyYAML or compile anything.
+- `AuditDLQUnresolvableDrop` (REQ-4/REQ-5): the permanent-loss path, expr
+  `increase(audit_dlq_unresolvable_total[15m]) > 0`, severity warning, and
+  annotations documenting the permanent-loss meaning. Before the split
+  resolution counters landed, unresolvable drops were counted as `replayed`
+  and invisible to alerting; a future change that re-conflates the paths,
+  renames the alert, or loosens the expr would silently reintroduce that
+  alert gap.
+
+- `AuditDLQAuthBlocked` (campaign fail-fast-or-warn-on-empty-rotated-
+  ingest-token): new 401-class dead-letters, expr
+  `increase(audit_consumer_unauthorized_total[15m]) > 0`. This is the
+  counter leg: it fires only while the consumer keeps dead-lettering
+  401s, so it goes quiet once the stream stops or the consumer is down.
+
+- `AuditDLQAuthBlockedBacklog` (same campaign): the static backlog leg,
+  expr `audit_dlq_auth_blocked > 0`, on the replay-side gauge. Blocked
+  records are excluded from `audit_dlq_pending` (so `AuditDLQBacklog`
+  stays quiet) and from the wanted set (so the counter leg alone would
+  leave a static backlog — including a forged `error_code=unauthorized`
+  wedge — silent). A gauge is required here, not a counter: counters
+  never fall, so a backlog-drained state is only observable on a gauge.
+
+The rules file is also parsed with `yaml.safe_load` when PyYAML is
+installed (guarded import: the gate must keep working without the
+third-party module), so an unparsable rule file fails the gate instead of
+being scanned as raw text.
 """
 
 import re
 import sys
 from pathlib import Path
 
-ALERT_NAME = "AuditDLQUnresolvableDrop"
-EXPECTED_EXPR = "increase(audit_dlq_unresolvable_total[15m]) > 0"
-EXPECTED_SEVERITY = "warning"
+try:  # pragma: no cover - environment-dependent
+    import yaml as _yaml
+except ImportError:  # pragma: no cover
+    _yaml = None
+
+# name -> (pinned expr, pinned severity, annotation tokens that must appear
+# somewhere in the alert block). Annotation tokens are checked against the
+# whole block text (existing behavior): they document the alert's meaning,
+# so a reword that drops them fails the gate.
+PINNED_ALERTS = {
+    "AuditDLQUnresolvableDrop": {
+        "expr": "increase(audit_dlq_unresolvable_total[15m]) > 0",
+        "severity": "warning",
+        "tokens": ("unresolvable", "permanent loss"),
+    },
+    "AuditDLQAuthBlocked": {
+        "expr": "increase(audit_consumer_unauthorized_total[15m]) > 0",
+        "severity": "warning",
+        "tokens": ("unauthorized", "token"),
+    },
+    "AuditDLQAuthBlockedBacklog": {
+        "expr": "audit_dlq_auth_blocked > 0",
+        "severity": "warning",
+        "tokens": ("auth-blocked", "backlog"),
+    },
+}
+EXPECTED_GROUP = "audit-dlq"
 
 # Rule blocks are indented 6 spaces (`      - alert: ...`); group headers
 # (`  - name: ...`) are indented 2. A block ends at the next line indented
@@ -58,6 +97,31 @@ def _group_of(src: str, line_index: int) -> str | None:
     return group
 
 
+def _check_alert(path: Path, src: str, name: str, pin: dict) -> list[str]:
+    failures = []
+    found = _alert_block(src, name)
+    if found is None:
+        failures.append(
+            f"{path}: group {EXPECTED_GROUP} has no alert named {name} — "
+            "the path it alerts on is invisible"
+        )
+        return failures
+    index, block = found
+    if _group_of(src, index) != EXPECTED_GROUP:
+        failures.append(f"{path}: {name} must live in group {EXPECTED_GROUP}")
+    if not any(line.strip() == f"expr: {pin['expr']}" for line in block):
+        failures.append(f"{path}: {name} expr must be exactly {pin['expr']!r}")
+    if not any(line.strip() == f"severity: {pin['severity']}" for line in block):
+        failures.append(f"{path}: {name} severity must be exactly {pin['severity']!r}")
+    block_text = " ".join(line.strip() for line in block).lower()
+    for token in pin["tokens"]:
+        if token not in block_text:
+            failures.append(
+                f"{path}: {name} block must document its meaning (contain {token!r})"
+            )
+    return failures
+
+
 def run(root=None) -> int:
     if root is None:
         root = Path(__file__).resolve().parents[1]
@@ -65,26 +129,13 @@ def run(root=None) -> int:
     src = path.read_text(encoding="utf-8")
 
     failures = []
-    found = _alert_block(src, ALERT_NAME)
-    if found is None:
-        failures.append(
-            f"{path}: group audit-dlq has no alert named {ALERT_NAME} — "
-            "unresolvable drops are invisible to alerting"
-        )
-    else:
-        index, block = found
-        if _group_of(src, index) != "audit-dlq":
-            failures.append(f"{path}: {ALERT_NAME} must live in group audit-dlq")
-        if not any(line.strip() == f"expr: {EXPECTED_EXPR}" for line in block):
-            failures.append(f"{path}: {ALERT_NAME} expr must be exactly {EXPECTED_EXPR!r}")
-        if not any(line.strip() == f"severity: {EXPECTED_SEVERITY}" for line in block):
-            failures.append(f"{path}: {ALERT_NAME} severity must be exactly {EXPECTED_SEVERITY!r}")
-        annotations = " ".join(line.strip() for line in block).lower()
-        if "unresolvable" not in annotations or "permanent loss" not in annotations:
-            failures.append(
-                f"{path}: {ALERT_NAME} annotations must document the permanent-loss "
-                "meaning (contain 'unresolvable' and 'permanent loss')"
-            )
+    if _yaml is not None:
+        try:
+            _yaml.safe_load(src)
+        except _yaml.YAMLError as exc:  # pragma: no cover - fixture-driven
+            failures.append(f"{path}: rule file does not parse as YAML ({exc})")
+    for name, pin in PINNED_ALERTS.items():
+        failures.extend(_check_alert(path, src, name, pin))
 
     if failures:
         print("FAIL: prometheus rules gate", *failures, sep="\n  ")

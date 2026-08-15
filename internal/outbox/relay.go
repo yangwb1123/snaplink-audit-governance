@@ -58,9 +58,16 @@ type Store interface {
 // DeliveryError classifies a failed delivery. Permanent errors (client
 // errors such as 403/409/422) dead-letter immediately instead of retrying;
 // 401 is deliberately retryable so a token rotation heals the backlog.
+// StatusCode lets callers discriminate the failure cause (401 = credential
+// problem) without parsing the message; it is 0 for non-HTTP errors.
 type DeliveryError struct {
 	Permanent bool
-	Err       error
+	// StatusCode is the HTTP status that produced the failure, or 0 for
+	// non-HTTP errors (dial, timeout, DNS). Populated by HTTPDeliverer at
+	// the single non-2xx classification site and by the unverified 2xx
+	// receipt path, so it is never misleading.
+	StatusCode int
+	Err        error
 }
 
 func (e *DeliveryError) Error() string { return e.Err.Error() }

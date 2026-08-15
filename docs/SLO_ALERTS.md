@@ -18,9 +18,10 @@
 
 ## 2. 告警规则（映射到现有指标）
 
-> 已落地：`deploy/prometheus-rules.verify.yml`（13 条规则，3 组：audit-dlq /
-> audit-slo / audit-production；audit-dlq 组含 `AuditDLQUnresolvableDrop`，
-> 对 unresolvable 永久丢弃告警，见 2026-08-15 release note）。本机可验证的 7 条 SLO 规则直接映射
+> 已落地：`deploy/prometheus-rules.verify.yml`（15 条规则，3 组：audit-dlq /
+> audit-slo / audit-production；audit-dlq 组含 `AuditDLQUnresolvableDrop`（unresolvable 永久丢弃）、
+> `AuditDLQAuthBlocked`（401 类死信）与 `AuditDLQAuthBlockedBacklog`（auth-blocked 积压），
+> 见 2026-08-15 release note）。本机可验证的 7 条 SLO 规则直接映射
 > audit-api `/metrics`；消费滞后与签名失败依赖生产形态指标（本机不提供，
 > 规则已声明待生产接入）；readyz 的 store/archive 503 由部署侧探针负责
 > （本机以 `AuditAPIDown`（up=0）兜底）。
@@ -36,6 +37,8 @@
 | 归档落后 | readiness 探针 `archive_unavailable` | P1 | WORM 目标不可用时停止新归档声明 |
 | 消费滞后 | Kafka consumer lag > 阈值（生产） | P2 | 扩容 consumer/projector |
 | 签名失败 | worker 日志 `sign aggregate checkpoint` 错误 | P0 | KMS/Vault 不可用时停止新 checkpoint |
+| 401 类死信（新） | `increase(audit_consumer_unauthorized_total[15m]) > 0` | P2 | 区分凭证问题与 IdP/JWKS 故障；修复 token 后死信记录保持 auth-blocked，凭证恢复后 `-replay-auth-blocked` 排空（runbook 见 release-notes 2026-08-15） |
+| auth-blocked 积压（新） | `audit_dlq_auth_blocked > 0`（replay 侧 gauge） | P2 | 凭证健康时仍 > 0 说明存在伪造/残留 `unauthorized` 记录（明文 Kafka 可注入）；确认 accepted 原文后排空或清理 |
 
 ## 3. 错误预算
 

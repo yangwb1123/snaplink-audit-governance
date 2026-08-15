@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -474,4 +475,147 @@ func TestConsumerNeverPublishesEmptyEventID(t *testing.T) {
 			t.Fatalf("commits=%d, want 1 (commit + log degradation)", len(reader.commits))
 		}
 	})
+}
+
+// runConsumerWithMetrics runs the consumer directly (not via runConsumer) so
+// the test can assert Metrics() after the run.
+func runConsumerWithMetrics(t *testing.T, reader *fakeReader, ingest IngestFunc, options ...ConsumerOption) *Consumer {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	consumer := newConsumerWithReader(reader, ingest, time.Millisecond, options...)
+	if err := consumer.Run(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v", err)
+	}
+	return consumer
+}
+
+// AC-7.2.1: a message whose attempts are exhausted on 401-class ingest errors
+// dead-letters with error_code=unauthorized and increments the Unauthorized
+// counter — the durable discriminator for credential problems.
+func TestConsumerDeadLettersUnauthorizedAtCap(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-401", 1)}}
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: false, StatusCode: http.StatusUnauthorized, Err: errors.New("audit api returned 401 Unauthorized")}
+	}, WithDLQ(reader), WithMaxAttempts(2))
+	if len(reader.published) != 1 {
+		t.Fatalf("published=%d, want 1", len(reader.published))
+	}
+	if reader.published[0].ErrorCode != ErrorCodeUnauthorized {
+		t.Fatalf("error_code=%s, want %s", reader.published[0].ErrorCode, ErrorCodeUnauthorized)
+	}
+	metrics := consumer.Metrics()
+	if metrics.Unauthorized != 1 {
+		t.Fatalf("Unauthorized=%d, want 1", metrics.Unauthorized)
+	}
+	if metrics.DeadLettered != 1 {
+		t.Fatalf("DeadLettered=%d, want 1", metrics.DeadLettered)
+	}
+	if len(reader.commits) != 1 {
+		t.Fatalf("commits=%d, want 1 (dead-lettered message committed)", len(reader.commits))
+	}
+}
+
+// AC-7.2.2: non-401 retryable errors (5xx, plain errors) hitting the cap
+// still dead-letter with attempts_exhausted and do NOT increment
+// Unauthorized; a permanent 4xx (403) dead-letters immediately with
+// permanent_error and does not increment it either.
+func TestConsumerDeadLettersNonAuthAtCap(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-500", 1)}}
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: false, StatusCode: http.StatusInternalServerError, Err: errors.New("audit api returned 500")}
+	}, WithDLQ(reader), WithMaxAttempts(2))
+	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodeAttemptsExhausted {
+		t.Fatalf("published=%v, want one attempts_exhausted record", reader.published)
+	}
+	if metrics := consumer.Metrics(); metrics.Unauthorized != 0 || metrics.DeadLettered != 1 {
+		t.Fatalf("metrics=%+v, want Unauthorized=0 DeadLettered=1", metrics)
+	}
+
+	plainReader := &fakeReader{messages: []kafka.Message{validMessage("evt-plain", 1)}}
+	plainConsumer := runConsumerWithMetrics(t, plainReader, func(_ context.Context, _ domain.Event) error {
+		return errors.New("broker dial timeout") // non-DeliveryError: StatusCode stays 0
+	}, WithDLQ(plainReader), WithMaxAttempts(2))
+	if len(plainReader.published) != 1 || plainReader.published[0].ErrorCode != ErrorCodeAttemptsExhausted {
+		t.Fatalf("published=%v, want one attempts_exhausted record", plainReader.published)
+	}
+	if metrics := plainConsumer.Metrics(); metrics.Unauthorized != 0 {
+		t.Fatalf("Unauthorized=%d, want 0 (non-HTTP failure)", metrics.Unauthorized)
+	}
+
+	forbiddenReader := &fakeReader{messages: []kafka.Message{validMessage("evt-403", 1)}}
+	forbiddenConsumer := runConsumerWithMetrics(t, forbiddenReader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: true, StatusCode: http.StatusForbidden, Err: errors.New("audit api returned 403")}
+	}, WithDLQ(forbiddenReader))
+	if len(forbiddenReader.published) != 1 || forbiddenReader.published[0].ErrorCode != ErrorCodePermanentError {
+		t.Fatalf("published=%v, want one permanent_error record", forbiddenReader.published)
+	}
+	if metrics := forbiddenConsumer.Metrics(); metrics.Unauthorized != 0 || metrics.DeadLettered != 1 {
+		t.Fatalf("metrics=%+v, want Unauthorized=0 DeadLettered=1 (permanent 403)", metrics)
+	}
+}
+
+// F-05 (N2 semantics): 401 is retryable — a 401 followed by success heals
+// before the cap, dead-lettering nothing and incrementing no Unauthorized
+// counter (token rotation recovery).
+func TestConsumerUnauthorizedRecoversBeforeCap(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-heal", 1)}}
+	attempts := 0
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		attempts++
+		if attempts == 1 {
+			return &outbox.DeliveryError{Permanent: false, StatusCode: http.StatusUnauthorized, Err: errors.New("audit api returned 401 Unauthorized")}
+		}
+		return nil // token rotated: the held message succeeds on the second attempt
+	}, WithDLQ(reader), WithMaxAttempts(3))
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2 (401 then success)", attempts)
+	}
+	if len(reader.published) != 0 {
+		t.Fatalf("published=%v, want none (healed before cap)", reader.published)
+	}
+	metrics := consumer.Metrics()
+	if metrics.Unauthorized != 0 || metrics.DeadLettered != 0 {
+		t.Fatalf("metrics=%+v, want Unauthorized=0 DeadLettered=0 (healing, N2)", metrics)
+	}
+	if len(reader.commits) != 1 {
+		t.Fatalf("commits=%d, want 1 (healed message committed)", len(reader.commits))
+	}
+}
+
+// F-05 (failure mode 5): without a DLQ publisher the Unauthorized counter
+// still increments — the alert leg does not depend on the DLQ topic being
+// configured.
+func TestConsumerUnauthorizedAtCapWithoutDLQ(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-nodlq", 1)}}
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: false, StatusCode: http.StatusUnauthorized, Err: errors.New("audit api returned 401 Unauthorized")}
+	}, WithMaxAttempts(2)) // no WithDLQ
+	if reader.publishCalls != 0 {
+		t.Fatalf("publishCalls=%d, want 0 (no publisher attached)", reader.publishCalls)
+	}
+	metrics := consumer.Metrics()
+	if metrics.Unauthorized != 1 || metrics.DeadLettered != 1 || metrics.DLQPublished != 0 {
+		t.Fatalf("metrics=%+v, want Unauthorized=1 DeadLettered=1 DLQPublished=0", metrics)
+	}
+}
+
+// F-06: the vocabulary value is pinned — the DLQ record written for 401-cap
+// exhaustion must be the free-string value "unauthorized" (AsyncAPI
+// contract-safe), and the whole vocabulary stays stable.
+func TestErrorCodeVocabulary(t *testing.T) {
+	if ErrorCodeUnauthorized != "unauthorized" {
+		t.Fatalf("ErrorCodeUnauthorized=%q, want \"unauthorized\"", ErrorCodeUnauthorized)
+	}
+	if ErrorCodePermanentError != "permanent_error" || ErrorCodeAttemptsExhausted != "attempts_exhausted" || ErrorCodeUnparsable != "unparsable_message" {
+		t.Fatalf("error-code vocabulary drift: %q / %q / %q", ErrorCodePermanentError, ErrorCodeAttemptsExhausted, ErrorCodeUnparsable)
+	}
+	failure := Failure{EventID: "evt-v", ErrorCode: ErrorCodeUnauthorized, ErrorMessage: "boom"}
+	encoded, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"event_id":"evt-v","error_code":"unauthorized","error_message":"boom"}` {
+		t.Fatalf("payload=%s, want the free-string unauthorized value", encoded)
+	}
 }

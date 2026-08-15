@@ -40,6 +40,31 @@ groups:
           summary: Dead-lettered events dropped as unresolvable (permanent loss)
           description: "{{ $value }} dead-lettered events were resolved as unresolvable in the last 15m (original not found in the accepted topic) and their DLQ offsets were committed. This is a permanent loss of ledger evidence; check accepted-topic retention and topic recreation."
 
+      # 认证死信告警（consumer 侧计数器）：新的 401 类死信说明接入凭证为空/被拒
+      # （或 IdP/JWKS 故障），事件正在被死信为 error_code=unauthorized，且重放器
+      # 默认不触碰它们（-replay-auth-blocked 默认关）。依赖 audit-kafka-consumer
+      # /metrics（AUDIT_KAFKA_METRICS，默认关闭；未启用时本规则静默）。
+      - alert: AuditDLQAuthBlocked
+        expr: increase(audit_consumer_unauthorized_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit ingest token rejected (401) — dead-letters classified unauthorized
+          description: "{{ $value }} dead-lettered events classified as unauthorized in the last 15m. Restore/rotate AUDIT_OUTBOX_TOKEN (or fix the IdP/JWKS outage); records stay auth-blocked in the DLQ until the credential works and replay is re-enabled (-replay-auth-blocked)."
+
+      # 认证阻塞积压告警（replay 侧 gauge）：任何 error_code=unauthorized 记录被
+      # 重放器保持 auth-blocked（不重放、不提交）期间持续触发——覆盖静止积压
+      # （audit_dlq_pending 不含阻塞记录，AuditDLQBacklog 看不到它）与伪造阻塞楔子。
+      # 依赖 audit-kafka-dlq-replay /metrics（AUDIT_DLQ_REPLAY_METRICS，默认关闭；
+      # -once 模式不挂载 /metrics）。积压排空后 gauge 归零，规则自动清除。
+      - alert: AuditDLQAuthBlockedBacklog
+        expr: audit_dlq_auth_blocked > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Auth-blocked DLQ backlog not draining
+          description: "{{ $value }} dead-lettered records are held auth-blocked (error_code=unauthorized). Verify the ingest credential (token problem vs IdP/JWKS outage) and that blocked events have accepted-topic originals, then drain with -replay-auth-blocked; the gauge falls to 0 when drained."
+
   - name: audit-slo
     # docs/SLO_ALERTS.md §2 告警规则 → audit-api /metrics 指标。
     # 完整性与签名失败独立于错误预算（安全事件）。

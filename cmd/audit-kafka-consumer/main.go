@@ -37,6 +37,22 @@ func main() {
 		log.Fatalf("backoff, timeout and max-attempts must be positive")
 	}
 	logger := log.New(os.Stdout, "audit-kafka-consumer ", log.LstdFlags|log.Lmicroseconds)
+	// F3 (RFC 6750 §1): the ingest bearer token must never travel over
+	// plaintext http except to loopback targets (or the explicit
+	// dev/verify-stack opt-in). Fails closed BEFORE any Kafka connection or
+	// delivery attempt.
+	if err := outbox.ValidateAPIURL(*apiURL, outbox.InsecureAPIURLAllowed()); err != nil {
+		logger.Fatalf("api-url: %v", err)
+	}
+	if outbox.InsecureAPIURLAllowed() && outbox.IsInsecureHTTPURL(*apiURL) {
+		logger.Printf("warning: %s=true: the ingest bearer token is sent over plaintext HTTP (%s) — verify-stack/dev-only, never production", outbox.APIURLInsecureEnv, *apiURL)
+	}
+	// REQ-7.1 (G1): an empty token means the API rejects every delivery with
+	// 401 and the whole accepted stream retries until attempts are exhausted
+	// — warn before any consumption (parity with audit-outbox-relay).
+	if strings.TrimSpace(*token) == "" {
+		logger.Printf("warning: AUDIT_OUTBOX_TOKEN is empty; the audit API will reject every delivery (401) and the accepted stream will retry until attempts are exhausted — set the token before starting")
+	}
 	// Build the deliverer once: the per-message IngestFunc closure captures it,
 	// so every Kafka message reuses the same HTTP client and connection pool
 	// instead of allocating a fresh transport per message.
@@ -101,15 +117,26 @@ func intEnv(name string, fallback int) int {
 // traffic (the release-notes follow-up: DLQ consumer + traffic alert).
 func serveMetrics(address string, consumer *kafka.Consumer, logger *log.Logger) {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		metrics := consumer.Metrics()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "audit_consumer_ingest_failures_total %d\n", metrics.IngestFailures)
-		fmt.Fprintf(w, "audit_consumer_dead_lettered_total %d\n", metrics.DeadLettered)
-		fmt.Fprintf(w, "audit_consumer_dlq_published_total %d\n", metrics.DLQPublished)
-		fmt.Fprintf(w, "audit_consumer_messages_committed_total %d\n", metrics.MessagesCommitted)
+		fmt.Fprint(w, metricsText(consumer.Metrics()))
 	})
 	server := &http.Server{Addr: address}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Printf("metrics listen=%s error=%v", address, err)
 	}
+}
+
+// metricsText renders the consumer counters in the Prometheus text format.
+// The line order is pinned (golden-tested): audit_consumer_unauthorized_total
+// sits after dead_lettered (it is a subset of dead-lettered events).
+// Consumers must parse by metric name (as Prometheus does), not by position.
+func metricsText(m kafka.ConsumerMetrics) string {
+	return fmt.Sprintf(
+		"audit_consumer_ingest_failures_total %d\n"+
+			"audit_consumer_dead_lettered_total %d\n"+
+			"audit_consumer_unauthorized_total %d\n"+
+			"audit_consumer_dlq_published_total %d\n"+
+			"audit_consumer_messages_committed_total %d\n",
+		m.IngestFailures, m.DeadLettered, m.Unauthorized,
+		m.DLQPublished, m.MessagesCommitted)
 }

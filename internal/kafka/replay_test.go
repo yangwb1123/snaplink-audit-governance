@@ -164,7 +164,14 @@ func dlqMessage(eventID string) kafka.Message {
 // mix pending and resolved records in one partition must use distinct
 // offsets.
 func dlqMessageAt(eventID string, offset int64) kafka.Message {
-	failure := Failure{EventID: eventID, ErrorCode: ErrorCodeAttemptsExhausted, ErrorMessage: "boom"}
+	return dlqMessageAtCode(eventID, offset, ErrorCodeAttemptsExhausted)
+}
+
+// dlqMessageAtCode builds a dead-letter Failure record with an explicit
+// error_code at an explicit offset (auth-blocked tests: error_code=
+// "unauthorized" must be held pending by the replay commit barrier).
+func dlqMessageAtCode(eventID string, offset int64, code string) kafka.Message {
+	failure := Failure{EventID: eventID, ErrorCode: code, ErrorMessage: "boom"}
 	encoded, _ := json.Marshal(failure)
 	return kafka.Message{Key: []byte(eventID), Value: encoded, Partition: 0, Offset: offset}
 }
@@ -2657,4 +2664,363 @@ func TestReplayStateLockFailureAbortsPersist(t *testing.T) {
 			t.Fatal("in-memory mark must not be set when the persist failed (security F1)")
 		}
 	})
+}
+
+// AC-7.3.1: a DLQ record with error_code=unauthorized is auth-blocked — the
+// republish func is never called for it, the record is counted (AuthBlocked
+// counter + AuthBlockedPending gauge), never marked replayed, and its DLQ
+// offset is never committed. F-03 semantics: in a blocked-only round
+// audit_dlq_pending stays 0 (blocked records are excluded from the wanted
+// set) while the blocked backlog is visible on the gauge.
+func TestReplayAuthBlockedSkipsAndCounts(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-auth", 1, ErrorCodeUnauthorized)}}
+	acceptedQueue := []kafka.Message{acceptedMessage("evt-auth")}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
+	var logBuf bytes.Buffer
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader(acceptedQueue, nil), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(&logBuf, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || republished != 0 {
+		t.Fatalf("replayed=%d republished=%d, want 0/0 (auth-blocked records are never re-published)", count, republished)
+	}
+	if state.Replayed["evt-auth"] {
+		t.Fatal("auth-blocked record must not be marked replayed")
+	}
+	if broker.committed != 0 {
+		t.Fatalf("DLQ committed offset=%d, want 0 (auth-blocked record stays pending)", broker.committed)
+	}
+	metrics := replayer.Metrics()
+	if metrics.AuthBlocked != 1 {
+		t.Fatalf("AuthBlocked=%d, want 1", metrics.AuthBlocked)
+	}
+	if metrics.AuthBlockedPending != 1 {
+		t.Fatalf("AuthBlockedPending=%d, want 1 (latest-round blocked backlog gauge)", metrics.AuthBlockedPending)
+	}
+	if metrics.Pending != 0 {
+		t.Fatalf("Pending=%d, want 0 (blocked records are excluded from the wanted set)", metrics.Pending)
+	}
+	if !strings.Contains(logBuf.String(), "dlq record auth-blocked") || !strings.Contains(logBuf.String(), "event_id=evt-auth") {
+		t.Fatalf("auth-blocked detail log line missing:\n%s", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "1 auth-blocked records pending") {
+		t.Fatalf("round summary log line missing:\n%s", logBuf.String())
+	}
+}
+
+// AC-7.3.2: the same blocked record is re-collected and re-blocked on a
+// second round — pending semantics: neither dropped nor blind-republished,
+// counter increments per round, gauge stays 1, still uncommitted/unmarked.
+func TestReplayAuthBlockedPersistsAcrossRounds(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-auth", 1, ErrorCodeUnauthorized)}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-auth")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Second round: the recreated DLQ session re-delivers the uncommitted
+	// record (committed offset is still 0) and it is blocked again.
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if republished != 0 {
+		t.Fatalf("republished=%d, want 0 across both rounds", republished)
+	}
+	if state.Replayed["evt-auth"] || broker.committed != 0 {
+		t.Fatalf("state/commit must stay untouched: marked=%v committed=%d", state.Replayed["evt-auth"], broker.committed)
+	}
+	metrics := replayer.Metrics()
+	if metrics.AuthBlocked != 2 {
+		t.Fatalf("AuthBlocked=%d, want 2 (per-round increments)", metrics.AuthBlocked)
+	}
+	if metrics.AuthBlockedPending != 1 {
+		t.Fatalf("AuthBlockedPending=%d, want 1", metrics.AuthBlockedPending)
+	}
+}
+
+// AC-7.3.3 (control): an identical record WITHOUT the auth code (same event,
+// error_code=attempts_exhausted) is re-published normally — existing replay
+// behavior is preserved.
+func TestReplayReplaysAttemptsExhaustedControl(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAt("evt-auth", 1)}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-auth")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 1 {
+		t.Fatalf("replayed=%d republished=%d, want 1/1 (attempts_exhausted control replays normally)", count, republished)
+	}
+	if !state.Replayed["evt-auth"] || broker.committed != 2 {
+		t.Fatalf("marked=%v committed=%d, want true/2", state.Replayed["evt-auth"], broker.committed)
+	}
+	if metrics := replayer.Metrics(); metrics.AuthBlocked != 0 || metrics.AuthBlockedPending != 0 {
+		t.Fatalf("metrics=%+v, want zero auth-blocked counters", metrics)
+	}
+}
+
+// AC-D1 (F1 resolution): SetReplayAuthBlocked(true) re-admits blocked records
+// — the operator-acknowledged credential fix makes the same record replay
+// normally (republished, marked replayed, DLQ offset committed).
+func TestReplayAuthBlockedFlagReplaysWhenEnabled(t *testing.T) {
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{dlqMessageAtCode("evt-auth", 1, ErrorCodeUnauthorized)}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	republished := 0
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-auth")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		republished++
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	// Round 1 with the default (block enabled): held pending.
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if republished != 0 || broker.committed != 0 {
+		t.Fatalf("round 1: republished=%d committed=%d, want 0/0 (default-off blocks)", republished, broker.committed)
+	}
+	// Operator fixes the credential and acknowledges with the flag.
+	replayer.SetReplayAuthBlocked(true)
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || republished != 1 {
+		t.Fatalf("round 2: replayed=%d republished=%d, want 1/1 (flag re-admits the record)", count, republished)
+	}
+	if !state.Replayed["evt-auth"] {
+		t.Fatal("re-admitted record must be marked replayed")
+	}
+	if broker.committed != 2 {
+		t.Fatalf("DLQ committed offset=%d, want 2", broker.committed)
+	}
+	if metrics := replayer.Metrics(); metrics.AuthBlocked != 1 || metrics.AuthBlockedPending != 0 {
+		t.Fatalf("metrics=%+v, want AuthBlocked=1 (blocked only while held) AuthBlockedPending=0 (drained)", metrics)
+	}
+}
+
+// F-02: an auth-blocked record acts as a per-partition commit barrier — a
+// resolved record at a HIGHER offset in the same partition is not committed
+// while the blocked record below it stays pending (committing would
+// leapfrog the pending record, silently losing it). Both orders are pinned.
+func TestReplayAuthBlockedActsAsCommitBarrier(t *testing.T) {
+	t.Run("blocked below resolved", func(t *testing.T) {
+		broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+			dlqMessageAtCode("evt-blocked", 1, ErrorCodeUnauthorized),
+			dlqMessageAt("evt-resolved", 3),
+		}}
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var republished []string
+		replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-resolved"), acceptedMessage("evt-blocked")}, nil), state, func(ctx context.Context, key, value []byte) error {
+			republished = append(republished, string(key))
+			return nil
+		}, log.New(io.Discard, "", 0))
+		replayer.drainTimeout = 20 * time.Millisecond
+		// Round 1: evt-resolved is re-published and marked, but its commit is
+		// held by the barrier below it — committing offset 3 would leapfrog
+		// the pending blocked record at offset 1.
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 0 {
+			t.Fatalf("round 1 committed=%d, want 0 (barrier holds the resolved record)", broker.committed)
+		}
+		if strings.Join(republished, ",") != "evt-resolved" {
+			t.Fatalf("round 1 republished=%v, want only evt-resolved (never the blocked record)", republished)
+		}
+		// Round 2: blocked re-blocked, resolved not re-republished (state
+		// mark), and still NOT committed: Kafka tracks one committed offset
+		// per partition, so committing offset 3 (→4) would leapfrog the
+		// pending blocked record at offset 1 and lose it forever. Progress
+		// resumes only when the blocked record resolves (round 3).
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 0 {
+			t.Fatalf("round 2 committed=%d, want 0 (barrier must not leapfrog the pending blocked record)", broker.committed)
+		}
+		if strings.Join(republished, ",") != "evt-resolved" {
+			t.Fatalf("round 2 republished=%v, want no re-republish", republished)
+		}
+		// Round 3: flag on — the blocked record is re-admitted and replayed.
+		replayer.SetReplayAuthBlocked(true)
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 4 {
+			t.Fatalf("round 3 committed=%d, want 4 (blocked record drained)", broker.committed)
+		}
+		if strings.Join(republished, ",") != "evt-resolved,evt-blocked" {
+			t.Fatalf("round 3 republished=%v, want evt-blocked replayed", republished)
+		}
+		if !state.Replayed["evt-blocked"] || !state.Replayed["evt-resolved"] {
+			t.Fatalf("both events must be marked replayed: %v", state.Replayed)
+		}
+	})
+	t.Run("resolved below blocked", func(t *testing.T) {
+		broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+			dlqMessageAt("evt-resolved", 1),
+			dlqMessageAtCode("evt-blocked", 3, ErrorCodeUnauthorized),
+		}}
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var republished []string
+		replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt-resolved"), acceptedMessage("evt-blocked")}, nil), state, func(ctx context.Context, key, value []byte) error {
+			republished = append(republished, string(key))
+			return nil
+		}, log.New(io.Discard, "", 0))
+		replayer.drainTimeout = 20 * time.Millisecond
+		// Round 1: the resolved record sits BELOW the barrier — committing it
+		// cannot leapfrog the blocked record, so the offset advances to 2.
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 2 {
+			t.Fatalf("round 1 committed=%d, want 2 (resolved below the barrier commits)", broker.committed)
+		}
+		if strings.Join(republished, ",") != "evt-resolved" {
+			t.Fatalf("round 1 republished=%v, want only evt-resolved", republished)
+		}
+		// Round 2: blocked re-blocked, no re-republish.
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 2 || strings.Join(republished, ",") != "evt-resolved" {
+			t.Fatalf("round 2 committed=%d republished=%v, want 2/evt-resolved (re-block, no re-republish)", broker.committed, republished)
+		}
+		// Round 3: flag on — the blocked record is re-admitted and replayed.
+		replayer.SetReplayAuthBlocked(true)
+		if _, err := replayer.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 4 {
+			t.Fatalf("round 3 committed=%d, want 4 (blocked record drained)", broker.committed)
+		}
+		if strings.Join(republished, ",") != "evt-resolved,evt-blocked" {
+			t.Fatalf("round 3 republished=%v, want evt-blocked replayed", republished)
+		}
+	})
+}
+
+// M3/CWE-117: the auth-blocked detail line sanitizes attacker-influenced DLQ
+// fields — control characters in a forged error_message/event_id must never
+// forge log lines, and long values are bounded.
+func TestReplayAuthBlockedLogSanitizesFields(t *testing.T) {
+	failure := Failure{
+		EventID:      "evt\ninjected",
+		ErrorCode:    ErrorCodeUnauthorized,
+		ErrorMessage: "rotated\x00secret\nforged-log-line " + strings.Repeat("x", 500),
+	}
+	encoded, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := kafka.Message{Key: []byte("evt\ninjected"), Value: encoded, Partition: 0, Offset: 1}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{message}}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader([]kafka.Message{acceptedMessage("evt\ninjected")}, nil), state, func(ctx context.Context, key, value []byte) error {
+		return nil
+	}, log.New(&logBuf, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	logText := logBuf.String()
+	detailLine := ""
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "dlq record auth-blocked") {
+			detailLine = line
+		}
+	}
+	if detailLine == "" {
+		t.Fatalf("auth-blocked detail line missing:\n%s", logText)
+	}
+	if strings.Count(detailLine, "\n") != 0 {
+		t.Fatalf("detail line contains a raw newline (log forging): %q", detailLine)
+	}
+	if !strings.Contains(detailLine, "evt?injected") {
+		t.Fatalf("event_id control char not sanitized: %q", detailLine)
+	}
+	if !strings.Contains(detailLine, "rotated?secret?forged-log-line") {
+		t.Fatalf("error_message control chars not sanitized: %q", detailLine)
+	}
+	if len(detailLine) > 512 {
+		t.Fatalf("detail line unbounded (%d bytes): %q", len(detailLine), detailLine)
+	}
+}
+
+// H1: the per-round per-record detail lines are budgeted — a large blocked
+// backlog logs at most maxAuthBlockedLogDetails detail lines per round plus
+// one summary, never one line per record (1M blocked records at the default
+// 5m interval would otherwise sustain ~3.3k lines/s).
+func TestReplayAuthBlockedDetailLogIsBudgeted(t *testing.T) {
+	var messages []kafka.Message
+	for i := 0; i < 25; i++ {
+		messages = append(messages, dlqMessageAtCode(fmt.Sprintf("evt-%02d", i), int64(i), ErrorCodeUnauthorized))
+	}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: messages}
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	replayer := newReplayerWithFactories(broker.freshDLQSession(), freshAcceptedReader(nil, nil), state, func(ctx context.Context, key, value []byte) error {
+		return nil
+	}, log.New(&logBuf, "", 0))
+	replayer.drainTimeout = 20 * time.Millisecond
+	if _, err := replayer.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	detailLines := 0
+	for _, line := range strings.Split(logBuf.String(), "\n") {
+		if strings.Contains(line, "dlq record auth-blocked") && strings.Contains(line, "event_id=") {
+			detailLines++
+		}
+	}
+	if detailLines != maxAuthBlockedLogDetails {
+		t.Fatalf("detail lines=%d, want the budgeted %d", detailLines, maxAuthBlockedLogDetails)
+	}
+	if !strings.Contains(logBuf.String(), "25 auth-blocked records pending") {
+		t.Fatalf("summary line with the total missing:\n%s", logBuf.String())
+	}
+	if metrics := replayer.Metrics(); metrics.AuthBlocked != 25 || metrics.AuthBlockedPending != 25 {
+		t.Fatalf("metrics=%+v, want AuthBlocked=25 AuthBlockedPending=25", metrics)
+	}
 }

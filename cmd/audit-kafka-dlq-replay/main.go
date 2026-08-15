@@ -34,12 +34,25 @@ func main() {
 	apiURL := flag.String("api-url", envOr("AUDIT_OUTBOX_API_URL", ""), "audit API base URL; when set, recovered events are re-ingested via HTTP instead of re-published to Kafka")
 	token := flag.String("token", os.Getenv("AUDIT_OUTBOX_TOKEN"), "bearer token for audit API ingestion")
 	timeout := flag.Duration("timeout", durationEnv("AUDIT_KAFKA_TIMEOUT", 30*time.Second), "per-event ingest timeout in API mode")
+	replayAuthBlocked := flag.Bool("replay-auth-blocked", false, "re-publish DLQ records with error_code=unauthorized (set only after the ingest token is fixed)")
 	metricsListen := flag.String("metrics-listen", os.Getenv("AUDIT_DLQ_REPLAY_METRICS"), "optional metrics listen address (e.g. :9091)")
 	flag.Parse()
 	if *brokers == "" {
 		log.Fatalf("brokers are required: pass -brokers or set AUDIT_KAFKA_BROKERS")
 	}
 	logger := log.New(os.Stdout, "audit-kafka-dlq-replay ", log.LstdFlags|log.Lmicroseconds)
+	// F3 (RFC 6750 §1): in HTTP mode the re-ingest token must never travel
+	// over plaintext http except to loopback targets (or the explicit
+	// dev/verify-stack opt-in). Kafka republish mode (no -api-url) is
+	// unaffected.
+	if *apiURL != "" {
+		if err := outbox.ValidateAPIURL(*apiURL, outbox.InsecureAPIURLAllowed()); err != nil {
+			logger.Fatalf("api-url: %v", err)
+		}
+		if outbox.InsecureAPIURLAllowed() && outbox.IsInsecureHTTPURL(*apiURL) {
+			logger.Printf("warning: %s=true: the re-ingest bearer token is sent over plaintext HTTP (%s) — verify-stack/dev-only, never production", outbox.APIURLInsecureEnv, *apiURL)
+		}
+	}
 	state, err := kafka.LoadReplayState(*statePath)
 	if err != nil {
 		logger.Fatalf("state: %v", err)
@@ -62,6 +75,17 @@ func main() {
 	}
 	replayer := kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group, state, republish, logger)
 	defer replayer.Close()
+	// -replay-auth-blocked is the operator-acknowledgment switch: default off
+	// holds error_code=unauthorized records blocked (pending); on re-admits
+	// them. Must be set on every replayer instance, including the -once
+	// replacement below.
+	replayer.SetReplayAuthBlocked(*replayAuthBlocked)
+	if *replayAuthBlocked {
+		if *apiURL != "" && strings.TrimSpace(*token) == "" {
+			logger.Printf("warning: -replay-auth-blocked enabled but AUDIT_OUTBOX_TOKEN is empty; HTTP-mode re-ingest will be rejected (401) and records will re-enter the DLQ each round — fix the token first")
+		}
+		logger.Printf("replay-auth-blocked enabled: unauthorized DLQ records will be re-published; ensure the ingest token is valid")
+	}
 	// -once 使用独立 group：与常驻实例共享 group 会在 rebalance 中竞争
 	// accepted partition，导致单轮扫描读不到消息（静默 replayed=0）。
 	if *once {
@@ -70,6 +94,7 @@ func main() {
 		}
 		replayer = kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group+"-once", state, republish, logger)
 		defer replayer.Close()
+		replayer.SetReplayAuthBlocked(*replayAuthBlocked)
 	}
 	if *metricsListen != "" && !*once {
 		go serveMetrics(*metricsListen, replayer, logger)
@@ -107,9 +132,11 @@ func serveMetrics(address string, replayer *kafka.Replayer, logger *log.Logger) 
 // metricsText renders the replay resolution counters in the Prometheus text
 // format. The line order is pinned (golden-tested, T7): the three split
 // resolution counters sit between replayed and republish_failures, pushing
-// republish_failures and pending down by three lines. Consumers must parse
-// by metric name (as Prometheus does), not by position; the fixed order
-// keeps the output deterministic for tests and dashboards.
+// republish_failures and pending down by three lines; the auth-blocked
+// counter and backlog gauge follow pending (campaign fail-fast-or-warn-on-
+// empty-rotated-ingest-token). Consumers must parse by metric name (as
+// Prometheus does), not by position; the fixed order keeps the output
+// deterministic for tests and dashboards.
 func metricsText(m kafka.ReplayerMetrics) string {
 	return fmt.Sprintf(
 		"audit_dlq_records_total %d\n"+
@@ -119,9 +146,12 @@ func metricsText(m kafka.ReplayerMetrics) string {
 			"audit_dlq_unresolvable_total %d\n"+
 			"audit_dlq_unparsable_marks_total %d\n"+
 			"audit_dlq_republish_failures_total %d\n"+
-			"audit_dlq_pending %d\n",
+			"audit_dlq_pending %d\n"+
+			"audit_dlq_auth_blocked_total %d\n"+
+			"audit_dlq_auth_blocked %d\n",
 		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.PermanentRejections,
-		m.Unresolvable, m.UnparsableMarks, m.RepublishFailures, m.Pending)
+		m.Unresolvable, m.UnparsableMarks, m.RepublishFailures, m.Pending,
+		m.AuthBlocked, m.AuthBlockedPending)
 }
 
 func envOr(name, fallback string) string {

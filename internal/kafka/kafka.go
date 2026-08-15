@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,15 @@ const (
 	// ErrorCodeUnparsable marks a message that could not be decoded into an
 	// event at all; it is dead-lettered immediately (never retried).
 	ErrorCodeUnparsable = "unparsable_message"
+	// ErrorCodeUnauthorized marks a transiently-failing event whose attempts
+	// were exhausted while the ingest API was rejecting with 401: a
+	// credential configuration problem (empty/rotated AUDIT_OUTBOX_TOKEN, or
+	// an IdP/JWKS outage), not an API outage. Replay treats it as
+	// config-fixable — blocked until the credential is restored and the
+	// operator re-admits it with -replay-auth-blocked. Additive to the
+	// Failure vocabulary (error_code is a free string in the AsyncAPI
+	// contract).
+	ErrorCodeUnauthorized = "unauthorized"
 )
 
 // Failure is the dead-letter payload declared by the AsyncAPI contract
@@ -188,6 +198,7 @@ type Consumer struct {
 
 	ingestFailures    atomic.Uint64
 	deadLettered      atomic.Uint64
+	unauthorized      atomic.Uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
 	dlqPublished      atomic.Uint64
 	messagesCommitted atomic.Uint64
 }
@@ -207,6 +218,7 @@ type ConsumerOption func(*Consumer)
 type ConsumerMetrics struct {
 	IngestFailures    uint64
 	DeadLettered      uint64
+	Unauthorized      uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
 	DLQPublished      uint64
 	MessagesCommitted uint64
 }
@@ -384,6 +396,16 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 		// 产生重复事实）。
 		c.attempts[key]++
 		if c.attempts[key] >= c.attemptCap() {
+			// 401 类（凭证问题，可配置修复）与其它瞬态失败分开计数与编码；
+			// Permanent 分支已提前返回，这里的 DeliveryError 必然是瞬态分类
+			// （!Permanent 守卫为防御性自文档）。注意：若未来的 deliverer 未
+			// 用 %w 包装 DeliveryError，errors.As 失败会优雅退化为
+			// attempts_exhausted（改动前行为）。
+			if errors.As(err, &deliveryErr) && !deliveryErr.Permanent &&
+				deliveryErr.StatusCode == http.StatusUnauthorized {
+				c.unauthorized.Add(1)
+				return c.deadLetter(ctx, message, event, ErrorCodeUnauthorized, err)
+			}
 			return c.deadLetter(ctx, message, event, ErrorCodeAttemptsExhausted, err)
 		}
 		c.logf("ingest failed topic=%s offset=%d event_id=%s error=%v (backoff=%s attempt=%d/%d)", c.reader.Config().Topic, message.Offset, event.EventID, err, c.backoff, c.attempts[key], c.attemptCap())
@@ -424,6 +446,7 @@ func (c *Consumer) Metrics() ConsumerMetrics {
 	return ConsumerMetrics{
 		IngestFailures:    c.ingestFailures.Load(),
 		DeadLettered:      c.deadLettered.Load(),
+		Unauthorized:      c.unauthorized.Load(),
 		DLQPublished:      c.dlqPublished.Load(),
 		MessagesCommitted: c.messagesCommitted.Load(),
 	}

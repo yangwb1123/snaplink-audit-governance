@@ -6,11 +6,13 @@ import (
 	"github.com/snaplink/audit-governance/internal/kafka"
 )
 
-// T7 (AC-2): metricsText renders the split resolution counters in the pinned
-// order — the five original lines keep their names and positions (with
-// replayed narrowed to successful re-publishes) and the three new counters
-// sit between replayed and republish_failures. The golden text is the
-// contract: a reorder or a name change fails this test.
+// T7 (AC-2/AC-D2): metricsText renders the split resolution counters in the
+// pinned order — the five original lines keep their names and positions
+// (with replayed narrowed to successful re-publishes), the three new
+// counters sit between replayed and republish_failures, and the auth-blocked
+// counter + backlog gauge follow pending (campaign fail-fast-or-warn-on-
+// empty-rotated-ingest-token). The golden text is the contract: a reorder or
+// a name change fails this test.
 func TestMetricsTextGolden(t *testing.T) {
 	metrics := kafka.ReplayerMetrics{
 		DLQRecords:          1,
@@ -21,6 +23,8 @@ func TestMetricsTextGolden(t *testing.T) {
 		UnparsableMarks:     6,
 		RepublishFailures:   7,
 		Pending:             8,
+		AuthBlocked:         9,
+		AuthBlockedPending:  10,
 	}
 	want := "" +
 		"audit_dlq_records_total 1\n" +
@@ -30,7 +34,9 @@ func TestMetricsTextGolden(t *testing.T) {
 		"audit_dlq_unresolvable_total 5\n" +
 		"audit_dlq_unparsable_marks_total 6\n" +
 		"audit_dlq_republish_failures_total 7\n" +
-		"audit_dlq_pending 8\n"
+		"audit_dlq_pending 8\n" +
+		"audit_dlq_auth_blocked_total 9\n" +
+		"audit_dlq_auth_blocked 10\n"
 	if got := metricsText(metrics); got != want {
 		t.Fatalf("metricsText mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
@@ -47,7 +53,9 @@ func TestMetricsTextEmptySnapshot(t *testing.T) {
 		"audit_dlq_unresolvable_total 0\n" +
 		"audit_dlq_unparsable_marks_total 0\n" +
 		"audit_dlq_republish_failures_total 0\n" +
-		"audit_dlq_pending 0\n"
+		"audit_dlq_pending 0\n" +
+		"audit_dlq_auth_blocked_total 0\n" +
+		"audit_dlq_auth_blocked 0\n"
 	if got := metricsText(kafka.ReplayerMetrics{}); got != want {
 		t.Fatalf("metricsText empty mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
