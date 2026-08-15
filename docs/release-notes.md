@@ -1,5 +1,59 @@
 # Release Notes
 
+## 2026-08-15 — `GET /api/v1/admin/actions` now honors `tenant_id` for platform tokens
+
+**写给运营（行为变化）：**
+
+- **平台 token + `tenant_id` 过滤生效**：`GET /api/v1/admin/actions?tenant_id=<T>`
+  在平台 token 下此前返回**所有租户**的自审计动作（`platform` 短路了过滤器，
+  静默丢弃已验证的 `tenant_id`）；现在只返回 `<T>` 租户的动作，`count ==
+  len(items)`。依赖该接口做合规巡检的下游工具若曾利用旧行为，需验证过滤参数
+  的预期。
+- **未过滤的平台读取不变**：不带 `tenant_id`（或空值，OpenAPI 允许）的平台
+  token 仍返回全部租户的动作（all-tenants 读）。
+- **租户 token 不变**：租户作用域 token 仍只能看到本租户动作。
+- **平台导出需显式 `tenant_id`**：平台 token 调 `POST /api/v1/exports` 不传
+  `tenant_id` 时返回 400（此前返回一个必然为空的任务 202）；带 `tenant_id`
+  的平台导出不变。
+- **滚动部署注意**：这是纯服务端修复，无需客户端协调；但混部窗口内旧节点仍
+  会泄露过滤请求的全量数据，跨租户敏感数据的巡检请等待全部节点完成升级。
+
+**写给开发（实现变化）：**
+
+- `internal/service/governance.go`：`ListAdminActions` 过滤谓词由
+  `platform || action.TenantID == tenantID` 修正为
+  `(platform && tenantID == "") || action.TenantID == tenantID`，与
+  `internal/service/service.go` 中已存在的契约注释（“platform caller sees all
+  actions (or one tenant with the optional filter)”）对齐；签名不变，OpenAPI
+  文档不变。
+- `internal/httpapi/server.go` `tenantFor` 平台分支收敛：平台 token 且无
+  `tenant_id`（或空值）时返回空哨兵 `""`，不再回落到 `claims.TenantID`。
+  此前 dev token 的 `claims.TenantID` 恒等于其 subject（
+  `dev:platform:platform-admin` → `"platform"`），无过滤读会被错误限定到
+  不存在的 `"platform"` 租户；生产 JWT 平台 token 的 `tenant_id` claim 本为
+  空，返回 `""`。此改动使 dev 与生产路径语义一致，与 `tenantFor` 既有注释
+  “Empty stays legal (all-tenants read)” 对齐。
+  **跨端点影响（dev 模式）**：`ListSchemas`/`QueryEvents`/`ListSources`/
+  retention/hold/export 读取在平台 token 无 `tenant_id` 时按空作用域
+  fail-closed（精确匹配空串 → 空结果，绝不跨租户）；对生产 JWT 无行为变化
+  （其 claim 本就为空）。依赖 dev 模式下“平台 token 无过滤读=租户
+  `platform` 的数据”的本地脚本需显式传 `tenant_id`。
+- `internal/service/governance.go` `CreateExport` 新增空租户守卫（ADR-0009
+  第 4 项）：空作用域导出按构造选不到任何事件（精确 TenantID 匹配），不存在
+  “导出全部租户”语义，因此平台 token 无 `tenant_id` 的导出请求改为 400
+  （此前 202 + 空任务）。带 `tenant_id` 的平台导出与租户 token 导出不变。
+- 测试：`internal/httpapi/server_test.go` 新增
+  `TestHTTPAdminActionsPlatformTenantFilter`（AC-1/AC-2/AC-2b/FM-8/limit）、
+  `TestHTTPAdminActionsTenantTokenIgnoresOverride`（租户 token 忽略
+  `tenant_id` 覆盖）、`TestHTTPCreateExportPlatformRequiresTenantID`
+  （空租户导出 400 + 无残留）；`TestHTTPTenantForRechecksClaimTenantID`
+  增加平台空哨兵 pin；`internal/service/read_selfaudit_test.go` 新增
+  `TestListAdminActionsPlatformTenantFilter`（服务契约 + 排序 + 过滤先于上限
+  pin）；`internal/service/service_test.go` 新增
+  `TestCreateExportRequiresTenantScope`（服务层 fail-closed pin）；
+  `internal/service/governance_hold_test.go` 的 `countAdminActions` 辅助函数改为
+  `ListAdminActions("", true, 100)` 保持其 “platform view: every tenant” 意图。
+
 ## 2026-08-15 — DLQ replay: 拆分解析计数，unresolvable 永久丢失可告警（internal/kafka + cmd/audit-kafka-dlq-replay + deploy）
 
 **写给运营（行为变化）：**

@@ -602,6 +602,224 @@ func TestHTTPAdminActionsSelfAudit(t *testing.T) {
 	}
 }
 
+// TestHTTPAdminActionsPlatformTenantFilter pins AC-1/AC-2: a platform token
+// filtering with tenant_id receives only that tenant's actions (pre-fix this
+// leaked all tenants), while the unfiltered platform read keeps the
+// all-tenants view.
+func TestHTTPAdminActionsPlatformTenantFilter(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	get := func(query string) (int, []domain.AdminAction) {
+		t.Helper()
+		url := server.URL + "/api/v1/admin/actions"
+		if query != "" {
+			url += "?" + query
+		}
+		request, _ := http.NewRequest(http.MethodGet, url, nil)
+		request.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("list actions status=%d err=%v", response.StatusCode, err)
+		}
+		var result struct {
+			Items []domain.AdminAction `json:"items"`
+			Count int                  `json:"count"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Count, result.Items
+	}
+
+	// AC-1: platform + tenant_id=tenant-a → only tenant-a's 3 bootstrap
+	// actions; tenant-b's tenant.created must be excluded.
+	count, items := get("tenant_id=tenant-a")
+	if count != 3 {
+		t.Fatalf("filtered actions count=%d, want 3 (tenant-a bootstrap); tenant-b action leaked", count)
+	}
+	if count != len(items) {
+		t.Fatalf("count=%d != len(items)=%d", count, len(items))
+	}
+	for _, action := range items {
+		if action.TenantID != "tenant-a" {
+			t.Fatalf("filtered action tenant=%q, want tenant-a", action.TenantID)
+		}
+	}
+
+	// AC-2: no query → all tenants (tenant-a 3 + tenant-b 1).
+	count, items = get("")
+	if count != 4 {
+		t.Fatalf("unfiltered actions count=%d, want 4 (both tenants)", count)
+	}
+	if count != len(items) {
+		t.Fatalf("count=%d != len(items)=%d", count, len(items))
+	}
+
+	// AC-2b: empty tenant_id is legal per the OpenAPI pattern and keeps the
+	// all-tenants read.
+	count, _ = get("tenant_id=")
+	if count != 4 {
+		t.Fatalf("empty-filter actions count=%d, want 4 (all tenants)", count)
+	}
+
+	// FM-8: a nonexistent tenant is a filter, not an existence check — 200
+	// with an empty page, never 404.
+	count, items = get("tenant_id=no-such-tenant")
+	if count != 0 || len(items) != 0 {
+		t.Fatalf("nonexistent-tenant filter count=%d len=%d, want 0/0", count, len(items))
+	}
+
+	// F5: limit parsing — invalid limit is a 400, 0 falls back to the
+	// default cap of 100 (ListAdminActions normalizes <=0), and the cap
+	// applies after the tenant filter at the HTTP boundary too.
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/admin/actions?limit=abc", nil)
+	request.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("limit=abc status=%d, want 400", response.StatusCode)
+	}
+
+	count, items = get("limit=0")
+	if count != 4 {
+		t.Fatalf("limit=0 actions count=%d, want 4 (default cap)", count)
+	}
+
+	count, items = get("tenant_id=tenant-a&limit=1")
+	if count != 1 || len(items) != 1 {
+		t.Fatalf("tenant-a limit=1 = count=%d len=%d, want 1/1", count, len(items))
+	}
+	if items[0].TenantID != "tenant-a" {
+		t.Fatalf("tenant-a limit=1 first=%+v, want tenant-a item (filter before cap)", items[0])
+	}
+}
+
+// TestHTTPAdminActionsTenantTokenIgnoresOverride pins F3: a tenant-scoped
+// token cannot widen its scope via ?tenant_id= — tenantFor's non-platform
+// branch derives the tenant from the signed claim and ignores the query.
+func TestHTTPAdminActionsTenantTokenIgnoresOverride(t *testing.T) {
+	server := testHTTPServer(t)
+	defer server.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/admin/actions?tenant_id=tenant-a", nil)
+	request.Header.Set("Authorization", "Bearer dev:tenant-b:tenant-admin")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("tenant-b list actions status=%d, want 200", response.StatusCode)
+	}
+	var result struct {
+		Items []domain.AdminAction `json:"items"`
+		Count int                  `json:"count"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("tenant-b + override count=%d, want 1 (tenant-b tenant.created only; override ignored)", result.Count)
+	}
+	for _, action := range result.Items {
+		if action.TenantID != "tenant-b" {
+			t.Fatalf("tenant-b + override returned tenant %q, want tenant-b", action.TenantID)
+		}
+	}
+}
+
+// TestHTTPCreateExportPlatformRequiresTenantID pins the ADR-0009 item-4
+// fail-closed decision (S-2.1): a platform token without ?tenant_id= reaches
+// CreateExport with the empty sentinel and must be rejected with 400 before
+// any job, self-audit record, or worker goroutine exists. With a tenant_id
+// the platform export path is unchanged (202).
+func TestHTTPCreateExportPlatformRequiresTenantID(t *testing.T) {
+	server, st := testHTTPServerWithStore(t)
+	defer server.Close()
+
+	body, _ := json.Marshal(domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_020, 0).UTC()})
+	post := func(rawurl string) int {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodPost, rawurl, bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+
+	if status := post(server.URL + "/api/v1/exports"); status != http.StatusBadRequest {
+		t.Fatalf("platform export without tenant_id status=%d, want 400", status)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if len(data.Exports) != 0 {
+			t.Fatalf("rejected export persisted %d job(s), want 0", len(data.Exports))
+		}
+		for _, action := range data.AdminActions {
+			if action.TenantID == "" {
+				t.Fatalf("rejected export appended empty-tenant self-audit record %s", action.Action)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Platform export with tenant_id is unchanged (202), and the job is
+	// tenant-scoped. Keep the worker goroutine alive until it finishes
+	// writing the archive; otherwise t.TempDir cleanup races the async job.
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/exports?tenant_id=tenant-a", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		response.Body.Close()
+		t.Fatalf("platform export with tenant_id status=%d, want 202", response.StatusCode)
+	}
+	var job domain.ExportJob
+	if err := json.NewDecoder(response.Body).Decode(&job); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if job.TenantID != "tenant-a" || job.Status != "pending" {
+		t.Fatalf("platform export job=%+v, want tenant-a pending", job)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		poll, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/exports/"+job.ID+"?tenant_id=tenant-a", nil)
+		poll.Header.Set("Authorization", "Bearer dev:platform:platform-admin")
+		response, err := http.DefaultClient.Do(poll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(response.Body).Decode(&job); err != nil {
+			response.Body.Close()
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if job.Status == "completed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("export job did not complete: status=%s", job.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestHTTPMetricsCounters(t *testing.T) {
 	server := testHTTPServer(t)
 	defer server.Close()
@@ -3318,6 +3536,17 @@ func TestHTTPTenantForRechecksClaimTenantID(t *testing.T) {
 	query := httptest.NewRequest(http.MethodGet, "/api/v1/events/x?tenant_id=tenant-a", nil)
 	if tenantID, err := (&Server{}).tenantFor(query, auth.Claims{Platform: true, TenantID: "a/b"}); err != nil || tenantID != "tenant-a" {
 		t.Errorf("platform tenantFor = (%q,%v), want (tenant-a,nil)", tenantID, err)
+	}
+	// S-2.3: the platform branch returns the empty all-tenants sentinel when
+	// no (or an empty) tenant_id query is present — it must never fall
+	// through to claims.TenantID (dev tokens fill it with their subject,
+	// e.g. "platform"; production JWT platform tokens carry an empty claim).
+	for _, raw := range []string{"/api/v1/events/x", "/api/v1/events/x?tenant_id="} {
+		unfiltered := httptest.NewRequest(http.MethodGet, raw, nil)
+		tenantID, err := (&Server{}).tenantFor(unfiltered, auth.Claims{Platform: true, TenantID: "platform"})
+		if err != nil || tenantID != "" {
+			t.Errorf("platform tenantFor(%q) = (%q,%v), want (\"\",nil) all-tenants sentinel", raw, tenantID, err)
+		}
 	}
 }
 

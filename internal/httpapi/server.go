@@ -1089,6 +1089,12 @@ func (s *Server) tenantFor(r *http.Request, claims auth.Claims) (string, error) 
 			}
 			return tenantID, nil
 		}
+		// A platform token has no tenant scope of its own; claims.TenantID is
+		// meaningless here (dev tokens fill it with their own subject,
+		// "platform"). Without a filter the empty sentinel is returned — the
+		// all-tenants read — matching the production JWT path where platform
+		// tokens carry an empty tenant_id claim.
+		return "", nil
 	}
 	if claims.TenantID != "" {
 		// Key-framing charset rule, non-platform branch: claims.TenantID is

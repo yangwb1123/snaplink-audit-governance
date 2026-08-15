@@ -15,6 +15,14 @@ import (
 )
 
 func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query) (domain.ExportJob, error) {
+	// Empty tenant scope (platform token without tenant_id): the selection
+	// pass matches event.TenantID exactly, so an empty scope selects zero
+	// events by construction — no "export all tenants" semantics exist.
+	// Fail closed before any read fact, job, self-audit record, or goroutine
+	// exists (same ordering discipline as the R2 legal-hold gate).
+	if tenantID == "" {
+		return domain.ExportJob{}, fmt.Errorf("%w: tenant_id is required for a platform export", domain.ErrInvalid)
+	}
 	// The export reads events: run the query through the audited read path so
 	// the same actor's audit.event.read fact is recorded, then create the job.
 	if _, err := s.QueryEvents(tenantID, requestedBy, query); err != nil {
@@ -958,7 +966,7 @@ func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for i := len(data.AdminActions) - 1; i >= 0 && len(result) < limit; i-- {
 			action := data.AdminActions[i]
-			if platform || action.TenantID == tenantID {
+			if (platform && tenantID == "") || action.TenantID == tenantID {
 				result = append(result, action)
 			}
 		}

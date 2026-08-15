@@ -163,7 +163,7 @@ func seedCompletedJobAndHold(t *testing.T, svc *Service, t0 time.Time) {
 // (platform view: every tenant).
 func countAdminActions(t *testing.T, svc *Service, match func(domain.AdminAction) bool) int {
 	t.Helper()
-	actions, err := svc.ListAdminActions("tenant-a", true, 100)
+	actions, err := svc.ListAdminActions("", true, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

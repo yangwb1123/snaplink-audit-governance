@@ -291,6 +291,32 @@ func TestQueryReplayAndExport(t *testing.T) {
 	}
 }
 
+// TestCreateExportRequiresTenantScope pins the fail-closed empty-tenant
+// decision (ADR-0009 item 4): a platform token without tenant_id reaches
+// CreateExport with the empty sentinel, and an empty-scope export selects
+// zero events by construction (exact TenantID match in runExport). Reject
+// before any read fact, job, self-audit record, or worker goroutine exists.
+func TestCreateExportRequiresTenantScope(t *testing.T) {
+	svc := testService(t, false)
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_010, 0).UTC()}
+	if _, err := svc.CreateExport("", "platform-admin", query); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateExport(\"\") err=%v, want domain.ErrInvalid", err)
+	}
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if len(data.Exports) != 0 {
+			t.Fatalf("empty-scope export persisted %d job(s), want 0", len(data.Exports))
+		}
+		for _, action := range data.AdminActions {
+			if action.TenantID == "" {
+				t.Fatalf("empty-scope export appended self-audit record %s", action.Action)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestQueryEventsChronologicalAcrossStreams is AC-1: a tenant-wide query must
 // order events chronologically across streams (occurred_at, sequence,
 // event_id), not by the per-stream sequence coordinates.

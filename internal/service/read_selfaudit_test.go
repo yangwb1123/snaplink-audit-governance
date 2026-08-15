@@ -58,6 +58,64 @@ func TestReadSelfAuditOnQueryAndGet(t *testing.T) {
 	}
 }
 
+// TestListAdminActionsPlatformTenantFilter pins the service contract behind
+// AC-1/AC-2 (SP-1): (platform=true, tenantID="") means all tenants, while a
+// non-empty tenantID is a filter for both platform and tenant-scoped callers.
+// SP-2 pins newest-first ordering and count == len(items).
+func TestListAdminActionsPlatformTenantFilter(t *testing.T) {
+	svc := testService(t, false)
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := svc.ListAdminActions("", true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("ListAdminActions(\"\", true) len=%d, want 4 (tenant-a 3 + tenant-b 1)", len(all))
+	}
+	// SP-2: newest-first — the last append (tenant-b tenant.created) is
+	// first, the first append (tenant-a tenant.created) is last.
+	if len(all) == 0 || all[0].Action != domain.AdminActionTenantCreated || all[0].TenantID != "tenant-b" {
+		t.Fatalf("newest-first order violated: first=%v", all[0])
+	}
+	if last := all[len(all)-1]; last.Action != domain.AdminActionTenantCreated || last.TenantID != "tenant-a" {
+		t.Fatalf("oldest entry=%v, want tenant-a tenant.created", last)
+	}
+
+	filtered, err := svc.ListAdminActions("tenant-a", true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 3 {
+		t.Fatalf("ListAdminActions(\"tenant-a\", true) len=%d, want 3 (pre-fix this leaked all 4)", len(filtered))
+	}
+	for _, action := range filtered {
+		if action.TenantID != "tenant-a" {
+			t.Fatalf("filtered action tenant=%q, want tenant-a", action.TenantID)
+		}
+	}
+
+	scoped, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped) != 3 {
+		t.Fatalf("ListAdminActions(\"tenant-a\", false) len=%d, want 3 (tenant-scoped path unchanged)", len(scoped))
+	}
+
+	// F2: filter applies before the cap — limit=1 must return the newest of
+	// tenant-a's 3 actions (schema.created), not a cross-tenant item.
+	capped, err := svc.ListAdminActions("tenant-a", true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 1 || capped[0].TenantID != "tenant-a" || capped[0].Action != domain.AdminActionSchemaCreated {
+		t.Fatalf("ListAdminActions(\"tenant-a\", true, 1) = %+v, want [tenant-a schema.created]", capped)
+	}
+}
+
 // TestReadSelfAuditOnExportPins F-06 export legs: creating an export runs the
 // query (audit.event.read for the exporter) and downloading records
 // audit.event.export for the downloader.
