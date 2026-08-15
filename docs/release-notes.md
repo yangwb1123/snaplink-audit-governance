@@ -1,5 +1,39 @@
 # Release Notes
 
+## 2026-08-15 — gRPC ingest 拒绝首值后的尾随 JSON（严格单值解码，internal/grpcapi）
+
+**写给运营（行为变化）：**
+
+- **gRPC 收窄一类畸形输入**：`payload_json`/`before_json`/`after_json` 在第一个
+  JSON 值之后携带非空白内容（例如 `{"a":1} extra`、`{"a":1}{"b":2}`）时，
+  `Write`/`WriteBatch`/`WriteStream` 此前会**静默丢弃尾随内容并接受事件**——
+  账本记录与生产者实际发送的字节不一致，`SourceDigest` 覆盖被截断的载荷；
+  现在返回 `InvalidArgument`，事件不入账、无回执。错误文本与既有非法 JSON
+  完全一致（`payload_json is invalid` / `invalid before_json` /
+  `invalid after_json`），已处理过非法 JSON 的客户端无需改动。
+- **合法输入不变**：尾随空白（`{"a":1}  `）仍被接受；所有此前被接受的良构事件
+  照常入账，`SourceDigest` 与修复前逐位一致（`UseNumber` 路径未动）。
+- **与 HTTP 对齐**：HTTP 表面自始拒绝该输入类（`decodeBody` 的
+  “request body must contain one JSON value” 检查），本修复消除两传输对同一
+  逻辑事件产生不同 `SourceDigest` 的差异，恢复跨传输摘要一致。
+- **滚动部署**：新节点更严格（拒绝畸形输入），旧节点更宽松（接受并截断）；
+  良构流量无互操作影响，任序升级安全。无数据迁移、无版本号变更。
+
+**写给开发（实现变化）：**
+
+- `internal/grpcapi/server.go` `decodeJSONNumber`：首值 `Decode` 成功后追加
+  第二次 `Decode` 到临时 `any`，结果非 `io.EOF` 即返回
+  `ErrInvalid`（"trailing content after first JSON value"），与 HTTP
+  `decodeBody` 的耗尽检查同构；首值语法错误路径不变，`UseNumber` 保留，
+  无调用点改动（三个调用点原有每字段包装与 `toStatus` 的 `InvalidArgument`
+  映射原样生效）。
+- 测试：`internal/grpcapi/server_test.go` 新增
+  `TestFromProtoRejectsTrailingJSON`（AC-1：三字段 + 空白负控 + 相邻值边界
+  + 空载荷负控）、`TestGRPCRejectsTrailingJSONPayload`（AC-2：三 RPC 全链路
+  `InvalidArgument` + 快照无残留 + 干净负控）、`TestGRPCHTTPDigestParity`
+  （AC-3：跨传输 `SourceDigest` 相等，覆盖 >2^53 大整数/嵌套对象/数组载荷/
+  变更字段对；顶层数组载荷按两侧一致拒绝断言接受集一致）。
+
 ## 2026-08-15 — `GET /api/v1/admin/actions` now honors `tenant_id` for platform tokens
 
 **写给运营（行为变化）：**

@@ -2071,6 +2071,78 @@ func TestHTTPNegativeCases(t *testing.T) {
 	response.Body.Close()
 }
 
+// TestHTTPIngestRejectsTrailingJSONBody closes the M1 gap: decodeBody's
+// second Decode + io.EOF exhaustion check ("request body must contain one
+// JSON value") is the HTTP side of the strict single-value contract that
+// grpcapi's decodeJSONNumber now enforces. A body whose first JSON value is
+// followed by non-whitespace must be rejected with 400 and nothing may
+// reach the ledger; trailing whitespace stays legal (design AC-1 Case D
+// analogue and negative control for the harness).
+func TestHTTPIngestRejectsTrailingJSONBody(t *testing.T) {
+	server, st := testHTTPServerWithStore(t)
+	defer server.Close()
+
+	bodyFor := func(id string) string {
+		return `{"event_id":"` + id + `","source_system":"crm","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T10:00:00Z","actor":{"id":"u1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"` + id + `","payload":{"value":1}}`
+	}
+	post := func(raw string) (int, string) {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/events?wait_for=ledgered", strings.NewReader(raw))
+		request.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(data)
+	}
+
+	// Trailing content after the first JSON value: 400 with decodeBody's
+	// message, event not ledgered (checked below).
+	status, body := post(bodyFor("trail-reject-1") + " extra")
+	if status != http.StatusBadRequest {
+		t.Fatalf("trailing body status=%d body=%s, want 400", status, body)
+	}
+	if !strings.Contains(body, "request body must contain one JSON value") {
+		t.Fatalf("trailing body error=%s, want request body must contain one JSON value", body)
+	}
+	// Adjacent JSON values are the same class (first value followed by
+	// content), not a multi-document request.
+	if status, body := post(bodyFor("trail-reject-2") + `{"second":true}`); status != http.StatusBadRequest {
+		t.Fatalf("adjacent values status=%d body=%s, want 400", status, body)
+	}
+
+	// Negative control: trailing whitespace stays legal and the event is
+	// ledgered with a receipt (proves harness + envelope are valid).
+	if status, body := post(bodyFor("trail-ok") + "  \n\t"); status != http.StatusAccepted {
+		t.Fatalf("whitespace trailer status=%d body=%s, want 202", status, body)
+	}
+
+	if err := st.Read(func(data *store.Snapshot) error {
+		key := store.EventKey("tenant-a", "trail-ok")
+		if _, exists := data.Events[key]; !exists {
+			t.Error("whitespace-trailer event was not ledgered")
+		}
+		if _, exists := data.Receipts[key]; !exists {
+			t.Error("whitespace-trailer event has no receipt")
+		}
+		for _, id := range []string{"trail-reject-1", "trail-reject-2"} {
+			key := store.EventKey("tenant-a", id)
+			if _, exists := data.Events[key]; exists {
+				t.Errorf("rejected event %q was persisted", id)
+			}
+			if _, exists := data.Receipts[key]; exists {
+				t.Errorf("rejected event %q left a receipt", id)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestHTTPCreateTenantRejectsKeyFramingIDs is AC-1 over HTTP (REQ-4): the
 // existing statusForError mapping turns ErrInvalid into 400; no handler-level
 // validation is added. Rejected bodies must leave the snapshot untouched.

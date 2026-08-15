@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -10,6 +11,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +22,7 @@ import (
 	auditv1 "github.com/snaplink/audit-governance/api/proto"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/httpapi"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
 	"google.golang.org/grpc"
@@ -338,8 +342,15 @@ func assertNoFramedKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
 			}
 		}
 		for _, id := range rejectedIDs {
-			if _, exists := data.Events[store.EventKey("tenant-a", id)]; exists {
+			key := store.EventKey("tenant-a", id)
+			if _, exists := data.Events[key]; exists {
 				t.Errorf("rejected event %q was persisted", id)
+			}
+			// Design AC-2: a receipt is the ledgered-state witness, so the
+			// Receipts map must stay empty for a rejected event too — not
+			// just the Events map.
+			if _, exists := data.Receipts[key]; exists {
+				t.Errorf("rejected event %q left a receipt in the snapshot", id)
 			}
 		}
 		return nil
@@ -471,5 +482,268 @@ func TestWriteRedactsStoreFailureEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(status.Convert(err).Message(), "state.json") {
 		t.Fatalf("state path leaked to client: %q", status.Convert(err).Message())
+	}
+}
+
+// TestFromProtoRejectsTrailingJSON is AC-1: decodeJSONNumber must reject any
+// input whose first JSON value is followed by non-whitespace (trailing
+// content would otherwise be silently dropped from the ledgered event),
+// while whitespace trailers and clean JSON stay accepted — the same rule the
+// HTTP surface's decodeBody enforces. Unit level: no store, no RPC.
+func TestFromProtoRejectsTrailingJSON(t *testing.T) {
+	// Case A: trailing content after payload_json.
+	payload := testProtoEvent("unit-trail-payload", "crm")
+	payload.PayloadJson = []byte(`{"a":1} extra`)
+	if _, err := fromProto(payload); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "payload_json is invalid") {
+		t.Fatalf("payload trailing: err=%v, want ErrInvalid carrying payload_json is invalid", err)
+	}
+	// Case B: trailing content after changed_fields[].before_json.
+	before := testProtoEvent("unit-trail-before", "crm")
+	before.ChangedFields = []*auditv1.FieldChange{{Field: "amount", BeforeJson: `{"v":1} extra`, AfterJson: `{"v":2}`}}
+	if _, err := fromProto(before); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "invalid before_json") {
+		t.Fatalf("before_json trailing: err=%v, want ErrInvalid carrying invalid before_json", err)
+	}
+	// Case C: trailing content after changed_fields[].after_json.
+	after := testProtoEvent("unit-trail-after", "crm")
+	after.ChangedFields = []*auditv1.FieldChange{{Field: "amount", BeforeJson: `{"v":1}`, AfterJson: `[1,2] trailing`}}
+	if _, err := fromProto(after); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "invalid after_json") {
+		t.Fatalf("after_json trailing: err=%v, want ErrInvalid carrying invalid after_json", err)
+	}
+	// Case D (negative): whitespace trailers and clean JSON are accepted.
+	clean := testProtoEvent("unit-trail-clean", "crm")
+	clean.PayloadJson = []byte("{\"a\":1}  \n\t")
+	clean.ChangedFields = []*auditv1.FieldChange{{Field: "amount", BeforeJson: `{"v":1}`, AfterJson: `[1,2]`}}
+	event, err := fromProto(clean)
+	if err != nil {
+		t.Fatalf("whitespace trailer rejected: %v", err)
+	}
+	if event.Payload["a"] != json.Number("1") {
+		t.Fatalf("payload not decoded: %#v", event.Payload)
+	}
+	if event.ChangedFields["amount"].After == nil {
+		t.Fatalf("changed fields not decoded: %#v", event.ChangedFields)
+	}
+	// Case E (boundary): two adjacent JSON values are trailing content.
+	adjacent := testProtoEvent("unit-trail-adjacent", "crm")
+	adjacent.PayloadJson = []byte(`{"a":1}{"b":2}`)
+	if _, err := fromProto(adjacent); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("adjacent values: err=%v, want ErrInvalid", err)
+	}
+	// Negative control: an omitted payload_json stays legal (len 0 skips decode).
+	empty := testProtoEvent("unit-trail-empty", "crm")
+	empty.PayloadJson = nil
+	if _, err := fromProto(empty); err != nil {
+		t.Fatalf("empty payload rejected: %v", err)
+	}
+}
+
+// TestGRPCRejectsTrailingJSONPayload is AC-2: trailing content after the
+// first JSON value is rejected with codes.InvalidArgument on Write,
+// WriteBatch and WriteStream, and nothing is persisted — fromProto runs
+// before Service.Ingest on all three RPCs. The negative control proves the
+// harness and envelope are valid.
+func TestGRPCRejectsTrailingJSONPayload(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+
+	write := testProtoEvent("grpc-trail-write", "crm")
+	write.PayloadJson = []byte(`{"a":1} extra`)
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: write}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Write code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	batch := testProtoEvent("grpc-trail-batch", "crm")
+	batch.PayloadJson = []byte(`{"a":1} extra`)
+	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{batch}})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	}
+	if len(response.GetReceipts()) != 0 {
+		t.Fatalf("WriteBatch wire receipts=%d, want 0", len(response.GetReceipts()))
+	}
+
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamBad := testProtoEvent("grpc-trail-stream", "crm")
+	streamBad.PayloadJson = []byte(`{"a":1} extra`)
+	if err := stream.Send(&auditv1.WriteRequest{Event: streamBad}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteStream termination code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	assertNoFramedKeys(t, st, "grpc-trail-write", "grpc-trail-batch", "grpc-trail-stream")
+
+	// Negative control: the identical envelope with clean JSON ingests.
+	ok := testProtoEvent("grpc-trail-ok", "crm")
+	receipt, err := client.Write(ctx, &auditv1.WriteRequest{Event: ok})
+	if err != nil {
+		t.Fatalf("negative control Write failed: %v", err)
+	}
+	if receipt.GetEventId() != "grpc-trail-ok" {
+		t.Fatalf("negative control receipt: %+v", receipt)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-trail-ok")]; !exists {
+			t.Fatal("negative control event was not ledgered")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newHTTPIngestLeg builds the HTTP transport's ingest surface from exported
+// APIs only (httpapi.NewServer + Handler), mirroring httpapi's unexported
+// testHTTPServerWithStore. The parity test cannot reuse the other package's
+// helper (both harness helpers are unexported); httpapi never imports
+// grpcapi, so this test-only import direction is cycle-free.
+func newHTTPIngestLeg(t *testing.T) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
+	t.Cleanup(server.Close)
+	return server, st
+}
+
+// parityEnvelope is testProtoEvent with a caller-supplied payload_json,
+// keeping the event fields digest-relevant (source, schema, actor, action,
+// outcome, classification, retention, idempotency key) identical to the
+// HTTP leg built by parityHTTPEvent.
+func parityEnvelope(eventID, payloadJSON string) *auditv1.EventEnvelope {
+	envelope := testProtoEvent(eventID, "crm")
+	envelope.PayloadJson = []byte(payloadJSON)
+	return envelope
+}
+
+// parityHTTPEvent is the HTTP-transport twin of parityEnvelope: the same
+// logical event as a domain.Event JSON body for POST /api/v1/events.
+func parityHTTPEvent(eventID string, payload map[string]any) domain.Event {
+	return domain.Event{
+		EventID: eventID, SourceSystem: "crm", EventType: "audit.event",
+		SchemaID: "audit.event", SchemaVersion: 1,
+		OccurredAt: time.Unix(1_700_000_020, 0).UTC(),
+		Actor:      domain.Actor{ID: "service"},
+		Action:     "write", Outcome: "success",
+		DataClassification: "internal", RetentionClass: "standard",
+		IdempotencyKey: eventID + "-idem", Payload: payload,
+	}
+}
+
+// storedDigest fetches the ledgered SourceDigest for an event, or fails the
+// test if the event never reached the snapshot.
+func storedDigest(t *testing.T, st *store.Store, eventID string) string {
+	t.Helper()
+	var digest string
+	if err := st.Read(func(data *store.Snapshot) error {
+		event, exists := data.Events[store.EventKey("tenant-a", eventID)]
+		if !exists {
+			t.Fatalf("event %q was never ledgered", eventID)
+		}
+		digest = event.SourceDigest
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+// TestGRPCHTTPDigestParity is AC-3: both transports decode the same logical
+// event with UseNumber and hash the same canonical content, so the stored
+// SourceDigest must be equal for every accepted input class — including an
+// int64 beyond 2^53, whose float64 collapse would silently diverge the two
+// transports. The gRPC leg uses newGRPCHarness; the HTTP leg is built inline
+// via exported APIs (newHTTPIngestLeg).
+func TestGRPCHTTPDigestParity(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	httpServer, httpStore := newHTTPIngestLeg(t)
+
+	changed := parityEnvelope("parity-changed", `{"value":1}`)
+	changed.ChangedFields = []*auditv1.FieldChange{{Field: "amount", BeforeJson: `{"v":1}`, AfterJson: `[1,2]`}}
+	changedHTTP := parityHTTPEvent("parity-changed", map[string]any{"value": json.Number("1")})
+	changedHTTP.ChangedFields = map[string]domain.FieldChange{"amount": {Before: map[string]any{"v": json.Number("1")}, After: []any{json.Number("1"), json.Number("2")}}}
+
+	classes := []struct {
+		name      string
+		envelope  *auditv1.EventEnvelope
+		httpEvent domain.Event
+	}{
+		{"big int64 beyond 2^53", parityEnvelope("parity-bigint", `{"value":12345678901234567890}`), parityHTTPEvent("parity-bigint", map[string]any{"value": json.Number("12345678901234567890")})},
+		{"nested object", parityEnvelope("parity-nested", `{"a":{"b":[1,2,{"c":3}]}}`), parityHTTPEvent("parity-nested", map[string]any{"a": map[string]any{"b": []any{json.Number("1"), json.Number("2"), map[string]any{"c": json.Number("3")}}}})},
+		{"array inside payload", parityEnvelope("parity-array", `{"items":[1,2,3]}`), parityHTTPEvent("parity-array", map[string]any{"items": []any{json.Number("1"), json.Number("2"), json.Number("3")}})},
+		{"changed-field pair", changed, changedHTTP},
+	}
+	for _, class := range classes {
+		t.Run(class.name, func(t *testing.T) {
+			if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: class.envelope}); err != nil {
+				t.Fatalf("gRPC ingest failed: %v", err)
+			}
+			body, err := json.Marshal(class.httpEvent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusAccepted {
+				data, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				t.Fatalf("HTTP ingest status=%d body=%s", resp.StatusCode, data)
+			}
+			resp.Body.Close()
+
+			grpcDigest := storedDigest(t, st, class.envelope.GetEventId())
+			httpDigest := storedDigest(t, httpStore, class.envelope.GetEventId())
+			if grpcDigest == "" || grpcDigest != httpDigest {
+				t.Fatalf("SourceDigest parity broken: gRPC=%q HTTP=%q", grpcDigest, httpDigest)
+			}
+		})
+	}
+
+	// Rejection parity: a top-level array payload cannot decode into the
+	// map-typed domain payload on EITHER transport, so neither side can ever
+	// ledger it — both reject before any ingest (gRPC InvalidArgument, HTTP
+	// 400), and the input class is invalid on both today and after the fix.
+	topLevel := testProtoEvent("parity-array-top", "crm")
+	topLevel.PayloadJson = []byte(`[1,2,3]`)
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: topLevel}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("top-level array: gRPC code=%v, want InvalidArgument", status.Code(err))
+	}
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/events", bytes.NewReader([]byte(`[1,2,3]`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("top-level array: HTTP status=%d, want 400", resp.StatusCode)
 	}
 }

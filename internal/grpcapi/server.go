@@ -178,7 +178,20 @@ func fromProto(input *auditv1.EventEnvelope) (domain.Event, error) {
 func decodeJSONNumber(data []byte, out any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	return decoder.Decode(out)
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	// Strict single-value decode: the first Decode consumes exactly one JSON
+	// value; anything but io.EOF on the second Decode means trailing content
+	// that the ledger would otherwise record truncated. Matches decodeBody's
+	// exhaustion check on the HTTP surface so both transports reject the same
+	// input class and cross-transport SourceDigest parity holds for every
+	// accepted input.
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("%w: trailing content after first JSON value", domain.ErrInvalid)
+	}
+	return nil
 }
 
 func toProtoReceipt(receipt domain.EventReceipt) *auditv1.WriteResponse {
