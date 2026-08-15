@@ -56,9 +56,9 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - `audit-kafka-dlq-replay`：DLQ 重放消费者——DLQ 记录只含失败元数据，原事件按 key 从 `audit.events.accepted.v1` 恢复并逐字节重发（或 `-api-url`/`-token` 改为经审计 API 重新接入）；已重放 event_id 持久化到 `-state`（`AUDIT_DLQ_REPLAY_STATE`，默认 `./data/dlq-replay-state.json`）使重扫幂等，accepted 主题每轮从头扫描以保证新 DLQ 记录能找到更早的原消息；`-once` 供调度器单轮执行，或按 `-interval` 常驻；瞬态失败下轮重试，API 永久拒绝（4xx 除 429）标记重放完成避免死循环（需人工处理）；`-metrics-listen` 暴露 `audit_dlq_*` 指标。自 2026-08-15 起：`error_code="unauthorized"` 记录默认被 auth-blocked（不重放、不标记、不提交，计 `audit_dlq_auth_blocked_total` + 积压 gauge `audit_dlq_auth_blocked`，配 `AuditDLQAuthBlockedBacklog` 告警）——凭证修复后由运营显式加 `-replay-auth-blocked` 排空并移除（事故处置 runbook 见 release-notes）。`audit-kafka-consumer` 与重放器均可暴露文本指标端点（`AUDIT_KAFKA_METRICS`/`AUDIT_DLQ_REPLAY_METRICS`），Prometheus 规则 `deploy/prometheus-rules.verify.yml` 对 DLQ 流量、积压、认证阻塞和重放失败告警（两个新告警依赖对应 /metrics 已挂载）。
 - 外部基础设施接入（全部可选、本机容器可验证）：
   - `AUDIT_VAULT_ADDR` + `AUDIT_VAULT_TOKEN` + `AUDIT_VAULT_TRANSIT_KEY`：checkpoint 签名改用 Vault Transit 引擎（私钥不出 Vault，算法标记 `vault-transit:<key>`），未配置时默认 HMAC-SHA256；地址必须 `https://…`，或本机 loopback + 显式 `AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK=true`（非 loopback 明文 http 任何情况下启动/预检失败关闭；scheme 缺失、空 host、带路径/userinfo 的地址同样失败关闭且错误信息不回显凭据）；
-  - `AUDIT_S3_ENDPOINT`/`AUDIT_S3_BUCKET`/`AUDIT_S3_ACCESS_KEY`/`AUDIT_S3_SECRET_KEY`：合规归档（事件/段清单/导出）写入 S3 兼容 Object Lock 桶（MinIO 验证：删除仅产生版本删除标记），默认本地只读目录；`AUDIT_S3_USE_SSL=true` 启用 TLS，`https://` scheme 端点必须与之匹配否则失败关闭（绝不静默降级明文）；scheme 缺失的非 loopback 端点默认允许明文 http（本机开发兼容，残余风险：明文链路上静态密钥与归档证据可被 MITM 读取，由 `transport_s3=http` + CI 断言观察式强制，见 `docs/THREAT_MODEL.md` §3.7）；
+  - `AUDIT_S3_ENDPOINT`/`AUDIT_S3_BUCKET`/`AUDIT_S3_ACCESS_KEY`/`AUDIT_S3_SECRET_KEY`：合规归档（事件/段清单/导出）写入 S3 兼容 Object Lock 桶（MinIO 验证：删除仅产生版本删除标记），默认本地只读目录；**自 2026-08-15（R-1）起归档就绪门禁强制要求桶默认留存为 COMPLIANCE 模式 + 正有效期（Days/Years > 0，如 365 天）**——Object Lock 已启用但无默认留存、或默认留存为 GOVERNANCE/零有效期的桶会失败关闭（`-check-config`/启动探针/`/readyz` 分别报 `no default retention`/`GOVERNANCE` 类错误并指明修复：`mc retention set --default compliance 365d <bucket>`）；已写对象的留存固定在写入时刻（继承当时的桶默认），不受后续配置变更影响；`AUDIT_S3_USE_SSL=true` 启用 TLS，`https://` scheme 端点必须与之匹配否则失败关闭（绝不静默降级明文）；scheme 缺失的非 loopback 端点默认允许明文 http（本机开发兼容，残余风险：明文链路上静态密钥与归档证据可被 MITM 读取，由 `transport_s3=http` + CI 断言观察式强制，见 `docs/THREAT_MODEL.md` §3.7）；
   - 两个二进制 `-check-config` 的 `check_config=ok` 逐腿报告 `transport_s3=`/`transport_vault=`（`tls`/`http`/`local`），格式串字节一致；
-- 签名与加密密钥强制显式配置：`AUDIT_SIGNING_SECRET`（段/聚合 checkpoint HMAC 签名）与 `AUDIT_ENCRYPTION_KEY`（schema 加密字段、导出文件 AES-GCM）任一为空、等于公开默认值或两者相同（非开发模式）时，`audit-api`/`audit-governance-worker` 启动失败（退出码非零，错误信息指明需设置的变量）；本机开发须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，独立于 `-allow-dev-auth`）才恢复旧默认行为。`-check-config` 不打开状态存储、不绑定监听器，供部署预检与 CI 使用（两个进程必须使用相同的两个值）：`audit-api` 的校验密钥、Vault/S3 与认证配置后退出（不发起网络）；`audit-governance-worker` 的还会对归档目的地做一次有界探测（5 秒超时；S3 配置会触网——桶必须存在且启用 Object Lock 与 versioning，本地归档做可写性探测），失败时退出码 1 且不打印 `check_config=ok`。认证配置与启动同一规则：无 JWT 信任源（开发认证默认关闭）即失败，`-allow-dev-auth` 单独无法满足预检，开发认证白名单仅接受环境变量 `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
+- 签名与加密密钥强制显式配置：`AUDIT_SIGNING_SECRET`（段/聚合 checkpoint HMAC 签名）与 `AUDIT_ENCRYPTION_KEY`（schema 加密字段、导出文件 AES-GCM）任一为空、等于公开默认值或两者相同（非开发模式）时，`audit-api`/`audit-governance-worker` 启动失败（退出码非零，错误信息指明需设置的变量）；本机开发须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，独立于 `-allow-dev-auth`）才恢复旧默认行为。`-check-config` 不打开状态存储、不绑定监听器，供部署预检与 CI 使用（两个进程必须使用相同的两个值）：`audit-api` 的校验密钥、Vault/S3 与认证配置后退出（不发起网络）；`audit-governance-worker` 的还会对归档目的地做一次有界探测（5 秒超时；S3 配置会触网——桶必须存在且启用 Object Lock、versioning，且默认留存为 COMPLIANCE + 正有效期（R-1，2026-08-15），本地归档做可写性探测），失败时退出码 1 且不打印 `check_config=ok`。认证配置与启动同一规则：无 JWT 信任源（开发认证默认关闭）即失败，`-allow-dev-auth` 单独无法满足预检，开发认证白名单仅接受环境变量 `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
   - `audit-projector`：消费 `audit.events.ledgered.v1` 写入 ClickHouse 查询投影（`ReplacingMergeTree` 按 event_id 去重、tenant 前缀排序键、按月分区），投影可重建、非事实源。
 - 导出任务支持状态轮询和租户鉴权的 JSONL 下载。
 - API 契约位于 `api/openapi`、`api/asyncapi` 和 `api/proto`。
@@ -146,6 +146,58 @@ B1-7 真实 IdP token 注入（G1 模式，**自包含**）：设置 `AUDIT_IDP_
 （dev token 负向断言 401；JWKS 经 host-gateway 别名访问容器 IdP；issuer 校验）。
 可选 `AUDIT_IDP_SCOPE`/`AUDIT_IDP_TOKEN_URL` 覆盖。未配置时过渡期使用 dev
 token 并告警。两种模式均实测通过（2026-08-07）。
+
+### COMPLIANCE 默认留存 cutover 验证（R-1 部署配套，2026-08-15）
+
+fullstack.sh 在启动任何应用之前自举归档桶并**自动化 cutover 验证**：用 worker
+二进制（宿主 `go build`，5 秒有界探针）对一次性 `worm-audit-cutover` 桶依次断言
+
+| 桶状态 | `-check-config` 期望 |
+|---|---|
+| 无默认留存（`--with-lock` + versioning 后） | 退出码 1 + `no default retention`（R-3a），不打印 `check_config=ok` |
+| `mc retention set --default governance 365d` | 退出码 1 + `GOVERNANCE`（R-3b），不打印 `check_config=ok` |
+| `mc retention set --default compliance 365d` | 退出码 0 + `check_config=ok` |
+
+随后给真实 `worm-audit` 桶设置 COMPLIANCE 365d 默认留存（幂等覆盖）并正向复核，
+然后才启动 worker——否则 worker 启动即 fatal 进入重启退避。scratch 桶从不写入
+数据、无留存对象，`mc rb --force` 可安全重建（带留存对象的 WORM 桶无法强制删除）。
+本镜像内置 mc 的 retention 子命令使用**位置参数模式**（`mc retention set
+--default compliance 365d`，而非 `--compliance`），已在 pinned 镜像上实测。
+
+### 部署 / 回滚 runbook（R-1 COMPLIANCE 默认留存门禁）
+
+**部署（新环境）**：
+
+1. 创建/校验归档桶：`mc mb --with-lock <alias>/worm-audit` + `mc version enable`
+   + `mc retention set --default compliance 365d <alias>/worm-audit`。
+2. 预检（不打开状态存储、不绑定监听器；S3 仅做 5 秒有界探针）：
+   `AUDIT_SIGNING_SECRET=… AUDIT_ENCRYPTION_KEY=… AUDIT_S3_ENDPOINT=…
+   AUDIT_S3_BUCKET=worm-audit AUDIT_S3_ACCESS_KEY=… AUDIT_S3_SECRET_KEY=…
+   ./bin/audit-governance-worker -check-config` → 退出码 0 且输出
+   `check_config=ok … archive=s3`。
+3. 部署新二进制（API + worker 同发布），观察 worker 启动日志
+   `archive_ready=ok`；`/readyz` 返回 200。
+
+**部署（既有桶 cutover）**：对每个现存归档桶先跑
+`./bin/audit-governance-worker -check-config` 分类：
+
+- 报 `no default retention`（R-3a）或 `GOVERNANCE`（R-3b）→ 桶处于可删除
+  状态，先修复再升级：`mc retention set --default compliance 365d <bucket>`，
+  重跑 `-check-config` 到 `check_config=ok`。
+- 已是 COMPLIANCE + 正有效期 → 直接升级，行为不变。
+
+已写对象不受影响（留存固定在写入时刻）；门禁只保护新写入。
+
+**回滚**：
+
+1. 重新部署旧二进制（`git revert` 或部署上一版本镜像）。旧二进制接受所有既有
+   桶配置（pre-gate 行为），包括 GOVERNANCE/无默认留存——因此回滚总是成功。
+2. 桶上已设置的 COMPLIANCE 默认留存**无需撤销**：它是合法配置，旧二进制同样
+   接受（默认留存只约束新对象，不删除/改写任何数据）。
+3. 若回滚发生在 cutover 之后且新二进制已写入对象：对象留存继承自写入时刻的
+   桶默认，不会因回滚解除；无需清理。
+4. fullstack.sh 的 cutover 负向断言依赖 R-1 门禁（pre-gate 二进制三类桶全通过）
+   ——回滚到 pre-gate 后 CI 不应再跑该 e2e 的负向断言，或与门禁代码一起回滚。
 
 ## 核心原则
 

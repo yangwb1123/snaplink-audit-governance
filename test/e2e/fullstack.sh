@@ -105,9 +105,10 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
 
-# 自举归档依赖：S3Store.Ready 要求 bucket 存在且启用 Object Lock（WORM）。
+# 自举归档依赖：S3Store.Ready 要求 bucket 存在、启用 Object Lock（WORM）、
+# versioning，并且（自 R-1 收口起）默认留存为 COMPLIANCE 模式 + 正有效期。
 # worker 启动即探测归档就绪（REQ-1，失败 fatal），因此 bucket 必须在任何
-# 应用启动之前创建，否则新栈的 worker 首次启动必然失败并进入重启退避。
+# 应用启动之前完成全部配置，否则新栈的 worker 首次启动必然失败并进入重启退避。
 log "bootstrapping MinIO Object Lock bucket"
 for _ in $(seq 1 30); do
   if $COMPOSE exec -T minio mc alias set "$MINIO_ALIAS" http://localhost:9000 \
@@ -119,6 +120,65 @@ for _ in $(seq 1 30); do
 done
 $COMPOSE exec -T minio mc mb --with-lock "$MINIO_ALIAS/worm-audit" >/dev/null 2>&1 || true
 $COMPOSE exec -T minio mc version enable "$MINIO_ALIAS/worm-audit" >/dev/null 2>&1 || true
+
+# ─────────────────────────────────────────────────────────────────────────
+# COMPLIANCE-default cutover (qa F4 / compliance F2 / security F6): the R-1
+# gate makes S3Store.Ready fail closed unless the bucket default retention is
+# COMPLIANCE with positive validity. 没有默认留存的桶恰是 R-3a
+# （"no default retention"），GOVERNANCE 默认留存是 R-3b（"GOVERNANCE"）——
+# 两者在 worker -check-config 下都必须退出码 1 且不打印 check_config=ok。
+# 用 worker 二进制对一次性 scratch 桶做 cutover 三态验证（自动化 design §5
+# 的手动步骤；scratch 桶从不写入数据、无留存对象，因此 mc rb --force 可
+# 安全重建，每次运行都从"无默认留存"状态开始，幂等）：
+#   no default      → exit 1 + "no default retention"   (R-3a)
+#   GOVERNANCE 365d → exit 1 + "GOVERNANCE"             (R-3b)
+#   COMPLIANCE 365d → exit 0 + check_config=ok
+# 随后给真实 worm-audit 桶设置 COMPLIANCE 365d 默认留存（幂等覆盖：即使
+# 上次运行残留 COMPLIANCE 默认，重跑也不会失真）并正向复核。
+# 注（部署顺序）：负向断言只在 R-1 门禁进入部署二进制后成立；pre-gate
+# 二进制对三类桶全部通过。fullstack.sh 必须与门禁代码同一发布落地（见
+# README 的 deploy/rollback runbook）。
+log "building worker binary for -check-config cutover validation"
+WORKER_BIN="${TMPDIR:-/tmp}/audit-governance-worker-checkconfig"
+CHECKCONFIG_LOG="${TMPDIR:-/tmp}/fullstack-checkconfig-$$.log"
+( cd "${ROOT}" && go build -o "$WORKER_BIN" ./cmd/audit-governance-worker )
+export AUDIT_SIGNING_SECRET="${AUDIT_SIGNING_SECRET:-local-only-change-me}"
+export AUDIT_ENCRYPTION_KEY="${AUDIT_ENCRYPTION_KEY:-local-only-encryption-key}"
+export AUDIT_S3_ENDPOINT="localhost:19010"   # minio 发布到宿主的端口
+# AUDIT_S3_BUCKET 按腿覆盖（见 checkconfig_expect）
+export AUDIT_S3_ACCESS_KEY="audit-local"
+export AUDIT_S3_SECRET_KEY="audit-local-change-me"
+
+checkconfig_expect() { # bucket want_marker forbid_marker want_rc
+  local bucket="$1" want="$2" forbid="$3" wantrc="$4" rc
+  AUDIT_S3_BUCKET="$bucket" "$WORKER_BIN" -check-config >"$CHECKCONFIG_LOG" 2>&1 && rc=0 || rc=$?
+  if [ "$rc" -ne "$wantrc" ] \
+     || ! grep -qE "$want" "$CHECKCONFIG_LOG" \
+     || { [ -n "$forbid" ] && grep -qE "$forbid" "$CHECKCONFIG_LOG"; }; then
+    log "FAIL: -check-config bucket=$bucket: want rc=$wantrc marker='$want' forbid='${forbid:-}' got rc=$rc"
+    tail -5 "$CHECKCONFIG_LOG"
+    exit 1
+  fi
+  log "PASS: -check-config bucket=$bucket → $want"
+}
+
+CUTOVER_BUCKET="worm-audit-cutover"
+$COMPOSE exec -T minio mc rb --force "$MINIO_ALIAS/$CUTOVER_BUCKET" >/dev/null 2>&1 || true
+$COMPOSE exec -T minio mc mb --with-lock "$MINIO_ALIAS/$CUTOVER_BUCKET" >/dev/null
+log "cutover negative leg (R-3a): no default retention must fail closed"
+checkconfig_expect "$CUTOVER_BUCKET" "no default retention" "check_config=ok|GOVERNANCE" 1
+$COMPOSE exec -T minio mc retention set --default governance 365d "$MINIO_ALIAS/$CUTOVER_BUCKET" >/dev/null
+log "cutover negative leg (R-3b): GOVERNANCE default must fail closed"
+checkconfig_expect "$CUTOVER_BUCKET" "GOVERNANCE" "no default retention" 1
+$COMPOSE exec -T minio mc retention set --default compliance 365d "$MINIO_ALIAS/$CUTOVER_BUCKET" >/dev/null
+log "cutover positive leg: COMPLIANCE 365d default must pass"
+checkconfig_expect "$CUTOVER_BUCKET" "check_config=ok" "" 0
+$COMPOSE exec -T minio mc rb --force "$MINIO_ALIAS/$CUTOVER_BUCKET" >/dev/null 2>&1 || true
+
+log "setting COMPLIANCE 365d default retention on worm-audit (R-1 required state)"
+$COMPOSE exec -T minio mc retention set --default compliance 365d "$MINIO_ALIAS/worm-audit" >/dev/null
+checkconfig_expect "worm-audit" "check_config=ok" "" 0
+rm -f "$CHECKCONFIG_LOG"
 
 log "starting applications (audit-api/relay/consumer/projector/worker/idp)"
 $COMPOSE up -d audit-api audit-outbox-relay audit-kafka-consumer \

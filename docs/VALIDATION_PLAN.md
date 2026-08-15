@@ -67,9 +67,11 @@ checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
 独立于 `AUDIT_ALLOW_DEV_AUTH`）才恢复旧默认行为。
 
 部署预检（不打开状态存储、不绑定监听器；API 的 `-check-config` 不发起网络，
-worker 的会做一次有界归档目的地探测——S3 触网且要求桶已启用 Object Lock
-与 versioning，本地归档做可写性探测，失败退出码 1；预检与启动使用相同的
-认证校验规则）：
+worker 的会做一次有界归档目的地探测——S3 触网且要求桶已启用 Object Lock、
+versioning，且默认留存为 **COMPLIANCE + 正有效期**（R-1，2026-08-15：无默认
+留存/GOVERNANCE/零有效期桶均失败关闭，错误分别含 `no default retention`/
+`GOVERNANCE` 并指明 `mc retention set --default compliance 365d` 修复），本地
+归档做可写性探测，失败退出码 1；预检与启动使用相同的认证校验规则）：
 
 ```sh
 AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... \
@@ -111,7 +113,16 @@ AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker 
 - **ClickHouse**：`audit-projector` 消费 ledgered topic 写入查询投影表
   （ReplacingMergeTree、tenant 前缀排序键、按月分区），投影可 SQL 查询。
 - **MinIO（Object Lock）**：事件/段清单/导出写入 `--with-lock` 桶；
-  retention（governance 365d）下删除仅产生版本删除标记，对象不可物理删除。
+  桶默认留存为 **COMPLIANCE 365d**（R-1 门禁必需，fullstack.sh 自举：
+  `mc retention set --default compliance 365d`），删除仅产生版本删除标记，
+  对象不可物理删除。
+- **COMPLIANCE cutover 验证矩阵（2026-08-15，fullstack.sh 内自动化）**：对
+  一次性 scratch 桶（无数据、可 `mc rb --force` 重建）以 worker
+  `-check-config` 断言三态——无默认留存 → 退出码 1 + `no default retention`
+  （R-3a）；`--default governance 365d` → 退出码 1 + `GOVERNANCE`（R-3b）；
+  `--default compliance 365d` → 退出码 0 + `check_config=ok`。真实
+  `worm-audit` 桶随后设为 COMPLIANCE 365d 并正向复核。cutover 负向断言仅在
+  R-1 门禁进入部署二进制后成立（pre-gate 二进制三类桶全通过）。
 - **Vault（Transit）**：checkpoint 签名改走 Transit 引擎（`AUDIT_VAULT_*`），
   私钥不出 Vault；协议层由单测覆盖，真实 Vault 容器可另行启动。
 - **Jaeger/Prometheus**：OTLP 导出已验证；指标端点接 Prometheus。

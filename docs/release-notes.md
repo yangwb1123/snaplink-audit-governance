@@ -1,5 +1,34 @@
 # Release Notes
 
+## 2026-08-15 — Verify 栈归档桶自举 COMPLIANCE 默认留存 + cutover 三态验证（test/e2e + deploy 配套）
+
+**写给运营（行为变化）：**
+
+- **归档桶默认留存收口（R-1 部署配套）**：`test/e2e/fullstack.sh` 现在在启动任何应用之前给
+  `worm-audit` 桶设置 COMPLIANCE 365d 默认留存（`mc retention set --default compliance 365d`），
+  并自动执行 cutover 三态验证：无默认留存 → `-check-config` 退出码 1 + `no default retention`
+  （R-3a）；GOVERNANCE 365d → 退出码 1 + `GOVERNANCE`（R-3b）；COMPLIANCE 365d → 退出码 0 +
+  `check_config=ok`。验证在一次性 `worm-audit-cutover` 桶上进行（无数据、可安全重建，重跑幂等）。
+- **既有桶升级顺序**：R-1 门禁落地后，任何无默认留存/GOVERNANCE 默认的归档桶都会让 worker
+  启动失败关闭。升级前对每个桶跑 `./bin/audit-governance-worker -check-config`，R-3a/R-3b 报错
+  的桶先 `mc retention set --default compliance 365d <bucket>` 再升级。已写对象不受影响（留存
+  固定在写入时刻）；回滚 = 重新部署旧二进制（旧二进制接受所有既有桶配置，已设的 COMPLIANCE
+  默认无需撤销）。完整 runbook 见 README「部署 / 回滚 runbook（R-1 COMPLIANCE 默认留存门禁）」。
+- **mc 语法注意**：pinned minio 镜像内置 mc 的 retention 子命令用位置参数模式
+  （`mc retention set --default compliance 365d`），`--compliance` 标志形式会被拒绝。
+
+**写给开发（实现变化）：**
+
+- `test/e2e/fullstack.sh`：桶自举后新增 COMPLIANCE-default cutover 块（宿主 `go build`
+  worker 二进制 + `checkconfig_expect` 断言 helper：退出码、必需 marker、marker 互斥
+  （R-3a 不含 `GOVERNANCE`/`check_config=ok`，R-3b 不含 `no default retention`）），随后给
+  `worm-audit` 设 COMPLIANCE 365d 并正向复核，再启动应用。
+- `deploy/docker-compose.verify.yml`：worker/minio 服务注释文档化 R-1 桶不变式与自举命令。
+- `README.md` / `docs/VALIDATION_PLAN.md`：`AUDIT_S3_*` 与 `-check-config` 契约更新为
+  COMPLIANCE + 正有效期；新增 cutover 矩阵与部署/回滚 runbook。
+- 本配套不包含 R-1 门禁代码（`internal/archive` 的 `Ready` 强制检查由独立实现任务落地）；
+  负向断言只在门禁二进制部署后成立，fullstack.sh 与门禁代码须同一发布。
+
 ## 2026-08-15 — Replay 重放分类不再被 Kafka key 覆盖有效冲突 payload event_id（internal/kafka）
 
 **写给运营（行为变化）：**

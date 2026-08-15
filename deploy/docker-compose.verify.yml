@@ -115,6 +115,13 @@ services:
       AUDIT_S3_BUCKET: worm-audit
       AUDIT_S3_ACCESS_KEY: audit-local
       AUDIT_S3_SECRET_KEY: audit-local-change-me
+    # R-1（2026-08-15）：worker 启动即探测归档就绪（Ready），要求 bucket 存在、
+    # Object Lock enabled + versioning，且默认留存为 COMPLIANCE + 正有效期。
+    # worm-audit 的 COMPLIANCE 365d 默认留存由 test/e2e/fullstack.sh 在启动
+    # 任何应用之前自举（mc retention set --default compliance 365d）并做
+    # cutover 三态验证（no-default/GOVERNANCE → exit 1，COMPLIANCE → ok）。
+    # 手工 `docker compose up -d` 时必须在启动本服务前完成同一自举，否则
+    # worker 会 fatal 进入重启退避。
     depends_on:
       - postgres
       - minio
@@ -215,6 +222,13 @@ services:
     environment:
       MINIO_ROOT_USER: audit-local
       MINIO_ROOT_PASSWORD: audit-local-change-me
+    # WORM 桶自举（fullstack.sh 执行；mc 随镜像内置）：
+    #   mc mb --with-lock worm-audit
+    #   mc version enable worm-audit
+    #   mc retention set --default compliance 365d worm-audit   # R-1 必需
+    # 注意本镜像内置 mc 的 retention 子命令用位置参数模式
+    # （`compliance` 而非 `--compliance`），`mc retention set --default
+    # compliance 365d` 是已验证的正确写法。
     ports:
       - "19010:9000"
       - "19011:9001"
