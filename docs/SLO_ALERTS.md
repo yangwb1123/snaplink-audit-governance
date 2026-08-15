@@ -26,6 +26,14 @@
 > 规则已声明待生产接入）；readyz 的 store/archive 503 由部署侧探针负责
 > （本机以 `AuditAPIDown`（up=0）兜底）。
 
+> **部署前置条件（-metrics-listen 默认关闭的暴露面）**：audit-dlq 组全部规则
+> （`AuditDLQTraffic`/`AuditDLQBacklog`/`AuditDLQRepublishFailures`/两个新告警）依赖
+> consumer 与 replay 二进制挂载 `/metrics`——`AUDIT_KAFKA_METRICS` 与
+> `AUDIT_DLQ_REPLAY_METRICS` 默认均为空（端点不监听），`-once` 模式即使设置也不挂载。
+> 未启用时这些规则永远静默，新增的 `AuditDLQAuthBlockedBacklog`（H2 伪造/残留阻塞楔子）
+> 也不例外；兜底信号是 replay 每轮的 `N auth-blocked records pending` 日志行。生产部署
+> 必须设置两个变量并接入 Prometheus 抓取（verify 栈已配 `:9092`/`:9093`）。
+
 | 告警 | 表达式 | 级别 | 动作 |
 |---|---|---|---|
 | 接入错误率超限 | `rate(audit_http_errors_total[5m]) / rate(audit_http_requests_total[5m]) > 0.01` | P1 | 检查 ingest 与存储依赖 |
