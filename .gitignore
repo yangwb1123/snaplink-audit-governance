@@ -13,6 +13,7 @@ __pycache__/
 logs/
 docs/archive/
 docs/auto/
+docs/evolution/
 docs/requirements/runs/
 /internal/**/exports/
 
