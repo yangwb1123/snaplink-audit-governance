@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-08-16 — 路由契约门禁升级为方法/响应感知：`cli.py check` 开始强制 OpenAPI 契约（api/openapi，make-the-route-contract-gate-method-and-response-456cafeb）
+
+**写给运营（行为变化）：**
+
+- **`python3 cli.py check` 现在运行路由契约门禁**（此前只有 `cli.py quality` / `cli.py check-routes` 执行）：`make check` / CI 常规检查即校验运行期路由与 `api/openapi/openapi.yaml` 的契约，全绿输出多一行 `PASS: route contract`。门禁现在对比 **(HTTP 方法, 规范化路径) 对**而非仅路径——同一路径 GET/POST 漂移（规范文档化 GET、运行期注册 POST，或反之）都会 FAIL 并指名方法与路径。
+- **运行期处理器实际写出的状态码必须被规范文档覆盖**（单向：字面量 ⊆ 文档；经 `statusForError` 动态映射的状态与中间件/鉴权/panic 产生的状态不在检查范围，属设计内限制）。例如 `downloadExport` 对缺失归档对象实际返回 404（`server.go` 的 `os.IsNotExist` 分支），规范此前只文档化 200/409/500——本次为它补上 404。
+- **`api/openapi/openapi.yaml` 纯文档增补**：15 个操作的 16 个错误响应状态键（queryEvents 400/500、getEvent 500、两条 timeline 500、各 create/verify/preview/restore/setRetention 400、downloadExport 404、listAdminActions 400）+ `AdminAction` 200 响应接线（此前定义了但从未被引用）。无任何运行期行为/二进制变化；回滚 = 回退规范文件，门禁会立即大声失败。
+
+**写给开发（实现变化）：**
+
+- `checks/route_contract.py`：单一共享实现，三阶段门禁。R1 方法感知操作匹配（运行期 `HandleFunc("METHOD /path", s.spanWrap(s.handler))` 注册 vs 规范 `paths:` 操作，key = `(METHOD.upper(), normalize(path))`）；R2 响应状态覆盖（处理器函数体内字面 `s.writeError(w,r,http.StatusX)`/`writeJSON(w,http.StatusX)`/`WriteHeader(http.StatusX)` 必须 ⊆ 该操作文档状态；`http.StatusX` → 数字经 Python 标准库 `http.HTTPStatus` 转换，不可映射常量 fail-loud 不回溯）；R3 模式完整性（`$ref` 悬空引用、已定义未引用顶层 schema 均 FAIL，`schemas:` 子段作用域避免误报 `securitySchemes`）。`_build_index` 单遍扫描 `internal/**/*.go` 同时产出路由表与处理器字面状态表（消除 O(R·F) N+1，实测每次门禁运行 100 次文件读取 / ~13ms）；重复 `(method, path)` 注册与重复接收器方法名 fail-loud（拒绝 last-write-wins）；`//` 全行注释先剥离、函数头正则锚定 `\nfunc ` 部分起点（消除 `server_test.go` 注释/字符串误归属）；`normalize()` 冻结契约不变（`{param}` → `{}`），`run(root=None)` 保持零参兼容（`checks/self_test.py`、`cmd_quality` 继续零参调用，`ROOT` 默认取 `checks/config`）。纯标准库，无 YAML 依赖（延续仓库 regex 契约测试纪律）。
+- `cli.py`：`cmd_check_routes()` 改为委托 `checks.route_contract.run(root=ROOT)`（调用时读 `cli.ROOT`，支持 test_proto_sync 式 monkeypatch 测试）；删除重复的 `normalized_route()` 与扫描正则（单一实现，消除双份正则漂移）；`cmd_check()` 元组加入 `cmd_check_routes`（R5：`cli.py check` 强制契约门禁）；`cmd_harness` 去掉冗余的显式 `cmd_check_routes`（该阶段已在 `cmd_check` 内）。
+- 测试：`checks/test_route_contract.py`（新增，27 用例）——方法漂移双向失败/匹配控制、未文档化字面状态失败（含真实仓库 downloadExport 404 回归、`WriteHeader` 形态、flow 风格多状态单行、单向非目标钉住）、悬空/未引用 schema 与 `bearerAuth` 作用域控制、缺失规范文件/空 internal/双空 vacuous pass、重复注册/重复处理器 fail-loud、不可映射 `http.StatusTeapot` 常量无 traceback、`AUDIT_QUALITY_ACTIVE` 递归防护（quality 内跑套件时跳过两个重量级子进程用例）。
+
 ## 2026-08-16 — 投影端把 `projection.ErrNotLedgered` 分类为永久错误：pre-ledger 事件首次尝试即死信 `permanent_error`（internal/kafka，classify-projection-errnotledgered-as-a-permanen-3e0130dd）
 
 **写给运营（行为变化）：**
