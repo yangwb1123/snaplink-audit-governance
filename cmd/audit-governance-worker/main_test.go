@@ -228,6 +228,31 @@ func (f *flakyArchive) Get(context.Context, string) ([]byte, error) { return nil
 
 func (f *flakyArchive) Ready(context.Context) error { return f.readyErr }
 
+// blockingArchive is the worker-test stand-in for an in-flight S3 Put
+// (mirrors blockingWorkerSigner): Put signals entry via a non-blocking send
+// (never close — a second Put must not panic), blocks on the passed context,
+// then returns the context error, exactly like minio-go aborts the in-flight
+// HTTP request when the request context is done. Ready passes so the
+// readiness probe cannot mask the archive step. observedErr is written by
+// the Put goroutine and read by the test only after <-done on the pass
+// goroutine, which gives the needed happens-before edge.
+type blockingArchive struct {
+	started     chan struct{}
+	once        sync.Once
+	observedErr error
+}
+
+func (b *blockingArchive) Put(ctx context.Context, _ string, _ []byte) error {
+	b.once.Do(func() { b.started <- struct{}{} })
+	<-ctx.Done()
+	b.observedErr = ctx.Err()
+	return ctx.Err()
+}
+
+func (b *blockingArchive) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (b *blockingArchive) Ready(context.Context) error { return nil }
+
 // swapArchiveStore replaces the newArchiveStore seam for one test and
 // restores it on cleanup. The seam is mutable package state: tests that swap
 // it must never run in parallel (R-5).
@@ -784,6 +809,142 @@ func TestRunEvaluatePassAbortsOnCancelledContext(t *testing.T) {
 	}
 	if n := strings.Count(out, "tenant=tenant-a aggregate_checkpoint_error="); n != 1 {
 		t.Fatalf("aggregate_checkpoint_error lines=%d, want exactly 1", n)
+	}
+}
+
+// TestRunEvaluatePassAbortsWithinDeadlineOnBlockedPut is AC-1 (REQ-1/REQ-2):
+// a store whose Put blocks until the context is done must make the pass
+// abort within the deadline instead of hanging. The 100 ms parent deadline
+// shrinks the effective bound (context.WithTimeout intersection) without
+// touching the production archivePassTimeout constant. The deadline error is
+// transient: no receipt is committed, no dead letter is recorded, and no
+// Store.Update window is opened, so the next pass retries the same events.
+func TestRunEvaluatePassAbortsWithinDeadlineOnBlockedPut(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	seedPendingReceipts(t, backend, 1)
+	blocked := &blockingArchive{started: make(chan struct{}, 1)}
+	svc.Config.Archive = blocked
+	savesBefore := backend.saves
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	done := make(chan struct{})
+	go func() { runEvaluatePass(ctx, logger, svc); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runEvaluatePass did not abort within the deadline on a blocked Put")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "tenant=tenant-a archive_error=") || !strings.Contains(out, "context deadline exceeded") {
+		t.Fatalf("log must surface the deadline archive error, got: %q", out)
+	}
+	if !strings.Contains(out, "archived=0") {
+		t.Fatalf("log must show archived=0 (transient, nothing committed), got: %q", out)
+	}
+	if !strings.Contains(out, "pass_aborted=") {
+		t.Fatalf("log must contain the pass abort line, got: %q", out)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := snap.Receipts[store.EventKey("tenant-a", "evt-1")]; receipt.Status != domain.StatusIndexed {
+		t.Fatalf("receipt status=%s, want untouched StatusIndexed (transient abort)", receipt.Status)
+	}
+	if len(snap.DeadLetters) != 0 {
+		t.Fatalf("dead letters=%d, want 0 (deadline is transient, never dead-lettered)", len(snap.DeadLetters))
+	}
+	if backend.saves != savesBefore {
+		t.Fatalf("saves=%d, want %d (no Store.Update window on a deadline abort)", backend.saves, savesBefore)
+	}
+}
+
+// TestRunEvaluatePassCancelledCtxAbortsInflightPut is AC-2: a signal-cancel
+// (the unit-level stand-in for main's signal.NotifyContext) during an
+// in-flight archive Put aborts it promptly — the pass context reaches Put
+// through ArchivePending → archiveEvent, and the store observes
+// context.Canceled. After the change, SIGTERM during a pass lets main's
+// ctx.Done() branch reach st.Flush() instead of blocking on the S3 round
+// trips. No receipt is committed (no partial batch).
+func TestRunEvaluatePassCancelledCtxAbortsInflightPut(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	seedPendingReceipts(t, backend, 1)
+	blocked := &blockingArchive{started: make(chan struct{}, 1)}
+	svc.Config.Archive = blocked
+	ctx, cancel := context.WithCancel(context.Background())
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	done := make(chan struct{})
+	go func() { runEvaluatePass(ctx, logger, svc); close(done) }()
+	select {
+	case <-blocked.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("archive Put never started")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runEvaluatePass did not abort promptly on a cancelled pass context")
+	}
+	if !errors.Is(blocked.observedErr, context.Canceled) {
+		t.Fatalf("store observed ctx error=%v, want context.Canceled (pass ctx reached Put)", blocked.observedErr)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "tenant=tenant-a archive_error=") || !strings.Contains(out, "context canceled") {
+		t.Fatalf("log must surface the cancellation archive error, got: %q", out)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := snap.Receipts[store.EventKey("tenant-a", "evt-1")]; receipt.Status != domain.StatusIndexed {
+		t.Fatalf("receipt status=%s, want untouched StatusIndexed (no partial commit)", receipt.Status)
+	}
+}
+
+// TestRunEvaluatePassAbortsBetweenTenants pins the REQ-1 abort placement
+// (QA review F-2): the between-tenant check fires only after the in-flight
+// tenant completes its full step sequence. With a pre-cancelled context,
+// tenant-a still runs seal → aggregate → archive → retention and commits its
+// receipts; tenant-b is never started; exactly one pass_aborted= line is
+// emitted. A top-of-loop placement would break this contract (and the pinned
+// single-tenant TestRunEvaluatePassAbortsOnCancelledContext), so this test
+// guards against both regressions.
+func TestRunEvaluatePassAbortsBetweenTenants(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := workerService(t, backend)
+	seedPendingReceipts(t, backend, 1)
+	// Second tenant with no pending work: its lines would appear if the pass
+	// ever reached it after the abort.
+	backend.data.Tenants["tenant-b"] = domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}
+	backend.data.Policies["tenant-b"] = domain.RetentionPolicy{TenantID: "tenant-b", RetentionClass: "default", ArchiveDays: 365}
+	archiveStub := &flakyArchive{}
+	svc.Config.Archive = archiveStub
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	runEvaluatePass(ctx, logger, svc)
+	out := buf.String()
+	if n := strings.Count(out, "pass_aborted="); n != 1 {
+		t.Fatalf("pass_aborted lines=%d, want exactly 1; log: %q", n, out)
+	}
+	for _, want := range []string{
+		"tenant=tenant-a stuck_exports_recovered=0",
+		"tenant=tenant-a archived=1 dead_lettered=0",
+		"tenant=tenant-a eligible=0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tenant-a full step sequence must emit %q, got: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "tenant=tenant-b") {
+		t.Fatalf("tenant-b must not run after the abort, got: %q", out)
 	}
 }
 
