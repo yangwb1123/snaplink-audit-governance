@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // postgresBackend persists the control-plane state snapshot in the
@@ -21,6 +22,15 @@ import (
 type postgresBackend struct {
 	db          *sql.DB
 	lastVersion int64
+
+	// Read self-audit trail state (trail.go). trailMu serializes trail
+	// writes within the process; across replicas BIGSERIAL seq provides
+	// total order. The trail is deliberately independent of the snapshot row
+	// (no version bump, no updated_at, no row rewrite), so reads never
+	// contend with ingests on the snapshot write path (F-2).
+	trailMu      sync.Mutex
+	trailCount   int64
+	trailEnsured bool
 }
 
 const (
@@ -82,10 +92,19 @@ func (p *postgresBackend) load() (*Snapshot, int64, error) {
 func (p *postgresBackend) Close() error { return p.db.Close() }
 
 // Ready pings the control-plane database so /readyz can fail fast when the
-// snapshot backend is unreachable. File-backed stores have no probe.
+// snapshot backend is unreachable, and verifies migration 005 landed: the
+// read self-audit trail table must exist before the trail path can serve
+// reads (F-5). File-backed stores have no probe.
 func (p *postgresBackend) Ready(ctx context.Context) error {
 	if err := p.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("state snapshot store: %w", err)
+	}
+	var trailExists bool
+	if err := p.db.QueryRowContext(ctx, `SELECT to_regclass('admin_action_trail') IS NOT NULL`).Scan(&trailExists); err != nil {
+		return fmt.Errorf("admin action trail catalog: %w", err)
+	}
+	if !trailExists {
+		return fmt.Errorf("admin action trail table missing: apply migration 005_admin_action_trail.sql")
 	}
 	return nil
 }

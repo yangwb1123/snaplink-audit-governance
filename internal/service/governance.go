@@ -44,7 +44,7 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	}
 	if blocked {
 		if err := s.Store.Update(func(data *store.Snapshot) error {
-			data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, requestedBy, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+			s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
 			return nil
 		}); err != nil {
 			return domain.ExportJob{}, err
@@ -54,7 +54,7 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
 	if err := s.Store.Update(func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
-		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
+		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
 		return nil
 	}); err != nil {
 		return domain.ExportJob{}, err
@@ -109,10 +109,7 @@ func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 	}
 	if blocked {
 		if actor != "" {
-			if err := s.Store.Update(func(data *store.Snapshot) error {
-				data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
-				return nil
-			}); err != nil {
+			if err := s.Store.AppendAdminFact(s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions); err != nil {
 				return err
 			}
 		}
@@ -184,10 +181,7 @@ func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([
 // transport identity; the fact's purpose is exposing tamper attempts, and
 // tenant + job identify the target.
 func (s *Service) recordExportRejected(tenantID, jobID string) {
-	_ = s.Store.Update(func(data *store.Snapshot) error {
-		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, "", domain.AdminActionExportRejected, "export", jobID, "download_verification_failed"))
-		return nil
-	})
+	_ = s.Store.AppendAdminFact(s.adminAction(tenantID, "", domain.AdminActionExportRejected, "export", jobID, "download_verification_failed"), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
 }
 
 func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, error) {
@@ -216,7 +210,7 @@ func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, erro
 			return fmt.Errorf("%w: legal hold already exists", domain.ErrConflict)
 		}
 		data.LegalHolds[hold.ID] = hold
-		data.AdminActions = append(data.AdminActions, s.adminAction(hold.TenantID, hold.CreatedBy, domain.AdminActionLegalHoldCreated, "legal_hold", hold.ID, hold.Reason))
+		s.appendAdminAction(data, s.adminAction(hold.TenantID, hold.CreatedBy, domain.AdminActionLegalHoldCreated, "legal_hold", hold.ID, hold.Reason))
 		return nil
 	}); err != nil {
 		return domain.LegalHold{}, err
@@ -254,7 +248,7 @@ func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.
 		value.ReleasedBy = releasedBy
 		data.LegalHolds[holdID] = value
 		hold = value
-		data.AdminActions = append(data.AdminActions, s.adminAction(value.TenantID, releasedBy, domain.AdminActionLegalHoldReleased, "legal_hold", holdID, ""))
+		s.appendAdminAction(data, s.adminAction(value.TenantID, releasedBy, domain.AdminActionLegalHoldReleased, "legal_hold", holdID, ""))
 		return nil
 	}); err != nil {
 		return domain.LegalHold{}, err
@@ -809,7 +803,7 @@ func (s *Service) CreateRestore(tenantID string, request domain.RestoreRequest, 
 	run := domain.RestoreRun{ID: newID("restore"), TenantID: tenantID, OperationID: request.OperationID, Status: domain.RestoreStatusPendingApproval, Reason: request.Reason, CreatedBy: requestedBy, CreatedAt: s.Now()}
 	if err := s.Store.Update(func(data *store.Snapshot) error {
 		data.RestoreRuns[run.ID] = run
-		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, requestedBy, domain.AdminActionRestoreCreated, "restore", run.ID, request.OperationID))
+		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionRestoreCreated, "restore", run.ID, request.OperationID))
 		return nil
 	}); err != nil {
 		return domain.RestoreRun{}, err
@@ -854,12 +848,12 @@ func (s *Service) transitionRestore(tenantID, runID, actor, target string) (doma
 			value.Status = domain.RestoreStatusApproved
 			value.ApprovedBy = actor
 			value.ApprovedAt = &now
-			data.AdminActions = append(data.AdminActions, s.adminAction(value.TenantID, actor, domain.AdminActionRestoreApproved, "restore", runID, value.OperationID))
+			s.appendAdminAction(data, s.adminAction(value.TenantID, actor, domain.AdminActionRestoreApproved, "restore", runID, value.OperationID))
 		} else {
 			value.Status = domain.RestoreStatusRejected
 			value.RejectedBy = actor
 			value.RejectedAt = &now
-			data.AdminActions = append(data.AdminActions, s.adminAction(value.TenantID, actor, domain.AdminActionRestoreRejected, "restore", runID, value.OperationID))
+			s.appendAdminAction(data, s.adminAction(value.TenantID, actor, domain.AdminActionRestoreRejected, "restore", runID, value.OperationID))
 		}
 		data.RestoreRuns[runID] = value
 		run = value
@@ -924,7 +918,7 @@ func (s *Service) RecoverStuckExports(tenantID string) (int, error) {
 			job.EventCount = 0
 			job.Error = fmt.Sprintf("export interrupted: stuck in running since %s; re-request the export", job.CreatedAt.Format(time.RFC3339))
 			data.Exports[jobID] = job
-			data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", job.CreatedAt.Format(time.RFC3339))))
+			s.appendAdminAction(data, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", job.CreatedAt.Format(time.RFC3339))))
 			recovered++
 			mutated = true
 		}
@@ -995,7 +989,7 @@ func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
 		job.Status, job.FinishedAt, job.ObjectPath, job.Digest, job.EventCount = "failed", &now, "", "", 0
 		job.Error = fmt.Sprintf("export blocked by active legal hold %s", hold.ID)
 		data.Exports[jobID] = job
-		data.AdminActions = append(data.AdminActions, s.adminAction(job.TenantID, "governance-worker", domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+		s.appendAdminAction(data, s.adminAction(job.TenantID, "governance-worker", domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
 		return nil
 	})
 }
@@ -1100,17 +1094,38 @@ func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
+	// Read the trail BEFORE the snapshot so a corrupt trail fails closed
+	// without masking the snapshot read, and so the fast path never opens an
+	// RLock inside Store.Read (lock-order safety with Store.mu writers).
+	trail, err := s.Store.ReadAdminTrail()
+	if err != nil {
+		return nil, err
+	}
 	var result []domain.AdminAction
-	err := s.Store.Read(func(data *store.Snapshot) error {
-		for i := len(data.AdminActions) - 1; i >= 0 && len(result) < limit; i-- {
-			action := data.AdminActions[i]
-			if (platform && tenantID == "") || action.TenantID == tenantID {
-				result = append(result, action)
+	if len(trail) == 0 {
+		// Fast path — no read facts: the verbatim pre-trail loop.
+		err = s.Store.Read(func(data *store.Snapshot) error {
+			for i := len(data.AdminActions) - 1; i >= 0 && len(result) < limit; i-- {
+				action := data.AdminActions[i]
+				if (platform && tenantID == "") || action.TenantID == tenantID {
+					result = append(result, action)
+				}
 			}
-		}
+			return nil
+		})
+		return result, err
+	}
+	// Merge path: snapshot mutation facts ∪ read trail, newest-first
+	// (equal CreatedAt ⇒ trail first, then reverse-append within source).
+	var snapshot []domain.AdminAction
+	err = s.Store.Read(func(data *store.Snapshot) error {
+		snapshot = data.AdminActions
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return mergeAdminActions(snapshot, trail, tenantID, platform, limit), nil
 }
 
 // Marshal is kept here as a small compile-time guard that the domain model

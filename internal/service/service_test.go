@@ -1546,15 +1546,15 @@ func TestVerifyExportDownloadRecordsRejectionFact(t *testing.T) {
 	if _, err := svc.VerifyExportDownload(job.TenantID, job.ID, tampered); err == nil {
 		t.Fatal("tampered blob must fail")
 	}
-	var snapshot *store.Snapshot
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
-		snapshot = data
-		return nil
-	}); err != nil {
+	// The rejection fact is a read-path fact: it lands in the separate read
+	// self-audit trail, never in Snapshot.AdminActions, and is visible
+	// through the merged governance view (ListAdminActions).
+	actions, err := svc.ListAdminActions(job.TenantID, false, 100)
+	if err != nil {
 		t.Fatal(err)
 	}
 	rejected := 0
-	for _, action := range snapshot.AdminActions {
+	for _, action := range actions {
 		if action.Action == domain.AdminActionExportRejected && action.TargetID == job.ID && action.TargetType == "export" {
 			rejected++
 		}

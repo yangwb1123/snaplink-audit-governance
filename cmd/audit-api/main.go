@@ -55,6 +55,15 @@ func main() {
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, then exit without opening the store or network")
 	bootstrapTenant := flag.String("bootstrap-tenant", envOr("AUDIT_BOOTSTRAP_TENANT", "demo"), "create a local bootstrap tenant when missing")
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
+	// adminActionsCap bounds Snapshot.AdminActions (control-plane mutation
+	// facts, drop-oldest); values <= 0 select service.DefaultMaxAdminActions.
+	// adminTrailCap bounds the separate read self-audit trail
+	// (<state>.admin-trail.jsonl / admin_action_trail) that absorbs read-path
+	// facts so reads never rewrite the snapshot; 0 = unbounded append-only
+	// (operator-explicit), negative values select
+	// service.DefaultMaxAdminTrailActions.
+	adminActionsCap := flag.Int("admin-actions-cap", intEnv("AUDIT_ADMIN_ACTIONS_CAP", service.DefaultMaxAdminActions), "cap on snapshot admin-action facts (drop-oldest; <= 0 selects the default)")
+	adminTrailCap := flag.Int("admin-trail-cap", intEnv("AUDIT_ADMIN_TRAIL_CAP", service.DefaultMaxAdminTrailActions), "cap on the read self-audit trail (0 = unbounded append-only)")
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
 	grpcTLSCert := flag.String("grpc-tls-cert", os.Getenv("AUDIT_GRPC_TLS_CERT"), "PEM certificate path for the gRPC ingest listener (must be set together with -grpc-tls-key)")
 	grpcTLSKey := flag.String("grpc-tls-key", os.Getenv("AUDIT_GRPC_TLS_KEY"), "PEM private key path for the gRPC ingest listener (must be set together with -grpc-tls-cert)")
@@ -83,7 +92,7 @@ func main() {
 	if *allowDevSecrets {
 		logger.Printf("warning=development_secrets_enabled")
 	}
-	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets}
+	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, MaxAdminActions: *adminActionsCap, MaxAdminTrailActions: *adminTrailCap}
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {

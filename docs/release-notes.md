@@ -1,5 +1,25 @@
 # Release Notes
 
+## 2026-08-16 — 读取自审计足迹与快照解耦并加界：读路径事实写入独立追加尾流，快照不再被读重写（internal/store + internal/service + cmd/audit-api，bound-and-isolate-the-read-self-audit-trail）
+
+**写给运营（行为变化）：**
+
+- **读操作不再重写控制面快照**：此前每次带 actor 的读取（`GetEvent`/`QueryEvents`/timeline/replay/`VerifyIntegrity` 及导出下载两腿）都会在 `Store.Update` 内把一条 `audit.event.read` 等事实追加进 `Snapshot.AdminActions` 并**全文档 Save**（文件后端整文件 JSON 重写 + fsync + rename；PG 后端整行 `UPDATE` + `version` 递增 + 乐观锁重试）。现在这些事实落入**独立的追加尾流**——文件后端为 `<state>.admin-trail.jsonl`（JSONL、每事实一次 `fsync` 追加、`O_APPEND` 持久 fd），PG 后端为 `admin_action_trail` 表（单条 `INSERT`，无 version 递增、无整行重写）。快照文档/行在读取期间字节与 mtime 不变；`/admin/actions` 的合并视图把两条来源按 `created_at` 倒序合并展示，`count == len(items)` 与 limit（1..100）语义不变。
+- **`Snapshot.AdminActions` 首次有界**：默认上限 `MaxAdminActions` = 10 000（drop-oldest、保留最新），在每个追加点强制执行，持久化文档永远不会超过该界；此前为无界增长。读取足迹走尾流，由 `MaxAdminTrailActions`（默认 100 000，`0` = 无界追加，显式运营选择）约束；尾流超界后压缩为最新 N 条（文件后端 tmp+fsync+rename 崩溃原子，PG 后端用 `seq` 水位 DELETE，绝不影响并发 INSERT）。
+- **新增配置项**：`-admin-actions-cap` / `AUDIT_ADMIN_ACTIONS_CAP`（默认 10000）、`-admin-trail-cap` / `AUDIT_ADMIN_TRAIL_CAP`（默认 100000，`0` = 无界）。非法组合（`MaxAdminTrailActions` 非零但小于 `MaxAdminActions`）在启动与 `-check-config` 以 `ErrInvalid` 失败退出。
+- **PG 部署**：上线前应用 `migrations/005_admin_action_trail.sql`（幂等）；`/readyz` 在表缺失时快速失败，首次尾流追加也会惰性 `CREATE TABLE IF NOT EXISTS` 自愈。多副本滚动窗口内，旧副本写入快照的读事实可能被新副本的首次封顶追加裁剪——仅限读取自审计事实、有界、自愈（FM-10；文件后端因 flock 单写者不存在此窗口）。
+- **回滚**：回退二进制即可。旧二进制忽略尾流文件/表，恢复把读事实追加进快照（回到无界但完全可用）；孤儿尾流文件/表无害，可事后删除。既有 `admin_actions` 在首次封顶追加时被裁剪，无回填、启动不重写文件。
+
+**写给开发（实现变化）：**
+
+- `internal/store/trail.go`（新增）：可选的 `AdminTrail` 能力接口（`AppendAdminFact(fact, trailCap)`/`ReadAdminTrail()`）；`Store.AppendAdminFact`/`Store.ReadAdminTrail`——能力后端走尾流（**不持 `Store.mu`**，F-2：追加纯追加、与快照无耦合，后端自串行化，读不再阻塞 ingest）；无能力后端（测试缝）回退到锁内 `updateLocked` 全快照 Save，冲突重试与失败即关闭语义与 `Store.Update` 逐字节一致（F-1，`conflict_retry_test.go` 不变）。`Store.Update` 重构为 `Lock()` + 未导出 `updateLocked`（公开行为不变）。
+- 文件后端：`<path>.admin-trail.jsonl`，惰性 `O_APPEND|O_CREATE` fd（父目录 0o750、文件 0o640、首建目录链 fsync），每事实 `file.Sync()`（与 `Save` 持久性对齐）；`trailCount` 惰性基线（首次使用扫描一次，之后 O(1) 判界，F-4）；超界 `compactTrail`（tmp+fsync+rename+目录链 fsync+重开 fd，F-7）。读取 newest-first；非末尾畸形行失败即关闭（FM-4），崩溃截断的末尾行容忍丢弃（FM-6）。内存模式（`-state ""`）为 `f.mu` 下普通有界切片。
+- PG 后端：`trailMu` 串行化进程内追加；一次性 `CREATE TABLE IF NOT EXISTS`（F-5）；`INSERT` 无 version/`updated_at`/行重写；`trailCompactQuery` 用 `seq` 水位（`OFFSET $1 LIMIT 1`）删除，并发副本的更新 `seq` INSERT 永不误删（FM-7）；`Ready` 增查 `to_regclass('admin_action_trail')`。
+- `internal/service/admin_trail.go`（新增）：`DefaultMaxAdminActions`（10000）/`DefaultMaxAdminTrailActions`（100000）；`resolveAdminTrailConfig`（F-6 零语义：`MaxAdminActions <= 0 ⇒ 默认`，`MaxAdminTrailActions < 0 ⇒ 默认`、`== 0 ⇒ 无界`；非零尾流界小于快照界 ⇒ `ErrInvalid`——设计草案的 `>= 100` 下限被移除：与 AC-3 验收夹具 `MaxAdminActions=5` 自相矛盾，已在注释记录）；`appendAdminAction`（14 个变更路径追加点统一接入，O(1) 切片重头、drop-oldest）；`mergeAdminActions`（快照 ∪ 尾流 newest-first，`CreatedAt` 相等尾流优先，tenant/platform 过滤先于 limit 收敛）。`recordReadAction` 与两条下载腿（`export.blocked`、`recordExportRejected` 保留 best-effort `_ =`）改走 `Store.AppendAdminFact`。`ListAdminActions` 空尾流快速路径为原逐字循环（`TestListAdminActionsPlatformTenantFilter` 不变）。
+- `cmd/audit-api/main.go`：`-admin-actions-cap`/`-admin-trail-cap` flag + `AUDIT_ADMIN_ACTIONS_CAP`/`AUDIT_ADMIN_TRAIL_CAP` env（沿用 `-segment-size` 的 `flag.Int`+`intEnv` 模式），接入 `service.Config`；`runCheckConfig` 经 `service.New(nil, cfg)` 自动暴露校验失败（退出码 1，不开 store）。
+- `migrations/005_admin_action_trail.sql`（新增，幂等）：`admin_action_trail`（`seq BIGSERIAL PK` 作压缩水位，`tenant_id+created_at DESC, seq DESC` 索引）。
+- 测试：`internal/store/trail_test.go`（JSONL 往返/压缩保留最新/损坏失败关闭/追加失败关闭/回退冲突重试/回退 saveErr/回退快照封顶/不持 Store 锁/无能力空结果/PG 追加不 bump version/PG 压缩水位，PG 用例走 `AUDIT_TEST_POSTGRES_DSN` skip 模式）与 `internal/service/admin_trail_test.go`（AC-1 `TestReadsDoNotRewriteSnapshotFile` 10k 读 mtime/size 不变 + 尾流有界；AC-3 `TestListAdminActionsNewestAfterCap`；变更路径 drop-oldest；F-6 配置解析）。`read_selfaudit_test.go` 全部 14 个测试原样通过（能力/回退分裂保持失败即关闭与冲突耗尽语义）。
+
 ## 2026-08-16 — 路由契约门禁升级为方法/响应感知：`cli.py check` 开始强制 OpenAPI 契约（api/openapi，make-the-route-contract-gate-method-and-response-456cafeb）
 
 **写给运营（行为变化）：**

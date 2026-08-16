@@ -1,10 +1,11 @@
 package store
 
 // The tests in this file exercise the real PostgreSQL snapshot row against
-// AUDIT_TEST_POSTGRES_DSN (migrations 001 and 004 applied) and skip cleanly
-// when it is unset, keeping the quality gate green in CI. They share one
-// row (audit_state_snapshot id=1), so they must never call t.Parallel; each
-// test resets the row first via newPostgresTestDB.
+// AUDIT_TEST_POSTGRES_DSN (migrations 001, 004 and 005 applied; 005 is
+// applied by newPostgresTestDB so the readyz trail-table probe stays green)
+// and skip cleanly when it is unset, keeping the quality gate green in CI.
+// They share one row (audit_state_snapshot id=1), so they must never call
+// t.Parallel; each test resets the row first via newPostgresTestDB.
 
 import (
 	"context"
@@ -40,6 +41,21 @@ func newPostgresTestDB(t *testing.T) *sql.DB {
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM audit_state_snapshot`); err != nil {
 		t.Fatalf("reset snapshot row: %v", err)
+	}
+	// Apply migration 005 (idempotent) so the readyz trail-table probe and
+	// trail tests see the table from the start.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS admin_action_trail (
+    seq         BIGSERIAL PRIMARY KEY,
+    id          TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    target_type TEXT NOT NULL DEFAULT '',
+    target_id   TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL
+)`); err != nil {
+		t.Fatalf("apply migration 005: %v", err)
 	}
 	return db
 }

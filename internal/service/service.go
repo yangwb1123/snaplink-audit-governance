@@ -56,6 +56,19 @@ type Config struct {
 	// default (DefaultStuckExportAge). The worker reads the override from
 	// AUDIT_GOVERNANCE_STUCK_EXPORT_AGE / -stuck-export-age.
 	StuckExportAge time.Duration
+	// MaxAdminActions caps Snapshot.AdminActions (mutation-path admin
+	// facts): drop-oldest, newest retained, enforced at every append site.
+	// Values <= 0 select the documented default (DefaultMaxAdminActions).
+	// The API reads the override from AUDIT_ADMIN_ACTIONS_CAP /
+	// -admin-actions-cap.
+	MaxAdminActions int
+	// MaxAdminTrailActions caps the separate read self-audit trail (read
+	// facts never rewrite the snapshot). 0 = unbounded append-only
+	// (operator-explicit); otherwise the trail is compacted to its newest
+	// MaxAdminTrailActions facts. Negative values select the documented
+	// default (DefaultMaxAdminTrailActions). The API reads the override
+	// from AUDIT_ADMIN_TRAIL_CAP / -admin-trail-cap.
+	MaxAdminTrailActions int
 }
 
 // Signer creates and verifies checkpoint signatures. Implementations must be
@@ -129,6 +142,11 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.StuckExportAge <= 0 {
 		cfg.StuckExportAge = DefaultStuckExportAge
 	}
+	resolved, err := resolveAdminTrailConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg = resolved
 	if err := resolveSecrets(&cfg); err != nil {
 		return nil, err
 	}
@@ -211,7 +229,7 @@ func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
 			return fmt.Errorf("%w: tenant already exists", domain.ErrConflict)
 		}
 		data.Tenants[tenant.ID] = tenant
-		data.AdminActions = append(data.AdminActions, s.adminAction(tenant.ID, actor, domain.AdminActionTenantCreated, "tenant", tenant.ID, ""))
+		s.appendAdminAction(data, s.adminAction(tenant.ID, actor, domain.AdminActionTenantCreated, "tenant", tenant.ID, ""))
 		return nil
 	})
 }
@@ -303,7 +321,7 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 			}
 		}
 		data.Schemas[key] = schema
-		data.AdminActions = append(data.AdminActions, s.adminAction(schema.TenantID, actor, domain.AdminActionSchemaCreated, "event_schema", schema.SchemaID, fmt.Sprintf("version %d", schema.Version)))
+		s.appendAdminAction(data, s.adminAction(schema.TenantID, actor, domain.AdminActionSchemaCreated, "event_schema", schema.SchemaID, fmt.Sprintf("version %d", schema.Version)))
 		return nil
 	})
 }
@@ -337,7 +355,7 @@ func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
 		data.Policies[policy.TenantID] = policy
-		data.AdminActions = append(data.AdminActions, s.adminAction(policy.TenantID, actor, domain.AdminActionRetentionPolicySet, "retention_policy", policy.RetentionClass, fmt.Sprintf("hot=%d warm=%d archive=%d", policy.HotDays, policy.WarmDays, policy.ArchiveDays)))
+		s.appendAdminAction(data, s.adminAction(policy.TenantID, actor, domain.AdminActionRetentionPolicySet, "retention_policy", policy.RetentionClass, fmt.Sprintf("hot=%d warm=%d archive=%d", policy.HotDays, policy.WarmDays, policy.ArchiveDays)))
 		return nil
 	})
 }
@@ -690,17 +708,17 @@ func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error
 }
 
 // recordReadAction appends one self-audit record for a read-path fact. Reads
-// have no paired mutation, so the record is appended in its own Store.Update
-// after the read succeeds; a failed append aborts the read (fail-closed:
-// an un-auditable read must not be reported as served).
+// have no paired mutation, so the record is appended to the separate read
+// self-audit trail after the read succeeds; a failed append aborts the read
+// (fail-closed: an un-auditable read must not be reported as served). Read
+// facts never rewrite the control-plane snapshot (the direction's core
+// defect); the trail is append-only with no Store.mu, so reads stop blocking
+// ingests (design F-2).
 func (s *Service) recordReadAction(tenantID, actor, action, targetType, targetID, detail string) error {
 	if actor == "" {
 		return nil
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
-		data.AdminActions = append(data.AdminActions, s.adminAction(tenantID, actor, action, targetType, targetID, detail))
-		return nil
-	})
+	return s.Store.AppendAdminFact(s.adminAction(tenantID, actor, action, targetType, targetID, detail), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
 }
 
 func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {

@@ -230,6 +230,14 @@ func snapshotConflictBackoff(attempt int) time.Duration {
 func (s *Store) Update(fn func(*Snapshot) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.updateLocked(fn)
+}
+
+// updateLocked is Update's retry loop without the lock; callers must hold
+// s.mu exclusively. It exists so AppendAdminFact's capability-less fallback
+// can reuse the exact optimistic-lock semantics without re-entering Update
+// and deadlocking on the same lock (F-1).
+func (s *Store) updateLocked(fn func(*Snapshot) error) error {
 	var lastErr error
 	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
 		data, err := s.backend.LoadForUpdate()
@@ -378,6 +386,16 @@ type fileBackend struct {
 	// fault-inject a specific path. Nil at production construction
 	// (openFileBackend), so there is no exported surface change.
 	syncDir func(path string) error
+
+	// Read self-audit trail state (trail.go). Append-only; serialized by f.mu
+	// (never Store.mu — F-2), so reads never block ingests. File mode:
+	// <path>.admin-trail.jsonl via a persistent O_APPEND fd. In-memory mode
+	// (path == ""): a plain bounded slice.
+	trailPath    string               // path + ".admin-trail.jsonl" (file mode)
+	trailFile    *os.File             // persistent append fd; lazily opened
+	trailCount   int64                // baseline-seeded append count (F-4)
+	trailCounted bool                 // baseline scan done
+	trail        []domain.AdminAction // in-memory mode trail
 }
 
 // openFileBackend builds a file-backed store. For a non-empty path it first

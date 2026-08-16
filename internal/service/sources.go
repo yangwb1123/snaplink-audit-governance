@@ -30,7 +30,7 @@ func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
 			return fmt.Errorf("%w: source already exists", domain.ErrConflict)
 		}
 		data.Sources[key] = source
-		data.AdminActions = append(data.AdminActions, s.adminAction(source.TenantID, actor, domain.AdminActionSourceCreated, "source", source.ID, fmt.Sprintf("allowed_client_ids=%v", source.AllowedClientIDs)))
+		s.appendAdminAction(data, s.adminAction(source.TenantID, actor, domain.AdminActionSourceCreated, "source", source.ID, fmt.Sprintf("allowed_client_ids=%v", source.AllowedClientIDs)))
 		return nil
 	})
 }
@@ -58,7 +58,7 @@ func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain
 		}
 		source.CreatedAt = existing.CreatedAt
 		data.Sources[key] = source
-		data.AdminActions = append(data.AdminActions, s.adminAction(source.TenantID, actor, domain.AdminActionSourceUpdated, "source", source.ID, fmt.Sprintf("allowed_client_ids=%v active=%v", source.AllowedClientIDs, source.Active)))
+		s.appendAdminAction(data, s.adminAction(source.TenantID, actor, domain.AdminActionSourceUpdated, "source", source.ID, fmt.Sprintf("allowed_client_ids=%v active=%v", source.AllowedClientIDs, source.Active)))
 		return nil
 	})
 	return source, err
