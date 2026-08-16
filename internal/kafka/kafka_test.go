@@ -24,6 +24,7 @@ type fakeReader struct {
 	publishCalls    int
 	published       []Failure
 	publishFunc     func(Failure) error
+	commitFunc      func(...kafka.Message) error
 }
 
 // FetchMessage 模拟真实 kafka-go reader 的语义（reader.go:846）：fetch 位置
@@ -41,6 +42,11 @@ func (f *fakeReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
 }
 
 func (f *fakeReader) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
+	if f.commitFunc != nil {
+		if err := f.commitFunc(msgs...); err != nil {
+			return err
+		}
+	}
 	for _, message := range msgs {
 		// kafka-go 提交的是 msg.Offset+1（下一条待消费位置，commit.go:17）；
 		// fake 记录已提交的最高消息 offset 供断言使用。
@@ -85,6 +91,14 @@ func validMessage(eventID string, offset int64) kafka.Message {
 	return kafka.Message{Key: []byte(eventID), Value: encoded, Partition: 0, Offset: offset}
 }
 
+// tenantMessage is validMessage parameterized by tenant: the tenant-scope
+// tests need envelope tenants other than the fixture's hardcoded "demo".
+func tenantMessage(eventID, tenantID string, offset int64) kafka.Message {
+	event := domain.Event{EventID: eventID, TenantID: tenantID, SourceSystem: "demo", Action: "update", Outcome: "success"}
+	encoded, _ := domain.CanonicalJSON(event)
+	return kafka.Message{Key: []byte(eventID), Value: encoded, Partition: 0, Offset: offset}
+}
+
 func TestConsumerCommitsAfterSuccessfulIngest(t *testing.T) {
 	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
 	ingested := 0
@@ -94,6 +108,155 @@ func TestConsumerCommitsAfterSuccessfulIngest(t *testing.T) {
 	})
 	if ingested != 2 || len(reader.commits) != 2 {
 		t.Fatalf("ingested=%d commits=%d, want 2/2", ingested, len(reader.commits))
+	}
+}
+
+// AC-1 / REQ-1+3 (T1): a foreign-tenant event is skipped and committed —
+// never ingested, never dead-lettered, never retried — and the skip counter
+// is a disjoint third class (neither an ingest/commit nor a dead-letter).
+func TestConsumerSkipsForeignTenantWithoutIngestOrDLQ(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{tenantMessage("evt-other", "other", 1)}}
+	ingested := 0
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, WithDLQ(reader), WithTenant("demo"))
+	if ingested != 0 {
+		t.Fatalf("ingested=%d, want 0 (IngestFunc must never be called)", ingested)
+	}
+	if len(reader.commits) != 1 || reader.committedOffset != 1 {
+		t.Fatalf("commits=%d committedOffset=%d, want 1 commit advancing the partition", len(reader.commits), reader.committedOffset)
+	}
+	if len(reader.published) != 0 || reader.publishCalls != 0 {
+		t.Fatalf("published=%v publishCalls=%d, want no DLQ publication", reader.published, reader.publishCalls)
+	}
+	metrics := consumer.Metrics()
+	if metrics.ForeignTenantSkipped != 1 || metrics.DeadLettered != 0 || metrics.MessagesCommitted != 0 || metrics.IngestFailures != 0 {
+		t.Fatalf("metrics=%+v, want ForeignTenantSkipped=1 and every other counter 0", metrics)
+	}
+}
+
+// AC-1 / REQ-1+7 (T2): tenant-scope boundaries — matching tenant ingested,
+// empty envelope tenant passes through (server-stamped), and an unset (or
+// explicitly empty) configured tenant filters nothing (REQ-7 backward compat).
+func TestConsumerTenantScopeBoundaries(t *testing.T) {
+	t.Run("same tenant is ingested", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{tenantMessage("evt-demo", "demo", 1)}}
+		ingested := 0
+		consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+			ingested++
+			return nil
+		}, WithTenant("demo"))
+		if ingested != 1 || len(reader.commits) != 1 {
+			t.Fatalf("ingested=%d commits=%d, want 1/1", ingested, len(reader.commits))
+		}
+		if metrics := consumer.Metrics(); metrics.ForeignTenantSkipped != 0 {
+			t.Fatalf("ForeignTenantSkipped=%d, want 0", metrics.ForeignTenantSkipped)
+		}
+	})
+	t.Run("empty event tenant passes through (server-stamped)", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{tenantMessage("evt-empty", "", 1)}}
+		ingested := 0
+		consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+			ingested++
+			return nil
+		}, WithTenant("demo"))
+		if ingested != 1 || len(reader.commits) != 1 {
+			t.Fatalf("ingested=%d commits=%d, want 1/1", ingested, len(reader.commits))
+		}
+		if metrics := consumer.Metrics(); metrics.ForeignTenantSkipped != 0 {
+			t.Fatalf("ForeignTenantSkipped=%d, want 0 (empty envelope tenant belongs to this instance by construction)", metrics.ForeignTenantSkipped)
+		}
+	})
+	t.Run("no WithTenant disables filtering (REQ-7)", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{tenantMessage("evt-other", "other", 1)}}
+		ingested := 0
+		consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+			ingested++
+			return nil
+		})
+		if ingested != 1 || len(reader.commits) != 1 {
+			t.Fatalf("ingested=%d commits=%d, want 1/1 (unscoped consumer)", ingested, len(reader.commits))
+		}
+		if metrics := consumer.Metrics(); metrics.ForeignTenantSkipped != 0 {
+			t.Fatalf("ForeignTenantSkipped=%d, want 0", metrics.ForeignTenantSkipped)
+		}
+	})
+	t.Run("WithTenant empty string disables filtering", func(t *testing.T) {
+		reader := &fakeReader{messages: []kafka.Message{tenantMessage("evt-other", "other", 1)}}
+		ingested := 0
+		consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+			ingested++
+			return nil
+		}, WithTenant(""))
+		if ingested != 1 || len(reader.commits) != 1 {
+			t.Fatalf("ingested=%d commits=%d, want 1/1 (empty scope is unset)", ingested, len(reader.commits))
+		}
+		if metrics := consumer.Metrics(); metrics.ForeignTenantSkipped != 0 {
+			t.Fatalf("ForeignTenantSkipped=%d, want 0", metrics.ForeignTenantSkipped)
+		}
+	})
+}
+
+// H2 (FM-2): a commit failure on the skip path propagates through Run into
+// the restart loop — at-least-once: the partition never advances silently and
+// the foreign message is re-fetched + re-skipped (never ingested) on restart.
+func TestConsumerSkipCommitFailurePropagatesAndDoesNotIngest(t *testing.T) {
+	reader := &fakeReader{
+		messages: []kafka.Message{tenantMessage("evt-other", "other", 1)},
+		commitFunc: func(...kafka.Message) error {
+			return errors.New("commit failed")
+		},
+	}
+	ingested := 0
+	consumer := newConsumerWithReader(reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, time.Millisecond, WithTenant("demo"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := consumer.Run(ctx); err == nil || !strings.Contains(err.Error(), "commit failed") {
+		t.Fatalf("Run must return the skip-commit error, got %v", err)
+	}
+	if ingested != 0 {
+		t.Fatalf("ingested=%d, want 0 (foreign message never reaches ingest)", ingested)
+	}
+	// Model the restart loop: the offset was never committed, so a fresh Run
+	// re-fetches the same message and re-skips it.
+	reader.fetchIndex = 0
+	if err := consumer.Run(ctx); err == nil || !strings.Contains(err.Error(), "commit failed") {
+		t.Fatalf("second Run must fail the same way, got %v", err)
+	}
+	if ingested != 0 {
+		t.Fatalf("ingested=%d, want 0 across restarts", ingested)
+	}
+	metrics := consumer.Metrics()
+	if metrics.ForeignTenantSkipped != 2 || metrics.MessagesCommitted != 0 || metrics.DeadLettered != 0 {
+		t.Fatalf("metrics=%+v, want ForeignTenantSkipped=2 (at-least-once skip counting), no commit/dead-letter", metrics)
+	}
+}
+
+// F-1 (identity protocol): the DLQ tenant_id is the ENVELOPE-claimed value,
+// never a server-verified one — the consumer has no channel to learn the
+// server-resolved tenant. A 422 tenant_mismatch dead-letter (e.g. a token
+// whose tenant differs from the envelope) must still stamp the envelope
+// tenant into the Failure record so the field's provenance stays honest.
+func TestConsumerDeadLetterTenantIDCarriesEnvelopeClaim(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1)}}
+	consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: true, StatusCode: http.StatusUnprocessableEntity, Err: errors.New("audit api returned 422 tenant_mismatch")}
+	}, WithDLQ(reader), WithTenant("demo"))
+	if len(reader.published) != 1 {
+		t.Fatalf("published=%d, want 1", len(reader.published))
+	}
+	if reader.published[0].ErrorCode != ErrorCodePermanentError {
+		t.Fatalf("error_code=%s, want %s", reader.published[0].ErrorCode, ErrorCodePermanentError)
+	}
+	if reader.published[0].TenantID != "demo" {
+		t.Fatalf("tenant_id=%q, want demo — the ENVELOPE value, claimed not verified (F-1)", reader.published[0].TenantID)
+	}
+	if metrics := consumer.Metrics(); metrics.ForeignTenantSkipped != 0 {
+		t.Fatalf("ForeignTenantSkipped=%d, want 0 (matching tenant is not skipped)", metrics.ForeignTenantSkipped)
 	}
 }
 
@@ -136,6 +299,9 @@ func TestConsumerDeadLettersUnparsableMessage(t *testing.T) {
 	}
 	if reader.published[0].EventID != "bad" {
 		t.Fatalf("DLQ record event_id=%s, want bad", reader.published[0].EventID)
+	}
+	if reader.published[0].TenantID != "" {
+		t.Fatalf("DLQ record tenant_id=%q, want empty (unparsable path cannot know the tenant)", reader.published[0].TenantID)
 	}
 }
 
@@ -191,6 +357,9 @@ func TestConsumerDeadLettersPermanentErrorAndAdvancesPartition(t *testing.T) {
 	if failure.EventID != "evt-1" || failure.ErrorCode != ErrorCodePermanentError || failure.ErrorMessage == "" {
 		t.Fatalf("published failure=%+v, want event_id=evt-1 code=%s with message", failure, ErrorCodePermanentError)
 	}
+	if failure.TenantID != "demo" {
+		t.Fatalf("published tenant_id=%q, want demo (envelope-claimed value on the decoded path)", failure.TenantID)
+	}
 }
 
 // T2: a transient failure is retried per (partition, offset) and dead-lettered
@@ -214,35 +383,54 @@ func TestConsumerDeadLettersAfterMaxAttempts(t *testing.T) {
 	if reader.published[0].ErrorCode != ErrorCodeAttemptsExhausted {
 		t.Fatalf("error_code=%s, want %s", reader.published[0].ErrorCode, ErrorCodeAttemptsExhausted)
 	}
+	if reader.published[0].TenantID != "demo" {
+		t.Fatalf("tenant_id=%q, want demo (decoded-path population on attempts_exhausted)", reader.published[0].TenantID)
+	}
 }
 
-// T3: the Failure payload serializes to exactly the AsyncAPI key set
-// (event_id, error_code, error_message) with the pinned error-code values.
+// T7 (AC-4/REQ-4+5): the Failure payload serializes to exactly the AsyncAPI
+// key set. When the tenant is known, tenant_id is present (4 keys, pinned
+// order); when empty it is omitted (omitempty — the unparsable path's
+// serialization is byte-identical to the pre-tenant binary).
 func TestFailurePayloadMatchesAsyncAPISchema(t *testing.T) {
-	failure := Failure{EventID: "evt-1", ErrorCode: ErrorCodePermanentError, ErrorMessage: "audit api returned 422"}
-	encoded, err := json.Marshal(failure)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	// api/asyncapi/asyncapi.yaml components.messages.Failure requires exactly
-	// these three fields; the exact string pins the key set and order.
-	const want = `{"event_id":"evt-1","error_code":"permanent_error","error_message":"audit api returned 422"}`
-	if string(encoded) != want {
-		t.Fatalf("payload=%s, want %s", encoded, want)
-	}
-	var keys map[string]any
-	if err := json.Unmarshal(encoded, &keys); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	expected := map[string]bool{"event_id": true, "error_code": true, "error_message": true}
-	if len(keys) != len(expected) {
-		t.Fatalf("key set=%v, want exactly %v", keys, expected)
-	}
-	for key := range expected {
-		if _, ok := keys[key]; !ok {
-			t.Fatalf("missing key %q in %v", key, keys)
+	t.Run("tenant known renders the optional key", func(t *testing.T) {
+		failure := Failure{EventID: "evt-1", ErrorCode: ErrorCodePermanentError, ErrorMessage: "audit api returned 422", TenantID: "other"}
+		encoded, err := json.Marshal(failure)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
-	}
+		// api/asyncapi/asyncapi.yaml components.messages.Failure: required
+		// [event_id, error_code, error_message] + optional tenant_id; the
+		// exact string pins the key set and order.
+		const want = `{"event_id":"evt-1","error_code":"permanent_error","error_message":"audit api returned 422","tenant_id":"other"}`
+		if string(encoded) != want {
+			t.Fatalf("payload=%s, want %s", encoded, want)
+		}
+		var keys map[string]any
+		if err := json.Unmarshal(encoded, &keys); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		expected := map[string]bool{"event_id": true, "error_code": true, "error_message": true, "tenant_id": true}
+		if len(keys) != len(expected) {
+			t.Fatalf("key set=%v, want exactly %v", keys, expected)
+		}
+		for key := range expected {
+			if _, ok := keys[key]; !ok {
+				t.Fatalf("missing key %q in %v", key, keys)
+			}
+		}
+	})
+	t.Run("empty tenant omits the key (byte-identical to old producers)", func(t *testing.T) {
+		failure := Failure{EventID: "evt-1", ErrorCode: ErrorCodePermanentError, ErrorMessage: "audit api returned 422"}
+		encoded, err := json.Marshal(failure)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		const want = `{"event_id":"evt-1","error_code":"permanent_error","error_message":"audit api returned 422"}`
+		if string(encoded) != want {
+			t.Fatalf("payload=%s, want %s (omitempty must drop tenant_id)", encoded, want)
+		}
+	})
 	if ErrorCodePermanentError != "permanent_error" || ErrorCodeAttemptsExhausted != "attempts_exhausted" {
 		t.Fatalf("error-code vocabulary drift: %q / %q", ErrorCodePermanentError, ErrorCodeAttemptsExhausted)
 	}
@@ -550,6 +738,9 @@ func TestConsumerDeadLettersUnauthorizedAtCap(t *testing.T) {
 	}
 	if reader.published[0].ErrorCode != ErrorCodeUnauthorized {
 		t.Fatalf("error_code=%s, want %s", reader.published[0].ErrorCode, ErrorCodeUnauthorized)
+	}
+	if reader.published[0].TenantID != "demo" {
+		t.Fatalf("tenant_id=%q, want demo (decoded-path population on unauthorized)", reader.published[0].TenantID)
 	}
 	metrics := consumer.Metrics()
 	if metrics.Unauthorized != 1 {

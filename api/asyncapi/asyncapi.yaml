@@ -75,6 +75,13 @@ components:
           event_id: { type: string, minLength: 1 }
           error_code: { type: string }
           error_message: { type: string }
+          # Tenant CLAIMED by the failing event's envelope at dead-letter time
+          # (the decoded envelope value, NOT server-verified — the ingest
+          # API's server-resolved tenant is the only authorization authority;
+          # consumers must use this field for display/filtering only). Empty
+          # when the payload was unparsable; absent on records written by
+          # older producers.
+          tenant_id: { type: string }
   schemas:
     EventEnvelope:
       type: object

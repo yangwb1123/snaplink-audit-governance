@@ -65,6 +65,19 @@ groups:
           summary: Auth-blocked DLQ backlog not draining
           description: "{{ $value }} dead-lettered records are held auth-blocked (error_code=unauthorized). Verify the ingest credential (token problem vs IdP/JWKS outage) and that blocked events have accepted-topic originals, then drain with -replay-auth-blocked; the gauge falls to 0 when drained. Requires audit-kafka-dlq-replay /metrics (AUDIT_DLQ_REPLAY_METRICS; default off, daemon mode only — -once mounts no /metrics)."
 
+      # 租户错配告警（consumer 侧计数器）：AUDIT_KAFKA_TENANT 与 token 租户错配
+      # （FM-3）或外来租户共享 accepted topic 时，跳过计数持续增长。错配会把本
+      # 实例自己的全部事件静默跳过（可用性损失），计数增长 + skip 日志的
+      # tenant=/consumer_tenant= 对是唯一的信号。依赖 audit-kafka-consumer
+      # /metrics（AUDIT_KAFKA_METRICS，默认关闭；未启用时本规则静默）。
+      - alert: AuditConsumerForeignTenantSkips
+        expr: increase(audit_consumer_foreign_tenant_skipped_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Foreign-tenant events being skipped by the scoped consumer
+          description: "{{ $value }} foreign-tenant events skipped in the last 15m. If the instance's own-tenant events are also being skipped, AUDIT_KAFKA_TENANT likely mismatches the token's tenant — check the skip log's tenant=/consumer_tenant= pair; otherwise foreign producers share the accepted topic and scoping is working as intended."
+
   - name: audit-slo
     # docs/SLO_ALERTS.md §2 告警规则 → audit-api /metrics 指标。
     # 完整性与签名失败独立于错误预算（安全事件）。

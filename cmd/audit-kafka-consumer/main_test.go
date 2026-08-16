@@ -245,22 +245,98 @@ func TestConsumerInsecureAPIURLOptInWarns(t *testing.T) {
 
 // AC-7.2.3: metricsText renders the consumer counters in the pinned order
 // with the new audit_consumer_unauthorized_total line (golden — a reorder
-// or a name change fails this test).
+// or a name change fails this test). The new disjoint third class
+// (audit_consumer_foreign_tenant_skipped_total) is appended last: a skip is
+// committed but is neither ingested nor dead-lettered, so its counter sits
+// outside both families.
 func TestConsumerMetricsTextGolden(t *testing.T) {
 	metrics := kafka.ConsumerMetrics{
-		IngestFailures:    1,
-		DeadLettered:      2,
-		Unauthorized:      3,
-		DLQPublished:      4,
-		MessagesCommitted: 5,
+		IngestFailures:       1,
+		DeadLettered:         2,
+		Unauthorized:         3,
+		DLQPublished:         4,
+		MessagesCommitted:    5,
+		ForeignTenantSkipped: 6,
 	}
 	want := "" +
 		"audit_consumer_ingest_failures_total 1\n" +
 		"audit_consumer_dead_lettered_total 2\n" +
 		"audit_consumer_unauthorized_total 3\n" +
 		"audit_consumer_dlq_published_total 4\n" +
-		"audit_consumer_messages_committed_total 5\n"
+		"audit_consumer_messages_committed_total 5\n" +
+		"audit_consumer_foreign_tenant_skipped_total 6\n"
 	if got := metricsText(metrics); got != want {
 		t.Fatalf("metricsText mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// AC-2 / REQ-2+7 (T3): the -tenant flag and AUDIT_KAFKA_TENANT env both reach
+// the consumer wiring and the startup log; absent both, tenant= renders empty
+// (REQ-7 backward compatible). The harness strips AUDIT_KAFKA_*, so the env
+// form needs the custom cmd.Env pattern (TestConsumerMaxAttemptsReadFromEnv).
+func TestConsumerTenantFlagAndEnvWiring(t *testing.T) {
+	t.Run("flag form", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "dev:demo:service", "-tenant", "demo")
+		if !strings.Contains(output, "tenant=demo") {
+			t.Fatalf("startup log missing tenant=demo:\n%s", output)
+		}
+		if strings.Contains(output, "tenant scope mismatch") {
+			t.Fatalf("aligned dev token + tenant must not warn:\n%s", output)
+		}
+	})
+	t.Run("env form", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, consumerBin, "-brokers", "localhost:9092")
+		cmd.Env = []string{"AUDIT_KAFKA_TENANT=demo", "PATH=" + os.Getenv("PATH")}
+		output, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(output), "tenant=demo") {
+			t.Fatalf("startup log missing tenant=demo from env:\n%s", output)
+		}
+	})
+	t.Run("unset renders empty tenant (REQ-7)", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "dev:demo:service")
+		if !strings.Contains(output, "dlq_topic=audit.events.dlq.v1 tenant=\n") {
+			t.Fatalf("startup log must render an empty tenant= field:\n%s", output)
+		}
+	})
+}
+
+// AC-5 / REQ-2+1 (T11): binary-level proof that the consumer runs
+// tenant-scoped with the token — dev:demo:service + -tenant demo are aligned
+// (no mismatch warning) and the startup log carries tenant=demo.
+func TestConsumerBinaryTenantScopedToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "dev:demo:service", "-tenant", "demo")
+	if !strings.Contains(output, "tenant=demo") {
+		t.Fatalf("startup log missing tenant=demo:\n%s", output)
+	}
+	if strings.Contains(output, "tenant scope mismatch") {
+		t.Fatalf("aligned dev token + tenant must not warn:\n%s", output)
+	}
+}
+
+// P2 (identity protocol F-2): a dev token whose tenant differs from
+// AUDIT_KAFKA_TENANT logs a non-fatal startup warning carrying both tenants,
+// then keeps running (the process reaches the startup log — not a fatal).
+// This converts the silent FM-3 availability failure into an operator-visible
+// signal while preserving REQ-7 (empty -tenant never warns).
+func TestConsumerWarnsOnTenantTokenMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, _ := runBinaryCtx(t, ctx, "-brokers", "localhost:9092", "-token", "dev:acme:service", "-tenant", "demo")
+	if !strings.Contains(output, "tenant scope mismatch") ||
+		!strings.Contains(output, "tenant_claim=acme") ||
+		!strings.Contains(output, "consumer_tenant=demo") {
+		t.Fatalf("mismatch warning missing both tenant values:\n%s", output)
+	}
+	// Non-fatal: the resolved-config startup log follows the warning.
+	if !strings.Contains(output, "brokers=localhost:9092") {
+		t.Fatalf("consumer must keep running after the warning (startup log missing):\n%s", output)
 	}
 }

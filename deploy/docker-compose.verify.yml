@@ -81,6 +81,7 @@ services:
       # 明文 http 默认失败关闭，生产环境必须使用 https，绝不设置此变量。
       AUDIT_ALLOW_INSECURE_API_URL: "true"
       AUDIT_OUTBOX_TOKEN: ${AUDIT_OUTBOX_TOKEN:-dev:demo:service}
+      AUDIT_KAFKA_TENANT: ${AUDIT_KAFKA_TENANT:-demo}
       AUDIT_KAFKA_METRICS: ":9092"
     depends_on:
       - redpanda

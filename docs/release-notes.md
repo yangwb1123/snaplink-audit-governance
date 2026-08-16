@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-08-16 — Kafka consumer 租户作用域 + DLQ `Failure.tenant_id`（internal/kafka + cmd/audit-kafka-consumer + api/asyncapi，add-tenant-scoped-validation-to-the-kafka-consumer）
+
+**写给运营（行为变化）：**
+
+- **消费端新增可选租户作用域**：`-tenant` / `AUDIT_KAFKA_TENANT` 设置后，accepted topic 上 `event.TenantID` 与本实例配置租户不同的事件被**跳过并提交**——绝不入账、绝不进 DLQ、绝不重试，因此也绝不会再走 `tenant_mismatch` 422 → `permanent_error` → 重放一次性闭合（REQ-PERM-1）的永久丢失链。事件为空租户时照常透传给 API（服务端按 token 租户盖章，DS-08），不属于本实例；`AUDIT_KAFKA_TENANT` 未设置时行为逐字节不变（向后兼容，回滚即恢复旧缺陷路径）。
+- **新指标 + 新日志 + 新告警**：`audit_consumer_foreign_tenant_skipped_total`（无任何 label，追加在 `/metrics` 末行，与 ingest/commit 和 dead-letter 两个家族不相交）；每条跳过记录一行 `skipped foreign-tenant … tenant=<事件声明的租户> consumer_tenant=<配置租户>`；Prometheus 规则 `AuditConsumerForeignTenantSkips`（`increase(…[15m]) > 0`，warning）覆盖 FM-3——`AUDIT_KAFKA_TENANT` 与 token 租户错配会把本实例全部事件静默跳过，计数/日志/告警是唯一信号。dev token 与 `AUDIT_KAFKA_TENANT` 错配时启动即打印非致命警告 `tenant scope mismatch tenant_claim=… consumer_tenant=…`（JWT 实例靠 skip 计数与日志对）。
+- **verify 栈默认开启租户作用域**：`AUDIT_KAFKA_TENANT: ${AUDIT_KAFKA_TENANT:-demo}`，与默认 token `dev:demo:service` 对齐；覆盖 `AUDIT_OUTBOX_TOKEN` 到其他租户时必须同步设置 `AUDIT_KAFKA_TENANT`（错配由上述信号暴露）。e2e：`make e2e-tenant-scope`（Docker 门控、不在 `cli.py quality` 内，fullstack.sh 同级）。
+- **契约（运营侧影响）**：DLQ `Failure` 载荷新增**可选** `tenant_id`——事件可解码的死信路径写入**事件信封声明的租户**（非服务端验证值；服务端解析租户仍是唯一授权权威），不可解析路径留空且 `omitempty` 省略该键，旧二进制写入的 3 键记录与新二进制写入的 4 键记录双向可解。Change Manifest：`docs/proposals/change-manifest-dlq-failure-tenant-id.md`。
+- **回滚**：消费者二进制 + compose env 一起回退（旧二进制忽略 env，外来租户事件恢复死信/REQ-PERM-1 丢失链，DLQ `permanent_error` 上升即特征信号）；schema/struct/填充同变更集回退，两种记录形态双向兼容，无需重放器改动。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/kafka.go`：`Consumer` 新增 `tenant` 字段与 `foreignTenantSkipped atomic.Uint64`；`WithTenant(tenant)` 选项（空 = 不过滤，REQ-7）；`consume` 第一语句为租户门禁（`c.tenant != "" && event.TenantID != "" && event.TenantID != c.tenant` → 计数 + 日志 + 提交并返回，`ingested==0` 由测试钉死，FM-1）；`Failure` 新增 `TenantID json:"tenant_id,omitempty"`（F-1 语义注释：信封声明值、非服务端验证）；`deadLetter` 填充 `TenantID: event.TenantID`，`deadLetterUnparsable` 留空；`Metrics()` 与 `ConsumerMetrics` 新增 `ForeignTenantSkipped`（不相交第三类）。
+- `cmd/audit-kafka-consumer/main.go`：`-tenant`/`AUDIT_KAFKA_TENANT` flag、`WithTenant` 接线、启动日志末位 `tenant=%s`、`metricsText` 追加不相交类行（doc 注释注明 no-labels 与三类关系）、`devTokenTenant` 启动诊断（非致命 F-2 警告，dev token 专用，JWT 不在此验证）。
+- `api/asyncapi/asyncapi.yaml`：`Failure` 新增可选 `tenant_id: { type: string }` + 注释；`required` 不变；`checks/asyncapi_channels.py` 严格子集解析器可分类（FM-5 保持 fail-closed）。
+- 测试：`internal/kafka/kafka_test.go` 新增 `TestConsumerSkipsForeignTenantWithoutIngestOrDLQ`（T1，`runConsumerWithMetrics`）、`TestConsumerTenantScopeBoundaries`（T2 四子测含 `WithTenant("")`）、`TestConsumerSkipCommitFailurePropagatesAndDoesNotIngest`（H2：`fakeReader.commitFunc` 失败缝，首次 Run 返回提交错误、二次 Run 重新跳过不 ingest、at-least-once 计数）、`TestConsumerDeadLetterTenantIDCarriesEnvelopeClaim`（P1/F-1：422 `tenant_mismatch` 死信携带信封值）；扩展 `TestFailurePayloadMatchesAsyncAPISchema`（T7 双子测：4 键精确串 + omitempty 省略）与 4 个死信测试的 `TenantID` 断言（T8/L2，含 attempts_exhausted、unauthorized 路径）。`cmd/audit-kafka-consumer/main_test.go`：`TestConsumerTenantFlagAndEnvWiring`（T3 三子测：flag/env/空值）、`TestConsumerBinaryTenantScopedToken`（T11）、`TestConsumerWarnsOnTenantTokenMismatch`（P2/F-2）、golden 扩展（6 行）。`checks/contract_fields.py`：新增 Failure 载荷键集/required 钉（M2/FM-6，YAML 侧；Go 侧由 T7 钉）。`deploy/prometheus-rules.verify.yml`：新增 `AuditConsumerForeignTenantSkips`（devops M4，同变更集落地）。`deploy/docker-compose.verify.yml`：consumer 新增 `AUDIT_KAFKA_TENANT`。`test/e2e/consumer-tenant-scope.sh`（新增，H1 有界 DLQ 读取 + M1 增量断言 + M3 双租户日志断言）；Makefile 新增 `e2e-tenant-scope`（M4）。
+- **不变量**：错误码词汇不变；`contract_fields.py`/`tenant_consistency.py`/`invariants.py` 不涉及 Failure schema；无新 Go import、无新依赖边；`checks/sensitive_logging.py` 对 `c.logf(` 调用不匹配（无 `event`/`payload` 参数表达式）；`docs/evolution/state.jsonl` 追加 `change_manifest` 记录（本地 trace；`docs/evolution/` 被 gitignore，持久记录为 manifest 文件）。
+
 ## 2026-08-15 — outbox 写入拒绝超限 payload：`Insert` 在任意 SQL 之前按 `domain.MaxEventBytes` 收口（internal/outbox，outbox-insert-accepts-unbounded-payloads-enabling-table-bloat）
 
 **写给运营（行为变化）：**

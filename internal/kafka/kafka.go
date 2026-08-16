@@ -69,11 +69,19 @@ const (
 
 // Failure is the dead-letter payload declared by the AsyncAPI contract
 // (api/asyncapi/asyncapi.yaml, components.messages.Failure). The JSON key set
-// is exactly the three required fields.
+// is the three required fields plus the optional tenant_id: present on
+// event-decoded failures, omitted (omitempty) on unparsable payloads and on
+// records written by older binaries (both record shapes decode — replay's
+// json.Decoder ignores unknown fields). TenantID is the tenant CLAIMED by the
+// event envelope at dead-letter time — an untrusted topic value, never
+// server-verified (service.Ingest's resolved tenant is the only
+// authorization authority); consumers must use it for display/filtering
+// only, never for scoping or routing without API re-enforcement.
 type Failure struct {
 	EventID      string `json:"event_id"`
 	ErrorCode    string `json:"error_code"`
 	ErrorMessage string `json:"error_message"`
+	TenantID     string `json:"tenant_id,omitempty"`
 }
 
 // FailurePublisher writes dead-letter Failure records to the DLQ topic.
@@ -195,12 +203,14 @@ type Consumer struct {
 	maxAttempts int
 	dlq         FailurePublisher
 	attempts    map[messageKey]int
+	tenant      string // optional tenant scope; "" = no filtering (REQ-1)
 
-	ingestFailures    atomic.Uint64
-	deadLettered      atomic.Uint64
-	unauthorized      atomic.Uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
-	dlqPublished      atomic.Uint64
-	messagesCommitted atomic.Uint64
+	ingestFailures       atomic.Uint64
+	deadLettered         atomic.Uint64
+	unauthorized         atomic.Uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
+	dlqPublished         atomic.Uint64
+	messagesCommitted    atomic.Uint64
+	foreignTenantSkipped atomic.Uint64 // disjoint third class: skipped+committed, never ingested/dead-lettered
 }
 
 // messageKey identifies one in-flight message for attempt accounting.
@@ -216,11 +226,12 @@ type ConsumerOption func(*Consumer)
 // ConsumerMetrics is a snapshot of the consumer's domain counters for the
 // /metrics endpoint and DLQ traffic alerting.
 type ConsumerMetrics struct {
-	IngestFailures    uint64
-	DeadLettered      uint64
-	Unauthorized      uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
-	DLQPublished      uint64
-	MessagesCommitted uint64
+	IngestFailures       uint64
+	DeadLettered         uint64
+	Unauthorized         uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
+	DLQPublished         uint64
+	MessagesCommitted    uint64
+	ForeignTenantSkipped uint64 // skipped+committed, disjoint from ingest/commit and dead-letter
 }
 
 // WithMaxAttempts caps transient retries per (partition, offset) before the
@@ -239,6 +250,14 @@ func WithDLQ(publisher FailurePublisher) ConsumerOption {
 	return func(c *Consumer) {
 		c.dlq = publisher
 	}
+}
+
+// WithTenant scopes the consumer to one tenant: messages whose event.TenantID
+// differs (and is non-empty) are skipped and committed without ingest,
+// dead-lettering, or retry. An empty value (the default) disables filtering —
+// behavior is byte-identical to a consumer built without this option (REQ-7).
+func WithTenant(tenant string) ConsumerOption {
+	return func(c *Consumer) { c.tenant = tenant }
 }
 
 // NewConsumer creates a consumer group reader with manual commit.
@@ -373,6 +392,18 @@ func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Messa
 // reached (attempts-exhausted dead-letter). The attempt-map entry is removed
 // on every resolution path, bounding the map by in-flight messages.
 func (c *Consumer) consume(ctx context.Context, message kafka.Message, event domain.Event) error {
+	// REQ-1 tenant scope gate: a message whose envelope tenant differs from the
+	// instance's configured tenant is skipped and committed — never ingested,
+	// never dead-lettered, never retried. An empty event tenant is stamped
+	// server-side with the token's tenant (service.Ingest, DS-08) and so belongs
+	// to this instance by construction; an empty configured tenant filters
+	// nothing (backward compatible, REQ-7).
+	if c.tenant != "" && event.TenantID != "" && event.TenantID != c.tenant {
+		c.foreignTenantSkipped.Add(1)
+		c.logf("skipped foreign-tenant topic=%s partition=%d offset=%d event_id=%s tenant=%s consumer_tenant=%s",
+			c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, event.TenantID, c.tenant)
+		return c.reader.CommitMessages(ctx, message)
+	}
 	key := messageKey{partition: message.Partition, offset: message.Offset}
 	defer delete(c.attempts, key)
 	for {
@@ -431,7 +462,7 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 // authoritative, and an empty-ID record cannot be routed by replay — commit
 // + durable log instead (the key is an untrusted producer hint).
 func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event domain.Event, code string, cause error) error {
-	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error()}
+	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error(), TenantID: event.TenantID}
 	if failure.EventID == "" {
 		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=empty-event-id code=%s (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, code)
 	} else if c.dlq != nil {
@@ -451,10 +482,11 @@ func (c *Consumer) Close() error { return c.reader.Close() }
 // Metrics returns a snapshot of the consumer's counters for /metrics.
 func (c *Consumer) Metrics() ConsumerMetrics {
 	return ConsumerMetrics{
-		IngestFailures:    c.ingestFailures.Load(),
-		DeadLettered:      c.deadLettered.Load(),
-		Unauthorized:      c.unauthorized.Load(),
-		DLQPublished:      c.dlqPublished.Load(),
-		MessagesCommitted: c.messagesCommitted.Load(),
+		IngestFailures:       c.ingestFailures.Load(),
+		DeadLettered:         c.deadLettered.Load(),
+		Unauthorized:         c.unauthorized.Load(),
+		DLQPublished:         c.dlqPublished.Load(),
+		MessagesCommitted:    c.messagesCommitted.Load(),
+		ForeignTenantSkipped: c.foreignTenantSkipped.Load(),
 	}
 }

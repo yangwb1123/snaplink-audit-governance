@@ -2,6 +2,7 @@ import re
 import sys
 from pathlib import Path
 
+from checks.asyncapi_channels import AsyncAPIError, parse_spec
 from checks.proto_sync import ProtoSyncParseError, envelope_fields
 
 
@@ -49,6 +50,25 @@ def asyncapi_envelope_props(root: Path) -> set[str]:
     return set(re.findall(r"^\s+(\w+): \{", match.group(1), re.MULTILINE))
 
 
+def asyncapi_failure_payload(root: Path) -> tuple[set[str], str] | None:
+    """Parse components.messages.Failure.payload with the strict YAML-subset
+    parser (checks.asyncapi_channels). Returns (property key set, required
+    string) or None when the block is missing or not a mapping. parse_spec
+    raises AsyncAPIError on unclassifiable input — the caller reports it."""
+    spec = parse_spec((root / "api/asyncapi/asyncapi.yaml").read_text(encoding="utf-8"))
+    try:
+        payload = spec["components"]["messages"]["Failure"]["payload"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    properties = payload.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    required = payload.get("required")
+    return set(properties), str(required) if required is not None else ""
+
+
 def run(root=None) -> int:
     if root is None:
         root = Path(__file__).resolve().parents[1]
@@ -83,10 +103,37 @@ def run(root=None) -> int:
         if field not in proto_lookup:
             failures.append(f"proto EventEnvelope missing field {field}")
 
+    # Failure (DLQ) payload: pin the AsyncAPI components.messages.Failure key
+    # set exactly (event_id, error_code, error_message + optional tenant_id)
+    # and require that required stays [event_id, error_code, error_message] —
+    # tenant_id must remain optional (the unparsable dead-letter path cannot
+    # recover a tenant). The Go-side pin is
+    # TestFailurePayloadMatchesAsyncAPISchema; this rule pins the YAML side so
+    # a schema edit without the struct update (or vice versa) cannot pass the
+    # gate silently (design FM-6).
+    try:
+        failure = asyncapi_failure_payload(root)
+    except AsyncAPIError as error:
+        print(f"FAIL: contract fields: asyncapi Failure parse error: {error}")
+        return 1
+    if failure is None:
+        failures.append("AsyncAPI Failure payload not found or unparsable")
+    else:
+        failure_keys, failure_required = failure
+        want_keys = {"event_id", "error_code", "error_message", "tenant_id"}
+        if failure_keys != want_keys:
+            failures.append(
+                f"AsyncAPI Failure property set = {sorted(failure_keys)}, "
+                f"want exactly {sorted(want_keys)}")
+        if failure_required != "[event_id, error_code, error_message]":
+            failures.append(
+                f"AsyncAPI Failure required = {failure_required}, want unchanged "
+                "[event_id, error_code, error_message] (tenant_id must stay optional)")
+
     if failures:
         print("FAIL: contract fields", *failures, sep="\n  ")
         return 1
-    print(f"PASS: contract fields (domain {len(domain_fields)} fields aligned with OpenAPI/AsyncAPI/Proto)")
+    print(f"PASS: contract fields (domain {len(domain_fields)} fields aligned with OpenAPI/AsyncAPI/Proto; Failure payload pinned)")
     return 0
 
 
