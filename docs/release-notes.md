@@ -1,5 +1,18 @@
 # Release Notes
 
+## 2026-08-16 — 投影端把 `projection.ErrNotLedgered` 分类为永久错误：pre-ledger 事件首次尝试即死信 `permanent_error`（internal/kafka，classify-projection-errnotledgered-as-a-permanen-3e0130dd）
+
+**写给运营（行为变化）：**
+
+- **audit-projector 指向 accepted topic（`-topic=audit.events.accepted.v1` 或空 `-topic` 回退 `TopicAccepted`）时快速失败**：此前每个 pre-ledger 事件都会烧满 8 次 × 2s 退避（≥14s 分区头阻塞），再以 `attempts_exhausted` 死信——重放会把预入账原件重新投递、再次烧满、再次死信，循环直到 replayed-mark 收敛。现在 `projection.Store.Insert` 返回的 `ErrNotLedgered`（裸哨兵或 `%w` 包装）与 `domain.ErrOccurredAtOutOfRange` 同级，在**第一次 ingest 尝试**即以 `error_code=permanent_error` 死信：零重试、零退避、零 `attempts_exhausted` 记录；重放侧进入一次性闭合类（REQ-PERM-1），不再循环。事件仍不会物化进投影（必须由运营修正 topic 配置；启动首行日志仍然可见解析后的 topic），变化的是速度、错误码语义与重放确定性。
+- **确定性隔离**：仅 `errors.Is` 精确匹配哨兵；ClickHouse 瞬态故障（`insert projection: %w` 包装的非哨兵错误）仍走原重试/退避/上限路径，绝不会被误标永久。
+- **既有 DLQ 记录不回迁**：修复前以 `attempts_exhausted` 写入的 pre-ledger 记录由重放 legacy 路径照常处理；运营修正配置后下一轮重放即可收敛。回滚 = 重新部署旧二进制（恢复慢速/错误码路径；DLQ 记录形态双向兼容，无重放器改动）。
+
+**写给开发（实现变化）：**
+
+- `internal/kafka/kafka.go`：`consume` 在 `ErrOccurredAtOutOfRange` 分支（kafka.go:429–431）之后、瞬态分支之前新增同级分支 `if errors.Is(err, projection.ErrNotLedgered) { return c.deadLetter(…, ErrorCodePermanentError, err) }`；新增 import `internal/projection`（`checks/architecture.py` 允许、无环）；`Consumer`/`consume` doc comment 与分支注释把 `ErrNotLedgered` 列为第二个确定性域拒绝。无哨兵/错误类型/词汇变更，无新计数器或指标，`deadLetter` 共享日志行复用（错误文本自带诊断）。
+- 测试：`internal/kafka/kafka_test.go` 新增 `TestConsumerDeadLettersNotLedgeredOnFirstAttempt`（T1，裸/包装双形态表驱动 + `time.Hour` 退避零等待证明 + 分区越过毒消息前进）、`TestErrNotLedgeredSentinelIdentitySurvivesWrapping`（T2，`errors.Is` 跨裸/包装/无关错误）、`TestDeterministicDomainRejectionsNeverAttemptsExhausted`（T5，三类确定性拒绝单次 ingest + 零 attempts_exhausted）、`TestConsumerPermanentRecordsAllLandInOneShot`（T6，消费端产物记录全部落入 `wantedEvents.oneShot`）。`test/e2e/projector-permanent-dlq.sh`（新增，Docker 门控）+ Makefile `e2e-projector-permanent-dlq`（AC-3：one-off 容器覆盖 `AUDIT_KAFKA_TOPIC`，DLQ 恰好一条 `permanent_error` 记录、零重试日志行）。`internal/projection/projection.go`、`cmd/audit-projector/main.go`、`internal/kafka/replay.go`、`api/asyncapi/asyncapi.yaml`、`deploy/docker-compose.verify.yml` 均未改动。
+
 ## 2026-08-16 — Kafka consumer 租户作用域 + DLQ `Failure.tenant_id`（internal/kafka + cmd/audit-kafka-consumer + api/asyncapi，add-tenant-scoped-validation-to-the-kafka-consumer）
 
 **写给运营（行为变化）：**

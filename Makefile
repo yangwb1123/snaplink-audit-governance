@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope
+.PHONY: help check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope"
+	@echo "make targets: check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq"
 
 check:
 	$(CLI) check
@@ -71,3 +71,6 @@ security-scan:
 
 e2e-tenant-scope:
 	test/e2e/consumer-tenant-scope.sh
+
+e2e-projector-permanent-dlq:
+	test/e2e/projector-permanent-dlq.sh

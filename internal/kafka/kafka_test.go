@@ -14,6 +14,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/outbox"
+	"github.com/snaplink/audit-governance/internal/projection"
 )
 
 type fakeReader struct {
@@ -334,6 +335,169 @@ func TestConsumerDeadLettersOccurredAtOutOfRangeOnFirstAttempt(t *testing.T) {
 		t.Fatalf("published failure=%+v, want event_id=evt-1 code=%s with self-describing message", failure, ErrorCodePermanentError)
 	}
 }
+
+// T1 (AC-1): an ingest func returning projection.ErrNotLedgered — the bare
+// sentinel shape projection.Store.Insert returns (projection.go) or the
+// %w-wrapped sibling shape — is classified permanent and dead-lettered on
+// the FIRST ingest attempt with error_code=permanent_error: exactly one
+// ingest call per message, zero backoff waits (time.Hour backoff inside a
+// 100 ms harness deadline would blow the deadline on any retry), and the
+// partition keeps advancing past the poison message.
+func TestConsumerDeadLettersNotLedgeredOnFirstAttempt(t *testing.T) {
+	cases := []struct {
+		name      string
+		ingestErr error
+	}{
+		{"bare sentinel", projection.ErrNotLedgered},
+		{"wrapped sentinel", fmt.Errorf("insert projection: %w", projection.ErrNotLedgered)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+			ingested := 0
+			// Zero-backoff proof: time.Hour backoff would blow the 100 ms
+			// harness deadline if the code regressed to the transient path.
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			consumer := newConsumerWithReader(reader, func(_ context.Context, event domain.Event) error {
+				ingested++
+				if event.EventID == "evt-1" {
+					return tc.ingestErr
+				}
+				return nil
+			}, time.Hour, WithDLQ(reader), WithMaxAttempts(3))
+			if err := consumer.Run(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run: %v", err)
+			}
+			if ingested != 2 {
+				t.Fatalf("ingested=%d, want 2 (poison message dead-lettered on first attempt, evt-2 ingested once)", ingested)
+			}
+			if len(reader.commits) != 2 || reader.committedOffset != 2 {
+				t.Fatalf("commits=%d committedOffset=%d, want 2/2 (partition advances past the poison message)", len(reader.commits), reader.committedOffset)
+			}
+			if len(reader.published) != 1 {
+				t.Fatalf("published=%d, want exactly 1", len(reader.published))
+			}
+			failure := reader.published[0]
+			if failure.EventID != "evt-1" || failure.ErrorCode != ErrorCodePermanentError {
+				t.Fatalf("published failure=%+v, want event_id=evt-1 code=%s", failure, ErrorCodePermanentError)
+			}
+			if failure.TenantID != "demo" {
+				t.Fatalf("published tenant_id=%q, want demo (envelope-claimed value, decoded path)", failure.TenantID)
+			}
+			if !strings.Contains(failure.ErrorMessage, "lacks ledger-assigned chain state") {
+				t.Fatalf("ErrorMessage=%q, want the self-describing sentinel text", failure.ErrorMessage)
+			}
+		})
+	}
+}
+
+// T2 (AC-2): the classification predicate is errors.Is, so sentinel identity
+// survives any %w wrapping — both real-world shapes match (the bare sentinel
+// returned by projection.Store.Insert and wrapped copies), and unrelated
+// transient errors never do. T1's wrapped case is the behavioral proof that
+// the consumer classification uses errors.Is, not ==.
+func TestErrNotLedgeredSentinelIdentitySurvivesWrapping(t *testing.T) {
+	if !errors.Is(projection.ErrNotLedgered, projection.ErrNotLedgered) {
+		t.Fatal("errors.Is(bare sentinel, sentinel) must be true")
+	}
+	wrapped := fmt.Errorf("insert projection: %w", projection.ErrNotLedgered)
+	if !errors.Is(wrapped, projection.ErrNotLedgered) {
+		t.Fatalf("errors.Is(%q, sentinel) must be true: identity survives %%w wrapping", wrapped)
+	}
+	if errors.Is(errors.New("api unavailable"), projection.ErrNotLedgered) {
+		t.Fatal("an unrelated transient error must not match the sentinel")
+	}
+}
+
+// T5 (AC-4, consumer tier): deterministic domain rejections — ErrNotLedgered
+// bare/wrapped and the sibling ErrOccurredAtOutOfRange wrapped — dead-letter
+// as permanent_error on the first attempt and never produce an
+// attempts_exhausted record; the invariant is pinned at the producing end by
+// record codes + per-message ingest count (Metrics().DeadLettered == number
+// of poison messages).
+func TestDeterministicDomainRejectionsNeverAttemptsExhausted(t *testing.T) {
+	cases := []struct {
+		name      string
+		ingestErr error
+	}{
+		{"ErrNotLedgered bare", projection.ErrNotLedgered},
+		{"ErrNotLedgered wrapped", fmt.Errorf("insert projection: %w", projection.ErrNotLedgered)},
+		{"ErrOccurredAtOutOfRange wrapped", fmt.Errorf("insert projection: %w", domain.ErrOccurredAtOutOfRange)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &fakeReader{messages: []kafka.Message{validMessage("evt-poison", 1)}}
+			ingested := 0
+			consumer := runConsumerWithMetrics(t, reader, func(_ context.Context, _ domain.Event) error {
+				ingested++
+				return tc.ingestErr
+			}, WithDLQ(reader), WithMaxAttempts(3))
+			if ingested != 1 {
+				t.Fatalf("ingested=%d, want exactly 1 (dead-lettered on the first attempt, cap never reached)", ingested)
+			}
+			if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodePermanentError {
+				t.Fatalf("published=%v, want one permanent_error record", reader.published)
+			}
+			if reader.published[0].ErrorCode == ErrorCodeAttemptsExhausted {
+				t.Fatalf("deterministic domain rejection must never be coded attempts_exhausted: %+v", reader.published[0])
+			}
+			metrics := consumer.Metrics()
+			if metrics.DeadLettered != 1 || metrics.IngestFailures != 1 || metrics.DLQPublished != 1 {
+				t.Fatalf("metrics=%+v, want DeadLettered=1 IngestFailures=1 DLQPublished=1", metrics)
+			}
+		})
+	}
+}
+
+// T6 (AC-4, replay tier): the consumer-produced permanent_error records all
+// land in the one-shot closure class of wantedEvents (REQ-PERM-1) and none
+// in the legacy attempts-exhausted traffic class — the replayer's
+// attemptsExhausted collection counter (replay.go) can never increment from
+// a deterministic domain rejection, pinned at both the producing (T5) and
+// the classifying (T6) ends.
+func TestConsumerPermanentRecordsAllLandInOneShot(t *testing.T) {
+	shapes := []struct {
+		name      string
+		ingestErr error
+	}{
+		{"ErrNotLedgered bare", projection.ErrNotLedgered},
+		{"ErrNotLedgered wrapped", fmt.Errorf("insert projection: %w", projection.ErrNotLedgered)},
+		{"ErrOccurredAtOutOfRange wrapped", fmt.Errorf("insert projection: %w", domain.ErrOccurredAtOutOfRange)},
+	}
+	var records []dlqRecord
+	for i, tc := range shapes {
+		reader := &fakeReader{messages: []kafka.Message{validMessage(fmt.Sprintf("evt-%d", i), int64(i+1))}}
+		runConsumer(t, reader, func(_ context.Context, _ domain.Event) error {
+			return tc.ingestErr
+		}, WithDLQ(reader), WithMaxAttempts(3))
+		if len(reader.published) != 1 {
+			t.Fatalf("%s: published=%d, want exactly 1", tc.name, len(reader.published))
+		}
+		if reader.published[0].ErrorCode != ErrorCodePermanentError {
+			t.Fatalf("%s: code=%s, want %s", tc.name, reader.published[0].ErrorCode, ErrorCodePermanentError)
+		}
+		// Collection shape mirroring the replayer's DLQ scan (replay.go
+		// dlqRecord): wanted=true, code read from the record.
+		records = append(records, dlqRecord{eventID: reader.published[0].EventID, errorCode: reader.published[0].ErrorCode, wanted: true})
+	}
+	wanted := wantedEvents(records)
+	if len(wanted.oneShot) != len(records) {
+		t.Fatalf("oneShot=%v, want all %d consumer-produced permanent records (one-shot closure, REQ-PERM-1)", wanted.oneShot, len(records))
+	}
+	for _, record := range records {
+		if !wanted.oneShot[record.eventID] {
+			t.Fatalf("record %s (code=%s) must land in oneShot", record.eventID, record.errorCode)
+		}
+		if !wanted.replay[record.eventID] {
+			t.Fatalf("record %s must be in the replay set (invariant oneShot ⊆ replay)", record.eventID)
+		}
+		if record.errorCode == ErrorCodeAttemptsExhausted {
+			t.Fatalf("record %s: deterministic domain rejection must never carry attempts_exhausted", record.eventID)
+		}
+	}
+}
+
 func TestConsumerDeadLettersPermanentErrorAndAdvancesPartition(t *testing.T) {
 	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
 	ingested := 0

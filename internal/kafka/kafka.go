@@ -19,6 +19,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/outbox"
+	"github.com/snaplink/audit-governance/internal/projection"
 )
 
 // TopicAccepted is the AsyncAPI topic for validated, normalized events.
@@ -191,8 +192,10 @@ const defaultMaxAttempts = 8
 // committed only after ingest succeeds; transient failures back off and
 // retry the held message up to the per-(partition, offset) attempt cap, then
 // dead-letter it. Permanent failures (outbox.DeliveryError with Permanent
-// set) are dead-lettered immediately. Unparsable messages are committed and
-// logged as dead-letter evidence. Dead-lettering publishes a Failure record
+// set) and deterministic domain rejections (domain.ErrOccurredAtOutOfRange,
+// projection.ErrNotLedgered) are dead-lettered immediately. Unparsable
+// messages are committed and logged as dead-letter evidence. Dead-lettering
+// publishes a Failure record
 // to the DLQ topic (when one is attached) and always commits, so partition
 // progress is never blocked by a slow or unavailable DLQ.
 type Consumer struct {
@@ -388,9 +391,11 @@ func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Messa
 // consume resolves one fetched message in place. Ingest is retried on the
 // held message — FetchMessage is not called again, because the reader has
 // already advanced past it — until the ingest succeeds (commit), the error
-// is permanent (immediate dead-letter), or the per-message attempt cap is
-// reached (attempts-exhausted dead-letter). The attempt-map entry is removed
-// on every resolution path, bounding the map by in-flight messages.
+// is permanent (immediate dead-letter: outbox.DeliveryError with Permanent
+// set, or a deterministic domain rejection — domain.ErrOccurredAtOutOfRange,
+// projection.ErrNotLedgered), or the per-message attempt cap is reached
+// (attempts-exhausted dead-letter). The attempt-map entry is removed on
+// every resolution path, bounding the map by in-flight messages.
 func (c *Consumer) consume(ctx context.Context, message kafka.Message, event domain.Event) error {
 	// REQ-1 tenant scope gate: a message whose envelope tenant differs from the
 	// instance's configured tenant is skipped and committed — never ingested,
@@ -425,8 +430,18 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 		// 域边界拒绝（occurred_at 超出账本时间窗）与 4xx 语义拒绝同级：没有
 		// 重试价值，立即死信，避免对这类毒消息烧掉 max-attempts 次退避。
 		// 预修复前已入账的超范围事件由此获得自描述 trace（错误文本携带
-		// 时间窗），而不是等到 attempts_exhausted。
+		// 时间窗），而不是等到 attempts_exhausted。同一类的第二个成员是
+		// projection.ErrNotLedgered（投影所需的账本链状态缺失）：错误文本
+		// 自带诊断（"projection: event lacks ledger-assigned chain state"）。
 		if errors.Is(err, domain.ErrOccurredAtOutOfRange) {
+			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
+		}
+		// 域边界拒绝（投影所需的账本链状态缺失）与上者同级：链状态由账本在
+		// ingest 提交时服务端分配，投影端任何重试都无法补上，没有重试价值，
+		// 立即死信为 permanent_error（第一次尝试）——不烧 max-attempts 次退避，
+		// 不产生 attempts_exhausted（重放会因此对预入账原件循环重试）。错误
+		// 文本自带诊断（"projection: event lacks ledger-assigned chain state"）。
+		if errors.Is(err, projection.ErrNotLedgered) {
 			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
 		}
 		// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；否则
