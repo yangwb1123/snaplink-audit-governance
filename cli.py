@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -138,26 +139,11 @@ def cmd_complexity() -> int:
     return int(failed)
 
 
-def normalized_route(path: str) -> str:
-    return re.sub(r"\{[^}]+\}", "{}", path)
-
-
 def cmd_check_routes() -> int:
-    go_routes: set[str] = set()
-    for path in (ROOT / "internal").rglob("*.go"):
-        text = path.read_text(encoding="utf-8")
-        go_routes.update(normalized_route(value) for value in re.findall(r'HandleFunc\("(?:GET|POST|PUT|DELETE|PATCH) ([^" ]+)', text) if value.startswith("/api/"))
-    openapi = ROOT / "api" / "openapi" / "openapi.yaml"
-    api_routes = set()
-    if openapi.exists():
-        api_routes.update(normalized_route(value) for value in re.findall(r"^  (/api/.*):\s*$", openapi.read_text(encoding="utf-8"), re.MULTILINE))
-    missing = sorted(go_routes - api_routes)
-    extra = sorted(api_routes - go_routes)
-    if missing:
-        print("routes missing from OpenAPI:", *missing, sep="\n  ")
-    if extra:
-        print("OpenAPI routes missing at runtime:", *extra, sep="\n  ")
-    return int(bool(missing or extra))
+    # Single shared implementation lives in checks/route_contract.py; this
+    # reads cli.ROOT at call time so the monkeypatch test pattern works.
+    from checks.route_contract import run
+    return run(root=ROOT)
 
 
 def cmd_check_root() -> int:
@@ -383,7 +369,7 @@ def cmd_coverage() -> int:
 
 
 def cmd_check() -> int:
-    for command in (cmd_fmt, cmd_check_filesize, cmd_vet, cmd_test):
+    for command in (cmd_fmt, cmd_check_filesize, cmd_check_routes, cmd_vet, cmd_test):
         if command() != 0:
             return 1
     return 0
@@ -395,6 +381,11 @@ def cmd_accept() -> int:
 
 def cmd_quality() -> int:
     """Run the full post-change engineering gate."""
+    # Recursion guard: the gate runs the checks unittest suite
+    # (cmd_python_checks), whose route-contract tests invoke `cli.py quality`
+    # and `cli.py check` end-to-end. Mark the run so those tests skip and
+    # cannot re-enter the gate (infinite recursion / wasted minutes).
+    os.environ["AUDIT_QUALITY_ACTIVE"] = "1"
     from checks.adr_compliance import run as adr_compliance
     from checks.architecture import run as architecture
     from checks.build import run as build
@@ -433,7 +424,9 @@ def cmd_quality() -> int:
 
 
 def cmd_harness() -> int:
-    for command in (cmd_check, cmd_complexity, cmd_check_routes):
+    # cmd_check now includes the route stage (cmd_check_routes), so listing it
+    # again here would run the gate twice per harness run.
+    for command in (cmd_check, cmd_complexity):
         if command() != 0:
             return 1
     return 0

@@ -46,11 +46,13 @@ paths:
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
       responses:
         '200': { description: Event page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
   /api/v1/events/{eventId}:
     get:
       operationId: getEvent
       parameters: [{ $ref: '#/components/parameters/eventId' }]
-      responses: { '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }, '404': { $ref: '#/components/responses/Error' } }
+      responses: { '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/events/{eventId}/receipt:
     get:
       operationId: getReceipt
@@ -71,7 +73,7 @@ paths:
     get:
       operationId: getOperationTimeline
       parameters: [{ $ref: '#/components/parameters/operationId' }]
-      responses: { '200': { description: Operation timeline } }
+      responses: { '200': { description: Operation timeline }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/operations/{operationId}/replay:
     get:
       operationId: replayOperation
@@ -83,12 +85,12 @@ paths:
       parameters:
         - { name: aggregateType, in: path, required: true, schema: { type: string } }
         - { name: aggregateId, in: path, required: true, schema: { type: string } }
-      responses: { '200': { description: Aggregate history } }
+      responses: { '200': { description: Aggregate history }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/exports:
     post:
       operationId: createExport
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Query' } } } }
-      responses: { '202': { description: Export job } }
+      responses: { '202': { description: Export job }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/exports/{jobId}:
     get:
       operationId: getExport
@@ -100,18 +102,19 @@ paths:
       parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }]
       responses:
         '200': { description: Export JSON Lines download, content: { application/x-ndjson: { schema: { type: string, format: binary } } } }
+        '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
   /api/v1/integrity/verify:
     post:
       operationId: verifyIntegrity
       requestBody: { content: { application/json: { schema: { type: object, properties: { stream_id: { type: string } } } } } }
-      responses: { '200': { description: Integrity result } }
+      responses: { '200': { description: Integrity result }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/legal-holds:
     post:
       operationId: createLegalHold
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
-      responses: { '201': { description: Legal hold } }
+      responses: { '201': { description: Legal hold }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listLegalHolds
       responses: { '200': { description: Legal holds } }
@@ -124,12 +127,12 @@ paths:
     post:
       operationId: previewRestore
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
-      responses: { '200': { description: Restore preview } }
+      responses: { '200': { description: Restore preview }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/restores:
     post:
       operationId: createRestore
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
-      responses: { '202': { description: Pending approval restore run } }
+      responses: { '202': { description: Pending approval restore run }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/restores/{runId}:
     get:
       operationId: getRestore
@@ -163,12 +166,14 @@ paths:
       parameters:
         - { name: tenant_id, in: query, required: false, schema: { type: string, pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$' } }
         - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100, default: 100 } }
-      responses: { '200': { description: Admin actions } }
+      responses:
+        '200': { description: Admin actions, content: { application/json: { schema: { $ref: '#/components/schemas/AdminAction' } } } }
+        '400': { $ref: '#/components/responses/Error' }
   /api/v1/tenants:
     post:
       operationId: createTenant
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
-      responses: { '201': { description: Tenant } }
+      responses: { '201': { description: Tenant }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listTenants
       responses: { '200': { description: Tenants } }
@@ -176,7 +181,7 @@ paths:
     post:
       operationId: createSource
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
-      responses: { '201': { description: Source system } }
+      responses: { '201': { description: Source system }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listSources
       parameters:
@@ -198,7 +203,7 @@ paths:
     post:
       operationId: createSchema
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventSchema' } } } }
-      responses: { '201': { description: Event schema } }
+      responses: { '201': { description: Event schema }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listSchemas
       parameters:
@@ -212,7 +217,7 @@ paths:
     put:
       operationId: setRetentionPolicy
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
-      responses: { '200': { description: Retention policy } }
+      responses: { '200': { description: Retention policy }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: getRetentionPolicy
       responses: { '200': { description: Retention policy } }
