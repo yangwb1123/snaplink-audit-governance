@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-08-16 — 治理 worker 归档写路径获得真实截止时间与取消：pass 级 2 分钟上限、ctx 贯穿三个 Put 站点、导出单写 30s 界（cmd/audit-governance-worker + internal/service，give-the-worker-s-archive-write-path-a-real-dead-f9f2be1e）
+
+**写给运营（行为变化）：**
+
+- **单次治理 pass 有硬上限（2 分钟）**：此前 `ArchivePending`/`archiveEvent`/`archiveSegment` 对归档写使用 `context.Background()`，且 minio-go 的 http.Client 没有整体超时——能通过 5s Ready 探针的黑洞端点可让每个对象卡住数分钟（Stat→Put→verify 三次往返 × 传输层超时），并阻塞整轮 pass 与 SIGTERM 优雅退出。现在每轮 pass 派生出 `archivePassTimeout`（2 分钟）截止上下文，并把 ctx 贯穿 `ArchivePending → archiveEvent/archiveSegment → Put`：minio-go 按请求 ctx 取消在途 HTTP 往返，pass 在界内返回；被截断的 pass 下个 tick（默认 5 分钟间隔）重试同一批事件（幂等，无数据丢失）。
+- **新增日志行**：pass 在租户之间中止时输出 `pass_aborted=<err>`；归档错误行 `archive_error=` 现在可携带 `context deadline exceeded`/`context canceled`。`archived=N`/`dead_lettered=` 行语义不变。
+- **导出单写 30s 界**：`runExport`（fire-and-forget，API 侧创建）的归档 Put 现在受 `archivePutTimeout`（30 秒）约束；超时 → 导出 job `failed`、`ObjectPath` 为空、`Error` 含 `context deadline exceeded`。重新请求 = 新的 `CreateExport`，失败语义不变。
+- **新启动告警**：`-interval`（`AUDIT_GOVERNANCE_INTERVAL`）小于 pass 上限时输出 `warning=interval_below_pass_timeout`（仅告警，不失败）。
+- **部署**：重建并滚动重启 worker 与 audit-api（共享 internal/service 包）；无数据迁移、无配置变更、无契约变更。回滚 = 回退二进制。
+
+**写给开发（实现变化）：**
+
+- `cmd/audit-governance-worker/main.go`：新增 `archivePassTimeout = 2 * time.Minute`；`runEvaluatePass` 顶部 `context.WithTimeout(ctx, archivePassTimeout)`（与信号 ctx 取交集，SIGINT/SIGTERM 仍更早生效）；租户循环**末尾**（非顶部）的 between-tenant 中止检查——顶部放置会破坏已固定的 `TestRunEvaluatePassAbortsOnCancelledContext`（预取消 ctx 下首租户仍须跑完完整步骤序列，产生断言中的 1 行 `checkpoint_error=` 与 1 行 `aggregate_checkpoint_error=`）。
+- `internal/service/governance.go`：`ArchivePending(ctx, tenantID)` 签名变更（编译期破坏，仅 1 个生产调用方 + 测试调用点）；新增 `archivePutTimeout`（var 缝，测试可缩小，`newArchiveStore` 先例）；`runExport` 的 Put 包 `context.WithTimeout(context.Background(), archivePutTimeout)`。
+- `internal/service/service.go`：`archiveEvent(ctx, …)`/`archiveSegment(ctx, …)`；`Ingest` 调用点透传 ctx——HTTP/gRPC 入口本就传 `context.WithoutCancel(r.Context())`，行为不变（F1 提交不因客户端断开而取消，`disconnect_test.go` 不变）。
+- 瞬态分类不变：`isPermanentArchiveError` 仍只死信 `ErrArchiveKeyTooLong`/`ErrObjectConflict`；`context.Canceled`/`DeadlineExceeded` 是瞬态——无收据提交、无死信、无 `Store.Update` 窗口，下个 pass 重试同一事件，幂等端到端保持。
+- 测试：worker 新增 `TestRunEvaluatePassAbortsWithinDeadlineOnBlockedPut`（AC-1）、`TestRunEvaluatePassCancelledCtxAbortsInflightPut`（AC-2）、`TestRunEvaluatePassAbortsBetweenTenants`（F-2 放置钉）；service 新增 `TestArchivePendingContextErrorIsTransientAndRetried`（AC-3）与 `TestRunExportPutTimeoutFailsJobAndHeals`（F-1，REQ-3 覆盖）；全部 `ArchivePending` 测试调用点（archive_batch/service/tenant_scoping 三个文件共 24 处）补 `context.Background()`。
+
 ## 2026-08-16 — 读取自审计足迹与快照解耦并加界：读路径事实写入独立追加尾流，快照不再被读重写（internal/store + internal/service + cmd/audit-api，bound-and-isolate-the-read-self-audit-trail）
 
 **写给运营（行为变化）：**

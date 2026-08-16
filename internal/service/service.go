@@ -586,9 +586,9 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 		return receipt, nil
 	}
 	if archive.Configured(s.Config.Archive) {
-		archived := s.archiveEvent(event) == nil
+		archived := s.archiveEvent(ctx, event) == nil
 		for _, segment := range sealedSegments {
-			if s.archiveSegment(segment) != nil {
+			if s.archiveSegment(ctx, segment) != nil {
 				archived = false
 			}
 		}
@@ -1165,7 +1165,7 @@ func (s *Service) sealSegment(ctx context.Context, stream store.StreamState, now
 	return segment, checkpoint, nil
 }
 
-func (s *Service) archiveEvent(event domain.Event) error {
+func (s *Service) archiveEvent(ctx context.Context, event domain.Event) error {
 	data, err := domain.CanonicalJSON(event)
 	if err != nil {
 		return err
@@ -1174,17 +1174,19 @@ func (s *Service) archiveEvent(event domain.Event) error {
 	// The archive store's pre-flight checkKeyLength rejects an over-limit
 	// composite with the typed archive.ErrArchiveKeyTooLong before any
 	// filesystem mutation or network call (FM-1); ArchivePending dead-letters
-	// that class instead of aborting the pass.
-	return s.Config.Archive.Put(context.Background(), key, data)
+	// that class instead of aborting the pass. The ctx threads the worker pass
+	// deadline (and the ingest boundary's WithoutCancel ctx) into the S3 round
+	// trips, so a black-holed endpoint cannot stall a pass indefinitely.
+	return s.Config.Archive.Put(ctx, key, data)
 }
 
-func (s *Service) archiveSegment(segment domain.Segment) error {
+func (s *Service) archiveSegment(ctx context.Context, segment domain.Segment) error {
 	data, err := domain.CanonicalJSON(segment)
 	if err != nil {
 		return err
 	}
 	key := fmt.Sprintf("segments/%s/%s/%020d-%020d.manifest.json", safeName(segment.TenantID), safeName(segment.StreamID), segment.FirstSequence, segment.LastSequence)
-	return s.Config.Archive.Put(context.Background(), key, data)
+	return s.Config.Archive.Put(ctx, key, data)
 }
 
 func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {

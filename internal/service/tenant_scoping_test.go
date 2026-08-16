@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,7 +134,7 @@ func TestArchivePendingExactTenantScoping(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ArchivePending("a"); err != nil {
+	if _, err := svc.ArchivePending(context.Background(), "a"); err != nil {
 		t.Fatal(err)
 	}
 	archiveRoot := svc.Config.ArchiveDir

@@ -27,6 +27,16 @@ import (
 // all probe sites (REQ-7), mirroring openStore's 10 s ping precedent.
 const archiveReadyTimeout = 5 * time.Second
 
+// archivePassTimeout bounds one complete governance pass (all tenants, all
+// archive writes). A black-holed S3 endpoint that passes the 5s Ready probe
+// must be able to stall the pass for at most this long: Put is ctx-threaded
+// (REQ-2), so the deadline cancels in-flight Stat/Put/verify round trips
+// instead of waiting out the transport timeouts. The effective bound is
+// min(signal ctx, archivePassTimeout): SIGINT/SIGTERM still wins earlier.
+// Healthy passes finish in well under this bound; the default 5m interval
+// retries a timed-out pass on the next tick.
+const archivePassTimeout = 2 * time.Minute
+
 // newArchiveStore builds the configured archive store. Package-level seam for
 // tests: worker tests substitute a store built on a scripted S3 client
 // (archive.NewS3StoreWithClient) to drive runCheckConfig and the startup
@@ -67,6 +77,13 @@ func main() {
 	logger := log.New(os.Stdout, "audit-governance-worker ", log.LstdFlags|log.Lmicroseconds)
 	if *allowDevSecrets {
 		logger.Printf("warning=development_secrets_enabled")
+	}
+	// A governance interval shorter than the per-pass deadline means a pass
+	// that legitimately needs most of its bound gets restarted before its
+	// work converges (healthy-but-slow passes starve). Warn at startup — the
+	// operator chose the interval, and the pass bound stays a hard ceiling.
+	if *interval < archivePassTimeout {
+		logger.Printf("warning=interval_below_pass_timeout interval=%s pass_timeout=%s", *interval, archivePassTimeout)
 	}
 	// AUDIT_AGGREGATE_CHECKPOINT_HISTORY caps retained aggregate-checkpoint
 	// history per tenant (drop-oldest; default 1000, floor 1). Invalid or
@@ -150,6 +167,12 @@ func main() {
 // (the probe line) and once per tenant (the skip line). When the probe
 // passes, the pass is byte-identical to the pre-probe behavior.
 func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Service) {
+	// REQ-1: bound the whole pass. WithTimeout on an already-cancelled or
+	// already-deadlined parent yields the earlier bound, so SIGINT/SIGTERM
+	// still wins and tests shrink the effective deadline via a short parent
+	// ctx without touching the production constant.
+	ctx, cancel := context.WithTimeout(ctx, archivePassTimeout)
+	defer cancel()
 	tenants, listErr := svc.ListTenants()
 	if listErr != nil {
 		logger.Printf("list tenants: %v", listErr)
@@ -174,7 +197,7 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		}
 		if !archiveReady {
 			logger.Printf("tenant=%s archive_skipped=ready_probe_failed", tenant.ID)
-		} else if archived, archiveErr := svc.ArchivePending(tenant.ID); archiveErr != nil {
+		} else if archived, archiveErr := svc.ArchivePending(ctx, tenant.ID); archiveErr != nil {
 			handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
 		} else {
 			// Dead-lettered objects are a handled outcome, not a pass error:
@@ -186,9 +209,21 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
 		if reportErr != nil {
 			logger.Printf("tenant=%s retention_error=%v", tenant.ID, reportErr)
-			continue
+		} else {
+			logger.Printf("tenant=%s eligible=%d protected=%d action=%s", tenant.ID, report.EligibleEvents, report.ProtectedEvents, report.Action)
 		}
-		logger.Printf("tenant=%s eligible=%d protected=%d action=%s", tenant.ID, report.EligibleEvents, report.ProtectedEvents, report.Action)
+		// Between-tenant abort (REQ-1): the in-flight tenant's failure has
+		// already surfaced through handleArchiveError / checkpoint_error /
+		// aggregate_checkpoint_error; do not run further tenants against a dead
+		// context (each step would only fail fast). End-of-iteration placement
+		// is deliberate: the first tenant still runs its full step sequence on
+		// an already-cancelled context (pinned by
+		// TestRunEvaluatePassAbortsOnCancelledContext and
+		// TestRunEvaluatePassAbortsBetweenTenants).
+		if ctx.Err() != nil {
+			logger.Printf("pass_aborted=%v", ctx.Err())
+			return
+		}
 	}
 }
 

@@ -872,7 +872,7 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	// against the default unconfigured FileStore, so the receipt is
 	// StatusIndexed and ArchivePending must retry it.
 	svc.Config.Archive = &archive.FileStore{Dir: filepath.Join(t.TempDir(), "archive")}
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
@@ -923,7 +923,7 @@ func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
 	if err := os.Remove(archivePath); err != nil {
 		t.Fatal(err)
 	}
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
@@ -977,7 +977,7 @@ func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
 		t.Fatalf("ingest with failing archive must stay indexed: %+v", receipt)
 	}
 	archiveStub.fail = false
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
@@ -1709,7 +1709,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	}
 	// Phase 3: one pass must archive the healthy backlog and dead-letter the
 	// doomed object — not abort on it and not return a pass error.
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
 	}
@@ -1764,7 +1764,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	}
 	// A second pass excludes the dead-lettered event: nothing to archive, no
 	// new dead letters, no error.
-	count2, err := svc.ArchivePending("tenant-a")
+	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil (dead-lettered event excluded from retry)", count2, err)
 	}
@@ -1807,7 +1807,7 @@ func TestArchiveStoreBoundaryCatchesCapBoundaryEvent(t *testing.T) {
 		t.Fatalf("stream dir must stay empty, got %d entries", len(entries))
 	}
 	// The next pass dead-letters the event with the typed reason.
-	if _, err := svc.ArchivePending("tenant-a"); err != nil {
+	if _, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-letter is a handled outcome)", err)
 	}
 	dead, err := svc.ListDeadLetters("tenant-a")
@@ -1826,7 +1826,7 @@ func TestArchiveStoreBoundaryCatchesCapBoundaryEvent(t *testing.T) {
 	if got.Status != domain.StatusIndexed || got.ErrorCode != "archive_dead_letter" {
 		t.Fatalf("receipt = %+v, want StatusIndexed + archive_dead_letter", got)
 	}
-	if count, err := svc.ArchivePending("tenant-a"); err != nil || count != 0 {
+	if count, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil || count != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count, err)
 	}
 }
@@ -2017,7 +2017,7 @@ func TestArchivePendingConvergesAfterInjectiveFix(t *testing.T) {
 	}
 	before := archiveListing()
 	for _, tenantID := range append(crossTenantCollisionPair(), "tenant-a") {
-		if _, err := svc.ArchivePending(tenantID); err != nil {
+		if _, err := svc.ArchivePending(context.Background(), tenantID); err != nil {
 			t.Fatalf("ArchivePending(%q) failed: %v", tenantID, err)
 		}
 	}
@@ -2135,7 +2135,7 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	// One pass with the real store: 100 healthy receipts reach
 	// StatusArchived, the oversized event is dead-lettered (no error).
 	svc.Config.Archive = realStore
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
 	}
@@ -2175,7 +2175,7 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	}
 	// A second pass excludes the dead-lettered event from the retry set and
 	// does not re-dead-letter anything.
-	count2, err := svc.ArchivePending("tenant-a")
+	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
 	}
@@ -2248,7 +2248,7 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 	}
 	// One pass: the healthy event archives, the collision is dead-lettered —
 	// the pass completes with no error.
-	count, err := svc.ArchivePending("a_b")
+	count, err := svc.ArchivePending(context.Background(), "a_b")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil", err)
 	}
@@ -2288,7 +2288,7 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 		t.Fatalf("legacy object at %s was modified: got %q want %q", key, stored, legacyBytes)
 	}
 	// A second pass excludes the dead-lettered event from the retry set.
-	count2, err := svc.ArchivePending("a_b")
+	count2, err := svc.ArchivePending(context.Background(), "a_b")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
 	}
@@ -2297,7 +2297,7 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 	if err := svc.ClearDeadLetter("a_b", "evt-1"); err != nil {
 		t.Fatal(err)
 	}
-	count3, err := svc.ArchivePending("a_b")
+	count3, err := svc.ArchivePending(context.Background(), "a_b")
 	if err != nil || count3 != 0 {
 		t.Fatalf("post-clear pass = %d, %v; want 0, nil", count3, err)
 	}
@@ -2345,7 +2345,7 @@ func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
 	}
 	// Pass 1: the segment is dead-lettered; the pass completes with no error
 	// (nothing else is pending).
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 0 {
 		t.Fatalf("pass 1 = %d, %v; want 0, nil", count, err)
 	}
@@ -2371,7 +2371,7 @@ func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
 	// abort on the first (non-permanent) store failure.
 	stub := &recordingArchive{fail: true}
 	svc.Config.Archive = stub
-	count2, err := svc.ArchivePending("tenant-a")
+	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("pass 2 (failing store) = %d, %v; want 0, nil — the dead-lettered segment must not be re-attempted", count2, err)
 	}

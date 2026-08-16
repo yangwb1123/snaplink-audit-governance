@@ -2,10 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,7 +172,7 @@ func TestArchivePendingBatchesSingleUpdate(t *testing.T) {
 	archiveStub.fail = false
 	archiveStub.puts = nil
 	passTime := svc.Now()
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending = %d, %v; want 5, nil", count, err)
 	}
@@ -202,7 +204,7 @@ func TestArchivePendingConvergesWithinRetryBudget(t *testing.T) {
 	archiveStub.fail = false
 	archiveStub.puts = nil
 	started := time.Now()
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending = %d, %v; want 5, nil", count, err)
 	}
@@ -232,7 +234,7 @@ func TestArchivePendingExhaustionAtomicAndConverges(t *testing.T) {
 	backend.saves = 0
 	archiveStub.fail = false
 	archiveStub.puts = nil
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if !errors.Is(err, store.ErrSnapshotConflict) {
 		t.Fatalf("ArchivePending err=%v, want ErrSnapshotConflict", err)
 	}
@@ -262,7 +264,7 @@ func TestArchivePendingExhaustionAtomicAndConverges(t *testing.T) {
 	backend.conflicts = 0
 	backend.saves = 0
 	archiveStub.puts = nil
-	count, err = svc.ArchivePending("tenant-a")
+	count, err = svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending after heal = %d, %v; want 5, nil", count, err)
 	}
@@ -329,7 +331,7 @@ func TestArchivePassConflictCounterPersistsAndResets(t *testing.T) {
 
 	// A successful pass resets the counter inside the batch commit.
 	svc2.Config.Archive = &archive.FileStore{Dir: filepath.Join(dir, "archive")}
-	count, err := svc2.ArchivePending("tenant-a")
+	count, err := svc2.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending after reopen = %d, %v; want 5, nil", count, err)
 	}
@@ -358,7 +360,7 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 	backend.saves = 0
 	archiveStub.fail = false
 	archiveStub.puts = nil
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ArchivePending err=%v, want ErrNotFound", err)
 	}
@@ -402,7 +404,7 @@ func TestArchivePendingEmptyPassLeavesCounter(t *testing.T) {
 	svc.Config.Archive = &recordingArchive{}
 
 	backend.saves = 0
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err != nil || count != 0 {
 		t.Fatalf("ArchivePending = %d, %v; want 0, nil", count, err)
 	}
@@ -427,7 +429,7 @@ func TestArchivePendingPutFailureReturnsZeroWithoutWindow(t *testing.T) {
 	archiveStub.puts = nil
 	backend.saves = 0
 
-	count, err := svc.ArchivePending("tenant-a")
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
 	if err == nil {
 		t.Fatal("ArchivePending err=nil, want Put failure")
 	}
@@ -448,5 +450,158 @@ func TestArchivePendingPutFailureReturnsZeroWithoutWindow(t *testing.T) {
 		if receipt := snap.Receipts[store.EventKey("tenant-a", fmt.Sprintf("evt-%d", i))]; receipt.Status == domain.StatusArchived {
 			t.Fatalf("event %d marked archived despite Put failure", i)
 		}
+	}
+}
+
+// ctxErrorArchive is a Store stub whose Put returns the given error until
+// heal is set, then succeeds; it counts Puts. It pins AC-3's transient
+// classification: a cancelled/timed-out Put (what a signal-cancelled pass
+// produces) must not dead-letter or commit anything, and the same events
+// must archive on the next pass.
+type ctxErrorArchive struct {
+	err  error
+	heal bool
+	puts int
+}
+
+func (c *ctxErrorArchive) Put(context.Context, string, []byte) error {
+	c.puts++
+	if c.heal {
+		return nil
+	}
+	return c.err
+}
+
+func (c *ctxErrorArchive) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (c *ctxErrorArchive) Ready(context.Context) error { return nil }
+
+// TestArchivePendingContextErrorIsTransientAndRetried is AC-3: a cancelled
+// Put (context.Canceled) is transient by isPermanentArchiveError
+// classification — ArchivePending returns (0, err), zero receipts are marked
+// StatusArchived, zero dead letters are recorded, and no Store.Update window
+// is opened (scriptedConflictBackend.saves probe). The next pass over the
+// healed store archives the same events, so retry semantics are preserved
+// end-to-end (idempotency tests stay green).
+func TestArchivePendingContextErrorIsTransientAndRetried(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := testServiceWithBackend(t, backend)
+	archiveStub := &recordingArchive{fail: true}
+	seedPendingEvents(t, svc, archiveStub, 5)
+	ctxErr := &ctxErrorArchive{err: context.Canceled}
+	svc.Config.Archive = ctxErr
+
+	backend.saves = 0
+	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ArchivePending err=%v, want context.Canceled", err)
+	}
+	if count != 0 {
+		t.Fatalf("count=%d, want 0 (nothing committed on a transient abort)", count)
+	}
+	if backend.saves != 0 {
+		t.Fatalf("saves=%d, want 0 (no Store.Update window on a transient abort)", backend.saves)
+	}
+	snap, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if receipt := snap.Receipts[store.EventKey("tenant-a", fmt.Sprintf("evt-%d", i))]; receipt.Status == domain.StatusArchived {
+			t.Fatalf("event %d marked archived despite a cancelled Put", i)
+		}
+	}
+	if len(snap.DeadLetters) != 0 {
+		t.Fatalf("dead letters=%d, want 0 (ctx errors are transient, never dead-lettered)", len(snap.DeadLetters))
+	}
+
+	// Heal: the next pass archives the same events — retry preserved.
+	ctxErr.heal = true
+	backend.saves = 0
+	count, err = svc.ArchivePending(context.Background(), "tenant-a")
+	if err != nil || count != 5 {
+		t.Fatalf("ArchivePending after heal = %d, %v; want 5, nil", count, err)
+	}
+	if backend.saves != 1 {
+		t.Fatalf("saves=%d, want 1 (one atomic batch window on the healed pass)", backend.saves)
+	}
+	assertAllArchived(t, svc, 5, svc.Now())
+}
+
+// exportBlockingArchive is a Store stub whose Put blocks until the passed
+// context is done (mirroring minio-go's per-request context honoring) and
+// returns the context error; when heal is set, Put succeeds instantly. It
+// records the context error the Put observed, for asserting the runExport
+// per-write bound reached the store (REQ-3).
+type exportBlockingArchive struct {
+	heal    bool
+	lastErr error
+}
+
+func (e *exportBlockingArchive) Put(ctx context.Context, _ string, _ []byte) error {
+	if e.heal {
+		return nil
+	}
+	<-ctx.Done()
+	e.lastErr = ctx.Err()
+	return ctx.Err()
+}
+
+func (e *exportBlockingArchive) Get(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (e *exportBlockingArchive) Ready(context.Context) error { return nil }
+
+// TestRunExportPutTimeoutFailsJobAndHeals is REQ-3 acceptance (QA review
+// F-1): runExport's fire-and-forget Put carries its own per-write bound
+// (archivePutTimeout, var seam shrunk here). A store whose Put blocks past
+// the bound fails the job with context deadline exceeded, ObjectPath empty
+// (no object path recorded); a healed re-request — a fresh CreateExport —
+// completes normally.
+func TestRunExportPutTimeoutFailsJobAndHeals(t *testing.T) {
+	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
+	svc := testServiceWithBackend(t, backend)
+	base := time.Unix(1_700_000_010, 0).UTC()
+	// Ingest with no archive configured: the receipt lands ledgered, and the
+	// event is selectable by the export regardless of receipt status.
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("exp-timeout-1", "op-exp", base), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	archiveStub := &exportBlockingArchive{}
+	svc.Config.Archive = archiveStub
+	original := archivePutTimeout
+	archivePutTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { archivePutTimeout = original })
+	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
+
+	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitExportCompleted(t, svc, job.ID)
+	if failed.Status != "failed" {
+		t.Fatalf("export status=%s, want failed on a timed-out Put", failed.Status)
+	}
+	if failed.ObjectPath != "" {
+		t.Fatalf("ObjectPath=%q, want empty on failure", failed.ObjectPath)
+	}
+	if !strings.Contains(failed.Error, "context deadline exceeded") {
+		t.Fatalf("export error=%q, want context deadline exceeded", failed.Error)
+	}
+	if !errors.Is(archiveStub.lastErr, context.DeadlineExceeded) {
+		t.Fatalf("store observed ctx error=%v, want context.DeadlineExceeded", archiveStub.lastErr)
+	}
+
+	// Healed re-request: a fresh CreateExport completes normally.
+	archiveStub.heal = true
+	job2, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitExportCompleted(t, svc, job2.ID)
+	if completed.Status != "completed" {
+		t.Fatalf("healed export status=%s, want completed", completed.Status)
+	}
+	if completed.ObjectPath == "" {
+		t.Fatal("healed export must set ObjectPath")
 	}
 }

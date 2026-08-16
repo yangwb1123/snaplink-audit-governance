@@ -528,6 +528,15 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 	})
 }
 
+// archivePutTimeout bounds one fire-and-forget export write. runExport has no
+// pass context (it outlives the request that created it), so a black-holed
+// endpoint must not be able to keep the goroutine (and its finishExport
+// write) alive for minutes per object. Mirrors vaultCallBudget's
+// detached-cancellation bound. Package-level var (not const) as a test seam:
+// export-timeout tests shrink the ceiling instead of waiting on the real 30s
+// bound (newArchiveStore precedent).
+var archivePutTimeout = 30 * time.Second
+
 // ArchivePending retries local WORM-compatible archive writes for events that
 // were ledgered/indexed before the archive destination became available.
 // It is intentionally idempotent: a byte-identical existing object is treated
@@ -551,7 +560,7 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 // StatusArchived (and every dead letter recorded) or none is. The same
 // atomic write resets the tenant's archive-conflict counter, and the
 // successful pass's receipts share one timestamp.
-func (s *Service) ArchivePending(tenantID string) (int, error) {
+func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, error) {
 	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
@@ -598,7 +607,7 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 	now := s.Now()
 	deadLetters := map[string]domain.DeadLetter{}
 	for _, segment := range segments {
-		if err := s.archiveSegment(segment); err != nil {
+		if err := s.archiveSegment(ctx, segment); err != nil {
 			if !isPermanentArchiveError(err) {
 				return 0, err
 			}
@@ -608,7 +617,7 @@ func (s *Service) ArchivePending(tenantID string) (int, error) {
 	}
 	archivedEvents := []domain.Event{}
 	for _, event := range events {
-		if err := s.archiveEvent(event); err != nil {
+		if err := s.archiveEvent(ctx, event); err != nil {
 			if !isPermanentArchiveError(err) {
 				return 0, err
 			}
@@ -1073,7 +1082,15 @@ func (s *Service) runExport(jobID string) {
 		return
 	}
 	key := fmt.Sprintf("exports/%s.jsonl", safeName(jobID))
-	if err := s.Config.Archive.Put(context.Background(), key, sealed); err != nil {
+	// Per-write bound (REQ-3): runExport has no pass context (it outlives the
+	// request that created it), so a black-holed endpoint must not be able to
+	// keep the goroutine — and its finishExport write — alive for minutes per
+	// object. Mirrors vaultCallBudget's detached-cancellation bound. Failure
+	// semantics are unchanged: a timed-out Put fails the job, and a re-request
+	// is a fresh CreateExport.
+	putCtx, cancel := context.WithTimeout(context.Background(), archivePutTimeout)
+	defer cancel()
+	if err := s.Config.Archive.Put(putCtx, key, sealed); err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())
 		return
 	}
