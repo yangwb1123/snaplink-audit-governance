@@ -1,0 +1,64 @@
+[
+  {
+    "name": "producer_minimal_payloadless",
+    "documented_rejection": "Envelope satisfies the EventEnvelope required set (12 tokens) and actor.id but carries neither payload nor payload_ref. ValidateBasic rejects the both-absent case with ErrInvalid; statusForError maps ErrInvalid to HTTP 400 and errorBody to code invalid_request. This is deliberately 400, NOT 422: the runtime reserves 422 for schema_not_found, tenant_mismatch and occurred_at_out_of_range (statusForError sentinel precedence). A producer building to the fixed spec must supply payload or payload_ref even though all other required tokens are present.",
+    "envelope": {
+      "event_id": "evt-minimal-1",
+      "source_system": "sverp-web",
+      "event_type": "purchase_request.created.v1",
+      "schema_id": "sverp.purchase_request.created.v1",
+      "schema_version": 1,
+      "occurred_at": "2024-01-15T10:00:00Z",
+      "actor": { "id": "user-1" },
+      "action": "create",
+      "outcome": "success",
+      "data_classification": "internal",
+      "retention_class": "standard",
+      "idempotency_key": "idem-minimal-1"
+    },
+    "expected_status": 400,
+    "expected_code": "invalid_request"
+  },
+  {
+    "name": "tenant_mismatch_contrast",
+    "documented_rejection": "Validated-conforming envelope (carries payload) with a non-empty tenant_id that differs from the server-resolved tenant (the bearer dev:tenant-a:service:sverp-web resolves tenant-a). ValidateBasic passes; Ingest then rejects with ErrTenantMismatch (DS-08): HTTP 422, error.code tenant_mismatch. An empty or absent tenant_id is derived from the client/source registration and stamped by the server — mismatch rejection requires a non-empty differing value.",
+    "envelope": {
+      "event_id": "evt-minimal-2",
+      "tenant_id": "other",
+      "source_system": "sverp-web",
+      "event_type": "purchase_request.created.v1",
+      "schema_id": "sverp.purchase_request.created.v1",
+      "schema_version": 1,
+      "occurred_at": "2024-01-15T10:00:00Z",
+      "actor": { "id": "user-1" },
+      "action": "create",
+      "outcome": "success",
+      "payload": { "order": "PO-2001", "status": "draft" },
+      "data_classification": "internal",
+      "retention_class": "standard",
+      "idempotency_key": "idem-minimal-2"
+    },
+    "expected_status": 422,
+    "expected_code": "tenant_mismatch"
+  },
+  {
+    "name": "occurred_at_out_of_range_contrast",
+    "documented_rejection": "Same shape as producer_minimal_payloadless but occurred_at is year 2300, outside the ledger horizon [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z]. ValidateBasic rejects with ErrOccurredAtOutOfRange (which wraps ErrInvalid); statusForError matches the sentinel before ErrInvalid, so the HTTP status is 422 (not 400) with error.code occurred_at_out_of_range.",
+    "envelope": {
+      "event_id": "evt-minimal-3",
+      "source_system": "sverp-web",
+      "event_type": "purchase_request.created.v1",
+      "schema_id": "sverp.purchase_request.created.v1",
+      "schema_version": 1,
+      "occurred_at": "2300-01-01T00:00:00Z",
+      "actor": { "id": "user-1" },
+      "action": "create",
+      "outcome": "success",
+      "data_classification": "internal",
+      "retention_class": "standard",
+      "idempotency_key": "idem-minimal-3"
+    },
+    "expected_status": 422,
+    "expected_code": "occurred_at_out_of_range"
+  }
+]
