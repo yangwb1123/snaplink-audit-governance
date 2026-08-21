@@ -180,6 +180,11 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 	}
 	archiveReady := probeArchiveReady(svc.Config.Archive, logger) == nil
 	for _, tenant := range tenants {
+		if resumed, resumeErr := svc.ResumePendingExports(tenant.ID); resumeErr != nil {
+			logger.Printf("tenant=%s pending_export_resume_error=%v", tenant.ID, resumeErr)
+		} else {
+			logger.Printf("tenant=%s pending_exports_resumed=%d", tenant.ID, resumed)
+		}
 		// Stuck-export recovery runs first, outside the archiveReady gate:
 		// it performs no archive I/O, so it behaves identically whether or not
 		// the readiness probe passed. The line is emitted unconditionally on

@@ -37,8 +37,9 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	var hold domain.LegalHold
 	blocked := false
 	if err := s.Store.Read(func(data *store.Snapshot) error {
-		hold, blocked = s.holdBlockingExport(data, tenantID, query)
-		return nil
+		var holdErr error
+		hold, blocked, holdErr = s.holdBlockingExport(data, tenantID, query)
+		return holdErr
 	}); err != nil {
 		return domain.ExportJob{}, err
 	}
@@ -73,7 +74,11 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 		// R4 (legal-hold gate): fail closed while any active hold covers the
 		// job's query, regardless of job status (covers exports completed
 		// before the hold). Read-only denial: no block fact is appended.
-		if hold, blocked := s.holdBlockingExport(data, tenantID, value.Query); blocked {
+		hold, blocked, holdErr := s.holdBlockingExport(data, tenantID, value.Query)
+		if holdErr != nil {
+			return holdErr
+		}
+		if blocked {
 			return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
 		}
 		job = value
@@ -102,8 +107,9 @@ func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
 		}
-		hold, blocked = s.holdBlockingExport(data, tenantID, value.Query)
-		return nil
+		var holdErr error
+		hold, blocked, holdErr = s.holdBlockingExport(data, tenantID, value.Query)
+		return holdErr
 	}); err != nil {
 		return err
 	}
@@ -369,10 +375,12 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	var aggregateCheckpoints []domain.AggregateCheckpoint
 	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
-		for _, event := range data.Events {
-			if event.TenantID == tenantID && (streamID == "" || event.StreamID == streamID) {
-				events = append(events, event)
-			}
+		var resolveErr error
+		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
+			return streamID == "" || event.StreamID == streamID
+		})
+		if resolveErr != nil {
+			return resolveErr
 		}
 		for key, values := range data.Segments {
 			tid, sid, ok := store.SplitTenantKey(key)
@@ -505,6 +513,9 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 // A pass that seals nothing (no pending hashes for the tenant) persists
 // nothing: Store.UpdateChecked skips the Save on an idle tick (FR-2).
 func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) error {
+	if s.Store.HotCold() {
+		return s.sealPendingTenant(ctx, tenantID)
+	}
 	now := s.Now()
 	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		mutated := false
@@ -564,7 +575,11 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
+	if s.Store.HotCold() {
+		return s.archivePendingTenant(ctx, tenantID)
+	}
 	var events []domain.Event
+	var evictedKeys []string
 	var segments []domain.Segment
 	if err := s.Store.Read(func(data *store.Snapshot) error {
 		for key, event := range data.Events {
@@ -575,9 +590,15 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 				continue // already dead-lettered: never retried
 			}
 			receipt := data.Receipts[key]
-			if receipt.Status != domain.StatusArchived {
-				events = append(events, event)
+			if receipt.Status == domain.StatusArchived {
+				// A legacy snapshot or a recovered two-phase deployment can
+				// contain the archived receipt and hot body together. The
+				// archive is already verified, so only schedule the safe,
+				// idempotent hot-body eviction; never rewrite the WORM object.
+				evictedKeys = append(evictedKeys, key)
+				continue
 			}
+			events = append(events, event)
 		}
 		for key, values := range data.Segments {
 			// Exact-component membership (see CreateAggregateCheckpoint); the
@@ -627,7 +648,7 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 		}
 		archivedEvents = append(archivedEvents, event)
 	}
-	if len(archivedEvents) == 0 && len(deadLetters) == 0 {
+	if len(archivedEvents) == 0 && len(deadLetters) == 0 && len(evictedKeys) == 0 {
 		// Nothing to mark; the conflict counter is deliberately not reset on
 		// an empty pass (it counts consecutive passes aborted by exhaustion,
 		// and an empty pass cannot have been aborted).
@@ -640,6 +661,11 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 	// The reset of the tenant's conflict counter rides in the same atomic
 	// write as the receipt marking (no extra window).
 	if err := s.Store.Update(func(data *store.Snapshot) error {
+		for _, key := range evictedKeys {
+			if receipt, ok := data.Receipts[key]; ok && receipt.Status == domain.StatusArchived {
+				delete(data.Events, key)
+			}
+		}
 		for _, event := range archivedEvents {
 			key := store.EventKey(tenantID, event.EventID)
 			receipt, ok := data.Receipts[key]
@@ -650,6 +676,10 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 			receipt.IndexedAt = now
 			receipt.ArchivedAt = now
 			data.Receipts[key] = receipt
+			// The verified WORM object is now the payload source of truth. Keep
+			// the receipt/hash linkage, but evict the immutable event body from
+			// the rewritten control-plane snapshot in the same atomic Save.
+			delete(data.Events, key)
 		}
 		for key, dead := range deadLetters {
 			data.DeadLetters[key] = dead
@@ -958,10 +988,16 @@ func (e exportBlockedError) Unwrap() error { return domain.ErrForbidden }
 // hold blocks iff at least one tenant event matches the export query AND is
 // covered by the hold under the existing holdMatchesEvent semantics. An
 // export selecting zero events is never blocked.
-func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool) {
+func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool, error) {
 	schemas := map[string]domain.EventSchema{}
 	for key, schema := range data.Schemas {
 		schemas[key] = schema
+	}
+	events, err := s.eventsFromSnapshot(context.Background(), data, tenantID, func(event domain.Event) bool {
+		return s.matches(event, query, schemas)
+	})
+	if err != nil {
+		return domain.LegalHold{}, false, err
 	}
 	var holds []domain.LegalHold
 	for _, hold := range data.LegalHolds {
@@ -971,19 +1007,13 @@ func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, quer
 	}
 	sort.Slice(holds, func(i, j int) bool { return holds[i].ID < holds[j].ID })
 	for _, hold := range holds {
-		for _, event := range data.Events {
-			if event.TenantID != tenantID {
-				continue
-			}
-			if !s.matches(event, query, schemas) {
-				continue
-			}
+		for _, event := range events {
 			if s.holdMatchesEvent(hold, event, schemas) {
-				return hold, true
+				return hold, true, nil
 			}
 		}
 	}
-	return domain.LegalHold{}, false
+	return domain.LegalHold{}, false, nil
 }
 
 // failExportBlocked transitions a job to failed because an active legal hold
@@ -1004,10 +1034,12 @@ func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
 }
 
 func (s *Service) runExport(jobID string) {
-	var job domain.ExportJob
+	// Preserve the lookup-before-claim ordering: besides avoiding work for a
+	// deleted job, this keeps the selection read as a distinct failure boundary
+	// for the legal-hold and storage fault-injection seams.
 	if err := s.Store.Read(func(data *store.Snapshot) error {
 		var ok bool
-		job, ok = data.Exports[jobID]
+		_, ok = data.Exports[jobID]
 		if !ok {
 			return domain.ErrNotFound
 		}
@@ -1015,17 +1047,15 @@ func (s *Service) runExport(jobID string) {
 	}); err != nil {
 		return
 	}
-	_ = s.Store.Update(func(data *store.Snapshot) error {
-		value := data.Exports[jobID]
-		value.Status = "running"
-		data.Exports[jobID] = value
-		return nil
-	})
+	job, claimed, err := s.claimPendingExport(jobID)
+	if err != nil || !claimed {
+		return
+	}
 	var events []domain.Event
 	schemas := map[string]domain.EventSchema{}
 	var blockedHold domain.LegalHold
 	blocked := false
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err = s.Store.Read(func(data *store.Snapshot) error {
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
 		}
@@ -1033,16 +1063,19 @@ func (s *Service) runExport(jobID string) {
 		// hold created after CreateExport's gate blocks the seal (no archive
 		// write). The block is reported after the read returns — an Update
 		// inside a Read closure would self-deadlock on the store RWMutex.
-		if hold, ok := s.holdBlockingExport(data, job.TenantID, job.Query); ok {
+		hold, ok, holdErr := s.holdBlockingExport(data, job.TenantID, job.Query)
+		if holdErr != nil {
+			return holdErr
+		}
+		if ok {
 			blockedHold, blocked = hold, true
 			return nil
 		}
-		for _, event := range data.Events {
-			if event.TenantID == job.TenantID && s.matches(event, job.Query, schemas) {
-				events = append(events, event)
-			}
-		}
-		return nil
+		var resolveErr error
+		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, job.TenantID, func(event domain.Event) bool {
+			return s.matches(event, job.Query, schemas)
+		})
+		return resolveErr
 	})
 	if err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())

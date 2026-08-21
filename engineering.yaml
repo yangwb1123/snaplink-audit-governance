@@ -26,6 +26,8 @@ build:
       path: ./cmd/audit-kafka-dlq-replay
     - name: audit-projector
       path: ./cmd/audit-projector
+    - name: audit-pg-migrate
+      path: ./cmd/audit-pg-migrate
 
 # Single source of truth for the api/proto generator toolchain pins.
 # checks/proto_sync.py and scripts/proto-gen.py read only this block;

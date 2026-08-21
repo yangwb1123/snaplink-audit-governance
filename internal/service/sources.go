@@ -103,7 +103,7 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 
 func (s *Service) ListSources(tenantID string) ([]domain.SourceSystem, error) {
 	var result []domain.SourceSystem
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(func(data *store.Snapshot) error {
 		for _, source := range data.Sources {
 			if source.TenantID == tenantID {
 				result = append(result, source)
@@ -117,7 +117,7 @@ func (s *Service) ListSources(tenantID string) ([]domain.SourceSystem, error) {
 
 func (s *Service) resolveIngestTenant(tenantHint, clientID, sourceID string) (string, error) {
 	var resolved string
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(func(data *store.Snapshot) error {
 		var resolveErr error
 		resolved, resolveErr = resolveIngestTenantFromData(data, tenantHint, clientID, sourceID)
 		return resolveErr

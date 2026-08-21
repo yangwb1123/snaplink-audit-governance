@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq
+.PHONY: help check quality ci test race bench vet fmt build proto migrate-pg check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build proto check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq"
+	@echo "make targets: check quality ci test race bench vet fmt build proto migrate-pg check-routes check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan e2e-tenant-scope e2e-projector-permanent-dlq"
 
 check:
 	$(CLI) check
@@ -35,6 +35,9 @@ build:
 
 proto:
 	python3 scripts/proto-gen.py
+
+migrate-pg:
+	go run ./cmd/audit-pg-migrate -confirm MIGRATE
 
 check-routes:
 	$(CLI) check-routes

@@ -69,6 +69,12 @@ type Config struct {
 	// default (DefaultMaxAdminTrailActions). The API reads the override
 	// from AUDIT_ADMIN_TRAIL_CAP / -admin-trail-cap.
 	MaxAdminTrailActions int
+	// LedgeredPublisher optionally publishes the post-commit event to the
+	// ledgered topic. A nil publisher preserves the local reference behavior.
+	LedgeredPublisher LedgeredPublisher
+	// Logf receives bounded publication diagnostics. It is nil-safe so service
+	// tests and embedded callers do not need to provide a logger.
+	Logf func(format string, args ...any)
 }
 
 // Signer creates and verifies checkpoint signatures. Implementations must be
@@ -106,6 +112,10 @@ type Service struct {
 	Config  Config
 	quotaMu sync.Mutex
 	quotas  map[string]quotaWindow
+	// ledgeredPublishMu serializes the immediate post-commit publisher and
+	// the durable queue flusher. Without this gate both paths could read the
+	// same pending event and issue an avoidable duplicate concurrently.
+	ledgeredPublishMu sync.Mutex
 }
 
 type quotaWindow struct {
@@ -484,98 +494,90 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	// superseded snapshot (phantom segments would be archived without ever
 	// being part of the ledger).
 	var sealedSegments []domain.Segment
-	err = s.Store.Update(func(data *store.Snapshot) error {
-		sealedSegments = sealedSegments[:0]
-		commitTenant, accessErr := resolveIngestTenantFromData(data, tenantHint, principal.ClientID, event.SourceSystem)
-		if accessErr != nil || commitTenant != tenantID {
-			return sourceAccessError()
-		}
-		key := store.EventKey(tenantID, event.EventID)
-		if existing, ok := data.Events[key]; ok {
-			existingDigest, digestErr := s.reconstructAndDerive(existing, data.Schemas)
-			if digestErr != nil {
-				// Fallback: legacy stored-digest comparison. Reconstruction needs
-				// the event's exact schema version and the current encryption
-				// key; when either is unavailable (deregistered schema, rotated
-				// key) we preserve historical idempotency behavior instead of
-				// breaking re-ingest.
-				existingDigest, digestErr = domain.EventDigest(existing)
-				if digestErr != nil {
-					return digestErr
-				}
+	committedEvent := event
+	if s.Store.HotCold() {
+		committedEvent, receipt, sealedSegments, err = s.ingestTenant(ctx, tenantHint, principal, tenantID, event, inputDigest)
+	} else {
+		err = s.Store.Update(func(data *store.Snapshot) error {
+			sealedSegments = sealedSegments[:0]
+			commitTenant, accessErr := resolveIngestTenantFromData(data, tenantHint, principal.ClientID, event.SourceSystem)
+			if accessErr != nil || commitTenant != tenantID {
+				return sourceAccessError()
 			}
-			receipt = data.Receipts[key]
-			if existingDigest == inputDigest {
-				receipt.Duplicate = true
-				data.Receipts[key] = receipt
-				return nil
+			key := store.EventKey(tenantID, event.EventID)
+			if existingReceipt, found, existingErr := s.checkExistingIngest(ctx, data, tenantID, event.EventID, inputDigest); found {
+				receipt = existingReceipt
+				return existingErr
 			}
-			receipt.Conflict = true
-			receipt.ErrorCode = "event_id_content_conflict"
-			receipt.ErrorMessage = "event_id already exists with different canonical content"
-			data.Receipts[key] = receipt
-			return fmt.Errorf("%w: event_id content differs", domain.ErrConflict)
-		}
-		// Idempotency keys are tenant-scoped and must not silently be reused
-		// for another event. This mirrors the control-plane uniqueness
-		// constraint and protects the file-backed reference implementation.
-		for existingKey, existing := range data.Events {
-			if existing.TenantID != tenantID || existing.IdempotencyKey != event.IdempotencyKey || existingKey == key {
-				continue
+			// Idempotency keys are tenant-scoped and must not silently be reused
+			// for another event. This mirrors the control-plane uniqueness
+			// constraint and protects the file-backed reference implementation.
+			if existingKey, ok := idempotencyConflictKey(data, tenantID, key, event.IdempotencyKey); ok {
+				receipt = data.Receipts[existingKey]
+				receipt.Conflict = true
+				receipt.ErrorCode = "idempotency_key_conflict"
+				receipt.ErrorMessage = "idempotency_key is already associated with another event"
+				data.Receipts[existingKey] = receipt
+				return fmt.Errorf("%w: idempotency_key is already associated with another event", domain.ErrConflict)
 			}
-			receipt = data.Receipts[existingKey]
-			receipt.Conflict = true
-			receipt.ErrorCode = "idempotency_key_conflict"
-			receipt.ErrorMessage = "idempotency_key is already associated with another event"
-			data.Receipts[existingKey] = receipt
-			return fmt.Errorf("%w: idempotency_key is already associated with another event", domain.ErrConflict)
-		}
 
-		now := event.ReceivedAt
-		receipt = domain.EventReceipt{EventID: event.EventID, TenantID: tenantID, Status: domain.StatusAccepted, AcceptedAt: now}
-		streamID := event.Stream()
-		streamKey := store.StreamKey(tenantID, streamID)
-		stream := data.Streams[streamKey]
-		if stream.StreamID == "" {
-			stream = store.StreamState{TenantID: tenantID, StreamID: streamID, NextSequence: 1}
-		}
-		event.StreamID = streamID
-		event.Sequence = stream.NextSequence
-		event.PrevHash = stream.HeadHash
-		event.Hash, err = s.eventHash(event)
-		if err != nil {
-			return err
-		}
-		stream.NextSequence++
-		stream.HeadHash = event.Hash
-		stream.PendingHashes = append(stream.PendingHashes, event.Hash)
-		stream.PendingEvents = append(stream.PendingEvents, key)
-		if len(stream.PendingHashes) == 1 {
-			stream.PendingPrevHash = event.PrevHash
-		}
-		data.Streams[streamKey] = stream
-		data.Events[key] = event
-		receipt.Status = domain.StatusLedgered
-		receipt.LedgeredAt = now
-		receipt.StreamID = event.StreamID
-		receipt.Sequence = event.Sequence
-		receipt.Hash = event.Hash
-		data.Receipts[key] = receipt
-		if len(stream.PendingHashes) >= s.Config.SegmentSize {
-			segment, checkpoint, sealErr := s.sealSegment(ctx, stream, now)
-			if sealErr != nil {
-				return sealErr
+			now := event.ReceivedAt
+			receipt = domain.EventReceipt{EventID: event.EventID, TenantID: tenantID, IdempotencyKey: event.IdempotencyKey, Status: domain.StatusAccepted, AcceptedAt: now}
+			streamID := event.Stream()
+			streamKey := store.StreamKey(tenantID, streamID)
+			stream := data.Streams[streamKey]
+			if stream.StreamID == "" {
+				stream = store.StreamState{TenantID: tenantID, StreamID: streamID, NextSequence: 1}
 			}
-			sealedSegments = append(sealedSegments, segment)
-			data.Segments[streamKey] = append(data.Segments[streamKey], segment)
-			data.Checkpoints[streamKey] = append(data.Checkpoints[streamKey], checkpoint)
-			stream.PendingHashes = nil
-			stream.PendingEvents = nil
-			stream.PendingPrevHash = ""
+			event.StreamID = streamID
+			event.Sequence = stream.NextSequence
+			event.PrevHash = stream.HeadHash
+			event.Hash, err = s.eventHash(event)
+			if err != nil {
+				return err
+			}
+			stream.NextSequence++
+			stream.HeadHash = event.Hash
+			stream.PendingHashes = append(stream.PendingHashes, event.Hash)
+			stream.PendingEvents = append(stream.PendingEvents, key)
+			if len(stream.PendingHashes) == 1 {
+				stream.PendingPrevHash = event.PrevHash
+			}
 			data.Streams[streamKey] = stream
-		}
-		return nil
-	})
+			data.Events[key] = event
+			if s.Config.LedgeredPublisher != nil {
+				if data.LedgeredOutbox == nil {
+					data.LedgeredOutbox = map[string]domain.Event{}
+				}
+				data.LedgeredOutbox[key] = event
+			}
+			receipt.Status = domain.StatusLedgered
+			receipt.LedgeredAt = now
+			receipt.StreamID = event.StreamID
+			receipt.Sequence = event.Sequence
+			receipt.Hash = event.Hash
+			data.Receipts[key] = receipt
+			if len(stream.PendingHashes) >= s.Config.SegmentSize {
+				segment, checkpoint, sealErr := s.sealSegment(ctx, stream, now)
+				if sealErr != nil {
+					return sealErr
+				}
+				sealedSegments = append(sealedSegments, segment)
+				data.Segments[streamKey] = append(data.Segments[streamKey], segment)
+				data.Checkpoints[streamKey] = append(data.Checkpoints[streamKey], checkpoint)
+				stream.PendingHashes = nil
+				stream.PendingEvents = nil
+				stream.PendingPrevHash = ""
+				data.Streams[streamKey] = stream
+			}
+			return nil
+		})
+		// The legacy snapshot closure derives the ledger coordinates in-place
+		// on event. Preserve those committed coordinates for the post-commit
+		// archive write; otherwise the archive key would be framed from the
+		// pre-ledger zero-value stream and sequence.
+		committedEvent = event
+	}
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
 			return receipt, err
@@ -585,6 +587,8 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	if receipt.Duplicate {
 		return receipt, nil
 	}
+	event = committedEvent
+	s.publishLedgered(ctx, event)
 	if archive.Configured(s.Config.Archive) {
 		archived := s.archiveEvent(ctx, event) == nil
 		for _, segment := range sealedSegments {
@@ -593,15 +597,8 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			}
 		}
 		if archived {
-			if err := s.Store.Update(func(data *store.Snapshot) error {
-				key := store.EventKey(tenantID, event.EventID)
-				r := data.Receipts[key]
-				r.IndexedAt = s.Now()
-				r.Status = domain.StatusArchived
-				r.ArchivedAt = s.Now()
-				data.Receipts[key] = r
-				return nil
-			}); err != nil {
+			updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusArchived, true)
+			if err != nil {
 				// Durability boundary (store.go Update): the status write is
 				// save-or-nothing, so a failed transition must not be reported.
 				// Fail closed — receipt still carries the ledger-CAS-committed
@@ -611,36 +608,20 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 				// transition durably commits.
 				return receipt, err
 			}
-			receipt.Status = domain.StatusArchived
-			receipt.IndexedAt = s.Now()
-			receipt.ArchivedAt = s.Now()
+			receipt = updated
 		} else {
-			if err := s.Store.Update(func(data *store.Snapshot) error {
-				key := store.EventKey(tenantID, event.EventID)
-				r := data.Receipts[key]
-				r.Status = domain.StatusIndexed
-				r.IndexedAt = s.Now()
-				data.Receipts[key] = r
-				return nil
-			}); err != nil {
+			updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusIndexed, false)
+			if err != nil {
 				return receipt, err
 			}
-			receipt.Status = domain.StatusIndexed
-			receipt.IndexedAt = s.Now()
+			receipt = updated
 		}
 	} else {
-		if err := s.Store.Update(func(data *store.Snapshot) error {
-			key := store.EventKey(tenantID, event.EventID)
-			r := data.Receipts[key]
-			r.Status = domain.StatusIndexed
-			r.IndexedAt = s.Now()
-			data.Receipts[key] = r
-			return nil
-		}); err != nil {
+		updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusIndexed, false)
+		if err != nil {
 			return receipt, err
 		}
-		receipt.Status = domain.StatusIndexed
-		receipt.IndexedAt = s.Now()
+		receipt = updated
 	}
 	if waitFor == "accepted" || waitFor == "" {
 		response := receipt
@@ -688,12 +669,9 @@ func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventRecei
 func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error) {
 	var event domain.Event
 	err := s.Store.Read(func(data *store.Snapshot) error {
-		value, ok := data.Events[store.EventKey(tenantID, eventID)]
-		if !ok {
-			return domain.ErrNotFound
-		}
-		event = value
-		return nil
+		var resolveErr error
+		event, resolveErr = s.eventFromSnapshot(context.Background(), data, tenantID, eventID)
+		return resolveErr
 	})
 	if err != nil {
 		return domain.Event{}, err
@@ -743,12 +721,11 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
 		}
-		for _, event := range data.Events {
-			if event.TenantID == tenantID && s.matches(event, query, schemas) {
-				events = append(events, event)
-			}
-		}
-		return nil
+		var resolveErr error
+		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, tenantID, func(event domain.Event) bool {
+			return s.matches(event, query, schemas)
+		})
+		return resolveErr
 	})
 	if err != nil {
 		return domain.QueryResult{}, err
@@ -821,66 +798,6 @@ func (s *Service) Operation(tenantID, actor, operationID string) (domain.Operati
 	return domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[len(events)-1].OccurredAt, Outcomes: outcomes}, nil
 }
 
-// operationTimelineNoAudit is the un-audited core shared by OperationTimeline
-// and ReplayOperation, so a single replay call appends exactly one fact
-// (FR-3: no delegation path may append twice).
-func (s *Service) operationTimelineNoAudit(tenantID, operationID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
-	if err != nil {
-		return nil, err
-	}
-	if len(events) == 0 {
-		return nil, domain.ErrNotFound
-	}
-	sortEvents(events)
-	return events, nil
-}
-
-// aggregateTimelineNoAudit mirrors operationTimelineNoAudit for aggregates
-// (aggregate-version ordering preserved verbatim).
-func (s *Service) aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(tenantID, func(event domain.Event) bool {
-		return event.AggregateType == aggregateType && event.AggregateID == aggregateID
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(events) == 0 {
-		return nil, domain.ErrNotFound
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].AggregateVersion == events[j].AggregateVersion {
-			return events[i].EventID < events[j].EventID
-		}
-		return events[i].AggregateVersion < events[j].AggregateVersion
-	})
-	return events, nil
-}
-
-func (s *Service) OperationTimeline(tenantID, actor, operationID string) ([]domain.Event, error) {
-	events, err := s.operationTimelineNoAudit(tenantID, operationID)
-	if err != nil {
-		return nil, err
-	}
-	// Read self-audit (F-06): append-before-serve, fail-closed — a timeline
-	// read that cannot leave its governance fact is not served.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
-		return nil, err
-	}
-	return events, nil
-}
-
-func (s *Service) AggregateTimeline(tenantID, actor, aggregateType, aggregateID string) ([]domain.Event, error) {
-	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
-		return nil, err
-	}
-	return events, nil
-}
-
 func (s *Service) ReplayOperation(tenantID, actor, operationID string) (domain.ReplayResult, error) {
 	events, err := s.operationTimelineNoAudit(tenantID, operationID)
 	if err != nil {
@@ -910,7 +827,7 @@ func (s *Service) ReplayAggregate(tenantID, actor, aggregateType, aggregateID st
 
 func (s *Service) checkTenantAndQuota(tenantID string) error {
 	var tenant domain.Tenant
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.ReadControl(func(data *store.Snapshot) error {
 		var ok bool
 		tenant, ok = data.Tenants[tenantID]
 		if !ok || !tenant.Active {
@@ -945,7 +862,7 @@ func (s *Service) checkTenantAndQuota(tenantID string) error {
 
 func (s *Service) validateEvent(tenantID string, principal domain.IngestPrincipal, event domain.Event) (domain.EventSchema, error) {
 	var schema domain.EventSchema
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(func(data *store.Snapshot) error {
 		if !sourceAccessAllowed(data, tenantID, event.SourceSystem, principal.ClientID) {
 			return sourceAccessError()
 		}
@@ -1170,7 +1087,7 @@ func (s *Service) archiveEvent(ctx context.Context, event domain.Event) error {
 	if err != nil {
 		return err
 	}
-	key := fmt.Sprintf("events/%s/%s/%020d-%s.json", safeName(event.TenantID), safeName(event.StreamID), event.Sequence, safeName(event.EventID))
+	key := eventArchiveKey(event.TenantID, event.StreamID, event.Sequence, event.EventID)
 	// The archive store's pre-flight checkKeyLength rejects an over-limit
 	// composite with the typed archive.ErrArchiveKeyTooLong before any
 	// filesystem mutation or network call (FM-1); ArchivePending dead-letters
@@ -1192,12 +1109,9 @@ func (s *Service) archiveSegment(ctx context.Context, segment domain.Segment) er
 func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
 	var events []domain.Event
 	err := s.Store.Read(func(data *store.Snapshot) error {
-		for _, event := range data.Events {
-			if event.TenantID == tenantID && predicate(event) {
-				events = append(events, event)
-			}
-		}
-		return nil
+		var resolveErr error
+		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, tenantID, predicate)
+		return resolveErr
 	})
 	return events, err
 }

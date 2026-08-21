@@ -7,7 +7,7 @@
 
 ## 结果
 
-更新：2026-08-06（读自审计 F-06 落地后重测，`-benchtime=1s`）
+更新：2026-08-20（hot/cold v2 分层后重测，`-benchtime=1s`；以下新增成本门禁为 `-benchtime=100ms` 快照）
 
 | Benchmark | 单次耗时 | 分配 | 说明 |
 |---|---:|---:|---|
@@ -16,6 +16,28 @@
 | `BenchmarkQueryLargeLedger` | 65.9 ms/op | 47.9 MB / 260k allocs | 5,000 事件账本同型查询；含读自审计快照写（同上） |
 | `BenchmarkEventDigest` | 9.9 µs/op | 5.8 KB / 126 allocs | Canonical JSON 编码 + SHA-256 摘要（哈希链最小单元） |
 | `BenchmarkVerifyIntegrity` | 22.8 ms/op | 16.3 MB / 267k allocs | 1,000 事件混合账本（半数敏感字段，10 个密封段）；内容认证（深拷贝 + 解密 + 重新规范化） |
+
+## Hot/cold ingest 成本门禁（2026-08-20）
+
+`BenchmarkIngestWithArchivedLedger` 在内存 v2 store 预置仅含 receipt 的冷账本，
+再测量新事件写入。冷账本按租户建立 O(1) receipt/idempotency 索引，单次 ingest
+只克隆有界热文档；数字会随机器和 Go 版本变化，不是生产 SLO。
+
+| 冷 receipt 数 K | ns/op | B/op | allocs/op |
+|---:|---:|---:|---:|
+| 0 | 460,641 | 554,264 | 1,545 |
+| 1,000 | 435,313 | 403,675 | 1,342 |
+| 10,000 | 519,840 | 538,717 | 1,524 |
+| 50,000 | 427,155 | 555,495 | 1,550 |
+
+运行方式：
+
+```sh
+go test ./internal/service -run '^$' -bench '^BenchmarkIngestWithArchivedLedger$' -benchmem -benchtime=100ms
+```
+
+`TestIngestCostIndependentOfArchivedEvents` 同时钉住 K=0 与 K=10,000 的 wall/allocation
+不超过 3×；若超限，说明 ingest 路径重新物化了冷 ledger，应阻断发布。
 
 旧基线（2026-08-04，读自审计前）：`BenchmarkIngest` 2.2 ms、`BenchmarkQuery` 448 µs（1,000 事件）、`BenchmarkQueryLargeLedger` 3.8 ms、`BenchmarkEventDigest` 10.0 µs、`BenchmarkVerifyIntegrity` 4.19 ms → 22.8 ms（内容认证改造）。
 
@@ -28,9 +50,10 @@ go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 
 ## 容量 envelope 与 cutover 门禁（B1-3 决策 #7）
 
-参考实现采用**容量预算**方案（方案 B）：控制面快照同时承载元数据与账本事件，
-`QueryEvents` 为 O(ledger) 全量扫描——这是单节点参考实现的**有界容量承诺**，
-不是生产形态（生产走 Kafka → 关系账本 + ClickHouse 投影，见 ADR-0001/0004）。
+v2 file store 采用**热/冷分层**：控制面和每租户热文档只承载有界写集，receipt、
+segment、checkpoint 进入租户 append-only ledger；兼容性的 `Snapshot`/查询读取仍会
+按需 materialize 全量 ledger。PostgreSQL 在应用 `006_hot_cold_split.sql` 并显式完成
+cutover 后使用同样的关系表；`NewWithBackend` 和未迁移的旧 PG 表仍保留单文档兼容路径。
 
 容量 envelope（本机基线，机器见上）：
 
@@ -39,19 +62,17 @@ go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 | 1,000 事件 | 2.2 ms/op（全链路） | 448 µs/op |
 | 5,000 事件 | O(n²) 累计写入（见下） | 3.8 ms/op |
 
-**Cutover 门禁**：单租户累计事件数超过 **10⁵（100,000）** 或查询 p95 超过
-**500 ms**（30 天范围操作时间线 SLO，架构计划 §3）时，必须启用关系账本方案
-（方案 A：`migrations/001_control_plane.sql` 的 `ledger_events`/`ledger_segments`
-表接线，`QueryEvents` 切 SQL 索引查询），不得继续依赖快照全量扫描。该门禁是
+**读取容量门禁**：单租户累计事件数超过 **10⁵（100,000）** 或查询 p95 超过
+**500 ms**（30 天范围操作时间线 SLO，架构计划 §3）时，不能继续依赖兼容
+`Snapshot` 全量读取，应把查询切到关系账本/ClickHouse 索引路径。该门禁是
 G2 验收“容量 envelope 记录；高容量类 cutover 门禁”的落点；`cli.py bench` 提供
 回归基线（`BenchmarkIngest`/`BenchmarkQueryLargeLedger`）。
 
 ## 已知特征（如实记录）
 
-- **快照式控制面存储是 O(n²) 累计写入**：每个 Update（含每次事件落账）都对
-  全量快照做一次克隆 + 原子持久化。该语义保证任何失败闭包（冲突、幂等键
-  冲突）都不可能污染已提交状态（`LoadForUpdate` 私有副本）。事件量在
-  数千级时毫秒内完成；这是单节点参考实现的固有上限，**不是生产形态**。
+- **兼容快照写路径仍是 O(n²) 累计写入**：`Store.Update`、旧 PG 表和测试脚本
+  仍对 materialized 全量快照做克隆 + 原子持久化；v2 ingest/归档/封段走租户
+  API，冷 ledger 不进入每次热写。失败闭包仍通过私有副本/提交顺序保证不丢数据。
 - 生产形态（ADR-0001/0003/0004）中，事件写入走 Kafka → 关系表/账本流，
   控制面快照只承载元数据，不存在该 O(n²) 路径。
 - 本机数字只验证功能正确性与算法正确性；50,000 events/s 稳态必须经过

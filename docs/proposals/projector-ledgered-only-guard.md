@@ -1,6 +1,6 @@
 # Design — Project only ledgered events; reject pre-ledger rows at `Store.Insert`
 
-Status: **Design** (proposal) · Date: 2026-08-12 · Module: `cmd/audit-projector`,
+Status: **Implemented in the reference tree** · Date: 2026-08-20 · Module: `cmd/audit-projector`,
 `internal/projection` (+ `internal/kafka` constant already declared)
 Related: `docs/proposals/ledgered-projection-pipeline.md`,
 `docs/proposals/projection-field-protection.md` (sibling directions)
@@ -12,13 +12,19 @@ at commit `b7aa627` (clean). Every claim used below was re-checked; the
 verification ledger is in §2, including two material findings the spec does
 not cover (§2.2).
 
+Implementation note: the historical accepted-topic projector path is now
+guarded by `projection.ErrNotLedgered`, the default source is
+`kafka.TopicLedgered`, and the API's durable post-ledger publisher feeds that
+topic. The verify compose/e2e path creates the topic and enables publication;
+the sections below are retained as the migration and failure-mode reference.
+
 ---
 
 ## 1. Problem (one paragraph)
 
-`cmd/audit-projector` defaults to `kafka.TopicAccepted` (`main.go:19`) and
-writes whatever arrives through `projection.Store.Insert` (`main.go:42`),
-which has no chain-state presence guard (`projection.go:68`). The accepted
+Historically, `cmd/audit-projector` defaulted to `kafka.TopicAccepted` and
+wrote whatever arrived through `projection.Store.Insert`, which had no
+chain-state presence guard. The accepted
 topic is published **before** the ledger assigns `StreamID`/`Sequence`/
 `PrevHash`/`Hash` (`cmd/audit-outbox-relay/main.go:59` → `service.go:431`
 strip → `service.go:522–525` commit closure), so every accepted-topic row
@@ -36,12 +42,12 @@ channel (`api/asyncapi/asyncapi.yaml:24`) already exist.
 
 | Claim | Verified? | Where |
 |---|---|---|
-| E1 projector defaults to `TopicAccepted` | ✅ | `cmd/audit-projector/main.go:19` |
+| E1 projector defaults to `TopicLedgered` | ✅ (implemented) | `cmd/audit-projector/main.go` |
 | E2 projector ingests via `projection.Store.Insert` | ✅ | `main.go:42` — `kafka.IngestFunc(store.Insert)` |
 | E3 `schemaDDL` has `stream_id`/`sequence`/`event_hash` | ✅ | `projection.go:44,45,52`; `ReplacingMergeTree(occurred_at) ORDER BY (tenant_id, occurred_at, event_id)` |
-| E4 `Insert` has no presence guard | ✅ | `projection.go:68–84`, payload-encode then `ExecContext`, no guard |
+| E4 `Insert` rejects missing chain state | ✅ (implemented) | `projection.Store.Insert` returns `ErrNotLedgered` before payload encoding/DB access |
 | E5 `TopicAccepted` at kafka.go:24 | ✅ | `kafka.go:24` |
-| E6 `TopicLedgered` exists, zero call sites | ✅ (line drift confirmed) | `kafka.go:34`; grep of non-test `cmd/`+`internal/` shows zero producers/consumers |
+| E6 `TopicLedgered` is wired | ✅ (implemented) | API durable publisher and projector default use `kafka.TopicLedgered` |
 | E7 strip of client `stream_id` | ✅ (line drift confirmed) | `service.go:426–431`; `event.StreamID = ""` at :431 |
 | E8 chain assignment in commit closure | ✅ (line drift confirmed) | `service.go:519–525`; stamps at :522–525, `stream.NextSequence++` :529 |
 | E9 AsyncAPI `ledgered` channel | ✅ | `asyncapi.yaml:24–25` → address `audit.events.ledgered.v1` |

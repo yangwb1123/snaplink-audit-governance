@@ -60,6 +60,57 @@ func TestFileBackendPersistAndReload(t *testing.T) {
 	}
 }
 
+func TestLedgeredOutboxPersistsAndLegacySnapshotsNormalize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{EventID: "outbox-event-1", TenantID: "tenant-a", Sequence: 7, Hash: "hash-7"}
+	if err := first.Update(func(data *Snapshot) error {
+		data.LedgeredOutbox[EventKey(event.TenantID, event.EventID)] = event
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.Read(func(data *Snapshot) error {
+		if got := data.LedgeredOutbox[EventKey(event.TenantID, event.EventID)]; got.EventID != event.EventID || got.Hash != event.Hash {
+			t.Fatalf("outbox event did not round-trip: %+v", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"tenants":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Open(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if err := legacy.Read(func(data *Snapshot) error {
+		if data.LedgeredOutbox == nil {
+			t.Fatal("legacy snapshot outbox was not normalized")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFileBackendUpdateRollbackOnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	st, err := Open(path)
@@ -294,6 +345,50 @@ func TestCheckFileToPostgresMigrationHazard(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "AUDIT_ALLOW_PG_EMPTY_LEDGER") {
 		t.Fatalf("error must name the opt-out flag: %v", err)
+	}
+	// An archived-and-evicted event still has a receipt and therefore remains
+	// ledger evidence. The migration guard must not mistake zero hot payloads
+	// for an empty ledger.
+	evicted := filepath.Join(dir, "evicted.json")
+	archived := NewSnapshot()
+	archived.Receipts[EventKey("t", "e")] = domain.EventReceipt{EventID: "e", TenantID: "t", Status: domain.StatusArchived}
+	encoded, err = json.Marshal(archived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evicted, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFileToPostgresMigrationHazard(evicted); err == nil {
+		t.Fatal("expected migration hazard for archived receipt without hot event")
+	}
+	// A v2 control file is intentionally empty of receipts/events; its
+	// sibling tenant/ledger files are the migration evidence instead.
+	v2 := filepath.Join(dir, "control.json")
+	control := NewSnapshot()
+	control.LayoutVersion = hotColdLayoutVersion
+	encoded, err = json.Marshal(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(v2, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(dir, "ledger", "tenant-a.jsonl")
+	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	record := LedgerRecord{TenantID: "tenant-a", RecordType: LedgerReceipt, Key: EventKey("tenant-a", "evt-1"), Version: 1, Receipt: &domain.EventReceipt{EventID: "evt-1", TenantID: "tenant-a", Status: domain.StatusArchived}}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledgerPath, append(line, '\n'), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	err = CheckFileToPostgresMigrationHazard(v2)
+	if err == nil || !strings.Contains(err.Error(), "cold ledger records") {
+		t.Fatalf("expected v2 ledger migration hazard, got %v", err)
 	}
 }
 

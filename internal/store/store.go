@@ -37,20 +37,31 @@ type StreamState struct {
 }
 
 type Snapshot struct {
-	Tenants              map[string]domain.Tenant          `json:"tenants"`
-	Sources              map[string]domain.SourceSystem    `json:"sources"`
-	Schemas              map[string]domain.EventSchema     `json:"schemas"`
-	Policies             map[string]domain.RetentionPolicy `json:"policies"`
-	Events               map[string]domain.Event           `json:"events"`
-	Receipts             map[string]domain.EventReceipt    `json:"receipts"`
-	Streams              map[string]StreamState            `json:"streams"`
-	Segments             map[string][]domain.Segment       `json:"segments"`
-	Checkpoints          map[string][]domain.Checkpoint    `json:"checkpoints"`
-	LegalHolds           map[string]domain.LegalHold       `json:"legal_holds"`
-	Exports              map[string]domain.ExportJob       `json:"exports"`
-	RestoreRuns          map[string]domain.RestoreRun      `json:"restore_runs"`
-	AdminActions         []domain.AdminAction              `json:"admin_actions"`
-	AggregateCheckpoints []domain.AggregateCheckpoint      `json:"aggregate_checkpoints"`
+	// LayoutVersion identifies the persistence layout. Version 0 is the
+	// original single-document shape; version 2 keeps the control plane in
+	// this snapshot while tenant hot data and immutable ledger metadata live
+	// in the split tier. The field is additive so old snapshots remain
+	// decodable and can be migrated on the next file-store open.
+	LayoutVersion int                               `json:"layout_version,omitempty"`
+	Tenants       map[string]domain.Tenant          `json:"tenants"`
+	Sources       map[string]domain.SourceSystem    `json:"sources"`
+	Schemas       map[string]domain.EventSchema     `json:"schemas"`
+	Policies      map[string]domain.RetentionPolicy `json:"policies"`
+	Events        map[string]domain.Event           `json:"events"`
+	Receipts      map[string]domain.EventReceipt    `json:"receipts"`
+	Streams       map[string]StreamState            `json:"streams"`
+	Segments      map[string][]domain.Segment       `json:"segments"`
+	Checkpoints   map[string][]domain.Checkpoint    `json:"checkpoints"`
+	LegalHolds    map[string]domain.LegalHold       `json:"legal_holds"`
+	Exports       map[string]domain.ExportJob       `json:"exports"`
+	RestoreRuns   map[string]domain.RestoreRun      `json:"restore_runs"`
+	// LedgeredOutbox retains post-commit projection publications until a
+	// broker acknowledges them. It is intentionally separate from Events: the
+	// immutable event remains the source of truth while this queue is a
+	// rebuildable delivery aid. Old snapshots decode nil and normalize it.
+	LedgeredOutbox       map[string]domain.Event      `json:"ledgered_outbox,omitempty"`
+	AdminActions         []domain.AdminAction         `json:"admin_actions"`
+	AggregateCheckpoints []domain.AggregateCheckpoint `json:"aggregate_checkpoints"`
 	// ArchiveConflictFailures counts consecutive archive passes aborted by
 	// optimistic-lock exhaustion, per tenant. Reset to zero by the batch
 	// receipt commit in ArchivePending; incremented best-effort by the
@@ -81,6 +92,7 @@ func NewSnapshot() *Snapshot {
 		LegalHolds:              map[string]domain.LegalHold{},
 		Exports:                 map[string]domain.ExportJob{},
 		RestoreRuns:             map[string]domain.RestoreRun{},
+		LedgeredOutbox:          map[string]domain.Event{},
 		AdminActions:            []domain.AdminAction{},
 		AggregateCheckpoints:    []domain.AggregateCheckpoint{},
 		ArchiveConflictFailures: map[string]int{},
@@ -125,6 +137,9 @@ func (s *Snapshot) normalize() {
 	if s.RestoreRuns == nil {
 		s.RestoreRuns = map[string]domain.RestoreRun{}
 	}
+	if s.LedgeredOutbox == nil {
+		s.LedgeredOutbox = map[string]domain.Event{}
+	}
 	if s.AdminActions == nil {
 		s.AdminActions = []domain.AdminAction{}
 	}
@@ -164,6 +179,8 @@ type Backend interface {
 type Store struct {
 	mu      sync.RWMutex
 	backend Backend
+	split   *splitStore
+	pgSplit *postgresSplitStore
 }
 
 // Open returns a store backed by the local snapshot file. An empty path
@@ -173,7 +190,12 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{backend: backend}, nil
+	split, err := newSplitStore(backend.data, path)
+	if err != nil {
+		_ = backend.Close()
+		return nil, err
+	}
+	return &Store{backend: backend, split: split}, nil
 }
 
 // OpenPostgres returns a store whose snapshot lives in the single-row
@@ -181,7 +203,8 @@ func Open(path string) (*Store, error) {
 // optimistic version check surfaces lost-update conflicts instead of
 // silently overwriting each other.
 func OpenPostgres(db *sql.DB) (*Store, error) {
-	return &Store{backend: &postgresBackend{db: db}}, nil
+	backend := &postgresBackend{db: db}
+	return &Store{backend: backend, pgSplit: newPostgresSplitStore(backend)}, nil
 }
 
 // NewWithBackend builds a Store over an arbitrary Backend. It is a test
@@ -190,6 +213,16 @@ func OpenPostgres(db *sql.DB) (*Store, error) {
 func NewWithBackend(b Backend) *Store { return &Store{backend: b} }
 
 func (s *Store) Read(fn func(*Snapshot) error) error {
+	if s.split != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.split.read(fn)
+	}
+	if s.pgSplit != nil && s.pgSplit.enabled() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.pgSplit.read(fn)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	data, err := s.backend.Load()
@@ -228,6 +261,16 @@ func snapshotConflictBackoff(attempt int) time.Duration {
 // (including errors returned by fn itself) are returned immediately: they
 // are not conflicts and must not be retried.
 func (s *Store) Update(fn func(*Snapshot) error) error {
+	if s.split != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.split.update(fn)
+	}
+	if s.pgSplit != nil && s.pgSplit.enabled() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.pgSplit.update(fn)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.updateLocked(fn)
@@ -271,6 +314,16 @@ func (s *Store) updateLocked(fn func(*Snapshot) error) error {
 // passes that can cheaply prove a no-op (no writes on an idle tick);
 // ordinary mutations should keep using Update.
 func (s *Store) UpdateChecked(fn func(*Snapshot) (bool, error)) error {
+	if s.split != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.split.updateChecked(fn)
+	}
+	if s.pgSplit != nil && s.pgSplit.enabled() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.pgSplit.updateChecked(fn)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var lastErr error
@@ -326,6 +379,16 @@ func (s *Store) Close() error {
 
 // Snapshot returns a deep copy of the current persisted state.
 func (s *Store) Snapshot() (*Snapshot, error) {
+	if s.split != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.split.materialize()
+	}
+	if s.pgSplit != nil && s.pgSplit.enabled() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.pgSplit.materialize()
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	data, err := s.backend.Load()
@@ -361,8 +424,15 @@ func CheckFileToPostgresMigrationHazard(statePath string) error {
 		// error on Open; do not guess here.
 		return nil
 	}
-	if len(data.Events) > 0 {
-		return fmt.Errorf("file state %s holds %d events; switching to PostgreSQL would start an empty ledger — migrate the snapshot first (import tool or controlled cutover), or set AUDIT_ALLOW_PG_EMPTY_LEDGER=true to override", statePath, len(data.Events))
+	if len(data.Events) > 0 || len(data.Receipts) > 0 {
+		return fmt.Errorf("file state %s holds %d events and %d receipts; switching to PostgreSQL would start an empty ledger — migrate the snapshot first (import tool or controlled cutover), or set AUDIT_ALLOW_PG_EMPTY_LEDGER=true to override", statePath, len(data.Events), len(data.Receipts))
+	}
+	hotEvents, ledgerRecords, err := splitFileEvidence(filepath.Dir(statePath))
+	if err != nil {
+		return fmt.Errorf("inspect split file state before postgres switch: %w", err)
+	}
+	if hotEvents > 0 || ledgerRecords > 0 {
+		return fmt.Errorf("file state %s holds %d hot events and %d cold ledger records in the split layout; switching to PostgreSQL would start an empty ledger — migrate the snapshot first (import tool or controlled cutover), or set AUDIT_ALLOW_PG_EMPTY_LEDGER=true to override", statePath, hotEvents, ledgerRecords)
 	}
 	return nil
 }

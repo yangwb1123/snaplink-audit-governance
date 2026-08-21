@@ -5,6 +5,14 @@
 >
 > 状态标记：✅ Verified（工作树/已提交代码中存在，附行号证据）｜⚠️ Partial（部分满足）｜
 > ❌ 未做 ｜ [PROPOSED]（无法在本仓库验证，需实施时确认）。
+
+> **当前树校正（2026-08-20）**：本文的逐项表格记录的是早期实施基线，不能
+> 直接代表当前状态。当前代码已完成 B1-1 的启动/manifest fail-closed 门禁、
+> B1-6/B1-8 的 gRPC 拓扑与 tenant 422 契约、B1-7 的可选 IdP token fixture，
+> 以及 B1-3 选择的方案 B 容量 envelope（见 `docs/BENCHMARKS.md`）。关系
+> ledger 方案 A、跨仓 IdP 的真实环境验收仍是外部部署边界；当前 `quality`
+> 门禁为 `QUALITY PASS`。后续章节中的旧行号/“未做”字样保留作历史证据，
+> 不应覆盖这条当前树校正。
 >
 > **重要基线事实**：工作树含一批**未提交原型**（`git status`）：`internal/domain/models.go`、
 > `internal/grpcapi/server.go(+test)`、`internal/httpapi/server.go(+test)`、

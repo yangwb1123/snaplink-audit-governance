@@ -22,6 +22,89 @@ SERVER_ASSIGNED = {
 # Fields only meaningful on the internal ledger, not on the ingest envelope.
 INGEST_ONLY = {"tenant_id"}
 
+# The ingest envelope deliberately excludes server-derived tenant authority
+# from its required set.  The authenticated source resolves the tenant and
+# the service stamps it after validation; an optional tenant_id is still
+# accepted so a mismatching claim can be rejected explicitly (DS-08).
+ENVELOPE_REQUIRED = {
+    "event_id", "source_system", "event_type", "schema_id", "schema_version",
+    "occurred_at", "actor", "action", "outcome", "data_classification",
+    "retention_class", "idempotency_key",
+}
+ENVELOPE_ACTOR_PIN = "actor"
+ENVELOPE_ACTOR_ID_PIN = "actor.id"
+ENVELOPE_ANYOF_PIN = "[{ required: [payload] }, { required: [payload_ref] }]"
+
+
+def _event_envelope_block(root: Path) -> str:
+    spec = (root / "api/asyncapi/asyncapi.yaml").read_text(encoding="utf-8")
+    match = re.search(
+        r"^    EventEnvelope:\n(.*?)(?=^    \w+:\s*$|\Z)",
+        spec,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1) if match else ""
+
+
+def _flow_required(value: str) -> set[str]:
+    match = re.search(r"required:\s*\[([^]]*)\]", value)
+    if not match:
+        return set()
+    return {item.strip() for item in match.group(1).split(",") if item.strip()}
+
+
+def asyncapi_envelope_semantics(root: Path | None = None) -> list[str]:
+    """Validate the security-sensitive EventEnvelope shape.
+
+    The repository intentionally uses a small YAML subset for contract gates,
+    so this check stays text-based and fail-closed.  It pins the producer
+    contract without introducing a PyYAML dependency: tenant authority is not
+    a required client field, actor.id is mandatory, and payload/payload_ref is
+    an at-least-one disjunction rather than an exclusive oneOf.
+    """
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+    block = _event_envelope_block(root)
+    if not block:
+        return ["AsyncAPI EventEnvelope schema not found"]
+    failures: list[str] = []
+
+    required_match = re.search(r"^      required:\s*\[([^]]*)\]", block, re.MULTILINE)
+    required = _flow_required(required_match.group(0)) if required_match else set()
+    if required != ENVELOPE_REQUIRED:
+        failures.append(
+            "EventEnvelope required set = %s, want exactly %s"
+            % (sorted(required), sorted(ENVELOPE_REQUIRED))
+        )
+
+    actor_match = re.search(r"^        actor:\s*(\{.*\})\s*$", block, re.MULTILINE)
+    actor = actor_match.group(1) if actor_match else ""
+    if not actor:
+        failures.append(f"EventEnvelope missing {ENVELOPE_ACTOR_PIN} property")
+    elif "required: [id]" not in actor or "id:" not in actor:
+        failures.append(
+            f"EventEnvelope {ENVELOPE_ACTOR_PIN} must require nested {ENVELOPE_ACTOR_ID_PIN}"
+        )
+
+    anyof_match = re.search(r"^      anyOf:\s*(\[.*\])\s*$", block, re.MULTILINE)
+    if not anyof_match:
+        if re.search(r"^      oneOf:\s*", block, re.MULTILINE):
+            failures.append(
+                "EventEnvelope uses oneOf; anyOf is required for payload/payload_ref"
+            )
+        else:
+            failures.append("EventEnvelope anyOf must require payload or payload_ref")
+    else:
+        branches = [
+            _flow_required(branch)
+            for branch in re.findall(r"\{[^{}]*required:\s*\[[^]]*\][^{}]*\}", anyof_match.group(1))
+        ]
+        if branches != [{"payload"}, {"payload_ref"}]:
+            failures.append(
+                "EventEnvelope anyOf branches = %s, want payload and payload_ref"
+                % branches
+            )
+    return failures
+
 
 def domain_event_fields(root: Path) -> set[str]:
     model = (root / "internal/domain/models.go").read_text(encoding="utf-8")
@@ -85,6 +168,7 @@ def run(root=None) -> int:
     for field in sorted(business_fields):
         if field not in asyncapi_props:
             failures.append(f"AsyncAPI EventEnvelope missing field {field}")
+    failures.extend(asyncapi_envelope_semantics(root))
 
     # The gRPC envelope field set comes from the GENERATED descriptor
     # (checks.proto_sync.envelope_fields), never from the .proto source text:

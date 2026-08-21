@@ -1,5 +1,11 @@
 实施提案已产出：`docs/proposals/implementation-b1-sink.md`（18KB）。核心结论：
 
+> 当前树校正（2026-08-20）：本摘要来自早期 B1 评估。B1-3 已按方案 B
+> 落入 `docs/BENCHMARKS.md` 的容量 envelope 与 cutover 门禁；B1-7 已有
+> `scripts/mint-token.sh` 与 verify IdP 路径；B1-8 的 HTTP/gRPC/OpenAPI
+> tenant 422 已同步。关系 ledger 接线和跨仓真实多节点验收仍不在本仓参考
+> 实现的声明范围内，最终质量门禁为 `QUALITY PASS`。
+
 ## 逐项状态（基于工作树实测，非清单照抄）
 
 | 项 | 状态 | 关键证据 |

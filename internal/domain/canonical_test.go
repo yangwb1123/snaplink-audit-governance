@@ -123,6 +123,36 @@ func TestCursorRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTimelineCursorRoundTripAndScopeValidation(t *testing.T) {
+	when := time.Date(2024, 1, 1, 0, 0, 0, 123456789, time.UTC)
+	operation := EncodeTimelineCursor(TimelineCursor{Kind: "operation", Scope: "op-1", OccurredAt: when, Sequence: 42, EventID: "evt-1"})
+	decoded, err := DecodeTimelineCursor(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Kind != "operation" || decoded.Scope != "op-1" || !decoded.OccurredAt.Equal(when) || decoded.Sequence != 42 || decoded.EventID != "evt-1" {
+		t.Fatalf("unexpected operation timeline cursor: %+v", decoded)
+	}
+	aggregate := EncodeTimelineCursor(TimelineCursor{Kind: "aggregate", Scope: "invoice\x1finv-1", AggregateVersion: 7, EventID: "evt-7"})
+	decoded, err = DecodeTimelineCursor(aggregate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Kind != "aggregate" || decoded.Scope != "invoice\x1finv-1" || decoded.AggregateVersion != 7 || decoded.EventID != "evt-7" {
+		t.Fatalf("unexpected aggregate timeline cursor: %+v", decoded)
+	}
+	for _, value := range []string{
+		"not-a-cursor",
+		base64.RawURLEncoding.EncodeToString([]byte(`{"v":2,"kind":"operation","scope":"op-1","event_id":"evt-1"}`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"kind":"operation","scope":"op-1","event_id":"evt-1"}`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"kind":"other","scope":"op-1","event_id":"evt-1"}`)),
+	} {
+		if _, err := DecodeTimelineCursor(value); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("timeline cursor %q must fail closed, got %v", value, err)
+		}
+	}
+}
+
 // TestCanonicalJSONExactInt64StructField is AC-1: a struct int64 field of
 // 9007199254740993 (2^53+1) must be emitted as exact decimal digits — no
 // "9.007199254740992e+15", no digit loss — and EventDigest of events

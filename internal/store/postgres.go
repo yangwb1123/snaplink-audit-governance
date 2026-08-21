@@ -106,6 +106,41 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 	if !trailExists {
 		return fmt.Errorf("admin action trail table missing: apply migration 005_admin_action_trail.sql")
 	}
+	var splitExists bool
+	if err := p.db.QueryRowContext(ctx, postgresHotColdCatalogQuery).Scan(&splitExists); err != nil {
+		return fmt.Errorf("hot/cold catalog: %w", err)
+	}
+	if !splitExists {
+		var layout string
+		err := p.db.QueryRowContext(ctx, `SELECT COALESCE(snapshot->>'layout_version', '0') FROM audit_state_snapshot WHERE id = 1`).Scan(&layout)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("hot/cold layout marker: %w", err)
+		}
+		if layout == fmt.Sprint(hotColdLayoutVersion) {
+			return fmt.Errorf("hot/cold layout marker is present but migration 006 tables are missing: apply 006_hot_cold_split.sql")
+		}
+	} else {
+		// Applying 006 is an expand step; an existing v1 row must not be
+		// served through the split store until the explicit cutover has moved
+		// its ledger data. Keep this check in readiness so operators see the
+		// migration action before requests start failing at the data path.
+		var layout string
+		var legacyLedger bool
+		err := p.db.QueryRowContext(ctx, `
+SELECT COALESCE(snapshot->>'layout_version', '0'),
+       COALESCE(jsonb_object_length(COALESCE(snapshot->'events', '{}'::jsonb)), 0) > 0 OR
+       COALESCE(jsonb_object_length(COALESCE(snapshot->'receipts', '{}'::jsonb)), 0) > 0 OR
+       COALESCE(jsonb_object_length(COALESCE(snapshot->'streams', '{}'::jsonb)), 0) > 0 OR
+       COALESCE(jsonb_object_length(COALESCE(snapshot->'segments', '{}'::jsonb)), 0) > 0 OR
+       COALESCE(jsonb_object_length(COALESCE(snapshot->'checkpoints', '{}'::jsonb)), 0) > 0
+FROM audit_state_snapshot WHERE id = 1`).Scan(&layout, &legacyLedger)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("hot/cold layout marker: %w", err)
+		}
+		if layout != fmt.Sprint(hotColdLayoutVersion) && legacyLedger {
+			return fmt.Errorf("hot/cold migration pending: audit_state_snapshot still contains v1 ledger data; run audit-pg-migrate after applying 006_hot_cold_split.sql")
+		}
+	}
 	return nil
 }
 

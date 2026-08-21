@@ -3,8 +3,16 @@
 Direction: "Bound the control-plane snapshot: stop rewriting the entire immutable ledger on
 every write and evict archived events"
 Module: `internal/store` (+ read surfaces in `internal/service` that must not break)
-Status: Proposed (evidence-verified, design for the design gate)
+Status: Increment 2 implemented in the reference tree; PostgreSQL cutover is explicit
 Gate: every landing increment must pass `python3 cli.py quality` (AGENTS.md).
+
+Implementation note: the reference tree archives and evicts hot event payloads,
+serves verified archive fallback reads across event details, queries, timelines,
+replay, export, legal-hold, and integrity surfaces, and now persists a v2
+per-tenant hot document plus append-only cold ledger. File stores auto-migrate
+v1 snapshots with a `.v1` backup. PostgreSQL enables the split only after
+`006_hot_cold_split.sql` is applied and `store.MigratePostgresSnapshot` is run;
+legacy single-row deployments remain supported during the expand/cutover window.
 
 ---
 
@@ -22,10 +30,10 @@ verified; line numbers drift by ≤ 8 lines as already noted in the spec. Highli
 | `fileBackend.Save` | store.go:394; `json.MarshalIndent(data, "", "  ")` of the whole doc, tmp-write + `file.Sync()` + rename + dir-chain fsync; no version/CAS. |
 | `postgresBackend.Save` | postgres.go:93; `json.Marshal(data)` whole doc, version-gated UPDATE; `ErrSnapshotConflict` on `affected != 1`. |
 | Ingest CAS cycles | Ledger CAS service.go:468; `data.Events[key] = event` :538; status commits :577/:599/:613 — **errors are now propagated** (the `_ =` swallow pattern is gone; confirmed at service.go:577–623). 2 full CAS cycles per event. |
-| `ArchivePending` | governance.go:541–613; collects non-archived events (:548–557), one batch `Store.Update` marks receipts `StatusArchived` (:596–609); **never deletes events**. |
+| `ArchivePending` | governance.go:541–613; collects non-archived events, verifies WORM writes, then one batch `Store.Update` marks receipts `StatusArchived` and evicts the corresponding hot payloads. |
 | `conflictBackend` + retry pins | conflict_retry_test.go:15–37, tests at :72/:81/:82 pin `snapshotConflictRetries`. |
-| No eviction path | `grep -rn "delete(" internal/ cmd/` (non-test): no event/receipt/segment deletion anywhere. |
-| Read surfaces | `GetEvent` service.go:669 (no archive fallback, `ErrNotFound` on miss); `QueryEvents` :705; `EvaluateRetention` :357; `eventsFor` :1167 (timeline/replay/restore); `VerifyIntegrity` governance.go:345 (iterates `data.Events` :369, segments :375); `holdBlockingExport` :812; `runExport` :857. |
+| No eviction path (historical baseline) | **Superseded by Increment 1.** `ArchivePending` and successful ingest now delete only the hot event payload after a verified archive write; receipts remain as the linkage anchor. |
+| Read surfaces | **Updated by Increment 1.** `GetEvent`, `QueryEvents`, `eventsFor` (timeline/replay/restore), `VerifyIntegrity`, `holdBlockingExport`, and `runExport` use verified archive fallback for evicted events; `EvaluateRetention` keeps its documented hot-window policy. |
 | Archive key | `events/{tenant}/{stream}/{seq:020d}-{eventID}.json` service.go:1154; `archive.Store.Get` exists (archive.go:178 FileStore, :358 S3Store); `StatusArchived` set only after a verified Put. |
 | Retained metadata | `EventReceipt` keeps Status/StreamID/Sequence/Hash; `Segment` keeps FirstPrevHash/LastHash/EventCount/MerkleRoot/ManifestHash/Signature (domain/models.go). |
 | Migration hazard | `CheckFileToPostgresMigrationHazard` store.go:325 uses `len(data.Events)`; test store_test.go:194. |
@@ -124,7 +132,8 @@ tool and documents the pre-split cost in `docs/BENCHMARKS.md`.
 
 ### Increment 2 — hot/cold split + per-tenant hot docs
 Satisfies REQ-2, REQ-8 and acceptance A2, A4; adapts A3.5's crash-atomicity test to the
-two-tier commit ordering (§5.2). Includes the layout/schema migration (§7).
+two-tier commit ordering (§5.2). Includes the file layout migration and PostgreSQL
+schema/cutover helper (§7).
 
 ---
 
@@ -217,7 +226,7 @@ Read-surface changes (all read paths keep their existing self-audit fact appends
 | `eventsFor` (service.go:1167) | Returns hot events + archived events (receipt-driven), same predicate. Serves operation/aggregate timeline, replay, restore preview identically pre/post eviction (A3). |
 | `runExport` selection (governance.go:857) | Selection over hot + archived events, same `matches` filter; strip-digest → canonical JSONL transform unchanged ⇒ byte-identical export (A3). |
 | `holdBlockingExport` (governance.go:812) | Scans hot + archived events so a legal hold continues to block exports containing archived events (F-5). |
-| `QueryEvents` (service.go:705) | **Hot-only, documented policy** (REQ-7): archived events are excluded by documented policy; release note + OpenAPI description note; pinned by test. Full-history reads use timeline/replay/export or the production ClickHouse projection (ADR-0004). |
+| `QueryEvents` (service.go:705) | Archive-inclusive after verified fallback (REQ-7): archived events remain visible with the pre-eviction API semantics; the OpenAPI description documents the WORM read path. |
 | `EvaluateRetention` (service.go:357) | **Hot-only, documented policy**: archived events are past the retention window by construction; pinned by test. |
 
 ### 4.3 Idempotency (REQ-5)
@@ -323,7 +332,7 @@ the two-tier constraint that A2 forces.
   startup); maintain on append; compaction (drop superseded receipt versions) is a
   governance-worker task (tmp+rename+fsync, rare, off the hot path).
 - PG: latest-record lookup `SELECT record FROM audit_ledger WHERE tenant_id=$1 AND
-  rec_type=$2 AND key=$3 ORDER BY version DESC LIMIT 1` (indexed); idempotency-key index on
+  record_type=$2 AND key=$3 ORDER BY version DESC LIMIT 1` (indexed); idempotency-key index on
   `(tenant_id, (record->>'idempotency_key'))` expression index.
 - `EventReceipt.IdempotencyKey` (additive, F-4): set at ingest receipt v1; old records decode
   with empty key and simply never match (same as pre-eviction absence).
@@ -347,10 +356,10 @@ A3.5 crash tests, layout migration tests. See §8.
 | 4 | `internal/domain` | `EventReceipt.IdempotencyKey` | Additive field |
 | 5 | `internal/service` | New files `archive_fallback.go`, `eviction.go`, `ledger.go`; `eventArchiveKey` extracted from `archiveEvent` | No exported surface change |
 | 6 | `internal/service` | `GetEvent`, `VerifyIntegrity`, `eventsFor` (timeline/replay/restore), `runExport`, `holdBlockingExport`: archive-inclusive | Behavior preserved (equivalence pinned by tests) |
-| 7 | `internal/service` | `QueryEvents`, `EvaluateRetention`: hot-only documented policy | Behavior change, documented + pinned + release note |
+| 7 | `internal/service` | `QueryEvents` archive-inclusive fallback; `EvaluateRetention` hot-window policy | Behavior and policy documented + pinned + release note |
 | 8 | `api/openapi/openapi.yaml` | Description notes only (no schema/route change) | Compatible |
-| 9 | `migrations/005_hot_cold_split.sql` (new) | `audit_tenant`, `audit_ledger` tables | New tables; existing `audit_state_snapshot` retained as control plane |
-| 10 | `cli.py` | Optional `migrate-pg-snapshot` helper for the PG cutover (or documented SQL) | Additive |
+| 9 | `migrations/006_hot_cold_split.sql` (new) | `audit_tenant`, `audit_ledger` tables | New tables; existing `audit_state_snapshot` retained as control plane |
+| 10 | `cmd/audit-pg-migrate` + `internal/store/postgres_hotcold.go` | `audit-pg-migrate -confirm MIGRATE` explicit PG cutover command and library helper | Additive |
 
 HTTP/OpenAPI surface is otherwise unchanged (non-goal): `GET /events/{id}`, `/receipt`,
 `POST /integrity/verify`, `/exports`, replay/timeline routes all keep their contracts.
@@ -385,7 +394,7 @@ HTTP/OpenAPI surface is otherwise unchanged (non-goal): `GET /events/{id}`, `/re
 
 | # | Failure | Detection | Recovery / behavior |
 |---|---|---|---|
-| FM-1 | Archive object missing/corrupt for an archived receipt | `archive.Get` error or hash mismatch in `archivedEvent`/`VerifyIntegrity`/export | Fail closed with an integrity error (never silent 404). Archive is the WORM source of truth; restore from archive-tier redundancy/backup (out of scope to fix here). Eviction never deletes archive objects (non-goal). |
+| FM-1 | Archive object missing/corrupt for an archived receipt | `archive.Get` error or hash mismatch in `archivedEvent`/`VerifyIntegrity`/export | Fail closed with an integrity error (never silent 404). Archive is the WORM source of truth; fallback reads are bounded by `archiveReadTimeout`; restore from archive-tier redundancy/backup remains an external operation. Eviction never deletes archive objects. |
 | FM-2 | Crash between cold commit and hot Save (ColdFirst, eviction) | Receipt archived, event still hot | Next `ArchivePending` pass evicts (collection predicate includes hot events with archived receipts); transient state is today's behavior — safe. |
 | FM-3 | Crash between hot Save and cold commit (HotFirst, ingest) | Event hot, cold receipt missing | Idempotent re-ingest completes the cold records; `GetReceipt` derives from hot event in the window; fail-closed error until recovered (existing 503/retry contract). |
 | FM-4 | Same-tenant hot CAS exhaustion (multi-replica) | `ErrSnapshotConflict` after `snapshotConflictRetries` | Existing retry + backoff + fail-loud mapping (503); per-tenant now, so blast radius shrinks. |
@@ -408,12 +417,13 @@ HTTP/OpenAPI surface is otherwise unchanged (non-goal): `GET /events/{id}`, `/re
 1. *File backend:* first open auto-migrates v1 → v2 (split into `control.json` + `tenants/*`
    + `ledger/*.jsonl`, `.v1` backup). Validate on a copied state file first; verify counts
    (events per tenant, receipts, segments) before and after.
-2. *PostgreSQL:* apply `migrations/005_hot_cold_split.sql` (new `audit_tenant`,
+2. *PostgreSQL:* apply `migrations/006_hot_cold_split.sql` (new `audit_tenant`,
    `audit_ledger`; `audit_state_snapshot` unchanged). Then run the cutover with the API
-   stopped: `cli.py migrate-pg-snapshot --dsn ... [--state path]` (or the documented SQL):
-   read the single row → rewrite it as control plane → insert per-tenant `audit_tenant` rows →
-   insert `audit_ledger` records (receipts, segments, checkpoints with versions) → keep a
-   backup of the original snapshot (backup table or dump).
+   stopped by running `go run ./cmd/audit-pg-migrate -confirm MIGRATE` (or a
+   program that calls `store.MigratePostgresSnapshot(db)`): it locks the single row, backs it up in
+   `audit_state_snapshot_v1_backup`, inserts per-tenant `audit_tenant` rows and
+   `audit_ledger` records, then marks the control row as layout v2 in one transaction.
+   Keep the backup table and a database dump until the cutover is validated.
 3. *Rollback:* file — restore `.v1`, delete new siblings. PG — restore backup row, drop new
    tables, redeploy previous binaries.
 4. *Cutover order:* Increment 1 first (independent, reversible); Increment 2 after soak.
@@ -424,15 +434,15 @@ HTTP/OpenAPI surface is otherwise unchanged (non-goal): `GET /events/{id}`, `/re
 
 | Acceptance | Test (file) | Measurable assertion | Increment |
 |---|---|---|---|
-| A1 file | `internal/service/archive_eviction_test.go` | ingest N∈{100,1k,5k}, P=4 KB, SegmentSize=2, ArchiveDir set; archive-all + evict; reload; `size(N2)−size(N1) ≤ perRetainedBytes×(N2−N1)+slack` (perRetainedBytes = marshaled minimal archived receipt + segment + checkpoint per event — with SegmentSize=2 the formula must include segments/checkpoints, cf. F-1); payload P→2P Δsize ≤ slack; baseline pin: same test fails on HEAD | 1 |
-| A1 PG | `internal/store/postgres_test.go` | same workload via `OpenPostgres`; assert `octet_length`/`pg_column_size` bounds on control-plane row + tenant rows + ledger (`pg_total_relation_size`); no `t.Parallel()`, reset row first | 1 |
+| A1 file | `internal/store/hotcold_capacity_test.go` (`TestFileHotColdCapacitySlope`) | retained receipt/segment/checkpoint metadata at N∈{100,1k,5k} grows linearly; 4 KB→8 KB evicted payload leaves control/tenant/ledger size within slack; WORM archive bytes are measured separately | 1 / 2 |
+| A1 PG | `internal/store/postgres_hotcold_test.go` (`TestZPostgresHotColdCapacityEnvelope`) | DSN-gated workload via `OpenPostgres`; assert `pg_column_size` bounds on control row + tenant rows + ledger records; reset rows/tables first, no `t.Parallel()` | 2 |
 | A2 bench | `internal/service/bench_test.go` (`BenchmarkIngestWithArchivedLedger`) | K∈{0,1k,10k,50k} preloaded archived+evicted; report ns/op + B/op per K; recorded in `docs/BENCHMARKS.md`; runnable via `go test -bench=BenchmarkIngestWithArchivedLedger -benchmem ./internal/service` | 1 (records pre-split cost) |
 | A2 gate | `TestIngestCostIndependentOfArchivedEvents` (unit, in-memory store) | K=10k vs K=0: single `Ingest` ≤ 3× wall and ≤ 3× allocs (`AllocsPerRun`); `cost(10k)−cost(1k) < cost(1k)` (marginal flat ⇒ O(1) w.r.t. archived events) | 2 |
-| A3 e2e | `internal/service/archive_eviction_test.go` (real archive dir, both backends, restart) | pre/post eviction: `GetEvent` canonical-content identical; `VerifyIntegrity` `Valid=true`, same `EventCount`/`SegmentCount`; `ReplayOperation`/`ReplayAggregate` identical; export `EventCount` + JSONL digest identical; `GetReceipt` unchanged; re-ingest identical→`Duplicate=true`, different→`ErrConflict`, no second append (REQ-5); restart durability | 1 |
-| A3.5 crash | Increment 1: `scriptedConflictBackend.saveErr` fault-inject the batch Save ⇒ all-or-nothing (verbatim). Increment 2: two-point fault injection ⇒ ordering/convergence/no-loss assertions (§5.2) | 1 / 2 |
-| A4 | `internal/store/conflict_rate_test.go` (scripted per-tenant CAS backend for CI) + PG variant (skips without DSN) | R∈{2,4}, M=200: cross-tenant conflict rate = 0; same-tenant ≤ single-row baseline on same harness; cross-tenant < 50% of pre-change single-row rate at R=4/M=200; baseline pin on HEAD (nonzero, growing with R) | 2 |
+| A3 e2e | `internal/service/archive_eviction_test.go` (real archive dir, both backends, restart) | `TestArchivedEventEvictionKeepsReadSemantics` covers verified `GetEvent`, query, timeline, operation/aggregate replay and re-ingest conflict; `TestArchivedExportDigestMatchesHotExport` pins export count/digest equivalence; `TestArchivedEventEvictionSurvivesFileRestart` covers restart durability and integrity | 1 / 2 |
+| A3.5 crash | `internal/store/hotcold_test.go` (`TestHotFirstColdFailureRetainsDurableHotState`, `TestColdFirstHotFailureLeavesRecoverableArchivedState`) | injected cold append failure never loses the durable hot event; injected hot save failure leaves archived receipt plus retained hot body; cleared fault converges to eviction | 2 |
+| A4 | `internal/store/postgres_hotcold_test.go` (`TestTenantCASConflictPartition`, `TestZPostgresTenantCASNoCrossTenantConflicts`) | scripted R=4/M=200 partition has zero cross-tenant conflicts and non-zero same-tenant baseline; optional PG R=4 cross-tenant writes complete without `ErrSnapshotConflict` | 2 |
 | REQ-6 | extend `TestCheckFileToPostgresMigrationHazard` (store_test.go:194) | state with N receipts / 0 events (archived+evicted) still trips; Increment 2: non-empty ledger dir trips; error names `AUDIT_ALLOW_PG_EMPTY_LEDGER` | 1 / 2 |
-| REQ-7 | `TestQueryEventsExcludesArchivedByPolicy`, `TestEvaluateRetentionHotWindowPolicy` (service) | archived events excluded by documented policy on hot-only surfaces; in-snapshot (non-archived) behavior unchanged (no regression on existing query tests); fallback surfaces equivalence from A3 | 1 |
+| REQ-7 | `TestArchivedEventEvictionKeepsReadSemantics`, `TestEvaluateRetentionHotWindowPolicy` (service) | verified archive fallback preserves event/query/timeline/replay/export/integrity behavior after eviction; retention remains a hot-window policy | 1 |
 | REQ-5 | A3 re-ingest assertions + `TestReingestArchivedEventIdempotency` | Duplicate/Conflict/no duplicate append; digest comparison exact (UseNumber) | 1 |
 
 Exit criteria: all assertions green on both backends; `python3 cli.py quality` green at every

@@ -1,6 +1,6 @@
 # Design — Feed the ClickHouse projection from post-ledger events and reject unledgered rows
 
-Status: Approved for implementation · Date: 2026-08-12 · Module: `api/asyncapi`
+Status: Implemented in the reference tree · Date: 2026-08-20 · Module: `api/asyncapi`
 Direction: "Feed the ClickHouse projection from post-ledger events and reject unledgered rows"
 Supersedes: the 2026-08-11 draft of this file (that draft predates the sibling
 "Gate AsyncAPI channel declarations" work — the `TopicLedgered`/`TopicProjection`/
@@ -13,6 +13,12 @@ as **untrusted claims**. Section 1 re-verifies every claim against the working
 tree. Sections 2–9 give the concrete design: API changes, compatibility
 constraints, failure modes, migration steps, and a testable acceptance mapping.
 
+Implementation note: `Service.Ingest` commits the event and durable
+`LedgeredOutbox` record before best-effort publication to
+`audit.events.ledgered.v1`; `cmd/audit-api` enables the publisher through
+`AUDIT_LEDGERED_BROKERS`, and `cmd/audit-projector` consumes the ledgered topic
+by default. The API and verify compose stack also create/enable that topic.
+
 ---
 
 ## 1. Evidence verification
@@ -22,15 +28,15 @@ commit `fae5b4c`. **All confirmed**, with the corrections and additions noted.
 
 | # | Claim | Verification |
 |---|---|---|
-| E1 | `cmd/audit-projector/main.go` defaults to `kafka.TopicAccepted` | **Confirmed.** main.go:19 — `flag.String("topic", envOr("AUDIT_KAFKA_TOPIC", kafka.TopicAccepted), ...)`. |
+| E1 | `cmd/audit-projector/main.go` defaults to `kafka.TopicLedgered` | **Confirmed in the implementation.** The default is `audit.events.ledgered.v1`; an explicit `-topic`/`AUDIT_KAFKA_TOPIC` override remains available for migration diagnostics. |
 | E2 | Projector ingests via `projection.Store.Insert` | **Confirmed.** main.go:42 — `kafka.NewConsumer(..., kafka.IngestFunc(store.Insert), ...)`. |
 | E3 | `projection.Insert`/`schemaDDL` write `StreamID`/`Sequence`/`Hash` with no presence validation | **Confirmed.** projection.go:33–45 (`schemaDDL`: `stream_id String`, `sequence UInt64`, `event_hash String`), projection.go:70–88 (`Insert`: payload encode then `ExecContext`, no guard). |
-| E4 | `internal/kafka/kafka.go` defines `TopicAccepted`/`TopicDLQ`; grep shows zero producers/consumers using `TopicLedgered`/`TopicProjection`/`TopicArchive` | **Confirmed (as corrected).** kafka.go:20/24 (`TopicAccepted`/`TopicDLQ`) and kafka.go:28–42 (`TopicLedgered`/`TopicProjection`/`TopicArchive`, added by the sibling work). Grep over `cmd/`+`internal/` non-test call sites: only `TopicAccepted` is used (`cmd/audit-outbox-relay/main.go:59`, `cmd/audit-kafka-dlq-replay` via a flag, `cmd/audit-kafka-consumer` via flags); `NewConsumer`/`NewProducer` default to `TopicAccepted` (kafka.go:86, 230). |
+| E4 | `internal/kafka/kafka.go` defines the accepted and ledgered topics | **Confirmed in the implementation.** Accepted remains the pre-ledger relay input; `cmd/audit-api` publishes `TopicLedgered` after commit and `cmd/audit-projector` consumes it by default. |
 | E5 | Ledger assigns chain fields only inside `service.Ingest`'s commit closure | **Confirmed.** service.go:422 strips client `StreamID`; service.go:513–516 assign `StreamID`/`Sequence`/`PrevHash`/`Hash` inside the `s.Store.Update` closure; service.go:531–533 copy into the receipt. |
 | E6 | ADR-0004 §4: projector consumes `audit.events.ledgered.v1` | **Confirmed.** docs/adr/ADR-0004.md:22 — "projector 消费 `audit.events.ledgered.v1` 构建投影". |
 | E7 | `asyncapi.yaml` declares `ledgered`/`projection`/`archive` channels and the `EventEnvelope` chain fields | **Confirmed.** asyncapi.yaml channels (lines 9–32), operations `publishAccepted`/`publishLedgered`/`publishProjection`/`publishArchive`/`publishFailure` all `action: send` (lines 36–53), `EventEnvelope` `stream_id` (documented "Server-assigned…"), `sequence`, `prev_hash`, `hash` (lines 66–114). **Additional finding:** `channels.ledgered` currently has **no `description`** (only `accepted` has one) — REQ-7.1 is a real delta, and it is parser-safe (see §3.5). |
 | E8 | Ledger rejections map to 400/409/422 | **Confirmed.** `internal/httpapi/server.go:1204–1229` `statusForError`: `ErrInvalid`→400, `ErrConflict`→409, `ErrTenantMismatch`→422, `ErrSchemaNotFound`→422. Sentinels at `internal/domain/models.go:32,35,37,42`. |
-| E9 | Accepted-topic events carry no chain fields; rejected events still get projected | **Confirmed.** `cmd/audit-outbox-relay/main.go:59` publishes the pre-ledger event to `TopicAccepted`; the ledger assigns chain fields later inside the API `Ingest` commit closure; the projector consumes `accepted` in parallel with the ledger consumer, so rows exist for events the ledger rejects. |
+| E9 | Accepted-topic events carry no chain fields; rejected events never reach the ledgered publisher | **Confirmed in the implementation.** `TopicAccepted` remains pre-ledger input; the API publishes only the post-commit event with server-assigned chain fields, so rejected events do not reach `TopicLedgered`. |
 | E10 | AsyncAPI↔code alignment gate exists and currently passes | **Confirmed.** `checks/asyncapi_channels.py` (Rules A/B, constant alignment only) wired at cli.py:408/419; current run: `PASS: asyncapi channels (5 send channels, 5 symbols aligned, undeclared topics: 0)`, exit 0. `python3 cli.py quality` at baseline: **QUALITY PASS, exit 0**. |
 
 **Additional verified facts:**
@@ -84,14 +90,13 @@ commit `fae5b4c`. **All confirmed**, with the corrections and additions noted.
   to `ledgered`/`sequence`/`prev_hash`/`hash` is parser-safe; keep the
   description text free of flow-container-breaking characters (quotes/braces).
 
-**Verified current data flow** (matches the spec): outbox relay →
-`audit.events.accepted.v1` (pre-ledger; chain fields empty/absent) → two
-independent consumer groups: `audit-kafka-consumer` (POST → API `Ingest`;
-ledger assigns `StreamID`/`Sequence`/`PrevHash`/`Hash` in the commit closure;
-receipt carries them) and `audit-projector` (inserts **pre-ledger** rows into
-ClickHouse with `hash=""`, `sequence=0`, `stream_id=""`, including events the
-ledger later rejects). `ledgered`/`projection`/`archive` have no producing
-code; ADR-0004 §4 is violated.
+**Verified current data flow**: outbox relay →
+`audit.events.accepted.v1` (pre-ledger; chain fields empty/absent) →
+`audit-kafka-consumer` (POST → API `Ingest`; ledger assigns
+`StreamID`/`Sequence`/`PrevHash`/`Hash` in the commit closure) → durable
+`LedgeredOutbox` plus best-effort `audit.events.ledgered.v1` publication →
+`audit-projector`. The projector rejects any message without complete chain
+state and stores protected payloads without derived search-digest keys.
 
 ---
 
@@ -411,9 +416,10 @@ them via `omitempty`).
    stays conformant; gate Rule A/B unaffected (E10).
 7. **`internal/kafka` API surface unchanged** (REQ-2.1) — the adapter lives in
    `cmd/audit-api`.
-8. **Residual risk (accepted):** a crash between the durable ledger commit and
-   the in-process publish loses that event from the ledgered stream; the
-   projection is eventually consistent and rebuildable from the ledger
+8. **Residual risk (bounded):** a crash between the durable ledger commit and
+   the immediate publish can delay the event, but the retained
+   `LedgeredOutbox` is retried after API restart/periodic flush; the projection
+   remains eventually consistent and rebuildable from the ledger
    (ADR-0004 §4 rebuild path is the backstop; durable outbox delivery of
    ledgered events is explicitly out of scope, §9).
 

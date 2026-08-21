@@ -283,3 +283,34 @@ func TestRecoverStuckExportsTenantScoping(t *testing.T) {
 		}
 	}
 }
+
+func TestResumePendingExportsClaimsAndCompletesOnce(t *testing.T) {
+	svc := testService(t, true)
+	t0 := time.Unix(1_700_001_000, 0).UTC()
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("resume-export-event", "resume-op", t0), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "resume-export-job"
+	job := domain.ExportJob{ID: jobID, TenantID: "tenant-a", RequestedBy: "worker", Query: domain.Query{From: t0.Add(-time.Second), To: t0.Add(time.Second)}, Status: "pending", CreatedAt: t0}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Exports[jobID] = job
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := svc.ResumePendingExports("tenant-a")
+	if err != nil || resumed != 1 {
+		t.Fatalf("resumed=%d err=%v, want one scheduled job", resumed, err)
+	}
+	completed := waitExportCompleted(t, svc, jobID)
+	if completed.Status != "completed" || completed.EventCount != 1 {
+		t.Fatalf("resumed export=%+v, want completed one-event export", completed)
+	}
+	resumed, err = svc.ResumePendingExports("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed != 0 {
+		t.Fatalf("terminal export was resumed again: %d", resumed)
+	}
+}

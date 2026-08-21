@@ -10,15 +10,16 @@ import (
 )
 
 const (
-	StatusReceived  = "received"
-	StatusAccepted  = "accepted"
-	StatusLedgered  = "ledgered"
-	StatusIndexed   = "indexed"
-	StatusArchived  = "archived"
-	StatusFailed    = "failed"
-	MaxEventBytes   = 256 * 1024
-	DefaultPageSize = 100
-	MaxPageSize     = 1000
+	StatusReceived    = "received"
+	StatusAccepted    = "accepted"
+	StatusLedgered    = "ledgered"
+	StatusIndexed     = "indexed"
+	StatusArchived    = "archived"
+	StatusFailed      = "failed"
+	MaxEventBytes     = 256 * 1024
+	DefaultPageSize   = 100
+	MaxPageSize       = 1000
+	MaxTimelineEvents = 10000
 	// MaxArchiveComponentBytes caps every identifier that becomes an archive
 	// key component (tenant id, stream-derived components, event id). The
 	// injective percent-encoding expands a non-safe byte 3×, so 85 bytes is
@@ -129,20 +130,23 @@ type FieldChange struct {
 }
 
 type EventReceipt struct {
-	EventID      string    `json:"event_id"`
-	TenantID     string    `json:"tenant_id"`
-	Status       string    `json:"status"`
-	AcceptedAt   time.Time `json:"accepted_at"`
-	LedgeredAt   time.Time `json:"ledgered_at,omitempty"`
-	IndexedAt    time.Time `json:"indexed_at,omitempty"`
-	ArchivedAt   time.Time `json:"archived_at,omitempty"`
-	StreamID     string    `json:"stream_id,omitempty"`
-	Sequence     int64     `json:"sequence,omitempty"`
-	Hash         string    `json:"hash,omitempty"`
-	Duplicate    bool      `json:"duplicate,omitempty"`
-	Conflict     bool      `json:"conflict,omitempty"`
-	ErrorCode    string    `json:"error_code,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
+	EventID  string `json:"event_id"`
+	TenantID string `json:"tenant_id"`
+	// IdempotencyKey is retained with the receipt so idempotency remains
+	// enforceable after the event payload is evicted from the hot snapshot.
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	Status         string    `json:"status"`
+	AcceptedAt     time.Time `json:"accepted_at"`
+	LedgeredAt     time.Time `json:"ledgered_at,omitempty"`
+	IndexedAt      time.Time `json:"indexed_at,omitempty"`
+	ArchivedAt     time.Time `json:"archived_at,omitempty"`
+	StreamID       string    `json:"stream_id,omitempty"`
+	Sequence       int64     `json:"sequence,omitempty"`
+	Hash           string    `json:"hash,omitempty"`
+	Duplicate      bool      `json:"duplicate,omitempty"`
+	Conflict       bool      `json:"conflict,omitempty"`
+	ErrorCode      string    `json:"error_code,omitempty"`
+	ErrorMessage   string    `json:"error_message,omitempty"`
 }
 
 // DeadLetter records an event (or sealed segment) that will never archive:

@@ -23,6 +23,10 @@ channels:
               description: MUST equal the AuditEvent payload's event_id.
   ledgered:
     address: audit.events.ledgered.v1
+    description: >-
+      Post-ledger, chain-linked audit events. Published after the immutable
+      ledger commit; stream_id, sequence, prev_hash and hash are server-assigned
+      and present on this channel. The Kafka message key MUST equal event_id.
     messages:
       auditEvent:
         $ref: '#/components/messages/AuditEvent'
@@ -85,7 +89,7 @@ components:
   schemas:
     EventEnvelope:
       type: object
-      required: [event_id, tenant_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key]
+      required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key]
       properties:
         event_id: { type: string }
         tenant_id: { type: string }
@@ -100,7 +104,7 @@ components:
         correlation_id: { type: string }
         trace_id: { type: string }
         span_id: { type: string }
-        actor: { type: object }
+        actor: { type: object, required: [id], properties: { id: { type: string } } }
         targets: { type: array, items: { type: object } }
         aggregate_type: { type: string }
         aggregate_id: { type: string }
@@ -117,6 +121,7 @@ components:
         retention_class: { type: string }
         idempotency_key: { type: string }
         stream_id: { type: string, description: Server-assigned; a client-supplied value is stripped on ingest. }
-        sequence: { type: integer }
-        prev_hash: { type: string }
-        hash: { type: string }
+        sequence: { type: integer, description: Server-assigned sequence within the ledger stream; always >= 1 on the ledgered channel. }
+        prev_hash: { type: string, description: Server-assigned predecessor hash in the ledger chain; empty only for the first event of a stream. }
+        hash: { type: string, description: Server-assigned chain hash; always non-empty on the ledgered channel. }
+      anyOf: [{ required: [payload] }, { required: [payload_ref] }]

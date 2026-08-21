@@ -39,6 +39,18 @@ func newPostgresTestDB(t *testing.T) *sql.DB {
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
+	// Hot/cold integration tests may run against the same disposable DSN.
+	// Always restore the legacy schema before a snapshot-row test so test
+	// order cannot accidentally select the split backend.
+	for _, statement := range []string{
+		`DROP TABLE IF EXISTS audit_state_snapshot_v1_backup`,
+		`DROP TABLE IF EXISTS audit_ledger`,
+		`DROP TABLE IF EXISTS audit_tenant`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("reset hot/cold tables: %v", err)
+		}
+	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM audit_state_snapshot`); err != nil {
 		t.Fatalf("reset snapshot row: %v", err)
 	}

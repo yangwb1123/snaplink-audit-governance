@@ -1108,6 +1108,23 @@ func TestRunCheckConfigGRPCPlaintextFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRequireGRPCMTLSCannotBeBypassedByLoopbackOrAllowlist(t *testing.T) {
+	certFile, keyFile := writeTestTLSFiles(t)
+	t.Setenv(grpcInsecureAllowlistEnv, "true")
+	for _, listen := range []string{"127.0.0.1:50051", ":50051"} {
+		_, _, err := resolveGRPCTransportWithMTLS(listen, certFile, keyFile, "", true)
+		if err == nil || !strings.Contains(err.Error(), "gRPC mTLS is required") || !strings.Contains(err.Error(), "AUDIT_GRPC_TLS_CLIENT_CA") {
+			t.Fatalf("listen=%q err=%v, want a hard mTLS requirement", listen, err)
+		}
+	}
+	// Disabling the listener remains a valid configuration-only state: no
+	// transport is exposed, so requiring client authentication is vacuous.
+	label, _, err := resolveGRPCTransportWithMTLS("", certFile, keyFile, "", true)
+	if err != nil || label != "disabled" {
+		t.Fatalf("disabled listener label=%q err=%v, want disabled without client CA", label, err)
+	}
+}
+
 // TestRunCheckConfigGRPCDeterministic is A4: two invocations of
 // runCheckConfig with identical configuration produce byte-identical output
 // and equal exit codes, across the TLS, allowlisted-plaintext and disabled

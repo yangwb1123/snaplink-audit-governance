@@ -283,6 +283,55 @@ type Cursor struct {
 	Legacy     bool
 }
 
+// TimelineCursor is the opaque position used by operation and aggregate
+// timeline pages. The scope is part of the cursor so a token issued for one
+// timeline cannot silently skip data in another timeline that happens to
+// share the same ordering key.
+type TimelineCursor struct {
+	Version          int       `json:"v"`
+	Kind             string    `json:"kind"`
+	Scope            string    `json:"scope"`
+	OccurredAt       time.Time `json:"occurred_at,omitempty"`
+	AggregateVersion int64     `json:"aggregate_version,omitempty"`
+	Sequence         int64     `json:"sequence,omitempty"`
+	EventID          string    `json:"event_id"`
+}
+
+const timelineCursorVersion = 1
+
+// EncodeTimelineCursor emits a versioned, URL-safe timeline position. It is
+// intentionally separate from the event-query cursor because aggregate
+// timelines are ordered by aggregate_version rather than occurred_at.
+func EncodeTimelineCursor(cursor TimelineCursor) string {
+	cursor.Version = timelineCursorVersion
+	data, _ := CanonicalJSON(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+// DecodeTimelineCursor parses and validates a timeline position. Unknown
+// versions and kinds fail closed so an ordering change cannot produce silent
+// duplicates or omissions.
+func DecodeTimelineCursor(value string) (TimelineCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return TimelineCursor{}, fmt.Errorf("%w: invalid timeline cursor", ErrInvalid)
+	}
+	var cursor TimelineCursor
+	if err := json.Unmarshal(data, &cursor); err != nil {
+		return TimelineCursor{}, fmt.Errorf("%w: invalid timeline cursor", ErrInvalid)
+	}
+	if cursor.Version != timelineCursorVersion || (cursor.Kind != "operation" && cursor.Kind != "aggregate") || cursor.Scope == "" || cursor.EventID == "" {
+		return TimelineCursor{}, fmt.Errorf("%w: invalid timeline cursor", ErrInvalid)
+	}
+	if cursor.Kind == "operation" && cursor.OccurredAt.IsZero() {
+		return TimelineCursor{}, fmt.Errorf("%w: invalid operation timeline cursor", ErrInvalid)
+	}
+	if cursor.Kind == "aggregate" && cursor.AggregateVersion < 0 {
+		return TimelineCursor{}, fmt.Errorf("%w: invalid aggregate timeline cursor", ErrInvalid)
+	}
+	return cursor, nil
+}
+
 // EncodeCursor encodes a cursor as a stable opaque string:
 //   - chronological: [occurred_at_rfc3339nano_utc, sequence, event_id]
 //   - legacy (Legacy=true): [sequence, event_id]  (byte-identical to today)

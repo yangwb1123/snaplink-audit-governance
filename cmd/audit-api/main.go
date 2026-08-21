@@ -23,6 +23,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/grpcapi"
 	"github.com/snaplink/audit-governance/internal/httpapi"
+	"github.com/snaplink/audit-governance/internal/kafka"
 	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
@@ -37,7 +38,18 @@ import (
 // the flag deliberately cannot satisfy it).
 const envDevAuth = "AUDIT_ALLOW_DEV_AUTH"
 
+const envGRPCRequireMTLS = "AUDIT_GRPC_REQUIRE_MTLS"
+
 func main() {
+	// Register the termination handler before opening the state store. The
+	// file-lock contract exposes the lock as soon as openStore succeeds; a
+	// supervisor may terminate the process during the remaining bootstrap
+	// work, and the signal must not fall through to the OS default action in
+	// that window.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stop)
+
 	listen := flag.String("listen", envOr("AUDIT_LISTEN", ":8089"), "HTTP listen address")
 	statePath := flag.String("state", envOr("AUDIT_STATE_PATH", "./data/state.json"), "local state snapshot path")
 	postgresDSN := flag.String("postgres-dsn", os.Getenv("AUDIT_POSTGRES_DSN"), "PostgreSQL DSN for the control-plane state snapshot; overrides -state")
@@ -67,6 +79,9 @@ func main() {
 	grpcListen := flag.String("grpc-listen", os.Getenv("AUDIT_GRPC_LISTEN"), "optional gRPC listen address")
 	grpcTLSCert := flag.String("grpc-tls-cert", os.Getenv("AUDIT_GRPC_TLS_CERT"), "PEM certificate path for the gRPC ingest listener (must be set together with -grpc-tls-key)")
 	grpcTLSKey := flag.String("grpc-tls-key", os.Getenv("AUDIT_GRPC_TLS_KEY"), "PEM private key path for the gRPC ingest listener (must be set together with -grpc-tls-cert)")
+	grpcTLSClientCA := flag.String("grpc-tls-client-ca", os.Getenv("AUDIT_GRPC_TLS_CLIENT_CA"), "PEM CA bundle for required gRPC client certificates; empty keeps server-only TLS")
+	grpcRequireMTLS := flag.Bool("grpc-require-mtls", strictBoolEnv(envGRPCRequireMTLS, false), "require a verified client certificate whenever the gRPC ingest listener is enabled (AUDIT_GRPC_REQUIRE_MTLS)")
+	ledgeredBrokers := flag.String("ledgered-brokers", os.Getenv("AUDIT_LEDGERED_BROKERS"), "comma-separated Kafka brokers for post-ledger events; empty disables ledgered publication")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("AUDIT_OTLP_ENDPOINT"), "OTLP/HTTP trace endpoint such as http://jaeger:4318; empty disables tracing")
 	vaultAddr := flag.String("vault-addr", os.Getenv("AUDIT_VAULT_ADDR"), "HashiCorp Vault address; with token+transit key, checkpoint signatures go through the Transit engine")
 	vaultToken := flag.String("vault-token", os.Getenv("AUDIT_VAULT_TOKEN"), "Vault token for the Transit signer")
@@ -96,8 +111,18 @@ func main() {
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
-		os.Exit(runCheckConfig(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey))
+		os.Exit(runCheckConfigWithMTLS(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey, *grpcTLSClientCA, *grpcRequireMTLS))
 	}
+	var ledgeredProducer *kafka.Producer
+	if *ledgeredBrokers != "" {
+		ledgeredProducer = kafka.NewProducer(strings.Split(*ledgeredBrokers, ","), kafka.TopicLedgered)
+		defer ledgeredProducer.Close()
+		cfg.LedgeredPublisher = kafkaLedgeredPublisher{producer: ledgeredProducer}
+		logger.Printf("ledgered_publish=enabled brokers=%s topic=%s", *ledgeredBrokers, kafka.TopicLedgered)
+	} else {
+		logger.Printf("ledgered_publish=disabled (set -ledgered-brokers or AUDIT_LEDGERED_BROKERS to enable)")
+	}
+	cfg.Logf = logger.Printf
 	st, err := openStore(*statePath, *postgresDSN, logger)
 	if err != nil {
 		logger.Fatalf("open store: %v", err)
@@ -135,7 +160,7 @@ func main() {
 		// as -check-config through the shared resolveGRPCTransport helper (so
 		// preflight and runtime cannot diverge) before any listener is bound;
 		// TLS credentials are loaded exactly once and reused for grpc.Creds.
-		grpcTransport, grpcCreds, transportErr := resolveGRPCTransport(*grpcListen, *grpcTLSCert, *grpcTLSKey)
+		grpcTransport, grpcCreds, transportErr := resolveGRPCTransportWithMTLS(*grpcListen, *grpcTLSCert, *grpcTLSKey, *grpcTLSClientCA, *grpcRequireMTLS)
 		if transportErr != nil {
 			logger.Fatalf("%v", transportErr)
 		}
@@ -184,8 +209,10 @@ func main() {
 			}
 		}()
 	}
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	ledgeredCtx, cancelLedgered := context.WithCancel(context.Background())
+	if svc.Config.LedgeredPublisher != nil {
+		go runLedgeredOutboxLoop(ledgeredCtx, svc, logger)
+	}
 	go func() {
 		logger.Printf("listen=%s", *listen)
 		if serveErr := server.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -193,6 +220,7 @@ func main() {
 		}
 	}()
 	<-stop
+	cancelLedgered()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
@@ -379,6 +407,14 @@ func envOr(name, fallback string) string {
 // (REQ-4, shared resolveGRPCTransport) and reports transport_grpc on the ok
 // line.
 func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey string) int {
+	return runCheckConfigWithClientCA(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, "")
+}
+
+func runCheckConfigWithClientCA(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA string) int {
+	return runCheckConfigWithMTLS(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA, false)
+}
+
+func runCheckConfigWithMTLS(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA string, requireMTLS bool) int {
 	svc, err := service.New(nil, cfg)
 	if err != nil {
 		logger.Printf("invalid secrets: %v", err)
@@ -432,7 +468,7 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 	// mismatched PEM pairs are hard errors (REQ-3.2/3.3). The ok line gains
 	// the unconditional final transport_grpc=<tls|insecure|disabled> field
 	// (REQ-3.4), keeping check-config a pure function of resolved config.
-	grpcTransport, _, transportGRPCErr := resolveGRPCTransport(grpcListen, grpcTLSCert, grpcTLSKey)
+	grpcTransport, _, transportGRPCErr := resolveGRPCTransportWithMTLS(grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA, requireMTLS)
 	if transportGRPCErr != nil {
 		logger.Printf("%v", transportGRPCErr)
 		return 1
@@ -561,16 +597,36 @@ func grpcAllowlisted() (bool, error) {
 // allowlist value. Sharing one helper structurally prevents preflight/runtime
 // divergence and double TLS loads.
 func resolveGRPCTransport(grpcListen, tlsCert, tlsKey string) (label string, creds credentials.TransportCredentials, err error) {
+	return resolveGRPCTransportWithClientCA(grpcListen, tlsCert, tlsKey, "")
+}
+
+func resolveGRPCTransportWithClientCA(grpcListen, tlsCert, tlsKey, clientCAFile string) (label string, creds credentials.TransportCredentials, err error) {
+	return resolveGRPCTransportWithMTLS(grpcListen, tlsCert, tlsKey, clientCAFile, false)
+}
+
+func resolveGRPCTransportWithMTLS(grpcListen, tlsCert, tlsKey, clientCAFile string, requireMTLS bool) (label string, creds credentials.TransportCredentials, err error) {
 	certSet := tlsCert != ""
 	keySet := tlsKey != ""
 	if certSet != keySet {
 		return "", nil, fmt.Errorf("partial TLS configuration: -grpc-tls-cert and -grpc-tls-key must be set together (AUDIT_GRPC_TLS_CERT/AUDIT_GRPC_TLS_KEY)")
 	}
+	if clientCAFile != "" && !certSet {
+		return "", nil, fmt.Errorf("partial mTLS configuration: -grpc-tls-client-ca requires -grpc-tls-cert and -grpc-tls-key (AUDIT_GRPC_TLS_CLIENT_CA)")
+	}
+	if requireMTLS && grpcListen != "" && clientCAFile == "" {
+		return "", nil, fmt.Errorf("gRPC mTLS is required: set -grpc-tls-client-ca/AUDIT_GRPC_TLS_CLIENT_CA together with the server certificate and key")
+	}
 	// REQ-3.3: TLS files are validated whenever either path is non-empty,
 	// even when the listener is unset, so typos fail preflight early. No
 	// expiry/time checks (REQ-7): check-config stays deterministic.
 	if certSet {
-		loaded, loadErr := grpcapi.ServerCredentials(tlsCert, tlsKey)
+		var loaded credentials.TransportCredentials
+		var loadErr error
+		if clientCAFile != "" {
+			loaded, loadErr = grpcapi.MutualTLSCredentials(tlsCert, tlsKey, clientCAFile)
+		} else {
+			loaded, loadErr = grpcapi.ServerCredentials(tlsCert, tlsKey)
+		}
 		if loadErr != nil {
 			return "", nil, fmt.Errorf("gRPC TLS: %w", loadErr)
 		}

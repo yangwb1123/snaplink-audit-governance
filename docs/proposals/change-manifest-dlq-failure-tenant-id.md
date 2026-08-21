@@ -1,6 +1,6 @@
 # Change Manifest — DLQ `Failure.tenant_id` + consumer tenant scope
 
-Status: Approved for implementation · Date: 2026-08-16 · Module: `api/asyncapi` + `cmd/audit-kafka-consumer` + `internal/kafka`
+Status: Implemented in the reference tree · Date: 2026-08-20 · Module: `api/asyncapi` + `cmd/audit-kafka-consumer` + `internal/kafka`
 Direction: "Add tenant-scoped validation to the Kafka consumer — foreign-tenant events on the shared accepted topic are permanently dead-lettered and dropped from the ledger"
 
 Platform-contract change discipline: this is a **cross-contract change** (the

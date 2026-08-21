@@ -447,22 +447,27 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.OperationTimeline(tenantID, claims.Subject, r.PathValue("operationID"))
+	pageSize, cursor, err := parseTimelinePage(r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	result, err := s.Service.OperationTimelinePage(tenantID, claims.Subject, r.PathValue("operationID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// 与 getEvent/queryEvents 相同：时间线响应剥离搜索摘要（深拷贝，绝不
 	// 改动存储快照共享的 map）。剥离失败时 500 —— 宁可失败也不泄漏。
-	for i := range result {
-		stripped, stripErr := security.StripSearchDigests(result[i].Payload)
+	for i := range result.Items {
+		stripped, stripErr := security.StripSearchDigests(result.Items[i].Payload)
 		if stripErr != nil {
 			s.writeError(w, r, http.StatusInternalServerError, stripErr)
 			return
 		}
-		result[i].Payload = stripped
+		result.Items[i].Payload = stripped
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": result, "count": len(result)})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
@@ -495,22 +500,27 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.AggregateTimeline(tenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"))
+	pageSize, cursor, err := parseTimelinePage(r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	result, err := s.Service.AggregateTimelinePage(tenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// 与 getEvent/queryEvents 相同：聚合时间线响应剥离搜索摘要（深拷贝，
 	// 绝不改动存储快照共享的 map）。剥离失败时 500 —— 宁可失败也不泄漏。
-	for i := range items {
-		stripped, stripErr := security.StripSearchDigests(items[i].Payload)
+	for i := range result.Items {
+		stripped, stripErr := security.StripSearchDigests(result.Items[i].Payload)
 		if stripErr != nil {
 			s.writeError(w, r, http.StatusInternalServerError, stripErr)
 			return
 		}
-		items[i].Payload = stripped
+		result.Items[i].Payload = stripped
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
@@ -1119,14 +1129,27 @@ func parseQuery(r *http.Request) (domain.Query, error) {
 	if err != nil {
 		return domain.Query{}, err
 	}
+	pageSize, cursor, err := parsePageOptions(values)
+	if err != nil {
+		return domain.Query{}, err
+	}
+	return domain.Query{From: from, To: to, EventType: values.Get("event_type"), SourceSystem: values.Get("source_system"), ActorID: values.Get("actor_id"), TargetID: values.Get("target_id"), AggregateType: values.Get("aggregate_type"), AggregateID: values.Get("aggregate_id"), OperationID: values.Get("operation_id"), CausationID: values.Get("causation_id"), CorrelationID: values.Get("correlation_id"), TraceID: values.Get("trace_id"), Outcome: values.Get("outcome"), PayloadField: values.Get("payload_field"), PayloadDigest: values.Get("payload_digest"), StreamID: values.Get("stream_id"), Cursor: cursor, PageSize: pageSize}, nil
+}
+
+func parseTimelinePage(r *http.Request) (int, string, error) {
+	return parsePageOptions(r.URL.Query())
+}
+
+func parsePageOptions(values interface{ Get(string) string }) (int, string, error) {
 	pageSize := 0
 	if raw := values.Get("page_size"); raw != "" {
-		pageSize, err = strconv.Atoi(raw)
+		parsed, err := strconv.Atoi(raw)
 		if err != nil {
-			return domain.Query{}, fmt.Errorf("%w: invalid page_size", domain.ErrInvalid)
+			return 0, "", fmt.Errorf("%w: invalid page_size", domain.ErrInvalid)
 		}
+		pageSize = parsed
 	}
-	return domain.Query{From: from, To: to, EventType: values.Get("event_type"), SourceSystem: values.Get("source_system"), ActorID: values.Get("actor_id"), TargetID: values.Get("target_id"), AggregateType: values.Get("aggregate_type"), AggregateID: values.Get("aggregate_id"), OperationID: values.Get("operation_id"), CausationID: values.Get("causation_id"), CorrelationID: values.Get("correlation_id"), TraceID: values.Get("trace_id"), Outcome: values.Get("outcome"), PayloadField: values.Get("payload_field"), PayloadDigest: values.Get("payload_digest"), StreamID: values.Get("stream_id"), Cursor: values.Get("cursor"), PageSize: pageSize}, nil
+	return pageSize, values.Get("cursor"), nil
 }
 
 func parseBodyQuery(w http.ResponseWriter, r *http.Request) (domain.Query, error) {

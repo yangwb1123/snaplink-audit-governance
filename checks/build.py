@@ -7,7 +7,7 @@ from .config import ROOT
 def run() -> int:
     output = ROOT / "bin"
     output.mkdir(exist_ok=True)
-    targets = (("audit-api", "./cmd/audit-api"), ("audit-governance-worker", "./cmd/audit-governance-worker"), ("audit-outbox-relay", "./cmd/audit-outbox-relay"), ("audit-kafka-consumer", "./cmd/audit-kafka-consumer"), ("audit-kafka-dlq-replay", "./cmd/audit-kafka-dlq-replay"), ("audit-projector", "./cmd/audit-projector"))
+    targets = (("audit-api", "./cmd/audit-api"), ("audit-governance-worker", "./cmd/audit-governance-worker"), ("audit-outbox-relay", "./cmd/audit-outbox-relay"), ("audit-kafka-consumer", "./cmd/audit-kafka-consumer"), ("audit-kafka-dlq-replay", "./cmd/audit-kafka-dlq-replay"), ("audit-projector", "./cmd/audit-projector"), ("audit-pg-migrate", "./cmd/audit-pg-migrate"))
     for name, package in targets:
         result = subprocess.run(["go", "build", "-o", str(output / name), package], cwd=ROOT, check=False)
         if result.returncode:
@@ -18,4 +18,3 @@ def run() -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
-

@@ -1,5 +1,72 @@
 # Release Notes
 
+## 2026-08-20 — 控制面 v2 热/冷分层与显式 PostgreSQL 切换
+
+**写给运营：**
+
+- 文件后端首次打开旧 v1 `state.json` 时会先写入 `.v1` 备份，再拆成控制面、每租户热文件和每租户 JSONL 冷 ledger；校验发现缺失租户文件、冷文件或残留 `.tmp` 会失败关闭。
+- PostgreSQL 旧部署不会因新二进制自动重解释。切换前停止 API，应用
+  `migrations/006_hot_cold_split.sql`，运行
+  `go run ./cmd/audit-pg-migrate -confirm MIGRATE`（或调用
+  `store.MigratePostgresSnapshot(db)`）；该操作锁定快照行，在同一事务中写入
+  `audit_state_snapshot_v1_backup`、租户热表、冷 ledger，并最后标记控制面为 v2。
+- 回滚前保留备份表和数据库 dump；文件回滚使用 `.v1` 恢复并移除 v2 兄弟目录，PostgreSQL 回滚恢复备份行、删除 006 表后再部署旧版本。切换未完成或目标布局不完整时服务应保持未就绪。
+
+**写给开发：**
+
+- `ReadTenant`/`UpdateTenant` 让 ingest、封段和归档 worker 只加载当前租户热文档；`TenantLedger` 以不可变 receipt 版本和 segment/checkpoint 家族索引支持重试幂等。
+- ingest 使用 HotFirst，归档淘汰使用 ColdFirst；冷证据先落盘/入库，热事件随后删除，半完成状态可由下一轮 worker 收敛。
+- 归档 receipt 的 idempotency lookup 不再扫描全量历史事件；热/冷 benchmark 覆盖 K=0、1,000、10,000、50,000，`TestIngestCostIndependentOfArchivedEvents` 固定 K=10,000 的近似 O(1) 成本边界。
+- 迁移、布局完整性、容量斜率、账本版本继承、热/冷故障恢复、跨租户 CAS 和全量质量门禁由单测覆盖；发布前必须运行 `python3 cli.py quality`。
+
+## 2026-08-20 — 投影脱敏与归档回退读取超时
+
+**写给运营：**
+
+- ClickHouse 投影继续只消费 post-ledger 事件；落库前会递归移除
+  `__search_digest` 派生字段，schema 加密字段仍以 `enc:v1:` 密文保存，
+  不会把明文复制到查询投影。
+- 归档事件的回退读取新增单次 30 秒截止时间；WORM/S3 黑洞会让事件读取、
+  查询、时间线、导出或完整性检查失败关闭，而不会无限占用请求或存储读锁。
+
+**写给开发：**
+
+- `internal/projection.projectionPayload` 通过 `security.StripSearchDigests`
+  深拷贝后再做 canonical JSON，绝不修改账本事件 payload。
+- `internal/service.archiveReadTimeout` 与调用方更短的 context deadline
+  取交集；测试可缩短该包级 seam 验证取消语义。
+- verify compose 已启用 `AUDIT_LEDGERED_BROKERS` 并创建
+  `audit.events.ledgered.v1`，使 accepted → ledger → projector 链路闭合。
+
+## 2026-08-20 — 归档事件热快照淘汰与可验证读回退
+
+**写给运营：**
+
+- 归档对象成功写入并验证后，事件正文会从控制面快照淘汰；receipt、序列、哈希链元数据仍保留，快照不会继续按归档事件正文增长。
+- 事件详情、操作/聚合时间线、回放、导出和完整性校验会从 WORM 归档读回，并校验 tenant、stream、sequence、event_id 与 receipt hash；归档对象缺失或被篡改时请求失败关闭，不会返回静默 404。
+- `GET /api/v1/events` 同样从 WORM 归档回退读取，已归档事件在淘汰热正文后仍保持可查询；归档后的 event_id 与 idempotency_key 仍继续执行重复/冲突保护。
+
+**写给开发：**
+
+- `EventReceipt.IdempotencyKey` 为兼容性新增字段；旧快照可加载，旧 receipt 缺少该字段时保留热事件路径的历史行为。
+- `ArchivePending` 与 ingest 的归档状态提交在同一个快照写入中删除热事件；文件切 PostgreSQL 预检同时把 receipts 视为账本证据。
+- 回退读取复用单一 archive key 编码和 `UseNumber` 解码，避免大整数在重启/归档回退路径丢失精度。
+
+## 2026-08-20 — 时间线分页、ledgered 持久化补发与可选严格 mTLS
+
+**写给运营：**
+
+- operation/aggregate timeline 新增 `page_size`（默认 100、最大 1000）与作用域绑定的 opaque `cursor`，响应包含 `next_cursor`；operation 按 `(occurred_at, sequence, event_id)` 排序，aggregate 按 `(aggregate_version, event_id)` 排序。
+- 配置 `AUDIT_LEDGERED_BROKERS`/`-ledgered-brokers` 后，post-ledger 发布失败会保留在快照 `ledgered_outbox`，API 重启和后台周期任务自动补发；账本仍先提交，发布链路为至少一次，投影消费者必须按 event_id 幂等。
+- 新增 `AUDIT_GRPC_REQUIRE_MTLS=true`/`-grpc-require-mtls`。启用后 gRPC listener 必须同时提供 server cert/key 与 client CA，回环监听和 `AUDIT_ALLOW_INSECURE_GRPC_LISTEN` 都不能绕过该要求；默认 false 以兼容现有验证栈。
+
+**写给开发：**
+
+- `internal/domain` 增加版本化、作用域绑定的 timeline cursor；`internal/service/timeline.go` 增加分页服务方法，旧全量方法与 replay 仍受 `MaxTimelineEvents` 保护。
+- `internal/store.Snapshot.LedgeredOutbox` 采用旧快照可归一化的可选字段；`internal/service.FlushLedgeredOutbox` 与 `cmd/audit-api` 的周期 loop 负责恢复发布，发布与确认由互斥区串行化以避免恢复竞态重复。
+- `internal/grpcapi` 的 `MutualTLSCredentials` 与 API transport gate 共用 cert/CA 校验；`check-config` 与启动路径共用严格 mTLS 约束。
+- 无新增数据库迁移；`python3 cli.py quality` 必须通过。
+
 ## 2026-08-16 — 治理 worker 归档写路径获得真实截止时间与取消：pass 级 2 分钟上限、ctx 贯穿三个 Put 站点、导出单写 30s 界（cmd/audit-governance-worker + internal/service，give-the-worker-s-archive-write-path-a-real-dead-f9f2be1e）
 
 **写给运营（行为变化）：**

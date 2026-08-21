@@ -12,7 +12,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
   发送审计事件。
 - OpenTelemetry 负责技术链路关联，不替代业务审计事实。
 
-当前阶段为架构设计期，尚未承诺任何生产功能或兼容性。
+当前仓库包含可运行的参考实现；生产部署仍须按部署环境完成安全配置、外部依赖探测和容量验证。
 
 ## 设计文档
 
@@ -39,11 +39,17 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - `go run ./cmd/audit-governance-worker -once` 执行一次留存/Legal Hold 评估。
 - 聚合 checkpoint 每租户按上限保留（默认 1000 条，drop-oldest，`AUDIT_AGGREGATE_CHECKPOINT_HISTORY` 可覆盖，下限 1）；根与签名未变化的周期去重、空闲周期不写快照，`VerifyIntegrity` 聚合校验工作量由此有界。
 - 导出作业卡在 `running` 超过阈值（默认 24 小时，从 `CreatedAt` 起算，`AUDIT_GOVERNANCE_STUCK_EXPORT_AGE`/`-stuck-export-age` 可覆盖；`0` = 默认）由 worker 在每次 pass 中失败并写入 `export.recovered` 自审计事实（状态变更与事实同一次原子保存；终态作业永不回退；空闲 pass 零写入）。
+- 操作时间线与聚合历史支持 `page_size`（默认 100、最大 1000）和作用域绑定的 `cursor`；分页响应的 `count` 是总匹配数，`next_cursor` 可安全续读，旧的 service 全量方法仍保留 10,000 条保护上限。
+- 归档成功后事件正文从控制面热快照淘汰，仅保留 receipt/hash 链元数据；`GET /events`、`GET /events/{id}`、操作/聚合时间线、回放、导出和完整性校验会从 WORM 归档读回并校验身份与哈希。查询结果在淘汰前后保持一致。
 - `go run ./cmd/audit-outbox-relay -once` 消费业务库 `audit_outbox` 待投递记录并写入审计 API；成功标记 delivered，失败按指数退避重试，超过上限或遇到客户端错误死信。
 - `go run ./cmd/audit-kafka-dlq-replay -once` 恢复死信事件（从 accepted topic 按 key 找回原消息重发或经 API 重新接入，状态文件去重）。
 - 默认本地状态保存到 `./data/state.json`，归档保存到 `./data/archive`。
+- 文件状态首次打开时会把 v1 单快照迁移为 v2 热/冷布局：控制面仍在
+  `state.json`，每个租户的热事件/流状态在 `tenants/`，receipt、segment、checkpoint
+  追加到 `ledger/`，原文件保留为 `state.json.v1` 备份；v2 布局发现缺失热文件、冷文件或临时文件时拒绝启动。
+- v2 文件写入优先走 `ReadTenant`/`UpdateTenant`，只重写当前租户热文档；冷 ledger 在启动时建立索引，写入采用 fsync 后追加。
 - 文件模式状态强制单写者：`store.Open` 在 `<path>.lock` 上持有进程生命周期排他 flock（flock 为 advisory 且依赖文件系统，NFS 上不可靠），同一 `-state` 路径的第二个实例（audit-api 或 audit-governance-worker）启动即报错退出；多实例部署必须使用 PostgreSQL 后端（乐观版本锁）。
-- 设置 `AUDIT_POSTGRES_DSN`（或 `-postgres-dsn`）后，控制面状态快照保存在 PostgreSQL 单行表 `audit_state_snapshot`（迁移 `004_state_snapshot.sql`），支持多副本共享；乐观版本锁防止丢失更新，`Store.Update` 内做有界 jitter 重试（3 次、5–25ms 指数退避 + 抖动，闭包在新鲜快照上重跑），重试耗尽返回 503 `snapshot_conflict`；`/readyz` 同时探测 store（PostgreSQL 不可达 → 503 `store_unavailable`）与归档目标。
+- 设置 `AUDIT_POSTGRES_DSN`（或 `-postgres-dsn`）后，旧部署默认继续使用 PostgreSQL 单行表 `audit_state_snapshot`（迁移 `004_state_snapshot.sql`）；要启用 v2 热/冷分层，先停 API、应用 `migrations/006_hot_cold_split.sql`，再运行 `go run ./cmd/audit-pg-migrate -confirm MIGRATE`（或调用 `store.MigratePostgresSnapshot(db)`）完成带备份的显式切换。切换后 `audit_state_snapshot` 仅保存控制面，`audit_tenant` 保存每租户热文档，`audit_ledger` 保存追加式账本；新库在已建 006 表但尚无快照行时可直接以 v2 启动。未完成切换的旧行会失败关闭，不会被自动解释为 v2。两种 PostgreSQL 布局都支持多副本共享与乐观版本锁；`Store.Update` 内做有界 jitter 重试（3 次、5–25ms 指数退避 + 抖动，闭包在新鲜快照上重跑），重试耗尽返回 503 `snapshot_conflict`；`/readyz` 同时探测 store（PostgreSQL 不可达 → 503 `store_unavailable`）与归档目标。
 - 接入、幂等、租户隔离、Schema 校验、分段哈希链、查询、操作回放、导出、Legal Hold、完整性验证和恢复申请已实现。
 - 哈希链证据链分三层：事件 prev_hash 链 → 段 Merkle Root + 签名 checkpoint → 跨段聚合 Merkle（governance worker 周期生成，`VerifyIntegrity` 逐层验证）。
 - 导出文件在归档前整体 AES-GCM 密封（独立加密），下载时解密，`job.Digest` 覆盖解密后内容。
@@ -53,11 +59,13 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - 恢复申请支持审批流程：`POST /api/v1/restores/{runId}/approve` 与 `reject` 记录审批事实（approval 与业务执行分离），状态机 `pending_approval → approved/rejected`。
 - 业务系统可使用 `internal/outbox` SDK 在事务内写入 `audit_outbox`，再由 relay 投递（迁移 `003_outbox_relay.sql` 增加投递台账列）。
 - relay 投递支持两种传输：HTTP（默认）与 Kafka（设置 `AUDIT_OUTBOX_KAFKA_BROKERS` 后写入 `audit.events.accepted.v1`，acks=all 同步生产）。HTTP 投递请求 `?wait_for=ledgered` 并**校验 API receipt**（`event_id` 匹配、状态 ∈ {ledgered/indexed/archived}、`ledgered_at` 非零、`hash` 非空）后才标记 delivered；`api_status`/`delivered_event_id` 存 API 返回的真实值（Kafka 投递为 NULL，不伪造）。`audit-kafka-consumer` 以手动 offset 提交消费该 topic 并接入审计 API，失败背压重试——同一条消息原地重试、不重新拉取（kafka-go 的 fetch 位置会越过已取出的消息，重新拉取会导致失败消息被静默跳过），单消息上限 8 次（可调 `AUDIT_KAFKA_MAX_ATTEMPTS`）——永久失败（4xx 除 401/429；401 属可恢复的凭证状态、重试而非死信）立即死信并发布 `Failure` 到 `audit.events.dlq.v1`（`AUDIT_KAFKA_DLQ_TOPIC`），不可解析消息记日志死信——验证了 AsyncAPI topic 契约与 Kafka 真实容器链路（compose `redpanda`）。自 2026-08-15 起：空 `AUDIT_OUTBOX_TOKEN` 启动即警告；401 类重试耗尽死信为 `error_code="unauthorized"`（独立计数 `audit_consumer_unauthorized_total` 与告警），区别于 API 故障。
+- 配置 `AUDIT_LEDGERED_BROKERS`/`-ledgered-brokers` 后，API 在 ledger 事务提交后发布链式事件到 `audit.events.ledgered.v1`；待发布事件同时写入快照内的 `ledgered_outbox`，发布失败不影响账本成功但会由 API 重启恢复和周期冲刷，成功后删除队列记录。消息仍按 event_id 采用至少一次语义，投影端必须幂等。
 - `audit-kafka-dlq-replay`：DLQ 重放消费者——DLQ 记录只含失败元数据，原事件按 key 从 `audit.events.accepted.v1` 恢复并逐字节重发（或 `-api-url`/`-token` 改为经审计 API 重新接入）；已重放 event_id 持久化到 `-state`（`AUDIT_DLQ_REPLAY_STATE`，默认 `./data/dlq-replay-state.json`）使重扫幂等，accepted 主题每轮从头扫描以保证新 DLQ 记录能找到更早的原消息；`-once` 供调度器单轮执行，或按 `-interval` 常驻；瞬态失败下轮重试，API 永久拒绝（4xx 除 429）标记重放完成避免死循环（需人工处理）；`-metrics-listen` 暴露 `audit_dlq_*` 指标。自 2026-08-15 起：`error_code="unauthorized"` 记录默认被 auth-blocked（不重放、不标记、不提交，计 `audit_dlq_auth_blocked_total` + 积压 gauge `audit_dlq_auth_blocked`，配 `AuditDLQAuthBlockedBacklog` 告警）——凭证修复后由运营显式加 `-replay-auth-blocked` 排空并移除（事故处置 runbook 见 release-notes）。`audit-kafka-consumer` 与重放器均可暴露文本指标端点（`AUDIT_KAFKA_METRICS`/`AUDIT_DLQ_REPLAY_METRICS`），Prometheus 规则 `deploy/prometheus-rules.verify.yml` 对 DLQ 流量、积压、认证阻塞和重放失败告警（两个新告警依赖对应 /metrics 已挂载）。
 - 外部基础设施接入（全部可选、本机容器可验证）：
   - `AUDIT_VAULT_ADDR` + `AUDIT_VAULT_TOKEN` + `AUDIT_VAULT_TRANSIT_KEY`：checkpoint 签名改用 Vault Transit 引擎（私钥不出 Vault，算法标记 `vault-transit:<key>`），未配置时默认 HMAC-SHA256；地址必须 `https://…`，或本机 loopback + 显式 `AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK=true`（非 loopback 明文 http 任何情况下启动/预检失败关闭；scheme 缺失、空 host、带路径/userinfo 的地址同样失败关闭且错误信息不回显凭据）；
   - `AUDIT_S3_ENDPOINT`/`AUDIT_S3_BUCKET`/`AUDIT_S3_ACCESS_KEY`/`AUDIT_S3_SECRET_KEY`：合规归档（事件/段清单/导出）写入 S3 兼容 Object Lock 桶（MinIO 验证：删除仅产生版本删除标记），默认本地只读目录；**自 2026-08-15（R-1）起归档就绪门禁强制要求桶默认留存为 COMPLIANCE 模式 + 正有效期（Days/Years > 0，如 365 天）**——Object Lock 已启用但无默认留存、或默认留存为 GOVERNANCE/零有效期的桶会失败关闭（`-check-config`/启动探针/`/readyz` 分别报 `no default retention`/`GOVERNANCE` 类错误并指明修复：`mc retention set --default compliance 365d <bucket>`）；已写对象的留存固定在写入时刻（继承当时的桶默认），不受后续配置变更影响；**每次写入还携带显式 COMPLIANCE 留存，时长由 `AUDIT_ARCHIVE_RETENTION_DAYS` 决定（正整数，如 365；上限 100 年；缺失/为零即配置错误，两个二进制 fail-closed）**——即使桶默认留存被移除/降级，写入窗口内的对象仍受保护，`StatusArchived` 回执与探测时机无关；`AUDIT_S3_USE_SSL=true` 启用 TLS，`https://` scheme 端点必须与之匹配否则失败关闭（绝不静默降级明文）；scheme 缺失的非 loopback 端点默认允许明文 http（本机开发兼容，残余风险：明文链路上静态密钥与归档证据可被 MITM 读取，由 `transport_s3=http` + CI 断言观察式强制，见 `docs/THREAT_MODEL.md` §3.7）；
   - 两个二进制 `-check-config` 的 `check_config=ok` 逐腿报告 `transport_s3=`/`transport_vault=`（`tls`/`http`/`local`），格式串字节一致；
+- gRPC ingest 支持 `AUDIT_GRPC_TLS_CERT`/`AUDIT_GRPC_TLS_KEY` 与 `AUDIT_GRPC_TLS_CLIENT_CA` 原生 TLS/mTLS；生产可设置 `AUDIT_GRPC_REQUIRE_MTLS=true`（或 `-grpc-require-mtls`），此时 gRPC 监听器无论是否回环或配置明文 allowlist 都必须验证客户端证书。`AUDIT_ALLOW_INSECURE_GRPC_LISTEN=true` 仅保留给隔离验证栈。
 - 签名与加密密钥强制显式配置：`AUDIT_SIGNING_SECRET`（段/聚合 checkpoint HMAC 签名）与 `AUDIT_ENCRYPTION_KEY`（schema 加密字段、导出文件 AES-GCM）任一为空、等于公开默认值或两者相同（非开发模式）时，`audit-api`/`audit-governance-worker` 启动失败（退出码非零，错误信息指明需设置的变量）；本机开发须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，独立于 `-allow-dev-auth`）才恢复旧默认行为。`-check-config` 不打开状态存储、不绑定监听器，供部署预检与 CI 使用（两个进程必须使用相同的两个值）：`audit-api` 的校验密钥、Vault/S3 与认证配置后退出（不发起网络）；`audit-governance-worker` 的还会对归档目的地做一次有界探测（5 秒超时；S3 配置会触网——桶必须存在且启用 Object Lock、versioning，且默认留存为 COMPLIANCE + 正有效期（R-1，2026-08-15），本地归档做可写性探测），失败时退出码 1 且不打印 `check_config=ok`。认证配置与启动同一规则：无 JWT 信任源（开发认证默认关闭）即失败，`-allow-dev-auth` 单独无法满足预检，开发认证白名单仅接受环境变量 `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
   - `audit-projector`：消费 `audit.events.ledgered.v1` 写入 ClickHouse 查询投影（`ReplacingMergeTree` 按 event_id 去重、tenant 前缀排序键、按月分区），投影可重建、非事实源。
 - 导出任务支持状态轮询和租户鉴权的 JSONL 下载。

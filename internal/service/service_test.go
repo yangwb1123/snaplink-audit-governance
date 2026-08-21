@@ -427,6 +427,48 @@ func TestQueryEventsCursorReproducesSet(t *testing.T) {
 	}
 }
 
+func TestTimelinePagesReproduceOperationAndAggregateOrder(t *testing.T) {
+	svc := testService(t, true)
+	t0 := time.Unix(1_700_000_200, 0).UTC()
+	seedChronologyFixture(t, svc, t0)
+
+	operationPage, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationPage.Count != 2 || len(operationPage.Items) != 1 || operationPage.Items[0].EventID != "A1" || operationPage.NextCursor == "" {
+		t.Fatalf("unexpected operation page: %+v", operationPage)
+	}
+	operationNext, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", 1, operationPage.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationNext.Count != 2 || len(operationNext.Items) != 1 || operationNext.Items[0].EventID != "A2" || operationNext.NextCursor != "" {
+		t.Fatalf("unexpected operation continuation: %+v", operationNext)
+	}
+
+	aggregatePage, err := svc.AggregateTimelinePage("tenant-a", "", "invoice", "agg-1", 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregatePage.Count != 2 || len(aggregatePage.Items) != 1 || aggregatePage.Items[0].EventID != "A1" || aggregatePage.NextCursor == "" {
+		t.Fatalf("unexpected aggregate page: %+v", aggregatePage)
+	}
+	aggregateNext, err := svc.AggregateTimelinePage("tenant-a", "", "invoice", "agg-1", 1, aggregatePage.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregateNext.Items) != 1 || aggregateNext.Items[0].EventID != "A2" || aggregateNext.NextCursor != "" {
+		t.Fatalf("unexpected aggregate continuation: %+v", aggregateNext)
+	}
+	if _, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-2", 1, operationPage.NextCursor); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("operation cursor reused across scopes must fail closed: %v", err)
+	}
+	if _, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", domain.MaxPageSize+1, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized timeline page must fail closed: %v", err)
+	}
+}
+
 // TestExportMatchesQueryEventsOrder is AC-3: a compliance export must agree
 // with the chronological QueryEvents order — page 1 of a paginated query is a
 // strict prefix of the export, and the export set equals the unpaginated API

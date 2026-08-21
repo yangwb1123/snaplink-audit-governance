@@ -29,6 +29,10 @@ services:
       AUDIT_BOOTSTRAP_TENANT: demo
       AUDIT_SIGNING_SECRET: local-only-change-me
       AUDIT_ENCRYPTION_KEY: local-only-encryption-key
+      # The projector consumes post-ledger events; the verify stack enables
+      # the API's durable ledgered publication path so the full chain reaches
+      # ClickHouse instead of stopping at the accepted topic.
+      AUDIT_LEDGERED_BROKERS: redpanda:9092
       AUDIT_OTLP_ENDPOINT: http://jaeger:4318
       AUDIT_S3_ENDPOINT: minio:9000
       AUDIT_S3_BUCKET: worm-audit
@@ -43,6 +47,7 @@ services:
     depends_on:
       - jaeger
       - minio
+      - redpanda
     ports:
       - "19089:8089"
       - "19051:50051"

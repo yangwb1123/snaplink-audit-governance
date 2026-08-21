@@ -110,6 +110,36 @@ func TestServerCredentials(t *testing.T) {
 	})
 }
 
+func TestMutualTLSCredentials(t *testing.T) {
+	certFile, keyFile := writeTestTLSFiles(t)
+	t.Run("valid CA bundle loads", func(t *testing.T) {
+		certPEM, _ := generateTestCertificate(t)
+		caFile := filepath.Join(t.TempDir(), "client-ca.pem")
+		if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		creds, err := MutualTLSCredentials(certFile, keyFile, caFile)
+		if err != nil || creds == nil {
+			t.Fatalf("MutualTLSCredentials=%v, want valid credentials", err)
+		}
+	})
+	t.Run("missing CA fails", func(t *testing.T) {
+		_, err := MutualTLSCredentials(certFile, keyFile, filepath.Join(t.TempDir(), "missing-ca.pem"))
+		if err == nil {
+			t.Fatal("missing client CA must fail closed")
+		}
+	})
+	t.Run("malformed CA fails", func(t *testing.T) {
+		caFile := filepath.Join(t.TempDir(), "bad-ca.pem")
+		if err := os.WriteFile(caFile, []byte("not a certificate"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := MutualTLSCredentials(certFile, keyFile, caFile); err == nil {
+			t.Fatal("malformed client CA must fail closed")
+		}
+	})
+}
+
 // newGRPCTLSHarness builds a real loopback gRPC ingest listener with TLS
 // credentials (A1/A2 server): the production option set (keepalive, receive
 // cap, recovery interceptors — panic-recovery outermost) plus grpc.Creds

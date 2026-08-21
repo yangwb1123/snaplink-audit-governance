@@ -10,7 +10,7 @@ import (
 )
 
 // benchService builds the same fixture as testService but for benchmarks.
-func benchService(b *testing.B) *Service {
+func benchService(b testing.TB) *Service {
 	b.Helper()
 	st, err := store.Open("")
 	if err != nil {
@@ -48,6 +48,73 @@ func BenchmarkIngest(b *testing.B) {
 			}
 		}
 	})
+}
+
+func seedArchivedReceipts(tb testing.TB, svc *Service, count int) {
+	tb.Helper()
+	if err := svc.Store.UpdateTenant("tenant-a", store.HotFirst, func(view *store.TenantView) error {
+		for i := 0; i < count; i++ {
+			view.Ledger.SetReceipt(domain.EventReceipt{EventID: fmt.Sprintf("archived-%d", i), TenantID: "tenant-a", IdempotencyKey: fmt.Sprintf("archived-idem-%d", i), Status: domain.StatusArchived, StreamID: "tenant-a:aggregate:invoice:inv-1", Sequence: int64(i + 1), Hash: fmt.Sprintf("archived-hash-%d", i)})
+		}
+		return nil
+	}); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+func benchmarkIngestEvent(id string, at time.Time) domain.Event {
+	return domain.Event{EventID: id, SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: at, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "idem-" + id, Payload: map[string]any{"resource": "invoice", "value": 10}}
+}
+
+// BenchmarkIngestWithArchivedLedger records the v2 hot-path cost as the
+// retained cold ledger grows. Archived receipts are preloaded without hot
+// events; each measured ingest only clones the bounded tenant hot document and
+// uses the O(1) receipt/idempotency index.
+func BenchmarkIngestWithArchivedLedger(b *testing.B) {
+	for _, count := range []int{0, 1000, 10000, 50000} {
+		b.Run(fmt.Sprintf("K=%d", count), func(b *testing.B) {
+			svc := benchService(b)
+			seedArchivedReceipts(b, svc, count)
+			base := time.Unix(1_700_000_010, 0).UTC()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, benchmarkIngestEvent(fmt.Sprintf("cost-%d", i), base), ""); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func measureArchivedIngestCost(t *testing.T, archived int) (time.Duration, float64) {
+	t.Helper()
+	svc := benchService(t)
+	seedArchivedReceipts(t, svc, archived)
+	base := time.Unix(1_700_000_010, 0).UTC()
+	next := 0
+	ingest := func() {
+		next++
+		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, benchmarkIngestEvent(fmt.Sprintf("measure-%d", next), base), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allocs := testing.AllocsPerRun(5, ingest)
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		ingest()
+	}
+	return time.Since(start) / 10, allocs
+}
+
+func TestIngestCostIndependentOfArchivedEvents(t *testing.T) {
+	baseDuration, baseAllocs := measureArchivedIngestCost(t, 0)
+	largeDuration, largeAllocs := measureArchivedIngestCost(t, 10000)
+	if largeDuration > baseDuration*3+time.Millisecond {
+		t.Fatalf("10k archived receipts changed ingest latency too much: base=%v large=%v", baseDuration, largeDuration)
+	}
+	if largeAllocs > baseAllocs*3+1000 {
+		t.Fatalf("10k archived receipts changed ingest allocations too much: base=%.0f large=%.0f", baseAllocs, largeAllocs)
+	}
 }
 
 // BenchmarkQuery measures a filtered time-range query over a warm ledger.

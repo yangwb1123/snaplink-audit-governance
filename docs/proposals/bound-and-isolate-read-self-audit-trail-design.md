@@ -4,8 +4,14 @@ Direction: "Bound and isolate the read self-audit trail so reads stop rewriting 
 control-plane snapshot"
 Module: `cmd/audit-api` (composes `internal/service`, `internal/store`, `internal/httpapi`,
 and the Postgres migration surface)
-Status: Proposed (evidence-verified; design for the design gate)
+Status: Implemented in the reference tree · Date: 2026-08-20
 Gate: every landing increment must pass `python3 cli.py quality` (AGENTS.md).
+
+Implementation note: `internal/store` now provides the append-only admin trail
+capability for file, PostgreSQL, and in-memory backends; actor-bearing reads
+use it through `Store.AppendAdminFact`, while capability-less test backends
+retain the fail-closed snapshot fallback. The design below remains the
+implementation and operations reference.
 
 ---
 

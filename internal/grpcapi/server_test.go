@@ -487,10 +487,16 @@ func TestWriteRedactsStoreFailureEndToEnd(t *testing.T) {
 	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	// Make the snapshot file unwritable: every Save now fails with an error
-	// carrying the state path and errno text.
+	// Make every v2 persistence tier unwritable: a hot/cold UpdateTenant may
+	// commit the tenant file or ledger without touching the control file.
 	if err := os.Chmod(statePath, 0o400); err != nil {
 		t.Fatal(err)
+	}
+	layoutDirs := []string{filepath.Join(dir, "tenants"), filepath.Join(dir, "ledger")}
+	for _, layoutDir := range layoutDirs {
+		if err := os.Chmod(layoutDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -498,6 +504,9 @@ func TestWriteRedactsStoreFailureEndToEnd(t *testing.T) {
 	t.Cleanup(func() {
 		_ = os.Chmod(dir, 0o700)
 		_ = os.Chmod(statePath, 0o600)
+		for _, layoutDir := range layoutDirs {
+			_ = os.Chmod(layoutDir, 0o700)
+		}
 	})
 	server := &Server{Service: svc, Auth: auth.Authenticator{AllowDev: true}, Logger: log.New(io.Discard, "", 0)}
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:tenant-a:service:crm"))

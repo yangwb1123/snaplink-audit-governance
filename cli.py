@@ -82,7 +82,8 @@ def cmd_build() -> int:
                ("audit-outbox-relay", "./cmd/audit-outbox-relay"),
                ("audit-kafka-consumer", "./cmd/audit-kafka-consumer"),
                ("audit-kafka-dlq-replay", "./cmd/audit-kafka-dlq-replay"),
-               ("audit-projector", "./cmd/audit-projector"))
+               ("audit-projector", "./cmd/audit-projector"),
+               ("audit-pg-migrate", "./cmd/audit-pg-migrate"))
     for name, package in targets:
         target = bin_dir / name
         if run("go", "build", "-o", str(target), package) != 0:

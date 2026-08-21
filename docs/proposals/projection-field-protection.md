@@ -1,6 +1,6 @@
 # Design — Projection derives from ledger-protected payloads; strips digests; refuses unledgered rows
 
-Status: Proposed for implementation · Date: 2026-08-12 · Module: `cmd/audit-api` (+ `cmd/audit-projector`, `internal/projection`, `internal/service`, `internal/kafka`)
+Status: Implemented in the reference tree · Date: 2026-08-20 · Module: `cmd/audit-api` (+ `cmd/audit-projector`, `internal/projection`, `internal/service`, `internal/kafka`)
 Direction: "ClickHouse projection persists plaintext copies of schema-encrypted (and unvalidated) fields, bypassing ledger-side field protection"
 Companion design: `docs/proposals/ledgered-projection-pipeline.md` (the post-ledger-stream mechanism; this design adopts its publisher shape with the three fixes its review gate required — BatchTimeout, verify-stack wiring, guard-guarantee wording).
 
@@ -11,6 +11,13 @@ tree at HEAD `99c0325`. Sections 2–9 give the concrete design: API changes,
 compatibility constraints, failure modes, migration steps, and a testable
 acceptance mapping.
 
+Implementation note: the post-ledger publisher/outbox and projector topic gate
+are wired in `internal/service/ledgered.go`, `cmd/audit-api`, and
+`cmd/audit-projector`; `internal/projection.projectionPayload` now strips
+`__search_digest` keys recursively while preserving encrypted ciphertext. The
+behavior is covered by `TestProjectionPayloadStripsSearchDigests`; ClickHouse
+integration checks remain environment-gated.
+
 ---
 
 ## 1. Evidence verification
@@ -20,9 +27,9 @@ tree. **All confirmed**, with the corrections and additions noted.
 
 | # | Claim | Verification |
 |---|---|---|
-| E1 | `projection.Store.Insert` stores `CanonicalJSON(event.Payload)` with no protection/stripping | **Confirmed.** projection.go:68–84 — `payload, err := domain.CanonicalJSON(event.Payload)` (:69), then `ExecContext` INSERT (:71). No schema lookup, no encryption, no `StripSearchDigests`, no validation anywhere in the function. |
+| E1 | Baseline `projection.Store.Insert` stored `CanonicalJSON(event.Payload)` with no stripping | **Confirmed as historical baseline; fixed.** `projectionPayload` now deep-copies through `security.StripSearchDigests` before canonical encoding; it does not decrypt or rewrite ledger ciphertext. |
 | E2 | `schemaDDL` has `payload String`, no encryption | **Confirmed.** projection.go:40–57; `payload String` at :51. |
-| E3 | `cmd/audit-projector/main.go` defaults to `kafka.TopicAccepted` | **Confirmed.** main.go:19 — `flag.String("topic", envOr("AUDIT_KAFKA_TOPIC", kafka.TopicAccepted), ...)`; :42 wires `kafka.IngestFunc(store.Insert)`. |
+| E3 | Historical projector default was `kafka.TopicAccepted` | **Superseded by implementation.** `cmd/audit-projector` now defaults to `kafka.TopicLedgered` and still wires `kafka.IngestFunc(store.Insert)`. |
 | E4 | Only producer of `TopicAccepted` is the outbox relay, raw events; `Deliver` = `CanonicalJSON(event)` | **Confirmed.** kafka.go:24 (`TopicAccepted`); `Deliver` :101–107 writes canonical JSON keyed by `event_id`. Non-test `NewProducer` call sites: `cmd/audit-outbox-relay/main.go:59` (→ accepted), `cmd/audit-kafka-consumer/main.go:42` (→ DLQ), `cmd/audit-kafka-dlq-replay/main.go:58` (→ accepted, `Republish` byte-for-byte only). |
 | E5 | Outbox relay delivers raw events, no validation | **Confirmed.** relay.go:127 — `r.Deliver(ctx, record.Event)` passes the stored event straight through. |
 | E6 | Encryption/digest protection applied only inside `service.Ingest` | **Confirmed.** `Ingest` :394; `validateEvent` :896; `protectSensitiveFields` :955, called :446; chain fields (`StreamID`/`Sequence`/`PrevHash`/`Hash`) assigned only inside the commit closure :513–516 (client `StreamID` stripped at :422); receipt copies at :531–533. |
@@ -33,7 +40,7 @@ tree. **All confirmed**, with the corrections and additions noted.
 | E11 | `projection.Store.Insert`'s only in-tree caller is `cmd/audit-projector` | **Confirmed.** Only main.go:42 (non-test); tests use it directly. |
 | E12 | ClickHouse fixture exists, gated, carries chain fields | **Confirmed.** projection_test.go: fixture `StreamID="demo:source:demo"`, `Sequence=1`, `Hash="abc123"`; asserts `count != 0`; gate `AUDIT_TEST_CLICKHOUSE_DSN`. Satisfies guard+strip unchanged. |
 | E13 | Service test harness exists | **Confirmed.** `testService` (service_test.go:43), `testEvent` (:70), `crmPrincipal` (:21). |
-| E14 | ADR-0004 §4 mandates projector consume `audit.events.ledgered.v1`; violated today | **Confirmed.** docs/adr/ADR-0004.md:22; `TopicLedgered` kafka.go:34 with zero producers/consumers (also per its own comment: "no producer or consumer wires this topic yet"). |
+| E14 | ADR-0004 §4 mandates projector consume `audit.events.ledgered.v1` | **Implemented.** ADR-0004, the API durable publisher, and the projector default now agree on the ledgered topic. |
 
 **Additional verified facts:**
 
@@ -549,7 +556,7 @@ ClickHouse-gated tests skip unless `AUDIT_TEST_CLICKHOUSE_DSN` is set.
 
 | AC | Test (file) | Harness | Assertion |
 |---|---|---|---|
-| **AC-1.1** (negative path) | `TestClickHouseProjectionPlaintextAndDigestInvariant` — new, `internal/projection/projection_test.go`, gated | in-test service: `store.Open(t.TempDir())` → `service.New(Config{SigningSecret, EncryptionKey distinct, AllowDevSecrets: true})` → `CreateTenant("tenant-a")` → `AddSource("crm")` → `RegisterSchema` with `EncryptedFields:["account_number"]`, `SearchableFields:["email"]`, `RequiredFields:["resource"]`, `AllowedFields:["resource","value","account_number","email"]`; `E_raw` payload `{"resource":"invoice","account_number":"4111111111111111","email":"user@example.com"}`, no chain fields | `projection.Insert(ctx, E_raw)` returns `errors.Is(err, ErrNotLedgered)` **and** `SELECT count() FROM audit_events WHERE event_id = ?` == 0 (on today's tree this insert succeeds with plaintext — the two assertions fail, demonstrating the bug) |
+| **AC-1.1** (negative path) | `TestClickHouseProjectionPlaintextAndDigestInvariant` — gated | in-test service with an encrypted/searchable schema and a raw event with no chain fields | `projection.Insert` returns `ErrNotLedgered`; no row is written |
 | **AC-1.1** (protected path) | same test, continued | `svc.Ingest("tenant-a", domain.IngestPrincipal{ClientID:"crm"}, E_raw, domain.StatusLedgered)` must succeed; `ledgerEvent, _ := svc.GetEvent("tenant-a", "", E_raw.EventID)` | ledger payload protected: `account_number` is a string with `enc:v1:` prefix ≠ `"4111111111111111"`; `email__search_digest` has `sd2:` prefix; `projection.Insert(ctx, ledgerEvent)` returns nil |
 | **AC-1.1** (row scan) | same test, continued | `SELECT payload FROM audit_events WHERE event_id = ?`; parse (UseNumber) | (a) no string value anywhere equals `"4111111111111111"` and the substring does not appear in the raw column value; (b) `account_number` equals the ledger ciphertext (`enc:v1:` prefix); (c) no key at any depth ends with `__search_digest`; (d) all non-encrypted values equal the ledger values |
 | **AC-1.2** | `TestInsertRejectsUnledgered` — new, `internal/projection/projection_test.go`, **no ClickHouse** | zero-value `*Store` (nil `db`); valid fixture mutated per case `{StreamID:""}`, `{Sequence:0}`, `{Sequence:-1}`, `{Hash:""}`; table-driven | `errors.Is(err, ErrNotLedgered)`; no nil-panic (guard precedes the DB access — the placement probe, N3) |

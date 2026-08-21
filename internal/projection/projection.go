@@ -14,6 +14,7 @@ import (
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/security"
 )
 
 // ErrNotLedgered is returned when an event lacks complete ledger-assigned
@@ -67,6 +68,22 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
+// projectionPayload removes derived search digests from a deep copy before
+// the protected ledger payload is written to ClickHouse. Encrypted values are
+// intentionally preserved as ciphertext: the projection is a query index,
+// never a decryption boundary, and the ledger remains the source of truth.
+func projectionPayload(event domain.Event) ([]byte, error) {
+	stripped, err := security.StripSearchDigests(event.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("strip search digests: %w", err)
+	}
+	payload, err := domain.CanonicalJSON(stripped)
+	if err != nil {
+		return nil, fmt.Errorf("encode payload: %w", err)
+	}
+	return payload, nil
+}
+
 // Insert writes one canonical event into the projection. ClickHouse applies
 // the ReplacingMergeTree dedup asynchronously; queries must not assume
 // immediate uniqueness.
@@ -89,9 +106,9 @@ func (s *Store) Insert(ctx context.Context, event domain.Event) error {
 	if event.OccurredAt.Before(domain.MinOccurredAt) || event.OccurredAt.After(domain.MaxOccurredAt) {
 		return fmt.Errorf("insert projection: %w", domain.ErrOccurredAtOutOfRange)
 	}
-	payload, err := domain.CanonicalJSON(event.Payload)
+	payload, err := projectionPayload(event)
 	if err != nil {
-		return fmt.Errorf("encode payload: %w", err)
+		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events (tenant_id, occurred_at, event_id, stream_id, sequence, event_type, source_system, operation_id, actor_id, outcome, payload, event_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.TenantID, event.OccurredAt.UTC(), event.EventID, event.StreamID, event.Sequence,

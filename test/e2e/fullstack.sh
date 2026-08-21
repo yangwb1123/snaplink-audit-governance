@@ -242,6 +242,8 @@ curl -sf -u audit:audit-local-only -X POST \
 log "ensuring Kafka topic"
 $COMPOSE exec -T redpanda rpk topic create audit.events.accepted.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
+$COMPOSE exec -T redpanda rpk topic create audit.events.ledgered.v1 \
+  --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 $COMPOSE exec -T redpanda rpk topic create audit.events.dlq.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 
@@ -302,16 +304,10 @@ POLICY_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$API/api/v1/poli
   -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
   -d '{"tenant_id":"demo","hot_days":1,"warm_days":7,"archive_days":30,"retention_class":"standard"}')"
 [ "$POLICY_STATUS" = "200" ] || { log "FAIL: set retention policy ($POLICY_STATUS)"; exit 1; }
-EVAL_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/retention/evaluate" \
+EVAL_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/retention/evaluate?tenant_id=demo" \
   -H "Authorization: $AUTH_POLICY")"
 [ "$EVAL_STATUS" = "200" ] || { log "FAIL: retention evaluate ($EVAL_STATUS)"; exit 1; }
 log "PASS: retention policy set and evaluated"
-
-HOLD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds" \
-  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
-  -d '{"name":"e2e-hold","reason":"verification","filter":{"from":"2026-08-01T00:00:00Z","to":"2026-09-01T00:00:00Z"}}')"
-[ "$HOLD_STATUS" = "201" ] || { log "FAIL: create legal hold ($HOLD_STATUS)"; exit 1; }
-log "PASS: legal hold created"
 
 EXPORT_ID="$(curl -s -X POST "$API/api/v1/exports" \
   -H "Authorization: $AUTH_COMPLIANCE" -H 'Content-Type: application/json' \
@@ -327,6 +323,14 @@ DOWNLOAD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/exports/$
 [ "$DOWNLOAD_STATUS" = "200" ] || { log "FAIL: export download ($DOWNLOAD_STATUS)"; exit 1; }
 log "PASS: export completed and downloaded"
 
+# 建立 Legal Hold 要放在导出之后：同一时间窗的导出会被活动 hold
+# 正确拒绝，先完成导出才能同时验证两条治理语义。
+HOLD_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds?tenant_id=demo" \
+  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-hold","reason":"verification","filter":{"from":"2026-08-01T00:00:00Z","to":"2026-09-01T00:00:00Z"}}')"
+[ "$HOLD_STATUS" = "201" ] || { log "FAIL: create legal hold ($HOLD_STATUS)"; exit 1; }
+log "PASS: legal hold created"
+
 # worker 单轮评估（与常驻实例共享 PG 快照 —— 乐观锁 + 有界重试的真实载体）
 $COMPOSE exec -T audit-governance-worker /audit-governance-worker -once 2>&1 | \
   grep -q "eligible=" || { log "FAIL: governance worker once-run produced no retention evaluation"; exit 1; }
@@ -339,18 +343,18 @@ curl -s -X POST "$API/api/v1/events?wait_for=ledgered" \
   -H "Authorization: $AUTH_WRITE" -H 'Content-Type: application/json' \
   -d "{\"event_id\":\"restore-evt-$(date +%s)\",\"operation_id\":\"$RESTORE_OP\",\"source_system\":\"demo\",\"event_type\":\"audit.event\",\"schema_id\":\"audit.event\",\"schema_version\":1,\"occurred_at\":\"2026-08-07T12:00:00Z\",\"actor\":{\"id\":\"u\"},\"action\":\"update\",\"outcome\":\"success\",\"data_classification\":\"internal\",\"retention_class\":\"standard\",\"idempotency_key\":\"restore-idem-$(date +%s)\",\"payload\":{\"x\":1}}" \
   -o /dev/null -w '%{http_code}' | grep -q 202 || { log "FAIL: restore op event ingest"; exit 1; }
-RUN_ID="$(curl -s -X POST "$API/api/v1/restores" \
+RUN_ID="$(curl -s -X POST "$API/api/v1/restores?tenant_id=demo" \
   -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
   -d "{\"operation_id\":\"$RESTORE_OP\",\"reason\":\"e2e verification\"}" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
 [ -n "$RUN_ID" ] || { log "FAIL: create restore run"; exit 1; }
 # 同人审批必须 403（职责分离）
-SAME_ACTOR="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/restores/$RUN_ID/approve" \
+SAME_ACTOR="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/restores/$RUN_ID/approve?tenant_id=demo" \
   -H "Authorization: $AUTH_POLICY")"
 [ "$SAME_ACTOR" = "403" ] || { log "FAIL: same-actor approve must be 403 (got $SAME_ACTOR)"; exit 1; }
 # 第二主体审批 -> approved（仅 G1 模式：dev token 的 sub 恒等于租户，
 # 单主体语义下同人 403 本身就是职责分离验证；真实第二主体需要 IdP）
 if [ -n "${AUDIT_IDP_CLIENT_ID:-}" ]; then
-  APPROVE_STATUS="$(curl -s -X POST "$API/api/v1/restores/$RUN_ID/approve" \
+  APPROVE_STATUS="$(curl -s -X POST "$API/api/v1/restores/$RUN_ID/approve?tenant_id=demo" \
     -H "Authorization: $AUTH_SECONDARY" | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")"
   [ "$APPROVE_STATUS" = "approved" ] || { log "FAIL: restore approve ($APPROVE_STATUS)"; exit 1; }
   log "PASS: restore approval chain (same-actor 403, distinct-actor approved)"
@@ -359,9 +363,9 @@ else
 fi
 
 log "verifying legal hold release"
-HOLD_ID="$(curl -s "$API/api/v1/legal-holds" -H "Authorization: $AUTH_POLICY" | python3 -c "import json,sys; items=json.load(sys.stdin).get('items',[]); print(items[0]['id'] if items else '')")"
+HOLD_ID="$(curl -s "$API/api/v1/legal-holds?tenant_id=demo" -H "Authorization: $AUTH_POLICY" | python3 -c "import json,sys; items=json.load(sys.stdin).get('items',[]); print(items[0]['id'] if items else '')")"
 [ -n "$HOLD_ID" ] || { log "FAIL: no legal hold to release"; exit 1; }
-RELEASE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds/$HOLD_ID/release" \
+RELEASE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/legal-holds/$HOLD_ID/release?tenant_id=demo" \
   -H "Authorization: $AUTH_POLICY")"
 [ "$RELEASE_STATUS" = "200" ] || { log "FAIL: legal hold release ($RELEASE_STATUS)"; exit 1; }
 log "PASS: legal hold released"

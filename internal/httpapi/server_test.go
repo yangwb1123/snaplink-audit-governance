@@ -1283,15 +1283,15 @@ func TestHTTPDownloadVerificationFacts(t *testing.T) {
 		t.Fatalf("tampered download status=%d, want 500", status)
 	}
 
-	var snapshot *store.Snapshot
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
-		snapshot = data
-		return nil
-	}); err != nil {
+	exportFacts, rejectedFacts := 0, 0
+	// Read-path facts are persisted in the append-only Admin Trail rather than
+	// Snapshot.AdminActions. Verify the public merged view so this boundary
+	// test stays correct for both the file and PostgreSQL backends.
+	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	if err != nil {
 		t.Fatal(err)
 	}
-	exportFacts, rejectedFacts := 0, 0
-	for _, action := range snapshot.AdminActions {
+	for _, action := range actions {
 		if action.Action == domain.AdminActionEventExport && action.TargetID == job.ID {
 			exportFacts++
 		}
@@ -2129,8 +2129,8 @@ func TestHTTPIngestRejectsTrailingJSONBody(t *testing.T) {
 
 	if err := st.Read(func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "trail-ok")
-		if _, exists := data.Events[key]; !exists {
-			t.Error("whitespace-trailer event was not ledgered")
+		if receipt, exists := data.Receipts[key]; !exists || receipt.Status == "" {
+			t.Error("whitespace-trailer event was not receipted")
 		}
 		if _, exists := data.Receipts[key]; !exists {
 			t.Error("whitespace-trailer event has no receipt")
@@ -3192,8 +3192,8 @@ func TestHTTPIngestRejectsKeyFramingEventIDs(t *testing.T) {
 	// SplitTenantKey case) after any of the rejected or accepted posts.
 	assertNoFramedCompositeKeys(t, st, rejectedIDs...)
 	if err := st.Read(func(data *store.Snapshot) error {
-		if _, exists := data.Events[store.EventKey("tenant-a", base.EventID)]; !exists {
-			t.Fatal("positive-control event was not ledgered")
+		if receipt, exists := data.Receipts[store.EventKey("tenant-a", base.EventID)]; !exists || receipt.Status == "" {
+			t.Fatal("positive-control event was not receipted")
 		}
 		return nil
 	}); err != nil {
@@ -3264,8 +3264,8 @@ func TestHTTPIngestBatchAbortsOnKeyFramingEvent(t *testing.T) {
 	// composite-key map holds a multi-separator key.
 	assertNoFramedCompositeKeys(t, st, "http-kfb-bad-1")
 	if err := st.Read(func(data *store.Snapshot) error {
-		if _, exists := data.Events[store.EventKey("tenant-a", "http-kfb-ok-1")]; !exists {
-			t.Fatal("valid batch prefix was not ledgered before the abort")
+		if receipt, exists := data.Receipts[store.EventKey("tenant-a", "http-kfb-ok-1")]; !exists || receipt.Status == "" {
+			t.Fatal("valid batch prefix was not receipted before the abort")
 		}
 		return nil
 	}); err != nil {

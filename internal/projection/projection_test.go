@@ -1,13 +1,16 @@
 package projection
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/security"
 )
 
 // TestClickHouseProjectionIntegration exercises the real ClickHouse table.
@@ -65,6 +68,51 @@ func ledgeredFixture(eventID string) domain.Event {
 		DataClassification: "internal", RetentionClass: "standard",
 		IdempotencyKey: "projection-guard-idem", Hash: "hash-abc",
 		Payload: map[string]any{"note": "guard", "amount": 3},
+	}
+}
+
+// TestProjectionPayloadStripsSearchDigests pins the projection boundary: the
+// ledger payload may contain derived lookup digests, but the ClickHouse copy
+// must not retain them. The original event is left untouched and encrypted
+// values remain opaque strings.
+func TestProjectionPayloadStripsSearchDigests(t *testing.T) {
+	payload := map[string]any{
+		"account_number":       "enc:v1:opaque",
+		"email":                "alice@example.test",
+		"email__search_digest": "sd2:bound",
+		"nested": map[string]any{
+			"legacy__search_digest": "legacy",
+			"keep":                  json.Number("9007199254740993"),
+		},
+		"items": []any{
+			map[string]any{"item__search_digest": "sd2:item", "value": 7},
+		},
+	}
+	event := ledgeredFixture("projection-payload-1")
+	event.Payload = payload
+	got, err := projectionPayload(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := security.StripSearchDigests(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := domain.CanonicalJSON(stripped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("projection payload=%s, want=%s", got, want)
+	}
+	if _, ok := payload["email__search_digest"]; !ok {
+		t.Fatal("projection preparation mutated the source payload")
+	}
+	if bytes.Contains(got, []byte("__search_digest")) {
+		t.Fatalf("projection payload retains a search-digest key: %s", got)
+	}
+	if !bytes.Contains(got, []byte("enc:v1:opaque")) || !bytes.Contains(got, []byte("9007199254740993")) {
+		t.Fatalf("projection payload lost protected or exact numeric content: %s", got)
 	}
 }
 
