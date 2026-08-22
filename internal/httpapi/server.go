@@ -83,6 +83,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/events/{eventID}", s.spanWrap(s.getEvent))
 	mux.HandleFunc("GET /api/v1/events/{eventID}/receipt", s.spanWrap(s.getReceipt))
 	mux.HandleFunc("GET /api/v1/events", s.spanWrap(s.queryEvents))
+	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/events", s.spanWrap(s.querySnaplinkAuditEvents))
+	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/events/{eventID}", s.spanWrap(s.getEvent))
+	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/facets", s.spanWrap(s.querySnaplinkAuditFacets))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", s.spanWrap(s.getOperation))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}/timeline", s.spanWrap(s.getOperationTimeline))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}/replay", s.spanWrap(s.replayOperation))
@@ -347,7 +350,12 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	event, err := s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
+	var event domain.Event
+	if tenantID == "" && (claims.Platform || claims.CrossTenantAuditRead) {
+		event, err = s.Service.GetEventAcrossTenants(claims.Subject, r.PathValue("eventID"))
+	} else {
+		event, err = s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
+	}
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -375,7 +383,12 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	receipt, err := s.Service.GetReceipt(tenantID, claims.Subject, r.PathValue("eventID"))
+	var receipt domain.EventReceipt
+	if tenantID == "" && (claims.Platform || claims.CrossTenantAuditRead) {
+		receipt, err = s.Service.GetReceiptAcrossTenants(claims.Subject, r.PathValue("eventID"))
+	} else {
+		receipt, err = s.Service.GetReceipt(tenantID, claims.Subject, r.PathValue("eventID"))
+	}
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -415,6 +428,44 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 		result.Items[i].Payload = stripped
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) querySnaplinkAuditEvents(w http.ResponseWriter, r *http.Request) {
+	claims, tenantID, query, ok := s.snaplinkConsoleQuery(w, r)
+	if !ok {
+		return
+	}
+	s.queryCount.Add(1)
+	result, err := s.Service.QueryConsoleEvents(tenantID, claims.Subject, query)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	for index := range result.Items {
+		stripped, stripErr := security.StripSearchDigests(result.Items[index].Payload)
+		if stripErr != nil {
+			s.writeError(w, r, http.StatusInternalServerError, stripErr)
+			return
+		}
+		result.Items[index].Payload = stripped
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": result.Items, "count": result.Count, "next_cursor": result.NextCursor,
+	})
+}
+
+func (s *Server) querySnaplinkAuditFacets(w http.ResponseWriter, r *http.Request) {
+	claims, tenantID, query, ok := s.snaplinkConsoleQuery(w, r)
+	if !ok {
+		return
+	}
+	s.queryCount.Add(1)
+	result, err := s.Service.QueryEventFacets(tenantID, claims.Subject, query)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"facets": result})
 }
 
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
@@ -1080,14 +1131,15 @@ func (s *Server) require(r *http.Request, permission string) (auth.Claims, error
 	if !claims.Allows(permission) {
 		return claims, domain.ErrForbidden
 	}
-	if permission != "audit:event:write" && claims.TenantID == "" && !claims.Platform {
+	if permission != "audit:event:write" && claims.TenantID == "" && !claims.Platform &&
+		!(permission == "audit:event:read" && claims.CrossTenantAuditRead) {
 		return claims, fmt.Errorf("%w: tenant context is required", domain.ErrUnauthorized)
 	}
 	return claims, nil
 }
 
 func (s *Server) tenantFor(r *http.Request, claims auth.Claims) (string, error) {
-	if claims.Platform {
+	if claims.Platform || claims.CrossTenantAuditRead {
 		if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" {
 			// Key-framing charset rule: the escape-hatch tenant becomes a
 			// composite-key component in every downstream read, so an embedded

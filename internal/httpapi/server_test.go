@@ -1826,6 +1826,9 @@ func TestHTTPSpanRouteCoverageAllPatterns(t *testing.T) {
 		{http.MethodGet, "/api/v1/events/{eventID}"},
 		{http.MethodGet, "/api/v1/events/{eventID}/receipt"},
 		{http.MethodGet, "/api/v1/events"},
+		{http.MethodGet, "/api/v1/compat/snaplink/audit/events"},
+		{http.MethodGet, "/api/v1/compat/snaplink/audit/events/{eventID}"},
+		{http.MethodGet, "/api/v1/compat/snaplink/audit/facets"},
 		{http.MethodGet, "/api/v1/operations/{operationID}"},
 		{http.MethodGet, "/api/v1/operations/{operationID}/timeline"},
 		{http.MethodGet, "/api/v1/operations/{operationID}/replay"},
@@ -2873,6 +2876,9 @@ var registeredRoutes = []struct {
 	{"GET /api/v1/events/{eventID}", "getEvent"},
 	{"GET /api/v1/events/{eventID}/receipt", "getReceipt"},
 	{"GET /api/v1/events", "queryEvents"},
+	{"GET /api/v1/compat/snaplink/audit/events", "querySnaplinkAuditEvents"},
+	{"GET /api/v1/compat/snaplink/audit/events/{eventID}", "getEvent"},
+	{"GET /api/v1/compat/snaplink/audit/facets", "querySnaplinkAuditFacets"},
 	{"GET /api/v1/operations/{operationID}", "getOperation"},
 	{"GET /api/v1/operations/{operationID}/timeline", "getOperationTimeline"},
 	{"GET /api/v1/operations/{operationID}/replay", "replayOperation"},
@@ -2908,10 +2914,11 @@ var registeredRoutes = []struct {
 // Payload). A future event-returning service method must be added here AND to
 // the guard's handler check at the same commit — documented, accepted surface.
 var eventReturningServiceMethods = map[string]bool{
-	"GetEvent":          true,
-	"QueryEvents":       true,
-	"OperationTimeline": true,
-	"AggregateTimeline": true,
+	"GetEvent":           true,
+	"QueryEvents":        true,
+	"QueryConsoleEvents": true,
+	"OperationTimeline":  true,
+	"AggregateTimeline":  true,
 }
 
 // TestEventReturningHandlersStripSearchDigests is AC-2 (REQ-7): a static
@@ -3014,11 +3021,13 @@ func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
 		}
 	}
 
-	// The four event routes must map to the four event-returning handlers
+	// Every event route must map to its reviewed event-returning handler
 	// (explicit mapping assertion, REQ-7 step 4).
 	eventRoutes := map[string]string{
 		"GET /api/v1/events/{eventID}":                                  "getEvent",
 		"GET /api/v1/events":                                            "queryEvents",
+		"GET /api/v1/compat/snaplink/audit/events":                      "querySnaplinkAuditEvents",
+		"GET /api/v1/compat/snaplink/audit/events/{eventID}":            "getEvent",
 		"GET /api/v1/operations/{operationID}/timeline":                 "getOperationTimeline",
 		"GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline": "getAggregateTimeline",
 	}

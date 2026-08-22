@@ -283,6 +283,16 @@ type QueryResult struct {
 	Count      int     `json:"count"`
 }
 
+// EventFacets is the bounded compatibility projection used by the Snaplink
+// Console filter UI. It deliberately exposes counts only, never event payload.
+type EventFacets struct {
+	Total     int            `json:"total"`
+	Outcomes  map[string]int `json:"outcomes"`
+	Types     map[string]int `json:"types"`
+	Clients   map[string]int `json:"clients"`
+	Providers map[string]int `json:"providers"`
+}
+
 type OperationSummary struct {
 	OperationID string    `json:"operation_id"`
 	TenantID    string    `json:"tenant_id"`

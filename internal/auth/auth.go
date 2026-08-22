@@ -19,6 +19,12 @@ type Claims struct {
 	Permissions map[string]bool
 	Platform    bool
 	Service     bool
+	// ConsoleAuditRead maps the audience-bound Snaplink admin:read scope only
+	// onto event reads; it grants no governance mutation permission.
+	ConsoleAuditRead bool
+	// CrossTenantAuditRead is restricted to Console tokens without a signed
+	// tenant claim. A tenant-scoped token can never select another tenant.
+	CrossTenantAuditRead bool
 }
 
 type Authenticator struct {
@@ -171,6 +177,8 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 			claims.Permissions[permission] = true
 		}
 	}
+	claims.ConsoleAuditRead = claims.Permissions["admin:read"] || claims.Permissions["admin:*"]
+	claims.CrossTenantAuditRead = claims.ConsoleAuditRead && claims.TenantID == ""
 	claims.Platform = claims.Permissions["audit:platform:cross_tenant"] || contains(claims.Roles, "platform-admin")
 	claims.Service = contains(claims.Roles, "service") || contains(claims.Roles, "event-writer")
 	return claims, nil
@@ -244,7 +252,8 @@ func strictIdentityClaim(payload map[string]any, name string) (string, bool, err
 }
 
 func (c Claims) Allows(permission string) bool {
-	return c.Permissions[permission] || c.Platform
+	return c.Permissions[permission] || c.Platform ||
+		(permission == "audit:event:read" && c.ConsoleAuditRead)
 }
 
 func permissionsForRoles(roles []string) map[string]bool {

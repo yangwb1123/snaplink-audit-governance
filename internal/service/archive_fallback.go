@@ -87,13 +87,13 @@ func (s *Service) eventFromSnapshot(ctx context.Context, data *store.Snapshot, t
 func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
 	events := make([]domain.Event, 0)
 	for _, event := range data.Events {
-		if event.TenantID == tenantID && predicate(event) {
+		if (tenantID == "" || event.TenantID == tenantID) && predicate(event) {
 			events = append(events, event)
 		}
 	}
 	keys := make([]string, 0, len(data.Receipts))
 	for key, receipt := range data.Receipts {
-		if receipt.TenantID == tenantID && receipt.Status == domain.StatusArchived {
+		if (tenantID == "" || receipt.TenantID == tenantID) && receipt.Status == domain.StatusArchived {
 			if _, hot := data.Events[key]; !hot {
 				keys = append(keys, key)
 			}

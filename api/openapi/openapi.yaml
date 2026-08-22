@@ -8,6 +8,59 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /api/v1/compat/snaplink/audit/events:
+    get:
+      operationId: querySnaplinkConsoleAuditEvents
+      description: Compatibility read projection for Snaplink Console. Time bounds are optional and default to the full ledger horizon; results are newest-first. The admin:read bridge grants only audit event reads, remains audience-bound by the JWT verifier, and a signed tenant claim cannot be overridden.
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: event_type, in: query, schema: { type: string } }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: client_id, in: query, description: Trusted source_system filter, schema: { type: string } }
+        - { name: tenant_id, in: query, description: Available only to a platform or tenantless Console admin token, schema: { type: string } }
+        - { name: outcome, in: query, schema: { type: string } }
+        - { name: trace_id, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
+        - { name: until, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        '200': { description: Newest-first Console event page, content: { application/json: { schema: { $ref: '#/components/schemas/AuditExplorerResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/v1/compat/snaplink/audit/events/{eventId}:
+    get:
+      operationId: getSnaplinkConsoleAuditEvent
+      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      responses:
+        '200': { description: Canonical governance event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/v1/compat/snaplink/audit/facets:
+    get:
+      operationId: querySnaplinkConsoleAuditFacets
+      description: Full-window bounded facet counts over the same trusted event filters as the Console event projection. SourceSystem supplies the clients dimension; providers is empty because the canonical governance envelope has no trusted provider field.
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: event_type, in: query, schema: { type: string } }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: client_id, in: query, schema: { type: string } }
+        - { name: tenant_id, in: query, schema: { type: string } }
+        - { name: outcome, in: query, schema: { type: string } }
+        - { name: trace_id, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
+        - { name: until, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
+      responses:
+        '200': { description: Facet counts, content: { application/json: { schema: { type: object, required: [facets], properties: { facets: { $ref: '#/components/schemas/EventFacets' } } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
   /api/v1/events:
     post:
       operationId: writeEvent
@@ -250,6 +303,8 @@ components:
     ReceiptResponse: { type: object, properties: { receipt: { $ref: '#/components/schemas/Receipt' }, receipt_url: { type: string } } }
     Query: { type: object, required: [from, to], properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
     QueryResult: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
+    AuditExplorerResult: { type: object, required: [events, count], properties: { events: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
+    EventFacets: { type: object, required: [total, outcomes, types, clients, providers], properties: { total: { type: integer }, outcomes: { type: object, additionalProperties: { type: integer } }, types: { type: object, additionalProperties: { type: integer } }, clients: { type: object, additionalProperties: { type: integer } }, providers: { type: object, additionalProperties: { type: integer } } } }
     LegalHold: { type: object, required: [name, reason], properties: { id: { type: string }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
     RestoreRequest: { type: object, required: [operation_id, reason], properties: { operation_id: { type: string }, reason: { type: string } } }
     Tenant: { type: object, required: [id, name], properties: { id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$' }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }

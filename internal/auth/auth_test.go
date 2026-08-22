@@ -70,6 +70,32 @@ func TestJWTClientIdentityUsesClientIDOrAZP(t *testing.T) {
 	}
 }
 
+func TestJWTAdminReadBridgeIsReadOnlyAndTenantAware(t *testing.T) {
+	authenticator := Authenticator{JWTSecret: testHMACSecret, AllowLocalHS256: true}
+	base := map[string]any{
+		"sub": "console-admin", "scope": "admin:read", "exp": time.Now().Add(time.Hour).Unix(),
+	}
+	tenantClaims := cloneClaims(base)
+	tenantClaims["tenant_id"] = "tenant-a"
+	tenant, err := authenticator.AuthenticateToken(signJWT(t, tenantClaims))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tenant.ConsoleAuditRead || tenant.CrossTenantAuditRead || !tenant.Allows("audit:event:read") {
+		t.Fatalf("tenant Console claims = %+v", tenant)
+	}
+	if tenant.Allows("audit:event:write") || tenant.Platform {
+		t.Fatalf("admin:read expanded beyond audit read: %+v", tenant)
+	}
+	platform, err := authenticator.AuthenticateToken(signJWT(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !platform.CrossTenantAuditRead || platform.Platform {
+		t.Fatalf("platform Console bridge = %+v", platform)
+	}
+}
+
 func TestJWTRejectsConflictingClientIdentityClaims(t *testing.T) {
 	payload := map[string]any{
 		"sub": "service-subject", "tenant_id": "tenant-a", "exp": time.Now().Add(time.Hour).Unix(),
