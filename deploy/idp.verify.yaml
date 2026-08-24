@@ -14,6 +14,9 @@ identity:
   backend: memory
 oauth:
   backend: memory
+  auth_code:
+    enabled: true
+    ttl: 10m
   # B4-2 严格路径：启用 scope registry（未注册 scope → 400 invalid_scope）。
   # 审计 scope 矩阵显式注册（生产部署的 IdP 启用 registry 时必须同样注册）；
   # e2e 的每次 mint 都走该严格门禁。
@@ -36,6 +39,7 @@ clients:
     tenant_id: demo
     redirect_uris: []
     allowed_scopes: [audit:event:write, audit:event:read, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read, audit:policy:write]
+    allowed_resources: [audit-governance]
     allowed_authenticators: [apikey, client_secret]
     token_strategy: jwt
     active: true
@@ -46,14 +50,55 @@ clients:
     tenant_id: demo
     redirect_uris: []
     allowed_scopes: [audit:event:read, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read]
+    allowed_resources: [audit-governance]
     allowed_authenticators: [apikey, client_secret]
     token_strategy: jwt
     active: true
+  # Browser client used by web/ and the Snaplink Console hosted login. It is
+  # public (no secret), S256-only and accepts both the Vite and container
+  # callback origins used by the local verification workflow.
+  - id: audit-governance-web
+    name: Audit Governance Web
+    tenant_id: demo
+    login_page_uri: http://localhost:4444/login/
+    redirect_uris:
+      - http://localhost:5178/auth/callback
+      - http://localhost:15178/auth/callback
+    post_logout_redirect_uris:
+      - http://localhost:5178/
+      - http://localhost:15178/
+    allowed_scopes: [openid, profile, audit:event:read, audit:event:write, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read, audit:policy:write, audit:platform:cross_tenant]
+    allowed_resources: [audit-governance]
+    allowed_authenticators: [password]
+    token_strategy: jwt
+    require_pkce: true
+    token_endpoint_auth_method: none
+    allowed_pkce_methods: [S256]
+    access_token_ttl: 15m
+    active: true
+authenticators:
+  password:
+    enabled: true
+    users:
+      - username: audit-operator
+        bcrypt_hash_file: /etc/sso/audit-operator.bcrypt
+        subject_id: audit-operator
+      - username: audit-approver
+        bcrypt_hash_file: /etc/sso/audit-operator.bcrypt
+        subject_id: audit-approver
 permissions:
   enabled: true
   backend: memory
+  embed_in_login: true
   apps:
     - client_id: demo
       roles:
         - code: service
           permissions: [audit:event:write]
+    - client_id: audit-governance-web
+      roles:
+        - code: platform-admin
+          permissions: [audit:platform:cross_tenant, audit:event:read, audit:event:write, audit:operation:read, audit:export:create, audit:integrity:verify, audit:legal_hold:manage, audit:policy:read, audit:policy:write]
+  user_roles:
+    - { user_id: audit-operator, client_id: audit-governance-web, roles: [platform-admin] }
+    - { user_id: audit-approver, client_id: audit-governance-web, roles: [platform-admin] }

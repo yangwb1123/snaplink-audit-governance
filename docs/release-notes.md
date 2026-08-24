@@ -1,5 +1,22 @@
 # Release Notes
 
+## 2026-08-22 — OTLP 网关路径前缀保留与端点校验
+
+**写给运营：**
+
+- `AUDIT_OTLP_ENDPOINT` 现在可配置 collector 网关前缀，例如
+  `https://otel-gateway.example/otlp` 会向 `/otlp/v1/traces` 导出；此前固定的
+  `/v1/traces` 会覆盖该前缀并导致网关后面的追踪静默丢失。
+- 已含 `/v1/traces` 的完整端点不会重复追加；缺少 scheme、缺少 host 或使用
+  非 HTTP(S) scheme 的端点会在启动时返回配置错误。
+
+**写给开发：**
+
+- `internal/telemetry.traceEndpointURL` 负责校验并幂等合成 signal path，exporter
+  只接收一个完整 `WithEndpointURL`，不再用后置 `WithURLPath` 覆盖配置。
+- 回归测试启动真实 `httptest` collector、生成 span 并在 `Shutdown` 刷新，直接
+  断言收到 `/otlp/v1/traces`；发布前仍须运行 `python3 cli.py quality`。
+
 ## 2026-08-20 — 控制面 v2 热/冷分层与显式 PostgreSQL 切换
 
 **写给运营：**

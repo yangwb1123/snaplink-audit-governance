@@ -2,6 +2,9 @@ package telemetry
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +52,66 @@ func TestInitAndShutdown(t *testing.T) {
 	defer cancel()
 	if err := tracer.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestInitPreservesOTLPGatewayPath(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+	}()
+
+	tests := []struct {
+		name     string
+		endpoint string
+		wantPath string
+	}{
+		{name: "gateway prefix", endpoint: "/otlp", wantPath: "/otlp/v1/traces"},
+		{name: "complete signal path", endpoint: "/otlp/v1/traces/", wantPath: "/otlp/v1/traces"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			paths := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				paths <- r.URL.Path
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			tracer, err := Init(context.Background(), server.URL+test.endpoint, "test-service")
+			if err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			_, span := otel.Tracer("otlp-path-test").Start(context.Background(), "flush-path")
+			span.End()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := tracer.Shutdown(shutdownCtx); err != nil {
+				t.Fatalf("Shutdown: %v", err)
+			}
+			select {
+			case got := <-paths:
+				if got != test.wantPath {
+					t.Fatalf("export path=%q, want %q", got, test.wantPath)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("collector did not receive flushed span")
+			}
+		})
+	}
+}
+
+func TestInitRejectsInvalidEndpointURL(t *testing.T) {
+	for _, endpoint := range []string{"collector:4318", "ftp://collector:4318", "http:///missing-host"} {
+		t.Run(endpoint, func(t *testing.T) {
+			tracer, err := Init(context.Background(), endpoint, "test-service")
+			if err == nil || tracer != nil {
+				t.Fatalf("Init(%q): tracer=%v err=%v, want nil/error", endpoint, tracer, err)
+			}
+		})
 	}
 }
 

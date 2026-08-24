@@ -5,7 +5,7 @@ from .config import ROOT
 ALLOWED = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
            "Makefile", "go.mod", "go.sum", "cli.py", "engineering.yaml", "api", "cmd",
            "deploy", "docs", "internal", "migrations", "checks", "bin", "test",
-           "scripts", ".trends", ".pi-batch", "__pycache__",
+           "scripts", "web", ".trends", ".pi-batch", "__pycache__",
            # ai-batch-runner tooling synced by the tooling-sync commit: quality
            # gate, pipeline shell, and the runner package. logs/ and
            # .pi-batch.lock are runner runtime artifacts (gitignored, present

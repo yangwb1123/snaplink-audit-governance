@@ -7,6 +7,8 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -16,6 +18,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
+
+const otlpTracesPath = "/v1/traces"
 
 // Tracer owns the OTLP exporter lifecycle. It is nil when tracing is
 // disabled.
@@ -31,15 +35,14 @@ func Init(ctx context.Context, endpoint, serviceName string) (*Tracer, error) {
 	if endpoint == "" {
 		return nil, nil
 	}
+	traceEndpoint, err := traceEndpointURL(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	if serviceName == "" {
 		serviceName = "audit-governance"
 	}
-	exporter, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpointURL(endpoint),
-		// WithEndpointURL keeps only the URL host; the OTLP path must be
-		// set explicitly or requests go to the root path.
-		otlptracehttp.WithURLPath("v1/traces"),
-	)
+	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(traceEndpoint))
 	if err != nil {
 		return nil, fmt.Errorf("create OTLP exporter: %w", err)
 	}
@@ -50,6 +53,31 @@ func Init(ctx context.Context, endpoint, serviceName string) (*Tracer, error) {
 	otel.SetTracerProvider(provider)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return &Tracer{shutdown: provider.Shutdown}, nil
+}
+
+// traceEndpointURL validates the collector URL and appends the OTLP traces
+// signal path to an optional gateway prefix. A caller may also provide the
+// complete signal URL; in that case the operation is idempotent.
+func traceEndpointURL(endpoint string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return "", fmt.Errorf("parse OTLP endpoint: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("OTLP endpoint scheme must be http or https")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("OTLP endpoint host is required")
+	}
+	endpointPath := strings.TrimRight(parsed.Path, "/")
+	if endpointPath == "" {
+		endpointPath = otlpTracesPath
+	} else if !strings.HasSuffix(endpointPath, otlpTracesPath) {
+		endpointPath += otlpTracesPath
+	}
+	parsed.Path = endpointPath
+	parsed.RawPath = ""
+	return parsed.String(), nil
 }
 
 // Shutdown flushes and stops the exporter. Safe on a nil receiver.

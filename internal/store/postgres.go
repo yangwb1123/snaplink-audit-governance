@@ -128,11 +128,11 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 		var legacyLedger bool
 		err := p.db.QueryRowContext(ctx, `
 SELECT COALESCE(snapshot->>'layout_version', '0'),
-       COALESCE(jsonb_object_length(COALESCE(snapshot->'events', '{}'::jsonb)), 0) > 0 OR
-       COALESCE(jsonb_object_length(COALESCE(snapshot->'receipts', '{}'::jsonb)), 0) > 0 OR
-       COALESCE(jsonb_object_length(COALESCE(snapshot->'streams', '{}'::jsonb)), 0) > 0 OR
-       COALESCE(jsonb_object_length(COALESCE(snapshot->'segments', '{}'::jsonb)), 0) > 0 OR
-       COALESCE(jsonb_object_length(COALESCE(snapshot->'checkpoints', '{}'::jsonb)), 0) > 0
+       COALESCE(snapshot->'events', '{}'::jsonb) <> '{}'::jsonb OR
+       COALESCE(snapshot->'receipts', '{}'::jsonb) <> '{}'::jsonb OR
+       COALESCE(snapshot->'streams', '{}'::jsonb) <> '{}'::jsonb OR
+       COALESCE(snapshot->'segments', '{}'::jsonb) <> '{}'::jsonb OR
+       COALESCE(snapshot->'checkpoints', '{}'::jsonb) <> '{}'::jsonb
 FROM audit_state_snapshot WHERE id = 1`).Scan(&layout, &legacyLedger)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("hot/cold layout marker: %w", err)

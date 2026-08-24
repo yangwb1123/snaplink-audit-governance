@@ -150,7 +150,7 @@ def cmd_check_routes() -> int:
 def cmd_check_root() -> int:
     allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
-               "docs", "internal", "migrations", "checks", "test", "bin", "scripts",
+               "docs", "internal", "migrations", "checks", "test", "bin", "scripts", "web",
                ".trends", ".pi-batch", "engineering.yaml", "__pycache__"}
     unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed and not path.name.startswith(".pi-batch.lock")]
     if unexpected:

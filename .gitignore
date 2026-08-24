@@ -1,5 +1,7 @@
 /data/
 /bin/
+/web/node_modules/
+/web/dist/
 /coverage.out
 *.test
 *.log

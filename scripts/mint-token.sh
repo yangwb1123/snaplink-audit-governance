@@ -10,6 +10,7 @@
 #   AUDIT_IDP_CLIENT_SECRET
 # Optional:
 #   AUDIT_IDP_SCOPE        default "audit:event:write"
+#   AUDIT_IDP_RESOURCE     RFC 8707 resource / access-token audience
 #
 # Fail-closed: without the three configuration variables the script exits
 # non-zero with a message instead of producing a bogus token. This script
@@ -28,18 +29,41 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
+TOKEN_ARGS=(
+  --data-urlencode "grant_type=client_credentials"
+  --data-urlencode "client_id=${AUDIT_IDP_CLIENT_ID}"
+  --data-urlencode "client_secret=${AUDIT_IDP_CLIENT_SECRET}"
+  --data-urlencode "scope=${SCOPE}"
+)
+if [ -n "${AUDIT_IDP_RESOURCE:-}" ]; then
+  TOKEN_ARGS+=(--data-urlencode "resource=${AUDIT_IDP_RESOURCE}")
+fi
+
 RESPONSE="$(curl -sfS \
   -X POST "${AUDIT_IDP_TOKEN_URL}" \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  --data-urlencode "grant_type=client_credentials" \
-  --data-urlencode "client_id=${AUDIT_IDP_CLIENT_ID}" \
-  --data-urlencode "client_secret=${AUDIT_IDP_CLIENT_SECRET}" \
-  --data-urlencode "scope=${SCOPE}")"
+  "${TOKEN_ARGS[@]}")"
 
 TOKEN="$(printf '%s' "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
 if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "None" ]; then
   echo "mint-token: IdP response contained no access_token" >&2
   exit 1
+fi
+if [ -n "${AUDIT_IDP_RESOURCE:-}" ]; then
+  TOKEN_VALUE="${TOKEN}" EXPECTED_RESOURCE="${AUDIT_IDP_RESOURCE}" python3 -c '
+import base64, json, os
+try:
+    payload = os.environ["TOKEN_VALUE"].split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+except Exception as exc:
+    raise SystemExit("mint-token: resource-bound access token is not a JWT") from exc
+audience = claims.get("aud", [])
+if isinstance(audience, str):
+    audience = [audience]
+if os.environ["EXPECTED_RESOURCE"] not in audience:
+    raise SystemExit("mint-token: access token audience does not contain requested resource")
+'
 fi
 
 # Shell-exportable output; works both when sourced (`source mint-token.sh`)

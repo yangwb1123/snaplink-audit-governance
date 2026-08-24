@@ -25,6 +25,7 @@ services:
       AUDIT_ALLOW_DEV_AUTH: ${AUDIT_ALLOW_DEV_AUTH:-true}
       AUDIT_JWKS_URL: ${AUDIT_JWKS_URL:-}
       AUDIT_JWT_ISSUER: ${AUDIT_JWT_ISSUER:-}
+      AUDIT_JWT_AUDIENCE: ${AUDIT_JWT_AUDIENCE:-}
       AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK: ${AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK:-false}
       AUDIT_BOOTSTRAP_TENANT: demo
       AUDIT_SIGNING_SECRET: local-only-change-me
@@ -159,11 +160,55 @@ services:
       # 是 demo/ 工作区，snaplink 与其并列。
       context: ../../snaplink
       dockerfile: Dockerfile
-    command: ["--config", "/etc/sso/idp.yaml"]
+    # The audit fixture uses only HTTP/OIDC. Disable the independent admin
+    # gRPC listener so the verification container does not opt out of TLS.
+    command: ["--config", "/etc/sso/idp.yaml", "--grpc-listen", ""]
     volumes:
       - ./idp.verify.yaml:/etc/sso/idp.yaml:ro
+      - ./audit-operator.verify.bcrypt:/etc/sso/audit-operator.bcrypt:ro
     ports:
       - "18082:18082"
+    networks: [audit_verify]
+
+  # Optional browser integration profile. Start it only after fullstack.sh has
+  # bootstrapped PostgreSQL and the WORM bucket (make web-stack-up does this).
+  audit-web:
+    profiles: [web]
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    environment:
+      AUDIT_API_UPSTREAM: http://audit-api:8089
+      SNAPLINK_API_UPSTREAM: http://audit-idp:18082
+    depends_on:
+      - audit-api
+      - audit-idp
+    ports:
+      - "15178:8080"
+    networks: [audit_verify]
+
+  # Snaplink Console owns the Hosted Login UI. Commercial routes are not part
+  # of this audit-only profile, so their required upstreams terminate at the
+  # local IdP and are never exercised by the /login/ flow.
+  audit-console:
+    profiles: [web]
+    build:
+      context: ../../snaplink-console
+      dockerfile: Dockerfile
+      args:
+        SNAPLINK_ADMIN_OAUTH_RESOURCES: audit-governance
+    environment:
+      SNAPLINK_UPSTREAM: http://audit-idp:18082
+      SNAPLINK_SERVER_NAME: audit-idp
+      SNAPLINK_BILLING_UPSTREAM: http://audit-idp:18082
+      SNAPLINK_STRIPE_ADAPTER_UPSTREAM: http://audit-idp:18082
+      AUDIT_GOVERNANCE_UPSTREAM: http://audit-api:8089
+      AUDIT_GOVERNANCE_SERVER_NAME: audit-api
+    depends_on:
+      - audit-api
+      - audit-idp
+    ports:
+      - "4444:80"
     networks: [audit_verify]
 
   audit-projector:

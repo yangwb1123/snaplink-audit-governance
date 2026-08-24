@@ -1,0 +1,1 @@
+window.__AUDIT_GOVERNANCE_CONFIG__ = window.__AUDIT_GOVERNANCE_CONFIG__ || {}

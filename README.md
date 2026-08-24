@@ -102,6 +102,22 @@ python3 cli.py help
 
 也可以使用等价的 `make check`、`make quality`、`make test`、`make race` 和 `make build`。
 
+## Web 管理端
+
+仓库内的 [`web`](web/README.md) 是基于 Iris UI React 的审计治理管理端，通过
+Snaplink Hosted Login 完成 OIDC Authorization Code + PKCE 登录，并对接本服务的
+事件查询、操作时间线、合规证据、Legal Hold、恢复审批和治理目录接口。
+
+```sh
+corepack pnpm install --dir web
+make web-dev       # http://localhost:5178，默认代理 API 到 localhost:8089
+make web-check     # 单测、类型检查、lint、生产构建
+make web-stack-up  # Snaplink Hosted Login + PKCE + Audit API 完整本机联调
+```
+
+Snaplink 必须注册 public client `audit-governance-web`；完整回调、代理和容器部署配置见
+[`web/README.md`](web/README.md)。
+
 ### Proto 生成代码同步（api/proto）
 
 `api/proto/audit.proto` 与检入的生成代码（`audit.pb.go`/`audit_grpc.pb.go`，即 gRPC
@@ -152,7 +168,8 @@ B1-7 真实 IdP token 注入（G1 模式，**自包含**）：设置 `AUDIT_IDP_
 （从兄弟仓库 snaplink 构建，配置 `deploy/idp.verify.yaml`），e2e 自动铸造带
 `tenant_id`/`scope` claims 的 JWT 并把栈切换到 **dev auth 关闭 + JWKS 验证**
 （dev token 负向断言 401；JWKS 经 host-gateway 别名访问容器 IdP；issuer 校验）。
-可选 `AUDIT_IDP_SCOPE`/`AUDIT_IDP_TOKEN_URL` 覆盖。未配置时过渡期使用 dev
+验证栈同时发送 RFC 8707 `resource=audit-governance`，并在 Audit API 强制校验同名
+audience；可选 `AUDIT_IDP_SCOPE`/`AUDIT_IDP_RESOURCE`/`AUDIT_IDP_TOKEN_URL` 覆盖。未配置时过渡期使用 dev
 token 并告警。两种模式均实测通过（2026-08-07）。
 
 ### COMPLIANCE 默认留存 cutover 验证（R-1 部署配套，2026-08-15）

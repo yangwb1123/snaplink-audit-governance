@@ -29,7 +29,11 @@ if [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ]; t
   for _ in $(seq 1 30); do
     if curl -sf -m 2 -X POST "${AUDIT_IDP_TOKEN_URL:-http://localhost:18082/token}" \
       -H 'Content-Type: application/x-www-form-urlencoded' \
-      --data "grant_type=client_credentials&client_id=${AUDIT_IDP_CLIENT_ID}&client_secret=${AUDIT_IDP_CLIENT_SECRET}&scope=audit:event:write" >/dev/null 2>&1; then
+      --data-urlencode "grant_type=client_credentials" \
+      --data-urlencode "client_id=${AUDIT_IDP_CLIENT_ID}" \
+      --data-urlencode "client_secret=${AUDIT_IDP_CLIENT_SECRET}" \
+      --data-urlencode "scope=audit:event:write" \
+      --data-urlencode "resource=${AUDIT_IDP_RESOURCE:-audit-governance}" >/dev/null 2>&1; then
       break
     fi
     sleep 2
@@ -53,6 +57,7 @@ elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ];
   # 默认 scope 覆盖 e2e 全部治理断言（策略/Legal Hold/导出/完整性/读写）；
   # 调用方可覆盖。
   export AUDIT_IDP_SCOPE="${AUDIT_IDP_SCOPE:-audit:event:write audit:event:read audit:operation:read audit:export:create audit:integrity:verify audit:legal_hold:manage audit:policy:read audit:policy:write}"
+  export AUDIT_IDP_RESOURCE="${AUDIT_IDP_RESOURCE:-audit-governance}"
   # shellcheck disable=SC1091
   source "${ROOT}/scripts/mint-token.sh"
   AUTH_READ="Bearer ${AUDIT_E2E_TOKEN}"
@@ -64,6 +69,7 @@ elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ];
   export AUDIT_ALLOW_INSECURE_JWKS_LOOPBACK=true
   export AUDIT_JWKS_URL="${AUDIT_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}"
   export AUDIT_JWT_ISSUER="${AUDIT_JWT_ISSUER:-http://localhost:18082}"
+  export AUDIT_JWT_AUDIENCE="${AUDIT_JWT_AUDIENCE:-audit-governance}"
   AUTH_POLICY="Bearer ${AUDIT_E2E_TOKEN}"
   AUTH_WRITE="Bearer ${AUDIT_E2E_TOKEN}"
   # 第二主体（demo-admin）：职责分离 e2e 的审批者。mint 会覆盖
@@ -252,7 +258,7 @@ log "inserting outbox record $EVENT_ID"
 $COMPOSE exec -T postgres psql -U audit -d audit <<SQL >/dev/null
 INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at)
 VALUES ('$EVENT_ID', 'demo', 'fs-$EVENT_ID',
-'{"event_id":"$EVENT_ID","tenant_id":"demo","source_system":"demo","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T12:00:00Z","actor":{"id":"user-1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"fs-$EVENT_ID","payload":{"note":"fullstack e2e"}}',
+'{"event_id":"$EVENT_ID","tenant_id":"demo","source_system":"demo","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T12:00:00Z","correlation_id":"fullstack-web-contract","trace_id":"0123456789abcdef0123456789abcdef","aggregate_type":"verification","aggregate_id":"$EVENT_ID","aggregate_version":1,"actor":{"id":"user-1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"fs-$EVENT_ID","payload":{"note":"fullstack e2e"}}',
 now());
 SQL
 
