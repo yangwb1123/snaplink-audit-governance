@@ -33,6 +33,7 @@ func main() {
 	interval := flag.Duration("interval", durationEnv("AUDIT_DLQ_REPLAY_INTERVAL", 5*time.Minute), "round interval in daemon mode")
 	apiURL := flag.String("api-url", envOr("AUDIT_OUTBOX_API_URL", ""), "audit API base URL; when set, recovered events are re-ingested via HTTP instead of re-published to Kafka")
 	token := flag.String("token", os.Getenv("AUDIT_OUTBOX_TOKEN"), "bearer token for audit API ingestion")
+	tenantScope := flag.String("tenant-scope", os.Getenv("AUDIT_DLQ_REPLAY_TENANT_SCOPE"), "explicit single-tenant scope for the static API replay token (required for token use)")
 	timeout := flag.Duration("timeout", durationEnv("AUDIT_KAFKA_TIMEOUT", 30*time.Second), "per-event ingest timeout in API mode")
 	replayAuthBlocked := flag.Bool("replay-auth-blocked", false, "re-publish DLQ records with error_code=unauthorized (set only after the ingest token is fixed)")
 	metricsListen := flag.String("metrics-listen", os.Getenv("AUDIT_DLQ_REPLAY_METRICS"), "optional metrics listen address (e.g. :9091)")
@@ -57,9 +58,19 @@ func main() {
 	if err != nil {
 		logger.Fatalf("state: %v", err)
 	}
+	if *tenantScope != "" {
+		state.SetLegacyTenantScope(*tenantScope)
+	}
 	var republish kafka.RepublishFunc
 	if *apiURL != "" {
-		deliver := outbox.HTTPDeliverer(*apiURL, *token, &http.Client{Timeout: *timeout})
+		if strings.TrimSpace(*tenantScope) == "" {
+			logger.Printf("warning: AUDIT_DLQ_REPLAY_TENANT_SCOPE is empty; API-mode replay will keep every recovered event pending and will not apply the static token")
+		}
+		if strings.TrimSpace(*token) == "" {
+			logger.Printf("warning: AUDIT_OUTBOX_TOKEN is empty; API-mode replay will keep records pending until a tenant-scoped credential is configured")
+		}
+		resolver := outbox.StaticTenantCredentialResolver(*tenantScope, *token)
+		deliver := outbox.HTTPDelivererForTenant(*apiURL, resolver, &http.Client{Timeout: *timeout})
 		republish = func(ctx context.Context, key, value []byte) error {
 			event, err := kafka.EventFromCanonical(value)
 			if err != nil {

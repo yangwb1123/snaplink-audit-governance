@@ -38,8 +38,20 @@ type RepublishFunc func(ctx context.Context, key, value []byte) error
 // on an exclusive advisory flock and can never lose a committed mark
 // (union by accumulation — no writer ever overwrites another's lines).
 type ReplayState struct {
+	// Replayed is the legacy event-ID view kept for source compatibility with
+	// older embedders and diagnostics. Tenant-aware replay never consults this
+	// map for authorization or correlation; it uses scopedMarks instead.
 	Replayed map[string]bool `json:"replayed"`
-	path     string
+	// scopedMarks is keyed by an injective length-framed (tenant_id,event_id)
+	// identity. It is intentionally unexported so callers cannot accidentally
+	// treat the compatibility event-ID view as tenant-safe state.
+	scopedMarks map[string]bool
+	// legacyMarks contains event-ID-only marks loaded from v1 state. They are
+	// honored by tenant-aware replay only after an operator explicitly proves
+	// the old file was single-tenant with SetLegacyTenantScope.
+	legacyMarks       map[string]bool
+	legacyTenantScope string
+	path              string
 	// mu serializes the in-memory map mutation and the persist critical
 	// section, making concurrent Mark calls on one instance race-free
 	// (REQ-8); separate instances sharing a path are serialized by the
@@ -83,11 +95,12 @@ const (
 type stateKind int
 
 const (
-	stateAbsent stateKind = iota // file does not exist
-	stateEmpty                   // size 0
-	stateLog                     // first line == the replay-log header
-	stateTorn                    // first line is a header prefix but not exact (never-fsynced first write)
-	stateLegacy                  // legacy {"replayed":{...}} single object
+	stateAbsent    stateKind = iota // file does not exist
+	stateEmpty                      // size 0
+	stateLog                        // first line == the replay-log header
+	stateTorn                       // first line is a header prefix but not exact (never-fsynced first write)
+	stateLegacy                     // legacy {"replayed":{...}} single object
+	stateTenantLog                  // tenant-aware replay log v2
 )
 
 // LoadReplayState reads the state file. A missing, zero-length, or
@@ -101,7 +114,7 @@ const (
 // never-fsynced first write fails that decode loudly, exactly like today's
 // torn-target pin. Temp and lock files are never read, parsed, or deleted.
 func LoadReplayState(path string) (*ReplayState, error) {
-	state := &ReplayState{Replayed: map[string]bool{}, path: path}
+	state := &ReplayState{Replayed: map[string]bool{}, scopedMarks: map[string]bool{}, legacyMarks: map[string]bool{}, path: path}
 	if path == "" {
 		return state, nil
 	}
@@ -126,6 +139,24 @@ func LoadReplayState(path string) (*ReplayState, error) {
 		}
 		for id := range marks {
 			state.Replayed[id] = true
+			state.legacyMarks[id] = true
+		}
+		return state, nil
+	}
+	if kind == stateTenantLog {
+		scoped, legacy, err := parseTenantLogMarks(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("decode replay state: %w", err)
+		}
+		for identity := range scoped {
+			state.scopedMarks[identity] = true
+			if eventID := replayEventIDFromIdentity(identity); eventID != "" {
+				state.Replayed[eventID] = true
+			}
+		}
+		for id := range legacy {
+			state.Replayed[id] = true
+			state.legacyMarks[id] = true
 		}
 		return state, nil
 	}
@@ -134,6 +165,9 @@ func LoadReplayState(path string) (*ReplayState, error) {
 	}
 	if state.Replayed == nil {
 		state.Replayed = map[string]bool{}
+	}
+	for id := range state.Replayed {
+		state.legacyMarks[id] = true
 	}
 	return state, nil
 }
@@ -163,16 +197,19 @@ func classifyFirstLine(first []byte) (stateKind, error) {
 	if bytes.Equal(line, []byte(replayLogHeaderLine)) {
 		return stateLog, nil
 	}
+	if bytes.Equal(line, []byte(replayTenantLogHeaderLine)) {
+		return stateTenantLog, nil
+	}
 	var probe struct {
 		Format string `json:"format"`
 	}
 	if json.Unmarshal(line, &probe) == nil && probe.Format != "" {
-		if probe.Format != replayLogFormat {
+		if probe.Format != replayLogFormat && probe.Format != replayTenantLogFormat {
 			return 0, fmt.Errorf("unknown replay state format %q", probe.Format)
 		}
 		return 0, fmt.Errorf("invalid replay state header %q", line)
 	}
-	if bytes.HasPrefix(line, []byte(replayLogPrefix)) {
+	if bytes.HasPrefix(line, []byte(replayLogPrefix)) || bytes.HasPrefix(line, []byte(replayTenantLogPrefix)) {
 		// Torn header from a never-fsynced first write: the line is a strict
 		// prefix of the header (invalid JSON), so the loader fails loudly
 		// via the legacy decode (FM-10) and the next Mark self-heals with a
@@ -269,8 +306,10 @@ func markLine(eventID string) ([]byte, error) {
 func (s *ReplayState) Mark(eventID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.initializeReplayMaps()
 	if s.path == "" {
 		s.Replayed[eventID] = true
+		s.legacyMarks[eventID] = true
 		return nil
 	}
 	lockWait := s.lockWait
@@ -290,7 +329,7 @@ func (s *ReplayState) Mark(eventID string) error {
 	if err != nil {
 		return fmt.Errorf("inspect replay state: %w", err)
 	}
-	if kind == stateLog {
+	if kind == stateLog || kind == stateTenantLog {
 		// The append WRITE is serialized by the flock (a concurrent rewrite
 		// must never race an append into a dying inode); the durability
 		// flush (file fsync) does not mutate the file and needs no mutual
@@ -308,6 +347,7 @@ func (s *ReplayState) Mark(eventID string) error {
 			return err
 		}
 		s.Replayed[eventID] = true
+		s.legacyMarks[eventID] = true
 		return nil
 	}
 	// Rewrite paths (first write / torn repair / legacy conversion) publish
@@ -318,6 +358,7 @@ func (s *ReplayState) Mark(eventID string) error {
 		return err
 	}
 	s.Replayed[eventID] = true
+	s.legacyMarks[eventID] = true
 	return nil
 }
 
@@ -413,6 +454,9 @@ func (s *ReplayState) repairTornTail() error {
 // lines), dropping a torn/corrupt un-terminated tail, via the same
 // unique-temp + fsync + rename + dir-fsync protocol as rewriteFull.
 func (s *ReplayState) rebuildLog() error {
+	if kind, err := classifyStateFile(s.path); err == nil && kind == stateTenantLog {
+		return s.rebuildTenantLog()
+	}
 	encoded, err := os.ReadFile(s.path)
 	if err != nil {
 		return fmt.Errorf("read replay state: %w", err)
@@ -617,12 +661,16 @@ const maxScanWindows = 2
 // re-scan idempotent, and committing the accepted scan position would make
 // new DLQ records miss older original messages.
 type Replayer struct {
-	dlqReader    messageReader
-	dlqNew       func() messageReader // per-round DLQ reader recreation (F1)
-	accepted     messageReader
-	acceptedNew  func() messageReader // per-round accepted reader recreation (REQ-1)
-	republish    RepublishFunc
-	state        *ReplayState
+	dlqReader   messageReader
+	dlqNew      func() messageReader // per-round DLQ reader recreation (F1)
+	accepted    messageReader
+	acceptedNew func() messageReader // per-round accepted reader recreation (REQ-1)
+	republish   RepublishFunc
+	state       *ReplayState
+	// tenantAware is true for production replayers. The legacy test seam is
+	// deliberately kept false so old byte-compatible event-ID fixtures remain
+	// useful; production Kafka and API modes both use canonical tenant state.
+	tenantAware  bool
 	logger       *log.Logger
 	drainTimeout time.Duration
 	dlqRecords   atomic.Uint64
@@ -675,6 +723,11 @@ type Replayer struct {
 	// auth-blocked detail log lines (H1: the full backlog must never flood
 	// the log); the round summary line always reports the total.
 	authBlockedDetailBudget atomic.Uint64
+	// tenantScopeMismatches counts exact API tenant_mismatch responses and
+	// resolver/configuration scope failures. tenantScopePending is the latest
+	// round's tenant-safety backlog gauge; neither path marks or commits.
+	tenantScopeMismatches atomic.Uint64
+	tenantScopePending    atomic.Uint64
 }
 
 // NewReplayer creates the DLQ and accepted-topic readers. The DLQ reader
@@ -720,7 +773,7 @@ func NewReplayer(brokers []string, dlqTopic, acceptedTopic, groupID string, stat
 		StartOffset:    kafka.FirstOffset,
 	}
 	acceptedReader := kafka.NewReader(acceptedConfig)
-	return &Replayer{dlqReader: dlqReader, dlqNew: func() messageReader { return kafka.NewReader(dlqConfig) }, accepted: acceptedReader, acceptedNew: func() messageReader { return kafka.NewReader(acceptedConfig) }, republish: republish, state: state, logger: logger, drainTimeout: defaultDrainTimeout}
+	return &Replayer{dlqReader: dlqReader, dlqNew: func() messageReader { return kafka.NewReader(dlqConfig) }, accepted: acceptedReader, acceptedNew: func() messageReader { return kafka.NewReader(acceptedConfig) }, republish: republish, state: state, tenantAware: true, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
 // newReplayerWithReaders is the test seam: the same messageReader contract
@@ -817,33 +870,37 @@ func sanitizeLogField(value string, limit int) string {
 // AuthBlocked increments per round a blocked record is re-collected;
 // AuthBlockedPending is the latest-round blocked backlog gauge.
 type ReplayerMetrics struct {
-	DLQRecords         uint64 // DLQ Failure records collected
-	AcceptedScanned    uint64 // accepted-topic messages scanned
-	Replayed           uint64 // successful re-publishes only
-	Permanent          uint64 // permanent closures (one-shot + legacy live rejection)
-	Unresolvable       uint64 // drained-unresolvable drops (permanent loss)
-	UnparsableMarks    uint64 // anti-loop marks for key-matched unparsable messages
-	AttemptsExhausted  uint64 // error_code=attempts_exhausted records collected (per-round traffic, NOT a resolution)
-	RepublishFailures  uint64 // transient + permanent republish failures (inclusive)
-	Pending            uint64 // wanted events pending in the current round
-	AuthBlocked        uint64 // error_code=unauthorized records held blocked (per-round increments)
-	AuthBlockedPending uint64 // blocked records collected by the latest round (gauge)
+	DLQRecords            uint64 // DLQ Failure records collected
+	AcceptedScanned       uint64 // accepted-topic messages scanned
+	Replayed              uint64 // successful re-publishes only
+	Permanent             uint64 // permanent closures (one-shot + legacy live rejection)
+	Unresolvable          uint64 // drained-unresolvable drops (permanent loss)
+	UnparsableMarks       uint64 // anti-loop marks for key-matched unparsable messages
+	AttemptsExhausted     uint64 // error_code=attempts_exhausted records collected (per-round traffic, NOT a resolution)
+	RepublishFailures     uint64 // transient + permanent republish failures (inclusive)
+	Pending               uint64 // wanted events pending in the current round
+	AuthBlocked           uint64 // error_code=unauthorized records held blocked (per-round increments)
+	AuthBlockedPending    uint64 // blocked records collected by the latest round (gauge)
+	TenantScopeMismatches uint64 // resolver/API scope failures (counter)
+	TenantScopePending    uint64 // tenant-safety backlog in the latest round (gauge)
 }
 
 // Metrics returns the replay resolution counters for the /metrics endpoint.
 func (r *Replayer) Metrics() ReplayerMetrics {
 	return ReplayerMetrics{
-		DLQRecords:         r.dlqRecords.Load(),
-		AcceptedScanned:    r.acceptedSeen.Load(),
-		Replayed:           r.replayed.Load(),
-		Permanent:          r.permanent.Load(),
-		Unresolvable:       r.unresolvable.Load(),
-		UnparsableMarks:    r.unparsableMarks.Load(),
-		AttemptsExhausted:  r.attemptsExhausted.Load(),
-		RepublishFailures:  r.republishFail.Load(),
-		Pending:            r.pending.Load(),
-		AuthBlocked:        r.authBlocked.Load(),
-		AuthBlockedPending: r.authBlockedPending.Load(),
+		DLQRecords:            r.dlqRecords.Load(),
+		AcceptedScanned:       r.acceptedSeen.Load(),
+		Replayed:              r.replayed.Load(),
+		Permanent:             r.permanent.Load(),
+		Unresolvable:          r.unresolvable.Load(),
+		UnparsableMarks:       r.unparsableMarks.Load(),
+		AttemptsExhausted:     r.attemptsExhausted.Load(),
+		RepublishFailures:     r.republishFail.Load(),
+		Pending:               r.pending.Load(),
+		AuthBlocked:           r.authBlocked.Load(),
+		AuthBlockedPending:    r.authBlockedPending.Load(),
+		TenantScopeMismatches: r.tenantScopeMismatches.Load(),
+		TenantScopePending:    r.tenantScopePending.Load(),
 	}
 }
 
@@ -865,6 +922,10 @@ func (r *Replayer) Metrics() ReplayerMetrics {
 // and never leapfrogged, so the next round's recreated DLQ session re-reads
 // it and retries. Replayed IDs in the state file keep re-reads idempotent.
 func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
+	// A scope backlog gauge describes the latest completed round, not the
+	// previous round's stale value. The tenant-aware scan repopulates it after
+	// a complete accepted-topic pass.
+	r.tenantScopePending.Store(0)
 	// F1: recreate the DLQ reader so this round drains from the broker's
 	// committed offset, not from the previous round's session position.
 	// kafka-go never re-delivers a fetched record within one group session
@@ -1117,7 +1178,7 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 			if failure.ErrorCode == ErrorCodeAttemptsExhausted {
 				r.attemptsExhausted.Add(1)
 			}
-			record.wanted = !r.state.marked(failure.EventID)
+			record.wanted = r.failureWanted(failure.EventID)
 			// error_code=unauthorized is config-fixable: while the operator has
 			// not acknowledged the credential is fixed (-replay-auth-blocked
 			// off, the default), the record is blocked — excluded from the
@@ -1170,7 +1231,7 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 // the set of event IDs that reached a durable decision this round
 // (replayed, permanently closed, unparsable, or converged-as-unresolvable
 // — NOT transiently failed).
-func (r *Replayer) scanAccepted(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
+func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
 	window := r.drainWindow()
 	scanCtx, cancel := context.WithTimeout(ctx, maxScanWindows*window)
 	defer cancel()
@@ -1317,6 +1378,13 @@ func EventFromCanonical(value []byte) (domain.Event, error) {
 	decoder := json.NewDecoder(bytes.NewReader(value))
 	decoder.UseNumber()
 	if err := decoder.Decode(&event); err != nil {
+		return domain.Event{}, fmt.Errorf("decode canonical event: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = errors.New("canonical event contains multiple JSON values")
+		}
 		return domain.Event{}, fmt.Errorf("decode canonical event: %w", err)
 	}
 	return event, nil

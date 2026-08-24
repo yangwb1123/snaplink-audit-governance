@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -55,6 +56,26 @@ type Store interface {
 	Update(ctx context.Context, id int64, patch Update) (bool, error)
 }
 
+// TenantCredentialResolver selects a bearer credential from the recovered
+// canonical tenant. Implementations must never return a credential for a
+// tenant they have not explicitly authorized; the resolver is a selection
+// aid, not a replacement for the API's server-side authorization.
+type TenantCredentialResolver func(ctx context.Context, tenantID string) (string, error)
+
+// TenantCredentialError is a configuration failure from a tenant credential
+// resolver. It intentionally carries no token material.
+type TenantCredentialError struct {
+	TenantID string
+	Reason   string
+}
+
+func (e *TenantCredentialError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("tenant credential unavailable for %q", e.TenantID)
+	}
+	return fmt.Sprintf("tenant credential unavailable for %q: %s", e.TenantID, e.Reason)
+}
+
 // DeliveryError classifies a failed delivery. Permanent errors (client
 // errors such as 403/409/422) dead-letter immediately instead of retrying;
 // 401 is deliberately retryable so a token rotation heals the backlog.
@@ -62,6 +83,12 @@ type Store interface {
 // problem) without parsing the message; it is 0 for non-HTTP errors.
 type DeliveryError struct {
 	Permanent bool
+	// TenantMismatch is true only for the exact API error contract
+	// HTTP 422 + error.code == "tenant_mismatch".
+	TenantMismatch bool
+	// TenantScopeBlocked covers TenantMismatch and resolver/configuration
+	// failures. Replay treats it as pending before any permanent policy.
+	TenantScopeBlocked bool
 	// StatusCode is the HTTP status that produced the failure, or 0 for
 	// non-HTTP errors (dial, timeout, DNS). Populated by HTTPDeliverer at
 	// the single non-2xx classification site and by the unverified 2xx
