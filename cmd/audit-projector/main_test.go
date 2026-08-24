@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snaplink/audit-governance/internal/kafka"
 )
 
 // Binary-level tests for flag/env wiring (REQ-2/REQ-3, AC-3). The resolved
@@ -53,14 +55,20 @@ func cleanEnv() []string {
 // is emitted before any blocking call, so the captured output is complete;
 // the exit code is not asserted, the first log line is the contract under
 // test.
-func runProjectorBinary(t *testing.T, timeout time.Duration, env []string, args ...string) string {
+func runProjectorBinaryWithResult(t *testing.T, timeout time.Duration, env []string, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, projectorBin, args...)
 	cmd.Env = env
-	output, _ := cmd.CombinedOutput()
-	return string(output)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func runProjectorBinary(t *testing.T, timeout time.Duration, env []string, args ...string) string {
+	t.Helper()
+	output, _ := runProjectorBinaryWithResult(t, timeout, env, args...)
+	return output
 }
 
 func firstLine(output string) string {
@@ -68,6 +76,70 @@ func firstLine(output string) string {
 		return output[:idx]
 	}
 	return output
+}
+
+func TestInvalidTopologyBinaryFailsBeforeExternalConnections(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        []string
+		args       []string
+		diagnostic string
+	}{
+		{
+			name:       "equal flags",
+			args:       []string{"-topic", "same", "-dlq-topic", "same"},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "equal environment",
+			env:        []string{"AUDIT_KAFKA_TOPIC=custom", "AUDIT_KAFKA_DLQ_TOPIC=custom"},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "source flag and DLQ environment",
+			env:        []string{"AUDIT_KAFKA_DLQ_TOPIC=custom"},
+			args:       []string{"-topic", "custom"},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "source environment and DLQ flag",
+			env:        []string{"AUDIT_KAFKA_TOPIC=custom"},
+			args:       []string{"-dlq-topic", "custom"},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "empty source fallback",
+			args:       []string{"-topic", "", "-dlq-topic", kafka.TopicAccepted},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "blank group flag",
+			args:       []string{"-group", " \t"},
+			diagnostic: "consumer group",
+		},
+		{
+			name:       "blank group environment",
+			env:        []string{"AUDIT_KAFKA_GROUP= \t\n"},
+			diagnostic: "consumer group",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := append(cleanEnv(), test.env...)
+			args := append([]string{"-brokers", "127.0.0.1:1"}, test.args...)
+			output, err := runProjectorBinaryWithResult(t, 5*time.Second, env, args...)
+			if err == nil {
+				t.Fatalf("projector exited successfully; output:\n%s", output)
+			}
+			if !strings.Contains(output, "invalid projector topology") || !strings.Contains(output, test.diagnostic) {
+				t.Fatalf("diagnostic = %q, want topology and %q", output, test.diagnostic)
+			}
+			lower := strings.ToLower(output)
+			if strings.Contains(lower, "clickhouse") || strings.Contains(lower, "schema") || strings.Contains(lower, "kafka reader") {
+				t.Fatalf("invalid configuration reached an external connection: %q", output)
+			}
+		})
+	}
 }
 
 // AC-3.1: with no -topic / AUDIT_KAFKA_TOPIC override, the resolved default

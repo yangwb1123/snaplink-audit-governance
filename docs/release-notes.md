@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-08-24 — Projector rejects unsafe Kafka topology at startup
+
+**写给运营：**
+
+- `audit-projector` now fails closed before connecting to ClickHouse or Kafka when the effective source and enabled DLQ topics are identical, or when the consumer group is empty/whitespace-only. Configure distinct topics and a nonblank group before rollout.
+- The existing source-topic fallback, flag/environment precedence, and explicit empty `-dlq-topic` behavior remain unchanged.
+
+**写给开发：**
+
+- Startup resolution and validation are isolated in `cmd/audit-projector/config.go`; invalid topology is rejected before any store, producer, or consumer factory is called. Regression coverage includes precedence, fallback collisions, blank groups, lifecycle ordering, disabled DLQ construction, and safe startup logging.
+
 ## 2026-08-22 — OTLP 网关路径前缀保留与端点校验
 
 **写给运营：**
