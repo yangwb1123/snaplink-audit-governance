@@ -48,12 +48,12 @@ func cleanEnv() []string {
 	return clean
 }
 
-// runProjector runs the built binary with a clean environment plus the given
+// runProjectorBinary runs the built binary with a clean environment plus the given
 // env overrides. The process is killed after the timeout — the config line
 // is emitted before any blocking call, so the captured output is complete;
 // the exit code is not asserted, the first log line is the contract under
 // test.
-func runProjector(t *testing.T, timeout time.Duration, env []string, args ...string) string {
+func runProjectorBinary(t *testing.T, timeout time.Duration, env []string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -73,29 +73,32 @@ func firstLine(output string) string {
 // AC-3.1: with no -topic / AUDIT_KAFKA_TOPIC override, the resolved default
 // source topic is kafka.TopicLedgered and it is the first log line.
 func TestResolvedDefaultTopicIsLedgered(t *testing.T) {
-	output := runProjector(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1")
+	output := runProjectorBinary(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1")
 	first := firstLine(output)
-	if !strings.Contains(first, "topic=audit.events.ledgered.v1") {
-		t.Fatalf("first log line %q: want topic=audit.events.ledgered.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `topic="audit.events.ledgered.v1"`) {
+		t.Fatalf(`first log line %q: want topic="audit.events.ledgered.v1"; full output:
+%s`, first, output)
 	}
 }
 
 // AC-3.2: an explicit -topic override keeps working (migration window).
 func TestTopicOverrideFlag(t *testing.T) {
-	output := runProjector(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1", "-topic", "audit.events.accepted.v1")
+	output := runProjectorBinary(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1", "-topic", "audit.events.accepted.v1")
 	first := firstLine(output)
-	if !strings.Contains(first, "topic=audit.events.accepted.v1") {
-		t.Fatalf("first log line %q: want override topic=audit.events.accepted.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `topic="audit.events.accepted.v1"`) {
+		t.Fatalf(`first log line %q: want override topic="audit.events.accepted.v1"; full output:
+%s`, first, output)
 	}
 }
 
 // AC-3.2: the AUDIT_KAFKA_TOPIC env form of the override also works.
 func TestTopicOverrideEnv(t *testing.T) {
 	env := append(cleanEnv(), "AUDIT_KAFKA_TOPIC=audit.events.accepted.v1")
-	output := runProjector(t, 5*time.Second, env, "-brokers", "127.0.0.1:1")
+	output := runProjectorBinary(t, 5*time.Second, env, "-brokers", "127.0.0.1:1")
 	first := firstLine(output)
-	if !strings.Contains(first, "topic=audit.events.accepted.v1") {
-		t.Fatalf("first log line %q: want env override topic=audit.events.accepted.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `topic="audit.events.accepted.v1"`) {
+		t.Fatalf(`first log line %q: want env override topic="audit.events.accepted.v1"; full output:
+%s`, first, output)
 	}
 }
 
@@ -103,25 +106,27 @@ func TestTopicOverrideEnv(t *testing.T) {
 // resolved defaults are the consumer's attempt cap (8) and kafka.TopicDLQ,
 // both visible in the first log line.
 func TestResolvedDefaultDLQConfig(t *testing.T) {
-	output := runProjector(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1")
+	output := runProjectorBinary(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1")
 	first := firstLine(output)
 	if !strings.Contains(first, "max_attempts=8") {
 		t.Fatalf("first log line %q: want max_attempts=8; full output:\n%s", first, output)
 	}
-	if !strings.Contains(first, "dlq_topic=audit.events.dlq.v1") {
-		t.Fatalf("first log line %q: want dlq_topic=audit.events.dlq.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `dlq_topic="audit.events.dlq.v1"`) {
+		t.Fatalf(`first log line %q: want dlq_topic="audit.events.dlq.v1"; full output:
+%s`, first, output)
 	}
 }
 
 // AC-3.2: explicit flags override the DLQ config defaults.
 func TestDLQConfigFlagOverrides(t *testing.T) {
-	output := runProjector(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1", "-max-attempts", "5", "-dlq-topic", "my.dlq.v1")
+	output := runProjectorBinary(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1", "-max-attempts", "5", "-dlq-topic", "my.dlq.v1")
 	first := firstLine(output)
 	if !strings.Contains(first, "max_attempts=5") {
 		t.Fatalf("first log line %q: want max_attempts=5; full output:\n%s", first, output)
 	}
-	if !strings.Contains(first, "dlq_topic=my.dlq.v1") {
-		t.Fatalf("first log line %q: want dlq_topic=my.dlq.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `dlq_topic="my.dlq.v1"`) {
+		t.Fatalf(`first log line %q: want dlq_topic="my.dlq.v1"; full output:
+%s`, first, output)
 	}
 }
 
@@ -129,13 +134,14 @@ func TestDLQConfigFlagOverrides(t *testing.T) {
 // override the defaults when no flags are passed.
 func TestDLQConfigEnvOverrides(t *testing.T) {
 	env := append(cleanEnv(), "AUDIT_KAFKA_MAX_ATTEMPTS=5", "AUDIT_KAFKA_DLQ_TOPIC=my.dlq.v1")
-	output := runProjector(t, 5*time.Second, env, "-brokers", "127.0.0.1:1")
+	output := runProjectorBinary(t, 5*time.Second, env, "-brokers", "127.0.0.1:1")
 	first := firstLine(output)
 	if !strings.Contains(first, "max_attempts=5") {
 		t.Fatalf("first log line %q: want env override max_attempts=5; full output:\n%s", first, output)
 	}
-	if !strings.Contains(first, "dlq_topic=my.dlq.v1") {
-		t.Fatalf("first log line %q: want env override dlq_topic=my.dlq.v1; full output:\n%s", first, output)
+	if !strings.Contains(first, `dlq_topic="my.dlq.v1"`) {
+		t.Fatalf(`first log line %q: want env override dlq_topic="my.dlq.v1"; full output:
+%s`, first, output)
 	}
 }
 
