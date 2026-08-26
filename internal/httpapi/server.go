@@ -264,6 +264,10 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	if err := domain.ValidateEventCaps(event); err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	// F1: the ingest commit must survive client disconnect — the durable
 	// write is detached from r.Context() cancellation (values are kept) so a
@@ -308,6 +312,10 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("%w: events must not be empty", domain.ErrInvalid))
 		return
 	}
+	if err := domain.CheckCount("events", len(request.Events), domain.MaxBatchEvents); err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
 	if request.WaitFor == "" {
 		request.WaitFor = r.URL.Query().Get("wait_for")
 	}
@@ -315,6 +323,15 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	commitCtx := context.WithoutCancel(r.Context())
 	for _, event := range request.Events {
+		if capErr := domain.ValidateEventCaps(event); capErr != nil {
+			receipts = append(receipts, domain.EventReceipt{})
+			partialStatus := statusForError(capErr)
+			if partialStatus >= 500 {
+				s.errorCount.Add(1)
+			}
+			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, capErr, r)})
+			return
+		}
 		receipt, ingestErr := s.Service.Ingest(commitCtx, claims.TenantID, principal, event, request.WaitFor)
 		if receipt.Duplicate {
 			s.ingestDuplicateCount.Add(1)

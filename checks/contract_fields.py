@@ -130,7 +130,14 @@ def asyncapi_envelope_props(root: Path) -> set[str]:
     match = re.search(r"EventEnvelope:\n(.*?)(?=\n  \S|\Z)", spec, re.S)
     if not match:
         raise SystemExit("FAIL: AsyncAPI EventEnvelope not found")
-    return set(re.findall(r"^\s+(\w+): \{", match.group(1), re.MULTILINE))
+    block = match.group(1)
+    # Most properties use compact flow mappings, but resource-capped array
+    # and object schemas may be multiline. Capture both shapes at the
+    # EventEnvelope.properties indentation without treating nested fields as
+    # envelope fields.
+    flow_props = re.findall(r"^\s+(\w+): \{", block, re.MULTILINE)
+    multiline_props = re.findall(r"^        (\w+):$", block, re.MULTILINE)
+    return set(flow_props) | set(multiline_props)
 
 
 def asyncapi_failure_payload(root: Path) -> tuple[set[str], str] | None:

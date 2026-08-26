@@ -798,6 +798,7 @@ func TestGRPCHTTPDigestParity(t *testing.T) {
 // full Write of a max-size field returns a receipt.
 func TestFromProtoRejectsOversizedEnvelope(t *testing.T) {
 	over := strings.Repeat("x", MaxEnvelopeFieldBytes+1)
+	overJSON := canonicalJSONString(strings.Repeat("x", MaxEnvelopeFieldBytes-1))
 	overCases := []struct {
 		name   string
 		mutate func(*auditv1.EventEnvelope)
@@ -806,7 +807,7 @@ func TestFromProtoRejectsOversizedEnvelope(t *testing.T) {
 		{"trace_id", func(e *auditv1.EventEnvelope) { e.TraceId = over }},
 		{"targets[0].name", func(e *auditv1.EventEnvelope) { e.Targets = []*auditv1.Target{{Name: over}} }},
 		{"changed_fields[0].after_json", func(e *auditv1.EventEnvelope) {
-			e.ChangedFields = []*auditv1.FieldChange{{Field: "f", AfterJson: over}}
+			e.ChangedFields = []*auditv1.FieldChange{{Field: "f", AfterJson: overJSON}}
 		}},
 	}
 	for _, tc := range overCases {
@@ -1161,58 +1162,6 @@ func TestGRPCBatchOverCapMemberPartialCommit(t *testing.T) {
 		}
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-partial-b")]; exists {
 			t.Fatal("batch member after the abort was persisted")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestGRPCStricterThanHTTPPerFieldCaps pins the deliberate HTTP/gRPC
-// acceptance asymmetry (security review F3): HTTP bounds only the whole body
-// (512KB) with no per-field caps, while gRPC enforces MaxEnvelopeFieldBytes.
-// The same logical event with an over-cap reason is accepted and ledgered
-// over HTTP and rejected with InvalidArgument over gRPC. The asymmetry is
-// intentional (gRPC acceptance ⊂ HTTP acceptance), so a producer must satisfy
-// the gRPC caps to be portable across transports; a future cap change on
-// either side must update this pin.
-func TestGRPCStricterThanHTTPPerFieldCaps(t *testing.T) {
-	st, client, ctx := newGRPCHarness(t)
-	httpServer, httpStore := newHTTPIngestLeg(t)
-
-	over := strings.Repeat("r", MaxEnvelopeFieldBytes+1)
-	envelope := parityEnvelope("parity-over-field", `{"value":1}`)
-	envelope.Reason = over
-	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: envelope}); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("gRPC Write code=%v, want InvalidArgument", status.Code(err))
-	}
-
-	httpEvent := parityHTTPEvent("parity-over-field", map[string]any{"value": json.Number("1")})
-	httpEvent.Reason = over
-	body, err := json.Marshal(httpEvent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/events?wait_for=ledgered", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer dev:tenant-a:service:crm")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("HTTP ingest status=%d body=%s, want 202 (HTTP has no per-field caps)", resp.StatusCode, data)
-	}
-	if storedDigest(t, httpStore, "parity-over-field") == "" {
-		t.Fatal("HTTP event with over-cap reason was not ledgered")
-	}
-	if err := st.Read(func(data *store.Snapshot) error {
-		if _, exists := data.Events[store.EventKey("tenant-a", "parity-over-field")]; exists {
-			t.Fatal("gRPC-rejected event must not be ledgered on the gRPC leg")
 		}
 		return nil
 	}); err != nil {

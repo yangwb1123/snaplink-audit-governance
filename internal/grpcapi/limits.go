@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"fmt"
+	"strings"
 
 	auditv1 "github.com/snaplink/audit-governance/api/proto"
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -13,22 +14,13 @@ import (
 const MaxRecvBytes = domain.MaxEventBytes * 2
 
 const (
-	// MaxEnvelopeFieldBytes caps every string field of EventEnvelope that is
-	// persisted verbatim into the hash-chained ledger (reason, trace_id,
-	// actor.*, target.*, changed_fields JSON strings, payload_ref, ids, ...).
-	// Byte count, matching http.MaxBytesReader semantics.
-	MaxEnvelopeFieldBytes = 8 * 1024
-
-	MaxActorRoles      = 64  // repeated Actor.roles count
-	MaxTargetsPerEvent = 64  // repeated Target targets count
-	MaxChangedFields   = 256 // repeated FieldChange changed_fields count
-
-	// MaxBatchEvents caps WriteBatchRequest.events so one RPC cannot trigger
-	// an unbounded number of full-snapshot ledger updates. 500 x typical
-	// envelope stays well below MaxRecvBytes (512KB), keeping this pre-flight
-	// cap the effective bound for count (the transport cap remains the byte
-	// bound).
-	MaxBatchEvents = 500
+	// These aliases preserve the grpcapi package API while making the domain
+	// package the single source of truth for every transport's cap values.
+	MaxEnvelopeFieldBytes = domain.MaxEnvelopeFieldBytes
+	MaxActorRoles         = domain.MaxActorRoles
+	MaxTargetsPerEvent    = domain.MaxTargetsPerEvent
+	MaxChangedFields      = domain.MaxChangedFields
+	MaxBatchEvents        = domain.MaxBatchEvents
 )
 
 // ErrEnvelopeTooLarge wraps domain.ErrInvalid: an envelope (or batch)
@@ -36,27 +28,45 @@ const (
 // classes so WriteStream can skip-and-continue only this class while
 // preserving the pinned termination semantics of every other rejection.
 // It maps to codes.InvalidArgument through the existing toStatus switch.
-var ErrEnvelopeTooLarge = fmt.Errorf("%w: envelope size cap exceeded", domain.ErrInvalid)
+var ErrEnvelopeTooLarge = domain.ErrEnvelopeTooLarge
 
 func checkString(name, value string) error {
-	if len(value) > MaxEnvelopeFieldBytes {
-		return fmt.Errorf("%w: %s is %d bytes, max %d", ErrEnvelopeTooLarge, name, len(value), MaxEnvelopeFieldBytes)
+	return domain.CheckString(name, value)
+}
+
+// checkCanonicalJSON validates the wire spelling of a changed-field value,
+// but applies the cap to the canonical value that reaches the domain event.
+// Empty strings retain the proto contract's "value omitted" meaning. Parsing
+// uses the same strict UseNumber decoder as fromProto so validation cannot
+// accept a value that conversion later rejects.
+func checkCanonicalJSON(name, value string) error {
+	if value == "" {
+		return nil
 	}
-	return nil
+	var decoded any
+	invalidName := strings.TrimPrefix(name, "changed_fields[].")
+	if err := decodeJSONNumber([]byte(value), &decoded); err != nil {
+		return fmt.Errorf("%w: invalid %s", domain.ErrInvalid, invalidName)
+	}
+	canonical, err := domain.CanonicalJSON(decoded)
+	if err != nil {
+		return fmt.Errorf("%w: invalid %s", domain.ErrInvalid, invalidName)
+	}
+	return domain.CheckString(name, string(canonical))
 }
 
 func checkCount(name string, n, max int) error {
-	if n > max {
-		return fmt.Errorf("%w: %s count %d, max %d", ErrEnvelopeTooLarge, name, n, max)
-	}
-	return nil
+	return domain.CheckCount(name, n, max)
 }
 
 // validateEnvelopeCaps rejects any verbatim-persisted envelope string above
 // MaxEnvelopeFieldBytes and any repeated field above its arity cap. Check
 // ordering is deterministic: fromProto checks nil envelope, then this
-// function, then the existing occurred_at/actor/decode checks. payload_json
-// is exempt: bounded by the service-layer payload cap and the transport cap.
+// function, then the existing occurred_at/actor/decode checks. changed_fields
+// before/after values are parsed with UseNumber and measured after
+// CanonicalJSON; their wire spelling is not the persisted representation.
+// payload_json is exempt: bounded by the service-layer payload cap and the
+// transport cap.
 func validateEnvelopeCaps(input *auditv1.EventEnvelope) error {
 	for _, f := range []struct{ name, value string }{
 		{"event_id", input.GetEventId()},
@@ -122,14 +132,14 @@ func validateEnvelopeCaps(input *auditv1.EventEnvelope) error {
 		return err
 	}
 	for _, c := range input.GetChangedFields() {
-		for _, f := range []struct{ name, value string }{
-			{"changed_fields[].field", c.GetField()},
-			{"changed_fields[].before_json", c.GetBeforeJson()},
-			{"changed_fields[].after_json", c.GetAfterJson()},
-		} {
-			if err := checkString(f.name, f.value); err != nil {
-				return err
-			}
+		if err := checkString("changed_fields[].field", c.GetField()); err != nil {
+			return err
+		}
+		if err := checkCanonicalJSON("changed_fields[].before_json", c.GetBeforeJson()); err != nil {
+			return err
+		}
+		if err := checkCanonicalJSON("changed_fields[].after_json", c.GetAfterJson()); err != nil {
+			return err
 		}
 	}
 	return nil

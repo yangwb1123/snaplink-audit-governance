@@ -87,39 +87,83 @@ components:
           # older producers.
           tenant_id: { type: string }
   schemas:
+    IngestBatch:
+      type: object
+      description: >-
+        HTTP and gRPC ingest batches accept at most 500 events. The runtime
+        rejects a larger batch before converting or ingesting any member.
+      required: [events]
+      properties:
+        events:
+          type: array
+          maxItems: 500
+          description: Maximum number of events in one ingest batch. This is a fixed runtime resource cap.
+          items:
+            $ref: '#/components/schemas/EventEnvelope'
+        wait_for: { type: string }
     EventEnvelope:
       type: object
       required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key]
+      description: >-
+        Runtime caps on persisted envelope strings are measured in UTF-8
+        bytes, not characters. The schema maxLength markers document the
+        fixed limit; runtime validation is authoritative.
       properties:
-        event_id: { type: string }
+        event_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
         tenant_id: { type: string }
-        source_system: { type: string }
-        event_type: { type: string }
-        schema_id: { type: string }
+        source_system: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
         schema_version: { type: integer, minimum: 1 }
         occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }
         received_at: { type: string, format: date-time }
-        operation_id: { type: string }
-        causation_id: { type: string }
-        correlation_id: { type: string }
-        trace_id: { type: string }
-        span_id: { type: string }
-        actor: { type: object, required: [id], properties: { id: { type: string } } }
-        targets: { type: array, items: { type: object } }
-        aggregate_type: { type: string }
-        aggregate_id: { type: string }
+        operation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        actor: { type: object, required: [id], properties: { id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, department: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, roles: { type: array, maxItems: 64, description: 'At most 64 role entries; each role is capped at 8192 UTF-8 bytes at runtime.', items: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }
+        targets:
+          type: array
+          maxItems: 64
+          description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.'
+          items:
+            type: object
+            properties:
+              type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+              id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+              name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        aggregate_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        aggregate_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
         aggregate_version: { type: integer }
-        workflow_instance_id: { type: string }
-        execution_run_id: { type: string }
-        action: { type: string }
-        outcome: { type: string }
-        reason: { type: string }
-        changed_fields: { type: object }
+        workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        changed_fields:
+          type: object
+          maxProperties: 256
+          description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.'
+          propertyNames:
+            maxLength: 8192
+            description: 'Runtime limit is 8192 UTF-8 bytes, not characters.'
+          additionalProperties:
+            type: object
+            properties:
+              before:
+                maxLength: 8192
+                description: Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.
+                x-maxCanonicalJsonBytes: 8192
+              after:
+                maxLength: 8192
+                description: Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.
+                x-maxCanonicalJsonBytes: 8192
         payload: { type: object, additionalProperties: true }
-        payload_ref: { type: string }
-        data_classification: { type: string }
-        retention_class: { type: string }
-        idempotency_key: { type: string }
+        payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
+        idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }
         stream_id: { type: string, description: Server-assigned; a client-supplied value is stripped on ingest. }
         sequence: { type: integer, description: Server-assigned sequence within the ledger stream; always >= 1 on the ledgered channel. }
         prev_hash: { type: string, description: Server-assigned predecessor hash in the ledger chain; empty only for the first event of a stream. }

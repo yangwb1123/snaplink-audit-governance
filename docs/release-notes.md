@@ -4,8 +4,9 @@
 
 **写给运营：**
 
-- HTTP event ingest now rejects persisted envelope strings over 8,192 UTF-8 bytes, more than 64 actor roles or targets, more than 256 changed fields, and batches over 500 events before the violating write. Batch count rejection is atomic; member validation keeps the existing valid-prefix behavior.
+- HTTP event ingest now rejects persisted envelope strings over 8,192 UTF-8 bytes, more than 64 actor roles or targets, more than 256 changed fields, and batches over 500 events before the violating write. Single-event cap checks run before `Service.Ingest`; batch count rejection is atomic; member validation keeps the existing valid-prefix behavior.
 - `before`/`after` changed-field values are capped after canonical JSON serialization. Clients must budget UTF-8 bytes and split larger batches while retaining idempotency keys.
+- No persistence model or migration changes are required: cap failures happen before ledger and receipt writes.
 
 **写给开发：**
 
