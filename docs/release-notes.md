@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-08-26 — Ingest resource caps aligned across HTTP and gRPC
+
+**写给运营：**
+
+- HTTP event ingest now rejects persisted envelope strings over 8,192 UTF-8 bytes, more than 64 actor roles or targets, more than 256 changed fields, and batches over 500 events before the violating write. Batch count rejection is atomic; member validation keeps the existing valid-prefix behavior.
+- `before`/`after` changed-field values are capped after canonical JSON serialization. Clients must budget UTF-8 bytes and split larger batches while retaining idempotency keys.
+
+**写给开发：**
+
+- The caps are defined in `internal/domain/limits.go` and documented in both AsyncAPI and OpenAPI. gRPC parses changed-field JSON strictly with `UseNumber`, canonicalizes it, and measures the canonical bytes, keeping HTTP/gRPC admission parity.
+
 ## 2026-08-26 — Tenant-isolated DLQ replay resolution
 
 **写给运营：**
