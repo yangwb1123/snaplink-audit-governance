@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -674,6 +673,7 @@ type Replayer struct {
 	logger       *log.Logger
 	drainTimeout time.Duration
 	dlqRecords   atomic.Uint64
+	malformed    atomic.Uint64
 	acceptedSeen atomic.Uint64
 	// replayed counts only successful re-publishes (resolution path a).
 	// Every other first-resolution path has its own counter below, so the
@@ -837,24 +837,6 @@ func authBlockedCount(collected []dlqRecord) int {
 	return blocked
 }
 
-// sanitizeLogField strips control characters (log-forging defense, CWE-117:
-// an attacker-influenced DLQ field must never inject lines into the replay
-// log) and truncates the value to limit runes, bounding log growth. Used for
-// attacker-influenced fields echoed by the auth-blocked log line.
-func sanitizeLogField(value string, limit int) string {
-	sanitized := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return '?'
-		}
-		return r
-	}, value)
-	runes := []rune(sanitized)
-	if len(runes) > limit {
-		runes = runes[:limit]
-	}
-	return string(runes)
-}
-
 // ReplayerMetrics is the /metrics snapshot of the replay counters. Every DLQ
 // event that reaches a durable first resolution increments exactly one of
 // Replayed / UnparsableMarks / Permanent / Unresolvable; a transient
@@ -871,6 +853,7 @@ func sanitizeLogField(value string, limit int) string {
 // AuthBlockedPending is the latest-round blocked backlog gauge.
 type ReplayerMetrics struct {
 	DLQRecords            uint64 // DLQ Failure records collected
+	Malformed             uint64 // malformed DLQ records collected
 	AcceptedScanned       uint64 // accepted-topic messages scanned
 	Replayed              uint64 // successful re-publishes only
 	Permanent             uint64 // permanent closures (one-shot + legacy live rejection)
@@ -889,6 +872,7 @@ type ReplayerMetrics struct {
 func (r *Replayer) Metrics() ReplayerMetrics {
 	return ReplayerMetrics{
 		DLQRecords:            r.dlqRecords.Load(),
+		Malformed:             r.malformed.Load(),
 		AcceptedScanned:       r.acceptedSeen.Load(),
 		Replayed:              r.replayed.Load(),
 		Permanent:             r.permanent.Load(),
@@ -1067,6 +1051,8 @@ type dlqRecordID struct {
 type dlqRecord struct {
 	id              dlqRecordID
 	message         kafka.Message
+	class           dlqRecordClass
+	reason          failureReason
 	eventID         string
 	claimedTenantID string
 	errorCode       string
@@ -1117,7 +1103,7 @@ func wantedEvents(collected []dlqRecord) wantedSet {
 		records:    map[dlqRecordID]dlqRecord{},
 	}
 	for index, record := range collected {
-		if !record.wanted || record.authBlocked {
+		if record.class == dlqRecordMalformed || !record.wanted || record.authBlocked {
 			continue
 		}
 		id := wantedRecordID(record, index)
@@ -1190,6 +1176,9 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 	// pending; no commit may cross it.
 	firstPending := map[partitionKey]int64{}
 	for _, record := range collected {
+		if record.class == dlqRecordMalformed {
+			continue
+		}
 		id := record.id
 		if id == (dlqRecordID{}) {
 			id = dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
@@ -1240,6 +1229,12 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 	r.authBlockedDetailBudget.Store(0)
 	var collected []dlqRecord
 	seenPhysical := map[dlqRecordID]uint32{}
+	malformedCount := 0
+	defer func() {
+		if malformedCount > 0 {
+			logMalformedSummary(r.logger, malformedCount)
+		}
+	}()
 	for {
 		message, err := r.dlqReader.FetchMessage(drainCtx)
 		if err != nil {
@@ -1254,16 +1249,18 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 			physicalID.sequence = sequence
 		}
 		seenPhysical[dlqRecordID{topic: effectiveTopic, partition: message.Partition, offset: message.Offset}]++
-		record := dlqRecord{
-			id:      physicalID,
-			message: message,
-			eventID: string(message.Key),
-		}
-		var failure Failure
-		decoder := json.NewDecoder(bytes.NewReader(message.Value))
-		decoder.UseNumber()
-		decodeErr := decoder.Decode(&failure)
-		if decodeErr == nil {
+		record := dlqRecord{id: physicalID, message: message}
+		validation := decodeStrictFailure(message.Value)
+		if validation.Reason != "" {
+			record.class = dlqRecordMalformed
+			record.reason = validation.Reason
+			malformedCount++
+			r.malformed.Add(1)
+			if malformedCount <= maxMalformedLogDetails {
+				logMalformedRecord(r.logger, effectiveTopic, message.Partition, message.Offset, validation.Reason)
+			}
+		} else {
+			failure := validation.Failure
 			r.dlqRecords.Add(1)
 			record.eventID = failure.EventID
 			record.claimedTenantID = failure.TenantID
@@ -1287,12 +1284,10 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 				r.authBlocked.Add(1)
 				if r.authBlockedDetailBudget.Add(1) <= maxAuthBlockedLogDetails {
 					r.logger.Printf("dlq record auth-blocked topic=%s partition=%d offset=%d event_id=%s error=%s (fix AUDIT_OUTBOX_TOKEN before replay)",
-						r.dlqReader.Config().Topic, message.Partition, message.Offset,
+						effectiveTopic, message.Partition, message.Offset,
 						sanitizeLogField(failure.EventID, 64), sanitizeLogField(failure.ErrorMessage, 200))
 				}
 			}
-		} else {
-			r.logger.Printf("dlq record unparsable topic=%s partition=%d offset=%d error=%v", r.dlqReader.Config().Topic, message.Partition, message.Offset, decodeErr)
 		}
 		collected = append(collected, record)
 	}

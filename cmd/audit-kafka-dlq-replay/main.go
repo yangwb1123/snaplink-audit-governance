@@ -152,8 +152,8 @@ func metricsHandler(metrics func() kafka.ReplayerMetrics) http.HandlerFunc {
 // format. The line order is pinned (golden-tested, T7): the split
 // resolution counters sit between replayed and republish_failures, pushing
 // republish_failures and pending down; the auth-blocked counter and backlog
-// gauge follow pending (campaign fail-fast-or-warn-on-empty-rotated-
-// ingest-token). The renamed permanent line
+// gauge follow pending, and malformed is appended last (campaign
+// fail-fast-or-warn-on-empty-rotated-ingest-token). The renamed permanent line
 // (audit_dlq_permanent_rejections_total → audit_dlq_permanent_total,
 // REQ-PERM-3) keeps its position, and the new observational
 // audit_dlq_attempts_exhausted_total sits at the end of the resolution
@@ -172,10 +172,11 @@ func metricsText(m kafka.ReplayerMetrics) string {
 			"audit_dlq_republish_failures_total %d\n"+
 			"audit_dlq_pending %d\n"+
 			"audit_dlq_auth_blocked_total %d\n"+
-			"audit_dlq_auth_blocked %d\n",
+			"audit_dlq_auth_blocked %d\n"+
+			"audit_dlq_malformed_total %d\n",
 		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.Permanent,
 		m.Unresolvable, m.UnparsableMarks, m.AttemptsExhausted, m.RepublishFailures, m.Pending,
-		m.AuthBlocked, m.AuthBlockedPending)
+		m.AuthBlocked, m.AuthBlockedPending, m.Malformed)
 }
 
 func envOr(name, fallback string) string {

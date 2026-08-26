@@ -73,6 +73,10 @@ components:
       payload:
         $ref: '#/components/schemas/LedgeredEvent'
     Failure:
+      description: >-
+        Replay consumers require one complete JSON object containing exactly
+        one JSON value; non-whitespace trailing data and multiple JSON values
+        are rejected.
       payload:
         type: object
         required: [event_id, error_code, error_message]
