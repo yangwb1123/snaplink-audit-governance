@@ -1692,8 +1692,12 @@ func TestWantedEventsOneShotSubsetInvariant(t *testing.T) {
 		{eventID: "evt-done", errorCode: ErrorCodePermanentError, wanted: false},                // already marked: excluded
 	}
 	wanted := wantedEvents(collected)
-	wantReplay := map[string]bool{"evt-p": true, "evt-x": true, "evt-u": true}
-	wantOneShot := map[string]bool{"evt-p": true}
+	wantReplay := map[dlqRecordID]bool{
+		{partition: 0, offset: 0}: true,
+		{partition: 1, offset: 1}: true,
+		{partition: 2, offset: 2}: true,
+	}
+	wantOneShot := map[dlqRecordID]bool{{partition: 0, offset: 0}: true}
 	if !reflect.DeepEqual(wanted.replay, wantReplay) {
 		t.Fatalf("replay set=%v, want %v", wanted.replay, wantReplay)
 	}
@@ -1702,7 +1706,7 @@ func TestWantedEventsOneShotSubsetInvariant(t *testing.T) {
 	}
 	for id := range wanted.oneShot {
 		if !wanted.replay[id] {
-			t.Fatalf("invariant oneShot ⊆ replay violated for %s", id)
+			t.Fatalf("invariant oneShot ⊆ replay violated for %+v", id)
 		}
 	}
 }

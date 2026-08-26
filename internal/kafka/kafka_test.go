@@ -485,11 +485,12 @@ func TestConsumerPermanentRecordsAllLandInOneShot(t *testing.T) {
 	if len(wanted.oneShot) != len(records) {
 		t.Fatalf("oneShot=%v, want all %d consumer-produced permanent records (one-shot closure, REQ-PERM-1)", wanted.oneShot, len(records))
 	}
-	for _, record := range records {
-		if !wanted.oneShot[record.eventID] {
+	for index, record := range records {
+		id := wantedRecordID(record, index)
+		if !wanted.oneShot[id] {
 			t.Fatalf("record %s (code=%s) must land in oneShot", record.eventID, record.errorCode)
 		}
-		if !wanted.replay[record.eventID] {
+		if !wanted.replay[id] {
 			t.Fatalf("record %s must be in the replay set (invariant oneShot ⊆ replay)", record.eventID)
 		}
 		if record.errorCode == ErrorCodeAttemptsExhausted {
