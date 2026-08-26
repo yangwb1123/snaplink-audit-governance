@@ -349,6 +349,64 @@ func TestTenantReplayKeepsSameEventRecordsIndependent(t *testing.T) {
 	})
 }
 
+// TestTenantReplayRejectsIncompatibleClaimAfterSiblingCommit pins the
+// cross-round boundary: once the tenant-A sibling is durably marked and its
+// offset committed, the tenant-B-claimed physical record must not inherit
+// tenant A's canonical candidate merely because it is now collected alone.
+func TestTenantReplayRejectsIncompatibleClaimAfterSiblingCommit(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+		tenantFailureMessage("evt", "tenant-a", ErrorCodeAttemptsExhausted, 0),
+		tenantFailureMessage("evt", "tenant-b", ErrorCodeAttemptsExhausted, 1),
+	}}
+	accepted := []kafka.Message{tenantAcceptedMessage("evt", "tenant-a", 0)}
+	var deliveries atomic.Int64
+	deliver := func(_ context.Context, _, value []byte) error {
+		event, err := EventFromCanonical(value)
+		if err != nil {
+			return err
+		}
+		if event.TenantID != "tenant-a" {
+			t.Fatalf("delivered tenant=%q, want tenant-a", event.TenantID)
+		}
+		deliveries.Add(1)
+		return nil
+	}
+
+	first := runTenantReplayer(broker, accepted, state, deliver)
+	if count, err := first.RunOnce(context.Background()); err != nil || count != 1 {
+		t.Fatalf("round 1 result count=%d err=%v, want 1/nil", count, err)
+	}
+	if !state.Marked("tenant-a", "evt") || state.Marked("tenant-b", "evt") {
+		t.Fatalf("round 1 marks a=%v b=%v, want true/false", state.Marked("tenant-a", "evt"), state.Marked("tenant-b", "evt"))
+	}
+	if broker.committed != 1 || len(broker.commits) != 1 || broker.commits[0].Offset != 0 {
+		t.Fatalf("round 1 committed=%d commits=%v, want offset 0 only", broker.committed, broker.commits)
+	}
+
+	reloaded, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := runTenantReplayer(broker, accepted, reloaded, deliver)
+	if count, err := second.RunOnce(context.Background()); err != nil || count != 0 {
+		t.Fatalf("round 2 result count=%d err=%v, want 0/nil", count, err)
+	}
+	if deliveries.Load() != 1 {
+		t.Fatalf("deliveries=%d, want exactly one canonical tenant-A delivery", deliveries.Load())
+	}
+	if reloaded.Marked("tenant-b", "evt") {
+		t.Fatal("incompatible tenant-B record must not inherit tenant-A mark")
+	}
+	if broker.committed != 1 || len(broker.commits) != 1 {
+		t.Fatalf("round 2 committed=%d commits=%v, want offset 1 still pending", broker.committed, broker.commits)
+	}
+}
+
 func TestTenantReplayMixedErrorCodesRemainRecordScoped(t *testing.T) {
 	state, err := LoadReplayState("")
 	if err != nil {
