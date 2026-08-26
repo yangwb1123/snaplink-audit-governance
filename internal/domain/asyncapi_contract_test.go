@@ -41,6 +41,54 @@ func readAsyncAPISpec(t *testing.T) string {
 // horizon window, derived from the domain constants (not a hard-coded
 // literal) so a constant change trips the test instead of silently
 // diverging the contract.
+func TestAsyncAPIActiveChannelCatalogAndRefs(t *testing.T) {
+	spec := readAsyncAPISpec(t)
+	channelSection := strings.SplitN(spec, "operations:", 2)[0]
+	var channels []string
+	for _, line := range strings.Split(channelSection, "\n") {
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(line, ":") {
+			channels = append(channels, strings.TrimSpace(strings.TrimSuffix(line, ":")))
+		}
+	}
+	if strings.Join(channels, ",") != "accepted,ledgered,dlq" {
+		t.Fatalf("active channels=%v, want [accepted ledgered dlq]", channels)
+	}
+	for _, name := range []string{"  accepted:", "  ledgered:", "  dlq:"} {
+		if !strings.Contains(channelSection, name) {
+			t.Fatalf("active channel %q missing", strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{"  projection:", "  archive:"} {
+		if strings.Contains(channelSection, name) {
+			t.Fatalf("inactive channel %q must not be declared", strings.TrimSpace(name))
+		}
+	}
+	for _, ref := range []string{
+		"$ref: '#/components/messages/AcceptedEvent'",
+		"$ref: '#/components/messages/LedgeredEvent'",
+		"$ref: '#/components/messages/Failure'",
+	} {
+		if !strings.Contains(channelSection, ref) {
+			t.Fatalf("active channel reference %q missing", ref)
+		}
+	}
+	for _, binding := range []string{
+		"description: MUST equal the AcceptedEvent payload's event_id.",
+		"description: MUST equal the LedgeredEvent payload's event_id.",
+		"description: MUST equal the Failure payload's event_id.",
+	} {
+		if !strings.Contains(channelSection, binding) {
+			t.Fatalf("Kafka key binding %q missing", binding)
+		}
+	}
+	if strings.Contains(spec, "publishProjection") || strings.Contains(spec, "publishArchive") {
+		t.Fatal("projection/archive operations must not be declared")
+	}
+	if !strings.Contains(spec, "AuditEvent:\n      deprecated: true") {
+		t.Fatal("AuditEvent compatibility alias must remain deprecated")
+	}
+}
+
 func TestAsyncAPIEventEnvelopeDocumentsOccurredAtHorizon(t *testing.T) {
 	spec := readAsyncAPISpec(t)
 	for _, line := range strings.Split(spec, "\n") {

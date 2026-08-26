@@ -74,6 +74,11 @@ func main() {
 		return err
 	})
 	options := []kafka.ConsumerOption{kafka.WithMaxAttempts(*maxAttempts), kafka.WithTenant(*tenant)}
+	// The stock consumer owns the accepted contract. Custom operator topics
+	// remain legacy-compatible unless a caller explicitly selects a schema.
+	if *topic == "" || *topic == kafka.TopicAccepted {
+		options = append(options, kafka.WithInputSchema(kafka.AcceptedEventSchema))
+	}
 	if *dlqTopic != "" {
 		dlqProducer := kafka.NewProducer(strings.Split(*brokers, ","), *dlqTopic)
 		defer dlqProducer.Close()

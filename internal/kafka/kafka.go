@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -33,16 +34,6 @@ const TopicDLQ = "audit.events.dlq.v1"
 // ledger (post-ledger chain-linked events). The audit API publishes this topic
 // after a successful ledger commit; the projector consumes it.
 const TopicLedgered = "audit.events.ledgered.v1"
-
-// TopicProjection is the AsyncAPI topic for projection indexing signals.
-// Declared to satisfy the AsyncAPI channel gate; not yet wired — see
-// docs/proposals/ledgered-projection-pipeline.md.
-const TopicProjection = "audit.events.projection.v1"
-
-// TopicArchive is the AsyncAPI topic for archival-pass completion signals.
-// Declared to satisfy the AsyncAPI channel gate; not yet wired — see
-// docs/proposals/ledgered-projection-pipeline.md.
-const TopicArchive = "audit.events.archive.v1"
 
 // Dead-letter error codes carried in Failure.ErrorCode, matching the
 // AsyncAPI Failure payload vocabulary.
@@ -96,8 +87,16 @@ type FailurePublisher interface {
 // without changing its retry/dead-letter state machine. A topic write is
 // delivery, but Kafka carries no audit receipt, so Deliver returns (nil, nil)
 // on success and the relay records no fabricated receipt fields.
+type producerWriter interface {
+	WriteMessages(context.Context, ...kafka.Message) error
+}
+
+type producerCloser interface {
+	Close() error
+}
+
 type Producer struct {
-	writer *kafka.Writer
+	writer producerWriter
 	topic  string
 }
 
@@ -117,18 +116,31 @@ func NewProducer(brokers []string, topic string) *Producer {
 	return &Producer{writer: writer, topic: topic}
 }
 
-// Deliver serializes the event to canonical JSON and writes it to Kafka.
+// Deliver canonicalizes and validates an event before writing it to Kafka.
+// A contract violation is permanent and is returned before the writer is
+// touched, so an outbox relay cannot retry an event that can never conform.
 // On success it returns (nil, nil): the write is the delivery proof, and no
 // audit receipt exists in this transport (outbox.DeliverFunc contract).
 func (p *Producer) Deliver(ctx context.Context, event domain.Event) (*domain.EventReceipt, error) {
 	encoded, err := domain.CanonicalJSON(event)
 	if err != nil {
-		return nil, err
+		return nil, permanentDeliveryError("canonicalize event", err)
+	}
+	schema := eventSchemaForTopic(p.topic)
+	if schema == "" {
+		return nil, permanentDeliveryError("deliver event", fmt.Errorf("unsupported event topic %q", p.topic))
+	}
+	if _, err := ValidateEventJSON(schema, encoded); err != nil {
+		return nil, permanentDeliveryError("validate event", err)
 	}
 	if err := p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(event.EventID), Value: encoded}); err != nil {
 		return nil, err
 	}
 	return nil, nil
+}
+
+func permanentDeliveryError(operation string, cause error) error {
+	return &outbox.DeliveryError{Permanent: true, Err: fmt.Errorf("%s: %w", operation, cause)}
 }
 
 // PublishFailure serializes a dead-letter Failure and writes it to the
@@ -149,7 +161,12 @@ func (p *Producer) Republish(ctx context.Context, key, value []byte) error {
 	return p.writer.WriteMessages(ctx, kafka.Message{Key: key, Value: value})
 }
 
-func (p *Producer) Close() error { return p.writer.Close() }
+func (p *Producer) Close() error {
+	if closer, ok := p.writer.(producerCloser); ok {
+		return closer.Close()
+	}
+	return nil
+}
 
 // IngestFunc delivers one canonical event into the ledger path. The audit
 // API is idempotent per event_id, so redelivery after a crash is safe.
@@ -203,6 +220,7 @@ type Consumer struct {
 	backoff     time.Duration
 	logger      *log.Logger
 	maxAttempts int
+	inputSchema EventSchema
 	dlq         FailurePublisher
 	attempts    map[messageKey]int
 	tenant      string // optional tenant scope; "" = no filtering (REQ-1)
@@ -279,7 +297,7 @@ func NewConsumer(brokers []string, topic, groupID string, ingest IngestFunc, bac
 		CommitInterval: 0, // manual commits only
 		StartOffset:    kafka.FirstOffset,
 	})
-	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: logger, attempts: make(map[messageKey]int)}
+	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: logger, inputSchema: eventSchemaForTopic(topic), attempts: make(map[messageKey]int)}
 	for _, option := range options {
 		option(consumer)
 	}
@@ -298,7 +316,7 @@ func newConsumerWithReader(reader messageReader, ingest IngestFunc, backoff time
 	if backoff <= 0 {
 		backoff = time.Millisecond
 	}
-	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: log.New(io.Discard, "", 0), attempts: make(map[messageKey]int)}
+	consumer := &Consumer{reader: reader, ingest: ingest, backoff: backoff, logger: log.New(io.Discard, "", 0), inputSchema: eventSchemaForTopic(reader.Config().Topic), attempts: make(map[messageKey]int)}
 	for _, option := range options {
 		option(consumer)
 	}
@@ -349,6 +367,14 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return deadErr
 			}
 			continue
+		}
+		if c.inputSchema != "" {
+			if _, schemaErr := ValidateEventJSON(c.inputSchema, message.Value); schemaErr != nil {
+				if deadErr := c.deadLetter(ctx, message, event, ErrorCodePermanentError, schemaErr); deadErr != nil {
+					return deadErr
+				}
+				continue
+			}
 		}
 		if err := c.consume(ctx, message, event); err != nil {
 			return err

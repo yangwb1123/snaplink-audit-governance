@@ -171,7 +171,13 @@ func runProjector(ctx context.Context, cfg projectorConfig, logger *log.Logger, 
 		return fmt.Errorf("schema: %w", err)
 	}
 
-	options := []kafka.ConsumerOption{kafka.WithMaxAttempts(cfg.maxAttempts)}
+	// Projection owns the ledgered channel contract even when operators
+	// override the source address for migration or replay. Never allow an
+	// accepted-shaped event to reach ClickHouse through that override.
+	options := []kafka.ConsumerOption{
+		kafka.WithMaxAttempts(cfg.maxAttempts),
+		kafka.WithInputSchema(kafka.LedgeredEventSchema),
+	}
 	if cfg.dlqTopic != "" {
 		producer := factories.newProducer(strings.Split(cfg.brokers, ","), cfg.dlqTopic)
 		defer func() { _ = producer.Close() }()

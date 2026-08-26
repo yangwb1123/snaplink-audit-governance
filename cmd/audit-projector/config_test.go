@@ -258,9 +258,9 @@ func TestRunProjectorStartupOrderAndDLQLifecycle(t *testing.T) {
 					return &projectorTestProducer{events: &events}
 				},
 				newConsumer: func(_ []string, _ string, _ string, _ kafka.IngestFunc, _ time.Duration, _ *log.Logger, options ...kafka.ConsumerOption) projectorConsumer {
-					wantOptions := 1
+					wantOptions := 2
 					if test.dlqTopic != "" {
-						wantOptions = 2
+						wantOptions = 3
 					}
 					if len(options) != wantOptions {
 						t.Errorf("consumer options = %d, want %d", len(options), wantOptions)

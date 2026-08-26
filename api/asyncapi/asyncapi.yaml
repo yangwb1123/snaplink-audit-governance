@@ -15,12 +15,12 @@ channels:
       correct.
     messages:
       auditEvent:
-        $ref: '#/components/messages/AuditEvent'
+        $ref: '#/components/messages/AcceptedEvent'
         bindings:
           kafka:
             key:
               type: string
-              description: MUST equal the AuditEvent payload's event_id.
+              description: MUST equal the AcceptedEvent payload's event_id.
   ledgered:
     address: audit.events.ledgered.v1
     description: >-
@@ -29,22 +29,22 @@ channels:
       and present on this channel. The Kafka message key MUST equal event_id.
     messages:
       auditEvent:
-        $ref: '#/components/messages/AuditEvent'
-  projection:
-    address: audit.events.projection.v1
-    messages:
-      auditEvent:
-        $ref: '#/components/messages/AuditEvent'
-  archive:
-    address: audit.events.archive.v1
-    messages:
-      auditEvent:
-        $ref: '#/components/messages/AuditEvent'
+        $ref: '#/components/messages/LedgeredEvent'
+        bindings:
+          kafka:
+            key:
+              type: string
+              description: MUST equal the LedgeredEvent payload's event_id.
   dlq:
     address: audit.events.dlq.v1
     messages:
       failure:
         $ref: '#/components/messages/Failure'
+        bindings:
+          kafka:
+            key:
+              type: string
+              description: MUST equal the Failure payload's event_id.
 operations:
   publishAccepted:
     action: send
@@ -54,23 +54,24 @@ operations:
     action: send
     channel:
       $ref: '#/channels/ledgered'
-  publishProjection:
-    action: send
-    channel:
-      $ref: '#/channels/projection'
-  publishArchive:
-    action: send
-    channel:
-      $ref: '#/channels/archive'
   publishFailure:
     action: send
     channel:
       $ref: '#/channels/dlq'
 components:
   messages:
+    # Deprecated compatibility alias. It is intentionally not referenced by
+    # an active channel or operation and may be removed after one release.
     AuditEvent:
+      deprecated: true
       payload:
         $ref: '#/components/schemas/EventEnvelope'
+    AcceptedEvent:
+      payload:
+        $ref: '#/components/schemas/AcceptedEvent'
+    LedgeredEvent:
+      payload:
+        $ref: '#/components/schemas/LedgeredEvent'
     Failure:
       payload:
         type: object
@@ -87,6 +88,10 @@ components:
           # older producers.
           tenant_id: { type: string }
   schemas:
+    AcceptedEvent:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+    LedgeredEvent:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }, { type: object, description: 'stream_id, sequence, prev_hash, and hash are server-assigned ledger state. stream_id is non-empty and sequence is at least 1 on this channel. hash is non-empty. prev_hash may be empty or omitted only for the first event in a stream and is non-empty for subsequent service-produced events.', required: [stream_id, sequence, hash], properties: { stream_id: { type: string, minLength: 1, description: 'Server-assigned; client value is stripped on ingest.' }, sequence: { type: integer, minimum: 1 }, prev_hash: { type: string }, hash: { type: string, minLength: 1 } } }]
     IngestBatch:
       type: object
       description: >-
