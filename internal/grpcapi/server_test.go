@@ -351,11 +351,12 @@ func assertNoFramedKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
 	t.Helper()
 	if err := st.Read(func(data *store.Snapshot) error {
 		for name, keys := range map[string][]string{
-			"Events":      keysOf(data.Events),
-			"Streams":     keysOf(data.Streams),
-			"Segments":    keysOf(data.Segments),
-			"Checkpoints": keysOf(data.Checkpoints),
-			"Receipts":    keysOf(data.Receipts),
+			"Events":         keysOf(data.Events),
+			"Streams":        keysOf(data.Streams),
+			"Segments":       keysOf(data.Segments),
+			"Checkpoints":    keysOf(data.Checkpoints),
+			"Receipts":       keysOf(data.Receipts),
+			"LedgeredOutbox": keysOf(data.LedgeredOutbox),
 		} {
 			for _, key := range keys {
 				if strings.Count(key, "\x1f") > 1 {
@@ -373,6 +374,9 @@ func assertNoFramedKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
 			// just the Events map.
 			if _, exists := data.Receipts[key]; exists {
 				t.Errorf("rejected event %q left a receipt in the snapshot", id)
+			}
+			if _, exists := data.LedgeredOutbox[key]; exists {
+				t.Errorf("rejected event %q left a ledgered outbox entry in the snapshot", id)
 			}
 		}
 		return nil

@@ -61,12 +61,11 @@ func checkCount(name string, n, max int) error {
 
 // validateEnvelopeCaps rejects any verbatim-persisted envelope string above
 // MaxEnvelopeFieldBytes and any repeated field above its arity cap. Check
-// ordering is deterministic: fromProto checks nil envelope, then this
-// function, then the existing occurred_at/actor/decode checks. changed_fields
-// before/after values are parsed with UseNumber and measured after
-// CanonicalJSON; their wire spelling is not the persisted representation.
-// payload_json is exempt: bounded by the service-layer payload cap and the
-// transport cap.
+// ordering is deterministic: fromProto checks nil envelope, unknown supported
+// messages, then this function. changed_fields count and field-name checks are
+// kept separate from JSON validation so duplicate names are rejected before
+// any changed-field JSON is decoded. payload_json is exempt: bounded by the
+// service-layer payload cap and the transport cap.
 func validateEnvelopeCaps(input *auditv1.EventEnvelope) error {
 	for _, f := range []struct{ name, value string }{
 		{"event_id", input.GetEventId()},
@@ -135,6 +134,16 @@ func validateEnvelopeCaps(input *auditv1.EventEnvelope) error {
 		if err := checkString("changed_fields[].field", c.GetField()); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateChangedFieldCaps applies the existing canonical JSON size checks
+// after duplicate names have been rejected by fromProto. Parsing here is only
+// for cap measurement; conversion retains its own strict decode and error
+// messages.
+func validateChangedFieldCaps(input *auditv1.EventEnvelope) error {
+	for _, c := range input.GetChangedFields() {
 		if err := checkCanonicalJSON("changed_fields[].before_json", c.GetBeforeJson()); err != nil {
 			return err
 		}

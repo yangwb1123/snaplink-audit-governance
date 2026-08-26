@@ -156,10 +156,23 @@ func fromProto(input *auditv1.EventEnvelope) (domain.Event, error) {
 	if input == nil {
 		return domain.Event{}, fmt.Errorf("%w: event is required", domain.ErrInvalid)
 	}
+	// Validate only the supported envelope messages. This must precede caps so
+	// an unknown field cannot be classified as an over-cap stream skip.
+	if err := validateEnvelopeUnknownFields(input); err != nil {
+		return domain.Event{}, err
+	}
 	// Per-field size/arity caps run before any field is copied into the
 	// ledger and before the occurred_at/actor/decode checks, so an envelope
 	// that is both over-cap and malformed reports the cap violation first.
+	// The changed-field count and names are checked before their JSON values,
+	// allowing duplicate detection to precede all changed-field JSON decoding.
 	if err := validateEnvelopeCaps(input); err != nil {
+		return domain.Event{}, err
+	}
+	if err := rejectDuplicateChangedFields(input.GetChangedFields()); err != nil {
+		return domain.Event{}, err
+	}
+	if err := validateChangedFieldCaps(input); err != nil {
 		return domain.Event{}, err
 	}
 	if input.GetOccurredAt() == nil || input.GetOccurredAt().CheckValid() != nil {

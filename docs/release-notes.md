@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-08-26 — gRPC protobuf conversion rejects ambiguous and unknown data
+
+**写给运营：**
+
+- gRPC `Write`, `WriteBatch`, and `WriteStream` now reject repeated `changed_fields.field` names and unknown fields on supported envelope messages with `InvalidArgument`; rejected envelopes are not persisted.
+- Oversized stream messages retain their existing skip-and-continue behavior, while duplicate and unknown-field errors terminate the stream.
+
+**写给开发：**
+
+- Validation uses protobuf reflection for `EventEnvelope`, `Actor`, `Target`, and `FieldChange` only. Request wrappers and `Timestamp` remain outside this validation scope.
+- Distinct changed-field entries retain their existing strict JSON/`json.Number` conversion and canonical digest behavior; no protobuf or storage migration is required.
+
 ## 2026-08-26 — Ingest resource caps aligned across HTTP and gRPC
 
 **写给运营：**
