@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-08-26 — Tenant-isolated DLQ replay resolution
+
+**写给运营：**
+
+- DLQ replay now resolves each physical record independently using the recovered canonical `(tenant_id, event_id)`. Same-ID records for different tenants no longer share replay marks, one-shot closures, deliveries, or commits.
+- An incompatible tenant claim remains pending across replay rounds and restarts until a safe canonical match is available. `Failure.tenant_id` remains optional and unchanged.
+
+**写给开发：**
+
+- Replay membership, per-record error policy, durable resolution, and commit barriers use `(topic, partition, offset)`; the event ID is only a candidate lookup index. Focused tenant replay regressions cover sibling commit inheritance, independent tenant marks, authorization, and mixed error codes.
+
 ## 2026-08-24 — Projector rejects unsafe Kafka topology at startup
 
 **写给运营：**

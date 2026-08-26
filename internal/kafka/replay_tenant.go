@@ -30,7 +30,7 @@ func (r *Replayer) failureWanted(eventID string) bool {
 // production tenant-aware implementation. Keeping the old seam separate
 // preserves Kafka byte-for-byte replay tests while NewReplayer always takes
 // the strict path.
-func (r *Replayer) scanAccepted(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
+func (r *Replayer) scanAccepted(ctx context.Context, wanted wantedSet) (int, map[dlqRecordID]bool, error) {
 	if !r.tenantAware {
 		return r.scanAcceptedLegacy(ctx, wanted)
 	}
@@ -47,24 +47,36 @@ func newTenantAwareReplayerWithFactories(dlqNew, acceptedNew func() messageReade
 	return &Replayer{dlqReader: dlqNew(), dlqNew: dlqNew, accepted: acceptedNew(), acceptedNew: acceptedNew, republish: republish, state: state, tenantAware: true, logger: logger, drainTimeout: defaultDrainTimeout}
 }
 
+type tenantEventKey struct {
+	tenantID string
+	eventID  string
+}
+
 type tenantAcceptedCandidate struct {
 	message  kafka.Message
 	tenantID string
 	eventID  string
 }
 
+// tenantCandidateIndex keeps canonical tenant/event identity authoritative
+// while retaining an event-ID-only index solely for candidate lookup.
+type tenantCandidateIndex struct {
+	byTenantEvent map[tenantEventKey]tenantAcceptedCandidate
+	byEventID     map[string][]tenantAcceptedCandidate
+}
+
 // scanAcceptedTenantAware never delivers while the accepted topic is still
 // being scanned. A later candidate with the same event_id but another tenant
 // would make an early delivery an unsafe guess, so candidate collection and
 // resolution are deliberately separate phases.
-func (r *Replayer) scanAcceptedTenantAware(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
+func (r *Replayer) scanAcceptedTenantAware(ctx context.Context, wanted wantedSet) (int, map[dlqRecordID]bool, error) {
 	candidates, found, drained, scanErr := r.collectTenantCandidates(ctx, wanted)
 	if scanErr != nil {
-		return 0, map[string]bool{}, scanErr
+		return 0, map[dlqRecordID]bool{}, scanErr
 	}
 	if !drained {
 		r.tenantScopePending.Store(uint64(len(wanted.replay)))
-		return 0, map[string]bool{}, nil
+		return 0, map[dlqRecordID]bool{}, nil
 	}
 	return r.resolveTenantCandidates(ctx, wanted, candidates, found)
 }
@@ -100,12 +112,12 @@ func (r *Replayer) collectTenantCandidates(ctx context.Context, wanted wantedSet
 			// A malformed/key-only value is evidence that the wanted record
 			// cannot be safely recovered, not a tenant identity. Keep it
 			// pending rather than letting the key create a state mark.
-			if id := eventIDFromValue(message.Value); wanted.replay[id] {
+			if id := eventIDFromValue(message.Value); len(wanted.byEventID[id]) > 0 {
 				found[id] = true
 			}
 			continue
 		}
-		if event.EventID == "" || !wanted.replay[event.EventID] {
+		if event.EventID == "" || len(wanted.byEventID[event.EventID]) == 0 {
 			continue
 		}
 		found[event.EventID] = true
@@ -128,29 +140,87 @@ func addTenantCandidate(candidates map[string][]tenantAcceptedCandidate, eventID
 	}
 }
 
+// tenantCandidateForRecord associates one physical DLQ record with a
+// canonical accepted candidate. A claim can select a matching candidate, but
+// never creates one. With one DLQ record, a unique canonical candidate also
+// preserves the legacy optional-claim behavior: a misleading claim is
+// ignored rather than becoming authorization. Once that canonical identity
+// already has a durable mark, however, a mismatching claim is an incompatible
+// sibling signal and must remain pending across rounds and restarts. With
+// duplicate records, a mismatching claim is also left pending when another
+// record has a compatible claim; this prevents that record from inheriting
+// its sibling's association.
+func tenantCandidateForRecord(record dlqRecord, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, state *ReplayState) (tenantAcceptedCandidate, bool) {
+	items := candidates[record.eventID]
+	if len(items) == 0 {
+		return tenantAcceptedCandidate{}, false
+	}
+	if record.claimedTenantID != "" {
+		for _, candidate := range items {
+			if candidate.tenantID == record.claimedTenantID {
+				// A claim may disambiguate only in the context of multiple
+				// physical records. A lone record must not turn an untrusted
+				// claim into authorization, and remains pending if canonical
+				// candidates are ambiguous.
+				if len(items) == 1 || len(wanted.byEventID[record.eventID]) > 1 {
+					return candidate, true
+				}
+				return tenantAcceptedCandidate{}, false
+			}
+		}
+	}
+	if len(items) != 1 {
+		return tenantAcceptedCandidate{}, false
+	}
+	if record.claimedTenantID == "" {
+		return items[0], true
+	}
+	// A single physical record retains backward-compatible behavior for the
+	// optional, unverified claim. For duplicate records, a mismatch is safe
+	// only if no sibling has a claim compatible with the canonical candidate;
+	// otherwise resolving it would make the sibling's identity reusable.
+	if len(wanted.byEventID[record.eventID]) == 1 {
+		// A durable canonical mark proves that an earlier physical sibling
+		// already resolved this event for the candidate tenant. Do not let a
+		// later record with an incompatible claim inherit that mark after the
+		// sibling has fallen below the DLQ commit offset.
+		if state != nil && state.Marked(items[0].tenantID, items[0].eventID) {
+			return tenantAcceptedCandidate{}, false
+		}
+		return items[0], true
+	}
+	for _, siblingID := range wanted.byEventID[record.eventID] {
+		sibling := wanted.records[siblingID]
+		if sibling.claimedTenantID == items[0].tenantID {
+			return tenantAcceptedCandidate{}, false
+		}
+	}
+	return tenantAcceptedCandidate{}, false
+}
+
 // resolveTenantCandidates applies durable state and delivery policy only
 // after the full accepted scan proved the event_id→tenant correlation. A
 // missing candidate, ambiguous candidates, missing resolver credential, and
 // tenant_mismatch all remain pending and are counted in the scope backlog.
-func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, found map[string]bool) (int, map[string]bool, error) {
-	resolved := map[string]bool{}
+func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, found map[string]bool) (int, map[dlqRecordID]bool, error) {
+	resolved := map[dlqRecordID]bool{}
 	scopePending := 0
 	replayed := 0
-	for eventID := range wanted.replay {
-		items := candidates[eventID]
-		if len(items) != 1 {
+	for _, id := range wanted.orderedIDs {
+		record := wanted.records[id]
+		candidate, ok := tenantCandidateForRecord(record, wanted, candidates, r.state)
+		if !ok {
 			scopePending++
-			r.logTenantPending(eventID, found[eventID], len(items))
+			r.logTenantPendingRecord(record, found[record.eventID], len(candidates[record.eventID]))
 			continue
 		}
-		candidate := items[0]
-		if r.state.Marked(candidate.tenantID, eventID) {
-			resolved[eventID] = true
+		if r.state.Marked(candidate.tenantID, candidate.eventID) {
+			resolved[id] = true
 			continue
 		}
 		if r.republish == nil {
 			scopePending++
-			r.logTenantPending(eventID, true, 0)
+			r.logTenantPendingRecord(record, true, 0)
 			continue
 		}
 		err := r.republish(ctx, candidate.message.Key, candidate.message.Value)
@@ -159,28 +229,28 @@ func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet
 			if isTenantScopeFailure(err) {
 				r.tenantScopeMismatches.Add(1)
 				scopePending++
-				r.logTenantMismatch(candidate.tenantID, eventID, err)
+				r.logTenantMismatch(candidate.tenantID, candidate.eventID, err)
 				continue
 			}
-			closed, closeErr := r.closeTenantDeliveryFailure(eventID, candidate.tenantID, wanted, err, resolved)
+			closed, closeErr := r.closeTenantDeliveryFailure(id, candidate, wanted, err, resolved)
 			if closeErr != nil {
 				return replayed, resolved, closeErr
 			}
 			if closed {
-				if !wanted.oneShot[eventID] {
+				if !wanted.oneShot[id] {
 					replayed++
 				}
 				continue
 			}
 			continue
 		}
-		if err := r.state.MarkTenant(candidate.tenantID, eventID); err != nil {
+		if err := r.state.MarkTenant(candidate.tenantID, candidate.eventID); err != nil {
 			return replayed, resolved, err
 		}
-		resolved[eventID] = true
+		resolved[id] = true
 		r.replayed.Add(1)
 		replayed++
-		r.logger.Printf("replayed tenant=%s event_id=%s", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(eventID, 64))
+		r.logger.Printf("replayed tenant=%s event_id=%s", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64))
 	}
 	r.tenantScopePending.Store(uint64(scopePending))
 	return replayed, resolved, nil
@@ -189,33 +259,35 @@ func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet
 // closeTenantDeliveryFailure preserves the existing permanent/one-shot
 // policies after the tenant-scope guard has already been applied. It returns
 // true only when a durable closure was recorded.
-func (r *Replayer) closeTenantDeliveryFailure(eventID, tenantID string, wanted wantedSet, err error, resolved map[string]bool) (bool, error) {
+func (r *Replayer) closeTenantDeliveryFailure(id dlqRecordID, candidate tenantAcceptedCandidate, wanted wantedSet, err error, resolved map[dlqRecordID]bool) (bool, error) {
 	var deliveryErr *outbox.DeliveryError
-	oneShot := wanted.oneShot[eventID]
+	oneShot := wanted.oneShot[id]
 	liveRejected := !oneShot && errors.As(err, &deliveryErr) && deliveryErr.Permanent
 	if !oneShot && !liveRejected {
-		r.logger.Printf("republish failed tenant=%s event_id=%s error=%v; will retry next round", sanitizeLogField(tenantID, 64), sanitizeLogField(eventID, 64), err)
+		r.logger.Printf("republish failed tenant=%s event_id=%s error=%v; will retry next round", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64), err)
 		return false, nil
 	}
 	if oneShot {
-		r.logger.Printf("PERMANENT closure tenant=%s event_id=%s code=permanent_error one-shot republish attempt failed: %s; DLQ offset committed", sanitizeLogField(tenantID, 64), sanitizeLogField(eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
+		r.logger.Printf("PERMANENT closure tenant=%s event_id=%s code=permanent_error one-shot republish attempt failed: %s; DLQ offset committed", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
 	} else {
-		r.logger.Printf("PERMANENT closure tenant=%s event_id=%s republish rejected (permanent): %s; DLQ offset committed", sanitizeLogField(tenantID, 64), sanitizeLogField(eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
+		r.logger.Printf("PERMANENT closure tenant=%s event_id=%s republish rejected (permanent): %s; DLQ offset committed", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
 	}
-	if markErr := r.state.MarkTenant(tenantID, eventID); markErr != nil {
+	if markErr := r.state.MarkTenant(candidate.tenantID, candidate.eventID); markErr != nil {
 		return false, markErr
 	}
-	resolved[eventID] = true
+	resolved[id] = true
 	r.permanent.Add(1)
 	return true, nil
 }
 
-func (r *Replayer) logTenantPending(eventID string, found bool, candidateCount int) {
+func (r *Replayer) logTenantPendingRecord(record dlqRecord, found bool, candidateCount int) {
 	reason := "canonical tenant correlation unavailable"
 	if found && candidateCount > 1 {
 		reason = "multiple canonical tenants share event_id"
 	}
-	r.logger.Printf("tenant-scope pending event_id=%s reason=%s", sanitizeLogField(eventID, 64), reason)
+	r.logger.Printf("tenant-scope pending topic=%s partition=%d offset=%d event_id=%s claimed_tenant=%s reason=%s",
+		sanitizeLogField(record.id.topic, 64), record.id.partition, record.id.offset,
+		sanitizeLogField(record.eventID, 64), sanitizeLogField(record.claimedTenantID, 64), reason)
 }
 
 func (r *Replayer) logTenantMismatch(tenantID, eventID string, err error) {

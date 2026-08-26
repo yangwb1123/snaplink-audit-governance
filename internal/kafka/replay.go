@@ -1049,12 +1049,28 @@ func (r *Replayer) drainWindow() time.Duration {
 	return r.drainTimeout
 }
 
-// dlqRecord is one collected DLQ failure with its parsed event ID.
+// dlqRecordID identifies one physical DLQ record. It deliberately contains
+// only the effective topic, partition, and offset: neither an untrusted Kafka
+// key nor the Failure event_id can collapse two records into one.
+type dlqRecordID struct {
+	topic     string
+	partition int
+	offset    int64
+	// sequence is normally zero because Kafka guarantees a unique
+	// (topic, partition, offset). It only disambiguates duplicate identities
+	// supplied by broker-free test readers; production records never need it.
+	sequence uint32
+}
+
+// dlqRecord is one collected DLQ failure with its parsed event metadata and
+// physical record identity.
 type dlqRecord struct {
-	message   kafka.Message
-	eventID   string
-	errorCode string
-	wanted    bool
+	id              dlqRecordID
+	message         kafka.Message
+	eventID         string
+	claimedTenantID string
+	errorCode       string
+	wanted          bool
 	// authBlocked marks an error_code=unauthorized record held blocked this
 	// round: excluded from the wanted set (scanAccepted and the
 	// drain-to-unresolvable loop never touch it) yet kept wanted=true so the
@@ -1064,35 +1080,92 @@ type dlqRecord struct {
 	authBlocked bool
 }
 
-// wantedSet is the round's replay target set: replay holds every wanted
-// event ID; oneShot is the subset whose DLQ record carries
-// error_code=permanent_error — the one-shot closure class (REQ-PERM-1).
-// Invariant: oneShot ⊆ replay, by construction (both derived from the same
-// records below). The one-shot class applies per event ID: a duplicate ID
-// collected with mixed codes closes ALL of that ID's records under the
-// one-shot policy (the shared state mark closes them together).
+// wantedSet is the round's replay target set. replay, oneShot, orderedIDs,
+// and commit decisions are all keyed by physical DLQ record identity.
+// byEventID is only a lookup index for locating accepted-topic candidates; it
+// is never used to authorize a mark or commit an offset. records retains the
+// claim and event metadata needed by tenant-aware correlation.
 type wantedSet struct {
-	replay  map[string]bool
-	oneShot map[string]bool
+	replay     map[dlqRecordID]bool
+	oneShot    map[dlqRecordID]bool
+	byEventID  map[string][]dlqRecordID
+	orderedIDs []dlqRecordID
+	records    map[dlqRecordID]dlqRecord
 }
 
-// wantedEvents returns the round's replay target set: collected event IDs
-// not yet marked replayed and not held auth-blocked, plus the subset whose
-// DLQ record carries error_code=permanent_error. error_code must never be
-// echoed into a log line or metric label at the classification sites — the
-// vocabulary is a free string from an untrusted boundary (CWE-117).
+// wantedRecordID supplies deterministic identities for same-package tests
+// that construct dlqRecord values directly. Kafka-collected records always
+// receive their topic/partition/offset identity in collectFailures.
+func wantedRecordID(record dlqRecord, index int) dlqRecordID {
+	if record.id != (dlqRecordID{}) {
+		return record.id
+	}
+	return dlqRecordID{partition: index, offset: int64(index)}
+}
+
+// wantedEvents returns the round's replay target records: collected records
+// not yet marked replayed and not held auth-blocked, plus the per-record
+// subset whose DLQ record carries error_code=permanent_error. error_code must
+// never be echoed into a log line or metric label at the classification sites
+// — the vocabulary is a free string from an untrusted boundary (CWE-117).
 func wantedEvents(collected []dlqRecord) wantedSet {
-	replay := map[string]bool{}
-	oneShot := map[string]bool{}
-	for _, record := range collected {
-		if record.wanted && !record.authBlocked {
-			replay[record.eventID] = true
-			if record.errorCode == ErrorCodePermanentError {
-				oneShot[record.eventID] = true
-			}
+	wanted := wantedSet{
+		replay:     map[dlqRecordID]bool{},
+		oneShot:    map[dlqRecordID]bool{},
+		byEventID:  map[string][]dlqRecordID{},
+		orderedIDs: []dlqRecordID{},
+		records:    map[dlqRecordID]dlqRecord{},
+	}
+	for index, record := range collected {
+		if !record.wanted || record.authBlocked {
+			continue
+		}
+		id := wantedRecordID(record, index)
+		if wanted.replay[id] {
+			continue
+		}
+		record.id = id
+		wanted.replay[id] = true
+		wanted.records[id] = record
+		wanted.byEventID[record.eventID] = append(wanted.byEventID[record.eventID], id)
+		wanted.orderedIDs = append(wanted.orderedIDs, id)
+		if record.errorCode == ErrorCodePermanentError {
+			wanted.oneShot[id] = true
 		}
 	}
-	return wantedSet{replay: replay, oneShot: oneShot}
+	return wanted
+}
+
+// resolveLegacyEventRecords bridges the historical event-ID replay seam to
+// the physical commit set. Legacy mode may still share one state mark for
+// duplicate event IDs, but every collected DLQ record gets its own durable
+// commit decision.
+func resolveLegacyEventRecords(wanted wantedSet, eventID string, resolved map[dlqRecordID]bool) {
+	for _, id := range wanted.byEventID[eventID] {
+		resolved[id] = true
+	}
+}
+
+func legacyEventResolved(wanted wantedSet, eventID string, resolved map[dlqRecordID]bool) bool {
+	ids := wanted.byEventID[eventID]
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if !resolved[id] {
+			return false
+		}
+	}
+	return true
+}
+
+func legacyEventOneShot(wanted wantedSet, eventID string) bool {
+	for _, id := range wanted.byEventID[eventID] {
+		if wanted.oneShot[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // commitResolved advances the DLQ reader past every collected record whose
@@ -1108,7 +1181,7 @@ func wantedEvents(collected []dlqRecord) wantedSet {
 // (permanent loss). The barrier therefore leaves resolved records at or
 // above the first pending offset uncommitted: the next round re-reads them
 // and the state file makes the re-read idempotent (no re-republish).
-func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, resolved map[string]bool) error {
+func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, resolved map[dlqRecordID]bool) error {
 	type partitionKey struct {
 		topic     string
 		partition int
@@ -1117,19 +1190,27 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 	// pending; no commit may cross it.
 	firstPending := map[partitionKey]int64{}
 	for _, record := range collected {
-		if record.authBlocked || (record.wanted && !resolved[record.eventID]) {
-			key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
-			if offset, ok := firstPending[key]; !ok || record.message.Offset < offset {
-				firstPending[key] = record.message.Offset
+		id := record.id
+		if id == (dlqRecordID{}) {
+			id = dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
+		}
+		if record.authBlocked || (record.wanted && !resolved[id]) {
+			key := partitionKey{topic: id.topic, partition: id.partition}
+			if offset, ok := firstPending[key]; !ok || id.offset < offset {
+				firstPending[key] = id.offset
 			}
 		}
 	}
 	for _, record := range collected {
-		if record.authBlocked || (record.wanted && !resolved[record.eventID]) {
+		id := record.id
+		if id == (dlqRecordID{}) {
+			id = dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
+		}
+		if record.authBlocked || (record.wanted && !resolved[id]) {
 			continue // auth-blocked: config-fixable, stays pending until the credential is restored (or -replay-auth-blocked)
 		}
-		key := partitionKey{topic: record.message.Topic, partition: record.message.Partition}
-		if pending, ok := firstPending[key]; ok && record.message.Offset >= pending {
+		key := partitionKey{topic: id.topic, partition: id.partition}
+		if pending, ok := firstPending[key]; ok && id.offset >= pending {
 			continue // resolved but at/above the barrier: committing would leapfrog the pending record
 		}
 		if err := r.dlqReader.CommitMessages(ctx, record.message); err != nil {
@@ -1158,12 +1239,26 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 	// detail line; every round still counts and summarizes the total.
 	r.authBlockedDetailBudget.Store(0)
 	var collected []dlqRecord
+	seenPhysical := map[dlqRecordID]uint32{}
 	for {
 		message, err := r.dlqReader.FetchMessage(drainCtx)
 		if err != nil {
 			return collected, err
 		}
-		record := dlqRecord{message: message, eventID: string(message.Key)}
+		effectiveTopic := message.Topic
+		if effectiveTopic == "" {
+			effectiveTopic = r.dlqReader.Config().Topic
+		}
+		physicalID := dlqRecordID{topic: effectiveTopic, partition: message.Partition, offset: message.Offset}
+		if sequence := seenPhysical[physicalID]; sequence > 0 {
+			physicalID.sequence = sequence
+		}
+		seenPhysical[dlqRecordID{topic: effectiveTopic, partition: message.Partition, offset: message.Offset}]++
+		record := dlqRecord{
+			id:      physicalID,
+			message: message,
+			eventID: string(message.Key),
+		}
 		var failure Failure
 		decoder := json.NewDecoder(bytes.NewReader(message.Value))
 		decoder.UseNumber()
@@ -1171,6 +1266,7 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 		if decodeErr == nil {
 			r.dlqRecords.Add(1)
 			record.eventID = failure.EventID
+			record.claimedTenantID = failure.TenantID
 			record.errorCode = failure.ErrorCode
 			// REQ-PERM-3: per-round collection-time traffic counter for
 			// error_code=attempts_exhausted records, mirroring dlqRecords
@@ -1231,12 +1327,12 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 // the set of event IDs that reached a durable decision this round
 // (replayed, permanently closed, unparsable, or converged-as-unresolvable
 // — NOT transiently failed).
-func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (int, map[string]bool, error) {
+func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (int, map[dlqRecordID]bool, error) {
 	window := r.drainWindow()
 	scanCtx, cancel := context.WithTimeout(ctx, maxScanWindows*window)
 	defer cancel()
 	replayed := 0
-	resolved := map[string]bool{}
+	resolved := map[dlqRecordID]bool{}
 	found := map[string]bool{} // wanted IDs whose message was matched this round
 	drained := false           // true only after a full quiet window with no message
 	var scanErr error
@@ -1257,9 +1353,9 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 		r.acceptedSeen.Add(1)
 		payloadID := eventIDFromValue(message.Value) // decode once per message
 		eventID := ""
-		if payloadID != "" && wanted.replay[payloadID] && !r.state.marked(payloadID) {
+		if payloadID != "" && len(wanted.byEventID[payloadID]) > 0 && !r.state.marked(payloadID) {
 			eventID = payloadID // payload event_id is authoritative
-		} else if keyID := string(message.Key); payloadID == "" && wanted.replay[keyID] && !r.state.marked(keyID) {
+		} else if keyID := string(message.Key); payloadID == "" && len(wanted.byEventID[keyID]) > 0 && !r.state.marked(keyID) {
 			eventID = keyID // fallback only when the payload probe is empty (unparsable values whose only signal is the key; mirrors deadLetterUnparsable)
 		}
 		if eventID == "" {
@@ -1272,7 +1368,7 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 			if err := r.state.Mark(eventID); err != nil {
 				return replayed, resolved, err
 			}
-			resolved[eventID] = true
+			resolveLegacyEventRecords(wanted, eventID, resolved)
 			r.unparsableMarks.Add(1)
 			replayed++
 			continue
@@ -1287,7 +1383,7 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 			// runs BEFORE the live-rejection check so a permanent_error record
 			// never reaches the legacy path (which would count replayed++).
 			var deliveryErr *outbox.DeliveryError
-			oneShot := wanted.oneShot[eventID]
+			oneShot := legacyEventOneShot(wanted, eventID)
 			liveRejected := !oneShot && errors.As(err, &deliveryErr) && deliveryErr.Permanent
 			if oneShot || liveRejected {
 				if oneShot {
@@ -1302,7 +1398,7 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 				if markErr := r.state.Mark(eventID); markErr != nil {
 					return replayed, resolved, markErr
 				}
-				resolved[eventID] = true
+				resolveLegacyEventRecords(wanted, eventID, resolved)
 				r.permanent.Add(1)
 				if liveRejected {
 					replayed++ // legacy return contribution preserved; the one-shot never counts (REQ-PERM-2)
@@ -1315,7 +1411,7 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 		if err := r.state.Mark(eventID); err != nil {
 			return replayed, resolved, err
 		}
-		resolved[eventID] = true
+		resolveLegacyEventRecords(wanted, eventID, resolved)
 		r.replayed.Add(1)
 		replayed++
 		r.logger.Printf("replayed event_id=%s", eventID)
@@ -1326,15 +1422,15 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 		// fetching the original). Mark unresolvable this round so
 		// commitResolved commits the DLQ offset — no attempt cap needed.
 		// Found-but-failed events (transient republish error) stay pending.
-		for eventID := range wanted.replay {
-			if resolved[eventID] || found[eventID] {
+		for eventID := range wanted.byEventID {
+			if found[eventID] || legacyEventResolved(wanted, eventID, resolved) {
 				continue
 			}
 			r.logger.Printf("unresolvable event_id=%s reason=original-not-found-in-accepted-topic round=%s", eventID, time.Now().Format(time.RFC3339))
 			if err := r.state.Mark(eventID); err != nil {
 				return replayed, resolved, err
 			}
-			resolved[eventID] = true
+			resolveLegacyEventRecords(wanted, eventID, resolved)
 			r.unresolvable.Add(1)
 			replayed++
 		}
