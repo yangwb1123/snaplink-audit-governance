@@ -13,9 +13,9 @@ import (
 )
 
 // TestGRPCCanonicalJSONCapsAcrossRPCs covers the three gRPC ingest methods
-// with JSON whose compact wire spelling fits the field cap but whose canonical
-// spelling does not. HTML-sensitive characters are intentionally left
-// unescaped on the wire; CanonicalJSON escapes them before measuring.
+// with before_json whose compact wire spelling fits the field cap but whose
+// canonical spelling does not. HTML-sensitive characters are intentionally
+// left unescaped on the wire; CanonicalJSON escapes them before measuring.
 func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 	st, client, ctx := newGRPCHarness(t)
 	chars := []struct {
@@ -30,7 +30,7 @@ func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 	for _, tc := range chars {
 		t.Run("Write/"+tc.name, func(t *testing.T) {
 			event := testProtoEvent("grpc-canonical-write-"+tc.name, "crm")
-			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", BeforeJson: canonicalOverWireJSON(tc.value)}}
 			if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: event}); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("Write code=%v, want InvalidArgument", status.Code(err))
 			}
@@ -41,7 +41,7 @@ func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 	for _, tc := range chars {
 		t.Run("WriteBatch/"+tc.name, func(t *testing.T) {
 			event := testProtoEvent("grpc-canonical-batch-"+tc.name, "crm")
-			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", BeforeJson: canonicalOverWireJSON(tc.value)}}
 			response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{event}})
 			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
@@ -60,7 +60,7 @@ func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 	rejectedIDs := make([]string, 0, len(chars))
 	for _, tc := range chars {
 		event := testProtoEvent("grpc-canonical-stream-"+tc.name, "crm")
-		event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+		event.ChangedFields = []*auditv1.FieldChange{{Field: "value", BeforeJson: canonicalOverWireJSON(tc.value)}}
 		rejectedIDs = append(rejectedIDs, event.GetEventId())
 		if err := stream.Send(&auditv1.WriteRequest{Event: event}); err != nil {
 			t.Fatal(err)
@@ -81,6 +81,77 @@ func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 		t.Fatalf("stream close err=%v, want io.EOF", err)
 	}
 	assertNoFramedKeys(t, st, rejectedIDs...)
+}
+
+// TestGRPCCanonicalJSONAfterCapsAcrossRPCs complements the before_json matrix
+// above. Keeping the fields separate prevents a rejection caused by one field
+// from masking a missing validator on the other field.
+func TestGRPCCanonicalJSONAfterCapsAcrossRPCs(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	chars := []struct {
+		name  string
+		value string
+	}{
+		{"less-than", "<"},
+		{"greater-than", ">"},
+		{"ampersand", "&"},
+	}
+
+	for _, tc := range chars {
+		t.Run("Write/"+tc.name, func(t *testing.T) {
+			event := testProtoEvent("grpc-canonical-after-write-"+tc.name, "crm")
+			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+			if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: event}); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("Write code=%v, want InvalidArgument", status.Code(err))
+			}
+			assertNoFramedKeys(t, st, event.GetEventId())
+		})
+	}
+	for _, tc := range chars {
+		t.Run("WriteBatch/"+tc.name, func(t *testing.T) {
+			event := testProtoEvent("grpc-canonical-after-batch-"+tc.name, "crm")
+			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+			response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{event}})
+			if status.Code(err) != codes.InvalidArgument || (response != nil && len(response.GetReceipts()) != 0) {
+				t.Fatalf("WriteBatch response=%v err=%v, want InvalidArgument with no receipts", response, err)
+			}
+			assertNoFramedKeys(t, st, event.GetEventId())
+		})
+	}
+
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range chars {
+		event := testProtoEvent("grpc-canonical-after-stream-"+tc.name, "crm")
+		event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
+		if err := stream.Send(&auditv1.WriteRequest{Event: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	valid := testProtoEvent("grpc-canonical-after-stream-valid", "crm")
+	if err := stream.Send(&auditv1.WriteRequest{Event: valid}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := stream.Recv()
+	if err != nil || receipt.GetEventId() != valid.GetEventId() {
+		t.Fatalf("stream receipt=%v err=%v, want only valid event", receipt, err)
+	}
+	if err := assertStreamEOF(stream); err != nil {
+		t.Fatal(err)
+	}
+	assertNoFramedKeys(t, st, "grpc-canonical-after-stream-less-than", "grpc-canonical-after-stream-greater-than", "grpc-canonical-after-stream-ampersand")
+}
+
+func assertStreamEOF(stream auditv1.Ingest_WriteStreamClient) error {
+	if _, err := stream.Recv(); err != io.EOF {
+		return fmt.Errorf("stream close err=%v, want io.EOF", err)
+	}
+	return nil
 }
 
 func canonicalOverWireJSON(char string) string {

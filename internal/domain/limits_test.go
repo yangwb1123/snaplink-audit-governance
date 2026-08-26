@@ -14,6 +14,8 @@ import (
 // gRPC parity tests build on.
 func TestValidateEventCapsBoundaryAndClass(t *testing.T) {
 	exact := strings.Repeat("e", MaxEnvelopeFieldBytes)
+	utf8Exact := strings.Repeat("é", MaxEnvelopeFieldBytes/len("é"))
+	utf8Over := utf8Exact + "x"
 	over := strings.Repeat("x", MaxEnvelopeFieldBytes+1)
 
 	base := Event{
@@ -32,6 +34,10 @@ func TestValidateEventCapsBoundaryAndClass(t *testing.T) {
 	if err := ValidateEventCaps(atCap); err != nil {
 		t.Fatalf("field at exactly the cap rejected: %v", err)
 	}
+	atCap.Reason = utf8Exact
+	if err := ValidateEventCaps(atCap); err != nil {
+		t.Fatalf("UTF-8 field at exactly the byte cap rejected: %v", err)
+	}
 
 	overCap := base
 	overCap.Reason = over
@@ -39,8 +45,14 @@ func TestValidateEventCapsBoundaryAndClass(t *testing.T) {
 	if !errors.Is(err, ErrInvalid) || !errors.Is(err, ErrEnvelopeTooLarge) {
 		t.Fatalf("err=%v, want both ErrInvalid and ErrEnvelopeTooLarge", err)
 	}
-	if want := "reason is 8193 bytes, max 8192"; !strings.Contains(err.Error(), want) {
+	const want = "reason is 8193 bytes, max 8192"
+	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("message %q missing size detail %q", err.Error(), want)
+	}
+	utf8OverCap := base
+	utf8OverCap.Reason = utf8Over
+	if err := ValidateEventCaps(utf8OverCap); !errors.Is(err, ErrEnvelopeTooLarge) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("UTF-8 one-byte-over error=%v, want byte-cap rejection %q", err, want)
 	}
 }
 
