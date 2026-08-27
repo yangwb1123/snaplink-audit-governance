@@ -268,13 +268,18 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
+	scope, err := s.resolveBodyScope(r, claims, event.TenantID)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	// F1: the ingest commit must survive client disconnect — the durable
 	// write is detached from r.Context() cancellation (values are kept) so a
 	// dropped connection can never roll back a ledgered event. The worker's
 	// signal-driven context stays cancellable: server-initiated stop is a
 	// legitimate abort.
-	receipt, err := s.Service.Ingest(context.WithoutCancel(r.Context()), claims.TenantID, principal, event, r.URL.Query().Get("wait_for"))
+	receipt, err := s.Service.Ingest(context.WithoutCancel(r.Context()), scope.TenantID, principal, event, r.URL.Query().Get("wait_for"))
 	s.ingestCount.Add(1)
 	if errors.Is(err, domain.ErrQuotaExceeded) {
 		s.ingestQuotaCount.Add(1)
@@ -319,10 +324,15 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	if request.WaitFor == "" {
 		request.WaitFor = r.URL.Query().Get("wait_for")
 	}
+	scopes, err := s.resolveBatchBodyScopes(r, claims, request.Events)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
+	}
 	receipts := make([]domain.EventReceipt, 0, len(request.Events))
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	commitCtx := context.WithoutCancel(r.Context())
-	for _, event := range request.Events {
+	for index, event := range request.Events {
 		if capErr := domain.ValidateEventCaps(event); capErr != nil {
 			receipts = append(receipts, domain.EventReceipt{})
 			partialStatus := statusForError(capErr)
@@ -332,7 +342,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, capErr, r)})
 			return
 		}
-		receipt, ingestErr := s.Service.Ingest(commitCtx, claims.TenantID, principal, event, request.WaitFor)
+		receipt, ingestErr := s.Service.Ingest(commitCtx, scopes[index].TenantID, principal, event, request.WaitFor)
 		if receipt.Duplicate {
 			s.ingestDuplicateCount.Add(1)
 		}
@@ -362,17 +372,12 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	var event domain.Event
-	if tenantID == "" && (claims.Platform || claims.CrossTenantAuditRead) {
-		event, err = s.Service.GetEventAcrossTenants(claims.Subject, r.PathValue("eventID"))
-	} else {
-		event, err = s.Service.GetEvent(tenantID, claims.Subject, r.PathValue("eventID"))
-	}
+	event, err := s.Service.GetEvent(scope.TenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -395,17 +400,12 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	var receipt domain.EventReceipt
-	if tenantID == "" && (claims.Platform || claims.CrossTenantAuditRead) {
-		receipt, err = s.Service.GetReceiptAcrossTenants(claims.Subject, r.PathValue("eventID"))
-	} else {
-		receipt, err = s.Service.GetReceipt(tenantID, claims.Subject, r.PathValue("eventID"))
-	}
+	receipt, err := s.Service.GetReceipt(scope.TenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -425,12 +425,12 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.queryCount.Add(1)
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.QueryEvents(tenantID, claims.Subject, query)
+	result, err := s.Service.QueryEvents(scope.TenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -491,12 +491,12 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.Operation(tenantID, claims.Subject, r.PathValue("operationID"))
+	result, err := s.Service.Operation(scope.TenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -510,7 +510,7 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -520,7 +520,7 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.OperationTimelinePage(tenantID, claims.Subject, r.PathValue("operationID"), pageSize, cursor)
+	result, err := s.Service.OperationTimelinePage(scope.TenantID, claims.Subject, r.PathValue("operationID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -544,12 +544,12 @@ func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ReplayOperation(tenantID, claims.Subject, r.PathValue("operationID"))
+	result, err := s.Service.ReplayOperation(scope.TenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -563,7 +563,7 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -573,7 +573,7 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.AggregateTimelinePage(tenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"), pageSize, cursor)
+	result, err := s.Service.AggregateTimelinePage(scope.TenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -602,12 +602,12 @@ func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.CreateExport(tenantID, claims.Subject, query)
+	job, err := s.Service.CreateExport(scope.TenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -621,12 +621,12 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(tenantID, r.PathValue("jobID"))
+	job, err := s.Service.GetExport(scope.TenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -647,12 +647,12 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(tenantID, r.PathValue("jobID"))
+	job, err := s.Service.GetExport(scope.TenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -705,12 +705,12 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.VerifyIntegrity(r.Context(), tenantID, claims.Subject, request.StreamID)
+	result, err := s.Service.VerifyIntegrity(r.Context(), scope.TenantID, claims.Subject, request.StreamID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -734,12 +734,12 @@ func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveQueryBodyScope(r, claims, hold.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	hold.TenantID = tenantID
+	hold.TenantID = scope.TenantID
 	hold.CreatedBy = claims.Subject
 	result, err := s.Service.CreateLegalHold(hold)
 	if err != nil {
@@ -755,12 +755,12 @@ func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListLegalHolds(tenantID)
+	items, err := s.Service.ListLegalHolds(scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -774,12 +774,12 @@ func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	hold, err := s.Service.ReleaseLegalHold(tenantID, r.PathValue("holdID"), claims.Subject)
+	hold, err := s.Service.ReleaseLegalHold(scope.TenantID, r.PathValue("holdID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -798,12 +798,12 @@ func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.PreviewRestore(tenantID, request)
+	result, err := s.Service.PreviewRestore(scope.TenantID, request)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -822,12 +822,12 @@ func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.CreateRestore(tenantID, request, claims.Subject)
+	result, err := s.Service.CreateRestore(scope.TenantID, request, claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -841,12 +841,12 @@ func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ApproveRestore(tenantID, r.PathValue("runID"), claims.Subject)
+	result, err := s.Service.ApproveRestore(scope.TenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -860,12 +860,12 @@ func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.RejectRestore(tenantID, r.PathValue("runID"), claims.Subject)
+	result, err := s.Service.RejectRestore(scope.TenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -879,12 +879,12 @@ func (s *Server) getRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.GetRestore(tenantID, r.PathValue("runID"))
+	result, err := s.Service.GetRestore(scope.TenantID, r.PathValue("runID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -947,9 +947,12 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	if !claims.Platform {
-		source.TenantID = claims.TenantID
+	scope, err := s.resolveQueryBodyScope(r, claims, source.TenantID)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
 	}
+	source.TenantID = scope.TenantID
 	if source.CreatedAt.IsZero() {
 		source.CreatedAt = s.Service.Now()
 	}
@@ -969,12 +972,12 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSources(tenantID)
+	items, err := s.Service.ListSources(scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -994,12 +997,12 @@ func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source.ID = r.PathValue("sourceID")
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveQueryBodyScope(r, claims, source.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	source.TenantID = tenantID
+	source.TenantID = scope.TenantID
 	updated, err := s.Service.UpdateSource(claims.Subject, source)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -1019,9 +1022,12 @@ func (s *Server) createSchema(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	if !claims.Platform {
-		schema.TenantID = claims.TenantID
+	scope, err := s.resolveQueryBodyScope(r, claims, schema.TenantID)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
 	}
+	schema.TenantID = scope.TenantID
 	if schema.CreatedAt.IsZero() {
 		schema.CreatedAt = s.Service.Now()
 	}
@@ -1041,12 +1047,12 @@ func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSchemas(tenantID)
+	items, err := s.Service.ListSchemas(scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1065,9 +1071,12 @@ func (s *Server) setRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	if !claims.Platform {
-		policy.TenantID = claims.TenantID
+	scope, err := s.resolveQueryBodyScope(r, claims, policy.TenantID)
+	if err != nil {
+		s.writeError(w, r, statusForError(err), err)
+		return
 	}
+	policy.TenantID = scope.TenantID
 	if err := s.Service.SetRetentionPolicy(claims.Subject, policy); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1081,12 +1090,12 @@ func (s *Server) getRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	policy, err := s.Service.GetRetentionPolicy(tenantID)
+	policy, err := s.Service.GetRetentionPolicy(scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1100,12 +1109,12 @@ func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeScopedQuery)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.EvaluateRetention(tenantID, time.Time{})
+	result, err := s.Service.EvaluateRetention(scope.TenantID, time.Time{})
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1114,12 +1123,12 @@ func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
-	claims, err := s.require(r, "audit:policy:read")
+	claims, err := s.requireAdminActionRead(r)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	tenantID, err := s.tenantFor(r, claims)
+	scope, err := s.resolveScope(r, claims, ScopeAllTenants)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1132,7 +1141,7 @@ func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, err := s.Service.ListAdminActions(tenantID, claims.Platform, limit)
+	items, err := s.Service.ListAdminActions(scope.TenantID, claims.Platform || claims.CrossTenantAuditRead, limit)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -1141,46 +1150,46 @@ func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) require(r *http.Request, permission string) (auth.Claims, error) {
+	return s.requirePermission(r, permission, false)
+}
+
+// requireAdminActionRead is the only policy-read exception for a tenantless
+// Console capability. CrossTenantAuditRead is intentionally not accepted by
+// the ordinary policy handlers: those handlers still require a real tenant
+// credential or platform credential before scope resolution.
+func (s *Server) requireAdminActionRead(r *http.Request) (auth.Claims, error) {
+	return s.requirePermission(r, "audit:policy:read", true)
+}
+
+func (s *Server) requirePermission(r *http.Request, permission string, allowTenantlessConsole bool) (auth.Claims, error) {
 	claims, err := s.Auth.Authenticate(r)
 	if err != nil {
 		return auth.Claims{}, fmt.Errorf("%w: %v", domain.ErrUnauthorized, err)
 	}
-	if !claims.Allows(permission) {
+	if !claims.Allows(permission) && !(allowTenantlessConsole && claims.CrossTenantAuditRead) {
 		return claims, domain.ErrForbidden
 	}
 	if permission != "audit:event:write" && claims.TenantID == "" && !claims.Platform &&
-		!(permission == "audit:event:read" && claims.CrossTenantAuditRead) {
+		!(allowTenantlessConsole && claims.CrossTenantAuditRead) {
 		return claims, fmt.Errorf("%w: tenant context is required", domain.ErrUnauthorized)
 	}
 	return claims, nil
 }
 
 func (s *Server) tenantFor(r *http.Request, claims auth.Claims) (string, error) {
+	// Keep the tenant selector read in this boundary. The selector is read
+	// once, including its cardinality, so repeated values cannot be reduced by
+	// URL.Values.Get into an ambiguous first-value decision.
+	queryTenant, _, err := queryTenantSelector(r)
+	if err != nil {
+		return "", err
+	}
 	if claims.Platform || claims.CrossTenantAuditRead {
-		if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" {
-			// Key-framing charset rule: the escape-hatch tenant becomes a
-			// composite-key component in every downstream read, so an embedded
-			// KeySeparator (0x1F) would forge another tenant's keys (cross-tenant
-			// read, forged self-audit record). Reject before any service or
-			// store access. Empty stays legal (all-tenants read).
-			if err := store.ValidTenantID(tenantID); err != nil {
-				return "", err
-			}
-			return tenantID, nil
-		}
 		// A platform token has no tenant scope of its own; claims.TenantID is
-		// meaningless here (dev tokens fill it with their own subject,
-		// "platform"). Without a filter the empty sentinel is returned — the
-		// all-tenants read — matching the production JWT path where platform
-		// tokens carry an empty tenant_id claim.
-		return "", nil
+		// never a fallback (development tokens may populate it with "platform").
+		return queryTenant, nil
 	}
 	if claims.TenantID != "" {
-		// Key-framing charset rule, non-platform branch: claims.TenantID is
-		// canonical-safe by construction today (tenantClaim and parseDevToken
-		// both validate), so this is defense-in-depth — the boundary must
-		// re-check the same rule any future claim producer bypasses. Empty
-		// stays legal (all-tenants read; client-id-resolved ingest).
 		if err := store.ValidTenantID(claims.TenantID); err != nil {
 			return "", err
 		}

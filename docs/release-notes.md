@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-08-27 — Explicit tenant scope for platform-capable API operations
+
+Scoped API operations now reject omitted, empty, malformed, or repeated platform tenant selectors before service access. Tenant credentials remain bound to their signed tenant, while only Console event/facet reads and admin-action reads retain approved all-tenant filtering. Platform event writes select each event tenant from the body, and source, schema, retention, and legal-hold writes treat query selection as authoritative.
+
 ## 2026-08-27 — Strict accepted and ledgered Kafka channel schemas
 
 Accepted messages may be pre-ledger, while ledgered messages now require server-assigned stream, sequence, and hash state (including predecessor rules). Producers and consumers enforce the payload `event_id` Kafka key; invalid ledgered/projector inputs are permanently dead-lettered before ingest or database access. Projection and archive Kafka channels remain inactive and undisclosed.

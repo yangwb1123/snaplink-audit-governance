@@ -257,6 +257,9 @@ func (s *Service) ListTenants() ([]domain.Tenant, error) {
 }
 
 func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error {
+	if err := requireTenantScope(schema.TenantID); err != nil {
+		return err
+	}
 	if schema.TenantID == "" {
 		return fmt.Errorf("%w: schema tenant_id is required", domain.ErrInvalid)
 	}
@@ -337,6 +340,9 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 }
 
 func (s *Service) ListSchemas(tenantID string) ([]domain.EventSchema, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	var result []domain.EventSchema
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, schema := range data.Schemas {
@@ -356,6 +362,9 @@ func (s *Service) ListSchemas(tenantID string) ([]domain.EventSchema, error) {
 }
 
 func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy) error {
+	if err := requireTenantScope(policy.TenantID); err != nil {
+		return err
+	}
 	if policy.TenantID == "" || strings.TrimSpace(policy.RetentionClass) == "" ||
 		policy.ArchiveDays < 0 || policy.HotDays < 0 || policy.WarmDays < 0 {
 		return fmt.Errorf("%w: invalid retention policy", domain.ErrInvalid)
@@ -371,6 +380,9 @@ func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy
 }
 
 func (s *Service) GetRetentionPolicy(tenantID string) (domain.RetentionPolicy, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RetentionPolicy{}, err
+	}
 	var result domain.RetentionPolicy
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		policy, ok := data.Policies[tenantID]
@@ -384,6 +396,9 @@ func (s *Service) GetRetentionPolicy(tenantID string) (domain.RetentionPolicy, e
 }
 
 func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.RetentionReport, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RetentionReport{}, err
+	}
 	policy, err := s.GetRetentionPolicy(tenantID)
 	if err != nil {
 		return domain.RetentionReport{}, err
@@ -438,11 +453,23 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 		return domain.EventReceipt{}, err
 	}
 	tenantHint := tenantID
+	// A supplied hint is already an effective tenant selector for the
+	// application call. Validate it before consulting the store; the empty
+	// hint remains the deliberate compatibility path for source-registration
+	// resolution used by non-tenant-bound producers.
+	if tenantHint != "" {
+		if err := requireTenantScope(tenantHint); err != nil {
+			return domain.EventReceipt{}, err
+		}
+	}
 	resolvedTenant, err := s.resolveIngestTenant(tenantHint, principal.ClientID, event.SourceSystem)
 	if err != nil {
 		return domain.EventReceipt{}, err
 	}
 	tenantID = resolvedTenant
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.EventReceipt{}, err
+	}
 	// Tenant consistency (DS-08): the envelope may carry a tenant_id, but it
 	// must be the tenant resolved server-side from the authenticated client
 	// identity — never a different one. The resolved tenant is authoritative;
@@ -644,6 +671,9 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 }
 
 func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventReceipt, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.EventReceipt{}, err
+	}
 	var receipt domain.EventReceipt
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.Receipts[store.EventKey(tenantID, eventID)]
@@ -667,6 +697,9 @@ func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventRecei
 }
 
 func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.Event{}, err
+	}
 	var event domain.Event
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		var resolveErr error
@@ -700,6 +733,9 @@ func (s *Service) recordReadAction(tenantID, actor, action, targetType, targetID
 }
 
 func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.QueryResult{}, err
+	}
 	if query.From.IsZero() || query.To.IsZero() {
 		return domain.QueryResult{}, fmt.Errorf("%w: from and to are required", domain.ErrInvalid)
 	}
@@ -768,6 +804,9 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 }
 
 func (s *Service) Operation(tenantID, actor, operationID string) (domain.OperationSummary, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.OperationSummary{}, err
+	}
 	if operationID == "" {
 		return domain.OperationSummary{}, fmt.Errorf("%w: operation_id is required", domain.ErrInvalid)
 	}
@@ -799,6 +838,9 @@ func (s *Service) Operation(tenantID, actor, operationID string) (domain.Operati
 }
 
 func (s *Service) ReplayOperation(tenantID, actor, operationID string) (domain.ReplayResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.ReplayResult{}, err
+	}
 	events, err := s.operationTimelineNoAudit(tenantID, operationID)
 	if err != nil {
 		return domain.ReplayResult{}, err
@@ -811,6 +853,9 @@ func (s *Service) ReplayOperation(tenantID, actor, operationID string) (domain.R
 }
 
 func (s *Service) ReplayAggregate(tenantID, actor, aggregateType, aggregateID string) (domain.ReplayResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.ReplayResult{}, err
+	}
 	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return domain.ReplayResult{}, err

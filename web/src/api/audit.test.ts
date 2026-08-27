@@ -106,6 +106,25 @@ describe('AuditApi', () => {
     })
   })
 
+  it('does not emit unscoped requests for platform scoped operations', async () => {
+    const fetcher = vi.fn<typeof fetch>(
+      async () => new Response(JSON.stringify({ items: [], count: 0 }), { status: 200 }),
+    )
+    const api = new AuditApi({ baseUrl: '/audit-api', accessToken: 'token', platform: true, fetcher })
+    const query = {
+      from: '2026-08-21T00:00:00.000Z',
+      to: '2026-08-22T00:00:00.000Z',
+    }
+    expect(() => api.queryEvents(query)).toThrow('tenant_id is required')
+    expect(() => api.createExport(query)).toThrow('tenant_id is required')
+    expect(() => api.listSources()).toThrow('tenant_id is required')
+    expect(fetcher).not.toHaveBeenCalled()
+
+    await api.getEventFacets({ since: query.from, until: query.to })
+    await api.listAdminActions()
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
   it('maps the stable server error contract and invalidates on 401', async () => {
     const invalidate = vi.fn()
     const fetcher = vi.fn<typeof fetch>(

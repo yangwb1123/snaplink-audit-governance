@@ -4017,17 +4017,21 @@ func TestHTTPVerifyIntegrityRejectsOversizedStreamID(t *testing.T) {
 }
 
 func TestTenantForBoundaryGuard(t *testing.T) {
-	src, err := os.ReadFile("server.go")
+	src, err := os.ReadFile("scope.go")
+	if err != nil {
+		t.Fatalf("read scope.go (go test runs with CWD=package dir): %v", err)
+	}
+	text := string(src)
+	rawRead := `url.ParseQuery(r.URL.RawQuery)`
+	if count := strings.Count(text, rawRead); count != 1 {
+		t.Fatalf("scope.go contains %d raw tenant query parses, want exactly 1 (inside queryTenantSelector)", count)
+	}
+	serverSrc, err := os.ReadFile("server.go")
 	if err != nil {
 		t.Fatalf("read server.go (go test runs with CWD=package dir): %v", err)
 	}
-	text := string(src)
-	rawRead := `r.URL.Query().Get("tenant_id")`
-	if count := strings.Count(text, rawRead); count != 1 {
-		t.Fatalf("server.go contains %d raw tenant_id query reads, want exactly 1 (inside tenantFor)", count)
-	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "server.go", src, parser.AllErrors)
+	file, err := parser.ParseFile(fset, "server.go", serverSrc, parser.AllErrors)
 	if err != nil {
 		t.Fatalf("parse server.go: %v", err)
 	}

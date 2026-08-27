@@ -17,16 +17,17 @@ var (
 func (s *Server) snaplinkConsoleQuery(
 	w http.ResponseWriter, r *http.Request,
 ) (claims authClaims, tenantID string, query domain.Query, ok bool) {
-	verified, err := s.require(r, "audit:event:read")
+	verified, err := s.requirePermission(r, "audit:event:read", true)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return authClaims{}, "", domain.Query{}, false
 	}
-	tenantID, err = s.tenantFor(r, verified)
+	scope, err := s.resolveScope(r, verified, ScopeAllTenants)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return authClaims{}, "", domain.Query{}, false
 	}
+	tenantID = scope.TenantID
 	query, err = parseSnaplinkConsoleQuery(r)
 	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err)

@@ -10,6 +10,9 @@ import (
 )
 
 func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
+	if err := requireTenantScope(source.TenantID); err != nil {
+		return err
+	}
 	var err error
 	source, err = normalizeSource(source)
 	if err != nil {
@@ -36,6 +39,9 @@ func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
 }
 
 func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain.SourceSystem, error) {
+	if err := requireTenantScope(source.TenantID); err != nil {
+		return domain.SourceSystem{}, err
+	}
 	var err error
 	source, err = normalizeSource(source)
 	if err != nil {
@@ -65,6 +71,9 @@ func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain
 }
 
 func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
+	if err := requireTenantScope(source.TenantID); err != nil {
+		return domain.SourceSystem{}, err
+	}
 	if source.TenantID == "" || source.ID == "" || source.Name == "" {
 		return domain.SourceSystem{}, fmt.Errorf("%w: source tenant_id, id and name are required", domain.ErrInvalid)
 	}
@@ -102,6 +111,9 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 }
 
 func (s *Service) ListSources(tenantID string) ([]domain.SourceSystem, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	var result []domain.SourceSystem
 	err := s.Store.ReadControl(func(data *store.Snapshot) error {
 		for _, source := range data.Sources {

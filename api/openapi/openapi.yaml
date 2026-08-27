@@ -11,13 +11,14 @@ paths:
   /api/v1/compat/snaplink/audit/events:
     get:
       operationId: querySnaplinkConsoleAuditEvents
-      description: Compatibility read projection for Snaplink Console. Time bounds are optional and default to the full ledger horizon; results are newest-first. The admin:read bridge grants only audit event reads, remains audience-bound by the JWT verifier, and a signed tenant claim cannot be overridden.
+      description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
+      x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
         - { name: type, in: query, schema: { type: string } }
         - { name: event_type, in: query, schema: { type: string } }
         - { name: actor_id, in: query, schema: { type: string } }
         - { name: client_id, in: query, description: Trusted source_system filter, schema: { type: string } }
-        - { name: tenant_id, in: query, description: Available only to a platform or tenantless Console admin token, schema: { type: string } }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: outcome, in: query, schema: { type: string } }
         - { name: trace_id, in: query, schema: { type: string } }
         - { name: since, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
@@ -33,7 +34,9 @@ paths:
   /api/v1/compat/snaplink/audit/events/{eventId}:
     get:
       operationId: getSnaplinkConsoleAuditEvent
-      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
       responses:
         '200': { description: Canonical governance event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
         '401': { $ref: '#/components/responses/Error' }
@@ -44,13 +47,14 @@ paths:
   /api/v1/compat/snaplink/audit/facets:
     get:
       operationId: querySnaplinkConsoleAuditFacets
-      description: Full-window bounded facet counts over the same trusted event filters as the Console event projection. SourceSystem supplies the clients dimension; providers is empty because the canonical governance envelope has no trusted provider field.
+      description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
+      x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
         - { name: type, in: query, schema: { type: string } }
         - { name: event_type, in: query, schema: { type: string } }
         - { name: actor_id, in: query, schema: { type: string } }
         - { name: client_id, in: query, schema: { type: string } }
-        - { name: tenant_id, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: outcome, in: query, schema: { type: string } }
         - { name: trace_id, in: query, schema: { type: string } }
         - { name: since, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
@@ -64,7 +68,8 @@ paths:
   /api/v1/events:
     post:
       operationId: writeEvent
-      description: 'The server derives OAuth client identity from signed client_id (or compatible azp). A signed tenant claim narrows access; when absent, tenant_id is uniquely resolved from server-side (client_id, source_system) registration. A non-empty body tenant_id must equal the resolved tenant or the event is rejected 422 (tenant consistency, DS-08); it never participates in resolution. A non-empty body stream_id is stripped on ingest (stream consistency); the server derives the stream from tenant + aggregate/operation/source and stamps it. stream_id is a read/query filter only. sub is never used as client identity. Runtime caps are authoritative: applicable persisted strings are limited to 8192 UTF-8 bytes, not characters.'
+      x-tenant-scope: { policy: scoped, selector: body, selector_path: tenant_id, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      description: 'Tenant scope: body-selected write; platform credentials must provide a non-empty Event.tenant_id; tenant credentials use the signed tenant and reject a mismatch. The server derives OAuth client identity from signed client_id (or compatible azp). When no tenant claim exists, tenant_id is uniquely resolved from server-side (client_id, source_system) registration. A non-empty body stream_id is stripped on ingest; the server derives the stream from tenant + aggregate/operation/source and stamps it. stream_id is a read/query filter only. sub is never used as client identity. Runtime caps are authoritative: applicable persisted strings are limited to 8192 UTF-8 bytes, not characters.'
       parameters:
         - { name: wait_for, in: query, schema: { type: string, enum: [accepted, ledgered, indexed, archived] } }
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
@@ -77,10 +82,12 @@ paths:
         '422': { $ref: '#/components/responses/Error', description: 'Envelope tenant_id does not match the resolved tenant, schema not found, or occurred_at outside [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (422 occurred_at_out_of_range)' }
     get:
       operationId: queryEvents
-      description: Items are ordered by (occurred_at, sequence, event_id). next_cursor resumes at exactly that position; a page walk reproduces the unpaginated result with no duplicates and no drops. Cursors issued before chronological ordering are rejected with 400; re-run the query to obtain a fresh cursor. Archived events are read from the configured WORM archive and remain visible after hot-payload eviction.
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id). next_cursor resumes at exactly that position; a page walk reproduces the unpaginated result with no duplicates and no drops. Cursors issued before chronological ordering are rejected with 400; re-run the query to obtain a fresh cursor. Archived events are read from the configured WORM archive and remain visible after hot-payload eviction.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { $ref: '#/components/parameters/from' }
         - { $ref: '#/components/parameters/to' }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: event_type, in: query, schema: { type: string } }
         - { name: source_system, in: query, schema: { type: string } }
         - { name: actor_id, in: query, schema: { type: string } }
@@ -104,63 +111,82 @@ paths:
   /api/v1/events/{eventId}:
     get:
       operationId: getEvent
-      description: Archived event payloads are read from the configured WORM archive and verified against the retained receipt hash before being returned.
-      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Archived event payloads are read from the configured WORM archive and verified against the retained receipt hash before being returned.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/events/{eventId}/receipt:
     get:
       operationId: getReceipt
-      parameters: [{ $ref: '#/components/parameters/eventId' }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Receipt, content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } } }
   /api/v1/events:batch:
     post:
       operationId: writeBatch
-      description: Every event source_system is checked against the authenticated OAuth client identity. An ingest batch may contain at most 500 events; an over-count batch is rejected before any member is ingested. Runtime validation is authoritative and applicable string limits count UTF-8 bytes, not characters.
+      description: 'Tenant scope: body-selected write; every platform batch member must provide a non-empty Event.tenant_id, tenant credentials use the signed tenant, and selector failures are rejected before any member is ingested.'
+      x-tenant-scope: { policy: scoped, selector: body, selector_path: 'events[*].tenant_id', platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [events], properties: { events: { type: array, maxItems: 500, description: 'An over-count batch is rejected before any member is ingested.', items: { $ref: '#/components/schemas/Event' } }, wait_for: { type: string } } } } } }
       responses: { '202': { description: Accepted batch }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '422': { $ref: '#/components/responses/Error', description: 'Envelope tenant_id does not match the resolved tenant, schema not found, or occurred_at outside [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (422 occurred_at_out_of_range)' } }
   /api/v1/operations/{operationId}:
     get:
       operationId: getOperation
-      parameters: [{ $ref: '#/components/parameters/operationId' }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Operation summary } }
   /api/v1/operations/{operationId}/timeline:
     get:
       operationId: getOperationTimeline
-      description: Items are ordered by (occurred_at, sequence, event_id). next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { $ref: '#/components/parameters/operationId' }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: cursor, in: query, schema: { type: string } }
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
       responses: { '200': { description: Operation timeline page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }, '400': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/operations/{operationId}/replay:
     get:
       operationId: replayOperation
-      parameters: [{ $ref: '#/components/parameters/operationId' }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Side-effect-free replay } }
   /api/v1/aggregates/{aggregateType}/{aggregateId}/timeline:
     get:
       operationId: getAggregateTimeline
-      description: Items are ordered by (aggregate_version, event_id). next_cursor is bound to this aggregate and resumes after the last item; count is the total matching event count.
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (aggregate_version, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { name: aggregateType, in: path, required: true, schema: { type: string } }
         - { name: aggregateId, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: cursor, in: query, schema: { type: string } }
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
       responses: { '200': { description: Aggregate history page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }, '400': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
   /api/v1/exports:
     post:
       operationId: createExport
+      description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before an export job or audit fact is created.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Query' } } } }
       responses: { '202': { description: Export job }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/exports/{jobId}:
     get:
       operationId: getExport
-      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Export status } }
   /api/v1/exports/{jobId}/download:
     get:
       operationId: downloadExport
-      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before export bytes are read.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
         '200': { description: Export JSON Lines download, content: { application/x-ndjson: { schema: { type: string, format: binary } } } }
         '404': { $ref: '#/components/responses/Error' }
@@ -169,41 +195,61 @@ paths:
   /api/v1/integrity/verify:
     post:
       operationId: verifyIntegrity
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before integrity work or its audit fact.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { content: { application/json: { schema: { type: object, properties: { stream_id: { type: string } } } } } }
       responses: { '200': { description: Integrity result }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/legal-holds:
     post:
       operationId: createLegalHold
+      description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
       responses: { '201': { description: Legal hold }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listLegalHolds
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Legal holds } }
   /api/v1/legal-holds/{holdId}/release:
     post:
       operationId: releaseLegalHold
-      parameters: [{ name: holdId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: holdId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Released legal hold } }
   /api/v1/restores/preview:
     post:
       operationId: previewRestore
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before restore preview.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
       responses: { '200': { description: Restore preview }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/restores:
     post:
       operationId: createRestore
+      description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before a restore run is created.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
       responses: { '202': { description: Pending approval restore run }, '400': { $ref: '#/components/responses/Error' } }
   /api/v1/restores/{runId}:
     get:
       operationId: getRestore
-      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Restore run } }
   /api/v1/restores/{runId}/approve:
     post:
       operationId: approveRestore
-      description: Records the human approval decision; executing compensating business calls is a separate later stage.
-      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. The approval decision is recorded without executing business calls.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
         '200': { description: Approved restore run }
         '401': { $ref: '#/components/responses/Error' }
@@ -213,7 +259,9 @@ paths:
   /api/v1/restores/{runId}/reject:
     post:
       operationId: rejectRestore
-      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }]
+      description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
         '200': { description: Rejected restore run }
         '401': { $ref: '#/components/responses/Error' }
@@ -223,9 +271,10 @@ paths:
   /api/v1/admin/actions:
     get:
       operationId: listAdminActions
-      description: Append-only self-audit trail of control-plane management actions and read-path governance facts (tenants, sources, schemas, retention policies, exports, legal holds, restore approvals, export downloads, and audit.event.read facts covering direct event reads, event queries, operation/aggregate timelines, operation replay, receipt lookups and integrity verification). A tenant-scoped token sees its own tenant; a platform token may filter with tenant_id.
+      description: 'Tenant scope: approved all-tenant platform or tenantless Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
+      x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
-        - { name: tenant_id, in: query, required: false, schema: { type: string, pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$' } }
+        - { $ref: '#/components/parameters/tenantId' }
         - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100, default: 100 } }
       responses:
         '200': { description: Admin actions, content: { application/json: { schema: { $ref: '#/components/schemas/AdminAction' } } } }
@@ -233,63 +282,81 @@ paths:
   /api/v1/tenants:
     post:
       operationId: createTenant
+      description: 'Platform management: Tenant.id is the new resource identity, not an implicit tenant scope selector.'
+      x-platform-management: { enabled: true }
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
       responses: { '201': { description: Tenant }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listTenants
+      description: 'Platform management: this explicitly lists tenants and has no tenant_id scope selector.'
+      x-platform-management: { enabled: true }
       responses: { '200': { description: Tenants } }
   /api/v1/sources:
     post:
       operationId: createSource
+      description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
       responses: { '201': { description: Source system }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listSources
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
-        - name: tenant_id
-          in: query
-          required: false
-          description: Required for a platform cross-tenant token; a tenant-scoped token derives and enforces its signed tenant.
-          schema: { type: string, pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$' }
+        - { $ref: '#/components/parameters/tenantId' }
       responses: { '200': { description: Source systems } }
   /api/v1/sources/{sourceId}:
     put:
       operationId: updateSource
-      description: Replaces source metadata and its exact OAuth client allow-list. Empty allowed_client_ids permits only client_id equal to sourceId.
+      description: 'Tenant scope: scoped write; tenant_id in the query selects the source tenant for platform credentials, body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { name: sourceId, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/tenantId' }
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceUpdate' } } } }
       responses: { '200': { description: Updated source system }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' } }
   /api/v1/schemas:
     post:
       operationId: createSchema
+      description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventSchema' } } } }
       responses: { '201': { description: Event schema }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: listSchemas
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
-        - name: tenant_id
-          in: query
-          required: false
-          description: Required for a platform cross-tenant token; a tenant-scoped token derives and enforces its signed tenant.
-          schema: { type: string, pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$' }
+        - { $ref: '#/components/parameters/tenantId' }
       responses: { '200': { description: Event schemas } }
   /api/v1/policies/retention:
     put:
       operationId: setRetentionPolicy
+      description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
       responses: { '200': { description: Retention policy }, '400': { $ref: '#/components/responses/Error' } }
     get:
       operationId: getRetentionPolicy
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Retention policy } }
   /api/v1/retention/evaluate:
     post:
       operationId: evaluateRetention
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Immutable ledger events are never deleted by this endpoint.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/tenantId' }]
       responses: { '200': { description: Retention evaluation; immutable ledger is never deleted by this endpoint } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Asymmetric production JWT using EdDSA/Ed25519, ES256/384/512, RS256 or PS256. Remote JWKS metadata is strictly matched before signature verification. }
   parameters:
+    tenantId: { name: tenant_id, in: query, required: false, description: 'Required and non-empty for platform credentials on scoped operations. Ignored as an override for tenant-scoped credentials. Optional only on explicitly all-tenant operations. Empty has the same semantics as omitted.', schema: { type: string, pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$' } }
     from: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
     to: { name: to, in: query, required: true, schema: { type: string, format: date-time } }
     eventId: { name: eventId, in: path, required: true, schema: { type: string } }
@@ -298,19 +365,19 @@ components:
     Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Actor: { type: object, required: [id], description: 'Applicable strings are capped at 8192 UTF-8 bytes at runtime, not characters.', properties: { id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, department: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, roles: { type: array, maxItems: 64, description: 'At most 64 role entries; each role is capped at 8192 UTF-8 bytes at runtime.', items: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }
-    Event: { type: object, description: 'Runtime validation is authoritative. Applicable persisted envelope strings are capped at 8192 UTF-8 bytes, not characters.', required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key], properties: { event_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, tenant_id: { type: string, description: Server-resolved; when present in the body it must equal the resolved tenant or the event is rejected 422 (DS-08). Empty or absent is derived from the client/source registration and stamped by the server. Never participates in resolution. }, source_system: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }, received_at: { type: string, format: date-time, description: Platform receive time, server-generated }, operation_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, maxItems: 64, description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.', items: { type: object, properties: { type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }, aggregate_type: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_version: { type: integer }, workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, changed_fields: { type: object, maxProperties: 256, description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.', propertyNames: { maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, additionalProperties: { type: object, properties: { before: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 }, after: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 } } } }, payload: { type: object }, payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, source_digest: { type: string, description: SHA-256 of the canonical source content, server-generated }, data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, stream_id: { type: string, description: Ledger stream, server-assigned. A client-supplied value is stripped on ingest and never participates in stream resolution or storage (stream consistency). The server derives the stream from tenant + aggregate/operation/source and stamps it. }, sequence: { type: integer, description: Monotonic stream sequence, server-assigned }, prev_hash: { type: string, description: Previous event hash in the stream chain }, hash: { type: string, description: This event's chain hash }, server_version: { type: string } } }
+    Event: { type: object, description: 'Runtime validation is authoritative. Applicable persisted envelope strings are capped at 8192 UTF-8 bytes, not characters.', required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key], properties: { event_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, tenant_id: { type: string, pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$', description: 'Platform body selector for writeEvent/writeBatch; a tenant token uses the signed claim and a present value is a consistency assertion. Empty or absent is resolved from the authenticated source registration only for non-platform credentials without a tenant claim, then server-stamped. It never participates in query scope resolution.' }, source_system: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }, received_at: { type: string, format: date-time, description: Platform receive time, server-generated }, operation_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, maxItems: 64, description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.', items: { type: object, properties: { type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }, aggregate_type: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_version: { type: integer }, workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, changed_fields: { type: object, maxProperties: 256, description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.', propertyNames: { maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, additionalProperties: { type: object, properties: { before: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 }, after: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 } } } }, payload: { type: object }, payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, source_digest: { type: string, description: SHA-256 of the canonical source content, server-generated }, data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, stream_id: { type: string, description: Ledger stream, server-assigned. A client-supplied value is stripped on ingest and never participates in stream resolution or storage (stream consistency). The server derives the stream from tenant + aggregate/operation/source and stamps it. }, sequence: { type: integer, description: Monotonic stream sequence, server-assigned }, prev_hash: { type: string, description: Previous event hash in the stream chain }, hash: { type: string, description: This event's chain hash }, server_version: { type: string } } }
     Receipt: { type: object, required: [event_id, tenant_id, status, accepted_at], properties: { event_id: { type: string }, tenant_id: { type: string }, idempotency_key: { type: string, description: Retained receipt key used to enforce idempotency after event payload eviction. }, status: { type: string }, accepted_at: { type: string, format: date-time }, ledgered_at: { type: string, format: date-time }, indexed_at: { type: string, format: date-time }, archived_at: { type: string, format: date-time }, stream_id: { type: string }, sequence: { type: integer }, hash: { type: string }, duplicate: { type: boolean }, conflict: { type: boolean } } }
     ReceiptResponse: { type: object, properties: { receipt: { $ref: '#/components/schemas/Receipt' }, receipt_url: { type: string } } }
-    Query: { type: object, required: [from, to], properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
+    Query: { type: object, required: [from, to], description: 'tenant_id is intentionally not a Query property. If sent as an unknown nested field, it cannot affect the outer operation scope; use the operation query parameter instead.', properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
     QueryResult: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
     AuditExplorerResult: { type: object, required: [events, count], properties: { events: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
     EventFacets: { type: object, required: [total, outcomes, types, clients, providers], properties: { total: { type: integer }, outcomes: { type: object, additionalProperties: { type: integer } }, types: { type: object, additionalProperties: { type: integer } }, clients: { type: object, additionalProperties: { type: integer } }, providers: { type: object, additionalProperties: { type: integer } } } }
-    LegalHold: { type: object, required: [name, reason], properties: { id: { type: string }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
+    LegalHold: { type: object, required: [name, reason], description: 'tenant_id is an optional consistency assertion; the query tenant_id selects ownership and the server resolves the response field.', properties: { id: { type: string }, tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
     RestoreRequest: { type: object, required: [operation_id, reason], properties: { operation_id: { type: string }, reason: { type: string } } }
     Tenant: { type: object, required: [id, name], properties: { id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$' }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }
-    Source: { type: object, required: [id, name], properties: { id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, tenant_id: { type: string }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
-    SourceUpdate: { type: object, required: [name, active], properties: { name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to the path sourceId., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
-    EventSchema: { type: object, required: [schema_id, version, event_type], properties: { tenant_id: { type: string }, schema_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, version: { type: integer }, event_type: { type: string }, required_fields: { type: array, items: { type: string } }, allowed_fields: { type: array, items: { type: string } }, encrypted_fields: { type: array, items: { type: string } }, searchable_fields: { type: array, items: { type: string } }, classification: { type: string }, active: { type: boolean } } }
-    RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], properties: { tenant_id: { type: string }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: Exact event retention class evaluated by this policy; other compliance classes are unaffected. } } }
+    Source: { type: object, required: [id, name], description: 'tenant_id is server-resolved ownership output and is never a platform selector; createSource selects ownership with the query tenant_id.', properties: { id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, tenant_id: { type: string, description: 'Server-resolved ownership output; not a selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    SourceUpdate: { type: object, required: [name, active], description: 'tenant_id is an optional consistency assertion; query tenant_id selects the source tenant.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to the path sourceId., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    EventSchema: { type: object, required: [schema_id, version, event_type], description: 'tenant_id is server-resolved ownership output or an optional consistency assertion; query tenant_id selects platform writes.', properties: { tenant_id: { type: string, description: 'Consistency/output field; never a platform selector.' }, schema_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, version: { type: integer }, event_type: { type: string }, required_fields: { type: array, items: { type: string } }, allowed_fields: { type: array, items: { type: string } }, encrypted_fields: { type: array, items: { type: string } }, searchable_fields: { type: array, items: { type: string } }, classification: { type: string }, active: { type: boolean } } }
+    RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], description: 'tenant_id in a response is required ownership output; for writes query tenant_id selects the tenant and the body value is only a consistency assertion.', properties: { tenant_id: { type: string, description: 'Ownership output or consistency assertion; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: Exact event retention class evaluated by this policy; other compliance classes are unaffected. } } }
     Error: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } } }
     AdminAction: { type: object, required: [id, actor, action, created_at], properties: { id: { type: string }, tenant_id: { type: string }, actor: { type: string }, action: { type: string }, target_type: { type: string }, target_id: { type: string }, detail: { type: string }, created_at: { type: string, format: date-time } } }

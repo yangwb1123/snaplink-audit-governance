@@ -42,13 +42,24 @@ function jsonBody(value: unknown): string {
 
 export class AuditApi {
   private readonly client: ApiClient
+  private readonly platform: boolean
 
   constructor(options: ApiClientOptions) {
     this.client = new ApiClient(options)
+    this.platform = options.platform ?? false
+  }
+
+  private scopedTenant(tenantId?: string): string | undefined {
+    if (this.platform && !tenantId?.trim()) {
+      throw new Error('tenant_id is required for platform-scoped operations')
+    }
+    return tenantId
   }
 
   queryEvents(query: EventQuery, tenantId?: string): Promise<QueryResult> {
-    return this.client.request(`/api/v1/events${queryString({ ...query, tenant_id: tenantId })}`)
+    return this.client.request(
+      `/api/v1/events${queryString({ ...query, tenant_id: this.scopedTenant(tenantId) })}`,
+    )
   }
 
   getEventFacets(query: EventFacetQuery, tenantId?: string): Promise<EventFacetsResponse> {
@@ -73,19 +84,19 @@ export class AuditApi {
 
   getEvent(eventId: string, tenantId?: string): Promise<AuditEvent> {
     return this.client.request(
-      `/api/v1/events/${encodeURIComponent(eventId)}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/events/${encodeURIComponent(eventId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
   getReceipt(eventId: string, tenantId?: string): Promise<EventReceipt> {
     return this.client.request(
-      `/api/v1/events/${encodeURIComponent(eventId)}/receipt${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/events/${encodeURIComponent(eventId)}/receipt${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
   getOperation(operationId: string, tenantId?: string): Promise<OperationSummary> {
     return this.client.request(
-      `/api/v1/operations/${encodeURIComponent(operationId)}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/operations/${encodeURIComponent(operationId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
@@ -97,14 +108,14 @@ export class AuditApi {
       `/api/v1/operations/${encodeURIComponent(operationId)}/timeline${queryString({
         page_size: options.pageSize,
         cursor: options.cursor,
-        tenant_id: options.tenantId,
+        tenant_id: this.scopedTenant(options.tenantId),
       })}`,
     )
   }
 
   replayOperation(operationId: string, tenantId?: string): Promise<ReplayResult> {
     return this.client.request(
-      `/api/v1/operations/${encodeURIComponent(operationId)}/replay${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/operations/${encodeURIComponent(operationId)}/replay${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
@@ -118,76 +129,93 @@ export class AuditApi {
         {
           page_size: options.pageSize,
           cursor: options.cursor,
-          tenant_id: options.tenantId,
+          tenant_id: this.scopedTenant(options.tenantId),
         },
       )}`,
     )
   }
 
   verifyIntegrity(streamId: string, tenantId?: string): Promise<IntegrityResult> {
-    return this.client.request(`/api/v1/integrity/verify${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody({ stream_id: streamId }),
-    })
+    return this.client.request(
+      `/api/v1/integrity/verify${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody({ stream_id: streamId }),
+      },
+    )
   }
 
   listLegalHolds(tenantId?: string): Promise<ItemList<LegalHold>> {
-    return this.client.request(`/api/v1/legal-holds${queryString({ tenant_id: tenantId })}`)
+    return this.client.request(
+      `/api/v1/legal-holds${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+    )
   }
 
   createLegalHold(
     hold: Pick<LegalHold, 'name' | 'reason' | 'filter'>,
     tenantId?: string,
   ): Promise<LegalHold> {
-    return this.client.request(`/api/v1/legal-holds${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(hold),
-    })
+    return this.client.request(
+      `/api/v1/legal-holds${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(hold),
+      },
+    )
   }
 
   releaseLegalHold(holdId: string, tenantId?: string): Promise<LegalHold> {
     return this.client.request(
-      `/api/v1/legal-holds/${encodeURIComponent(holdId)}/release${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/legal-holds/${encodeURIComponent(holdId)}/release${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       { method: 'POST' },
     )
   }
 
   createExport(query: EventQuery, tenantId?: string): Promise<ExportJob> {
-    return this.client.request(`/api/v1/exports${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(query),
-    })
+    return this.client.request(
+      `/api/v1/exports${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(query),
+      },
+    )
   }
 
   getExport(jobId: string, tenantId?: string): Promise<ExportJob> {
     return this.client.request(
-      `/api/v1/exports/${encodeURIComponent(jobId)}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/exports/${encodeURIComponent(jobId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
   downloadExport(jobId: string, tenantId?: string): Promise<Blob> {
     return this.client.blob(
-      `/api/v1/exports/${encodeURIComponent(jobId)}/download${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/exports/${encodeURIComponent(jobId)}/download${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
   previewRestore(request: RestoreRequest, tenantId?: string): Promise<RestorePreview> {
-    return this.client.request(`/api/v1/restores/preview${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(request),
-    })
+    return this.client.request(
+      `/api/v1/restores/preview${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(request),
+      },
+    )
   }
 
   createRestore(request: RestoreRequest, tenantId?: string): Promise<RestoreRun> {
-    return this.client.request(`/api/v1/restores${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(request),
-    })
+    return this.client.request(
+      `/api/v1/restores${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(request),
+      },
+    )
   }
 
   getRestore(runId: string, tenantId?: string): Promise<RestoreRun> {
     return this.client.request(
-      `/api/v1/restores/${encodeURIComponent(runId)}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/restores/${encodeURIComponent(runId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
     )
   }
 
@@ -197,7 +225,7 @@ export class AuditApi {
     tenantId?: string,
   ): Promise<RestoreRun> {
     return this.client.request(
-      `/api/v1/restores/${encodeURIComponent(runId)}/${decision}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/restores/${encodeURIComponent(runId)}/${decision}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       { method: 'POST' },
     )
   }
@@ -211,14 +239,19 @@ export class AuditApi {
   }
 
   listSources(tenantId?: string): Promise<ItemList<SourceSystem>> {
-    return this.client.request(`/api/v1/sources${queryString({ tenant_id: tenantId })}`)
+    return this.client.request(
+      `/api/v1/sources${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+    )
   }
 
   createSource(source: Omit<SourceSystem, 'created_at'>, tenantId?: string): Promise<SourceSystem> {
-    return this.client.request(`/api/v1/sources${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(source),
-    })
+    return this.client.request(
+      `/api/v1/sources${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(source),
+      },
+    )
   }
 
   updateSource(
@@ -226,7 +259,7 @@ export class AuditApi {
     tenantId?: string,
   ): Promise<SourceSystem> {
     return this.client.request(
-      `/api/v1/sources/${encodeURIComponent(source.id)}${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/sources/${encodeURIComponent(source.id)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       {
         method: 'PUT',
         body: jsonBody({
@@ -239,30 +272,37 @@ export class AuditApi {
   }
 
   listSchemas(tenantId?: string): Promise<ItemList<EventSchema>> {
-    return this.client.request(`/api/v1/schemas${queryString({ tenant_id: tenantId })}`)
+    return this.client.request(
+      `/api/v1/schemas${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+    )
   }
 
   createSchema(schema: Omit<EventSchema, 'created_at'>, tenantId?: string): Promise<EventSchema> {
-    return this.client.request(`/api/v1/schemas${queryString({ tenant_id: tenantId })}`, {
-      method: 'POST',
-      body: jsonBody(schema),
-    })
+    return this.client.request(
+      `/api/v1/schemas${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      {
+        method: 'POST',
+        body: jsonBody(schema),
+      },
+    )
   }
 
   getRetention(tenantId?: string): Promise<RetentionPolicy> {
-    return this.client.request(`/api/v1/policies/retention${queryString({ tenant_id: tenantId })}`)
+    return this.client.request(
+      `/api/v1/policies/retention${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+    )
   }
 
   setRetention(policy: RetentionPolicy, tenantId?: string): Promise<RetentionPolicy> {
     return this.client.request(
-      `/api/v1/policies/retention${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/policies/retention${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       { method: 'PUT', body: jsonBody(policy) },
     )
   }
 
   evaluateRetention(tenantId?: string): Promise<RetentionReport> {
     return this.client.request(
-      `/api/v1/retention/evaluate${queryString({ tenant_id: tenantId })}`,
+      `/api/v1/retention/evaluate${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       {
         method: 'POST',
       },

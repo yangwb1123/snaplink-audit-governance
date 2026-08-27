@@ -408,12 +408,13 @@ def cmd_quality() -> int:
     from checks.sensitive_logging import run as sensitive_logging
     from checks.stream_consistency import run as stream_consistency
     from checks.tenant_consistency import run as tenant_consistency
+    from checks.tenant_scope import run as tenant_scope
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
                     adr_compliance, make_help, route_contract, contract_fields,
                     asyncapi_channels,
                     proto_sync,  # proto drift guard: fails fast, before the ~95s Go stages
-                    dev_auth_manifest, tenant_consistency, stream_consistency,
+                    dev_auth_manifest, tenant_consistency, tenant_scope, stream_consistency,
                     replay_round_reset,
                     prometheus_rules,
                     sensitive_logging,

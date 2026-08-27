@@ -16,14 +16,11 @@ import (
 )
 
 func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query) (domain.ExportJob, error) {
-	// Empty tenant scope (platform token without tenant_id): the selection
-	// pass matches event.TenantID exactly, so an empty scope selects zero
-	// events by construction — no "export all tenants" semantics exist.
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.ExportJob{}, err
+	}
 	// Fail closed before any read fact, job, self-audit record, or goroutine
 	// exists (same ordering discipline as the R2 legal-hold gate).
-	if tenantID == "" {
-		return domain.ExportJob{}, fmt.Errorf("%w: tenant_id is required for a platform export", domain.ErrInvalid)
-	}
 	// The export reads events: run the query through the audited read path so
 	// the same actor's audit.event.read fact is recorded, then create the job.
 	if _, err := s.QueryEvents(tenantID, requestedBy, query); err != nil {
@@ -65,6 +62,9 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 }
 
 func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.ExportJob{}, err
+	}
 	var job domain.ExportJob
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.Exports[jobID]
@@ -92,6 +92,9 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 // is verified completed and before the sealed object is streamed; a failed
 // append aborts the download (fail-closed).
 func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
+	if err := requireTenantScope(tenantID); err != nil {
+		return err
+	}
 	if jobID == "" {
 		return fmt.Errorf("%w: job id is required", domain.ErrInvalid)
 	}
@@ -147,6 +150,9 @@ var exportDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // blob the transport fetched at job.ObjectPath and this record's
 // binding/digest always describe the same export.
 func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([]byte, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	var job domain.ExportJob
 	if err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.Exports[jobID]
@@ -191,6 +197,9 @@ func (s *Service) recordExportRejected(tenantID, jobID string) {
 }
 
 func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, error) {
+	if err := requireTenantScope(hold.TenantID); err != nil {
+		return domain.LegalHold{}, err
+	}
 	if hold.TenantID == "" || hold.Name == "" || hold.Reason == "" {
 		return domain.LegalHold{}, fmt.Errorf("%w: tenant_id, name and reason are required", domain.ErrInvalid)
 	}
@@ -225,6 +234,9 @@ func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, erro
 }
 
 func (s *Service) ListLegalHolds(tenantID string) ([]domain.LegalHold, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	var result []domain.LegalHold
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, hold := range data.LegalHolds {
@@ -239,6 +251,9 @@ func (s *Service) ListLegalHolds(tenantID string) ([]domain.LegalHold, error) {
 }
 
 func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.LegalHold, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.LegalHold{}, err
+	}
 	var hold domain.LegalHold
 	if err := s.Store.Update(func(data *store.Snapshot) error {
 		value, ok := data.LegalHolds[holdID]
@@ -282,6 +297,9 @@ func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.
 // aggregate work is bounded by the cap (FR-5). Retained records keep
 // today's layout and stay individually verifiable (C4).
 func (s *Service) CreateAggregateCheckpoint(ctx context.Context, tenantID string) error {
+	if err := requireTenantScope(tenantID); err != nil {
+		return err
+	}
 	now := s.Now()
 	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		roots := make([]string, 0, len(data.Checkpoints))
@@ -352,6 +370,9 @@ func isInterrupted(err error) bool {
 }
 
 func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID string) (IntegrityResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return IntegrityResult{}, err
+	}
 	result := IntegrityResult{Valid: true, TenantID: tenantID, StreamID: streamID, CheckedAt: s.Now()}
 	// Self-audit trail bound (security review F2): the fact records stream_id
 	// verbatim as target_id into the unbounded single-row admin trail, so an
@@ -513,6 +534,9 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 // A pass that seals nothing (no pending hashes for the tenant) persists
 // nothing: Store.UpdateChecked skips the Save on an idle tick (FR-2).
 func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) error {
+	if err := requireTenantScope(tenantID); err != nil {
+		return err
+	}
 	if s.Store.HotCold() {
 		return s.sealPendingTenant(ctx, tenantID)
 	}
@@ -572,6 +596,9 @@ var archivePutTimeout = 30 * time.Second
 // atomic write resets the tenant's archive-conflict counter, and the
 // successful pass's receipts share one timestamp.
 func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return 0, err
+	}
 	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
@@ -755,6 +782,9 @@ func isSegmentDeadLetter(dead domain.DeadLetter) bool {
 // ErrorCode "archive_dead_letter" exactly flag the state that will never
 // converge without operator action.
 func (s *Service) ListDeadLetters(tenantID string) ([]domain.DeadLetter, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	var out []domain.DeadLetter
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, dead := range data.DeadLetters {
@@ -779,6 +809,9 @@ func (s *Service) ListDeadLetters(tenantID string) ([]domain.DeadLetter, error) 
 // re-dead-letters the event if the conflict persists, keeping the loop
 // bounded.
 func (s *Service) ClearDeadLetter(tenantID, eventID string) error {
+	if err := requireTenantScope(tenantID); err != nil {
+		return err
+	}
 	return s.Store.Update(func(data *store.Snapshot) error {
 		key := store.EventKey(tenantID, eventID)
 		delete(data.DeadLetters, key)
@@ -800,6 +833,9 @@ func (s *Service) ClearDeadLetter(tenantID, eventID string) error {
 // fresh snapshot, and a failed Save commits nothing, so each committed
 // attempt applies exactly one increment.
 func (s *Service) RecordArchivePassConflict(tenantID string) error {
+	if err := requireTenantScope(tenantID); err != nil {
+		return err
+	}
 	return s.Store.Update(func(data *store.Snapshot) error {
 		data.ArchiveConflictFailures[tenantID]++
 		return nil
@@ -809,6 +845,9 @@ func (s *Service) RecordArchivePassConflict(tenantID string) error {
 // ArchivePassConflictFailures returns the tenant's persisted archive-pass
 // conflict counter, for the worker's log line and for tests.
 func (s *Service) ArchivePassConflictFailures(tenantID string) (int, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return 0, err
+	}
 	var count int
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		count = data.ArchiveConflictFailures[tenantID]
@@ -818,6 +857,9 @@ func (s *Service) ArchivePassConflictFailures(tenantID string) (int, error) {
 }
 
 func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest) (domain.RestorePreview, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RestorePreview{}, err
+	}
 	// F1 (security review): restore preview replays event-derived state with
 	// the same read permission as the audited timeline/replay endpoints, but
 	// the design gate records an explicit rejection of audit here: the actor
@@ -833,6 +875,9 @@ func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest)
 }
 
 func (s *Service) CreateRestore(tenantID string, request domain.RestoreRequest, requestedBy string) (domain.RestoreRun, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RestoreRun{}, err
+	}
 	if request.OperationID == "" || request.Reason == "" {
 		return domain.RestoreRun{}, fmt.Errorf("%w: operation_id and reason are required", domain.ErrInvalid)
 	}
@@ -865,6 +910,9 @@ func (s *Service) RejectRestore(tenantID, runID, rejectedBy string) (domain.Rest
 }
 
 func (s *Service) transitionRestore(tenantID, runID, actor, target string) (domain.RestoreRun, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RestoreRun{}, err
+	}
 	var run domain.RestoreRun
 	err := s.Store.Update(func(data *store.Snapshot) error {
 		value, ok := data.RestoreRuns[runID]
@@ -902,6 +950,9 @@ func (s *Service) transitionRestore(tenantID, runID, actor, target string) (doma
 }
 
 func (s *Service) GetRestore(tenantID, runID string) (domain.RestoreRun, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.RestoreRun{}, err
+	}
 	var run domain.RestoreRun
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		value, ok := data.RestoreRuns[runID]
@@ -932,6 +983,9 @@ const DefaultStuckExportAge = 24 * time.Hour
 // replicas cannot double-fail the same job. No archive I/O. Returns the
 // number of transitions committed by the winning attempt.
 func (s *Service) RecoverStuckExports(tenantID string) (int, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return 0, err
+	}
 	recovered := 0
 	err := s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
 		// Store.UpdateChecked may re-invoke the closure on a CAS conflict; a
@@ -1141,6 +1195,12 @@ func (s *Service) finishExport(jobID, status, path, digest string, count int, fa
 }
 
 func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([]domain.AdminAction, error) {
+	if tenantID == "" && !platform {
+		return nil, fmt.Errorf("%w: tenant_id is required", domain.ErrInvalid)
+	}
+	if err := requireOptionalTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}

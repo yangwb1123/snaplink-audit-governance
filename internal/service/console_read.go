@@ -11,6 +11,9 @@ import (
 // QueryConsoleEvents returns a newest-first page for the interactive Console.
 // QueryEvents remains chronological for reconstruction, replay, and export.
 func (s *Service) QueryConsoleEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
+	if err := requireOptionalTenantScope(tenantID); err != nil {
+		return domain.QueryResult{}, err
+	}
 	if err := validateConsoleReadQuery(query); err != nil {
 		return domain.QueryResult{}, err
 	}
@@ -38,6 +41,9 @@ func (s *Service) QueryConsoleEvents(tenantID, actor string, query domain.Query)
 // of the legacy Console client column; provider has no trusted counterpart in
 // the canonical event envelope and therefore remains an empty map.
 func (s *Service) QueryEventFacets(tenantID, actor string, query domain.Query) (domain.EventFacets, error) {
+	if err := requireOptionalTenantScope(tenantID); err != nil {
+		return domain.EventFacets{}, err
+	}
 	if err := validateConsoleReadQuery(query); err != nil {
 		return domain.EventFacets{}, err
 	}

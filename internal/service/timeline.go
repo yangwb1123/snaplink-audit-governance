@@ -136,6 +136,9 @@ func timelineCursorFor(kind, scope string, event domain.Event) domain.TimelineCu
 // exactly one read fact for the page request. A page walk therefore remains
 // auditable without exposing an unbounded response body.
 func (s *Service) OperationTimelinePage(tenantID, actor, operationID string, pageSize int, cursor string) (domain.QueryResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.QueryResult{}, err
+	}
 	events, err := s.operationTimelineEventsNoAudit(tenantID, operationID)
 	if err != nil {
 		return domain.QueryResult{}, err
@@ -154,6 +157,9 @@ func (s *Service) OperationTimelinePage(tenantID, actor, operationID string, pag
 // Its cursor follows aggregate_version/event_id ordering, not chronological
 // occurred_at ordering used by event queries and operation timelines.
 func (s *Service) AggregateTimelinePage(tenantID, actor, aggregateType, aggregateID string, pageSize int, cursor string) (domain.QueryResult, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return domain.QueryResult{}, err
+	}
 	events, err := s.aggregateTimelineEventsNoAudit(tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return domain.QueryResult{}, err
@@ -170,6 +176,9 @@ func (s *Service) AggregateTimelinePage(tenantID, actor, aggregateType, aggregat
 }
 
 func (s *Service) OperationTimeline(tenantID, actor, operationID string) ([]domain.Event, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	events, err := s.operationTimelineNoAudit(tenantID, operationID)
 	if err != nil {
 		return nil, err
@@ -183,6 +192,9 @@ func (s *Service) OperationTimeline(tenantID, actor, operationID string) ([]doma
 }
 
 func (s *Service) AggregateTimeline(tenantID, actor, aggregateType, aggregateID string) ([]domain.Event, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return nil, err
+	}
 	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return nil, err

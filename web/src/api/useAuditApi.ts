@@ -11,9 +11,10 @@ export function useAuditApi(): AuditApi {
       new AuditApi({
         baseUrl: config.auditApiBaseUrl,
         accessToken: session?.accessToken ?? '',
+        platform: session?.platform ?? false,
         onUnauthorized: invalidate,
       }),
-    [config.auditApiBaseUrl, invalidate, session?.accessToken],
+    [config.auditApiBaseUrl, invalidate, session?.accessToken, session?.platform],
   )
   if (!session) throw new Error('useAuditApi requires an authenticated session')
   return api

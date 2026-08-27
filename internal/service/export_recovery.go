@@ -12,6 +12,9 @@ import (
 // with a CAS transition, so an API worker and a governance worker cannot both
 // execute the same pending job.
 func (s *Service) ResumePendingExports(tenantID string) (int, error) {
+	if err := requireTenantScope(tenantID); err != nil {
+		return 0, err
+	}
 	var jobIDs []string
 	if err := s.Store.Read(func(data *store.Snapshot) error {
 		for jobID, job := range data.Exports {

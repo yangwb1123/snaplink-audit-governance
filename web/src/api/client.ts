@@ -21,6 +21,10 @@ export class ApiError extends Error {
 export interface ApiClientOptions {
   baseUrl: string
   accessToken: string
+  // Platform sessions must supply a selector for scoped operations. The API
+  // layer keeps tenant-token compatibility, while preventing the UI from
+  // emitting an unscoped request that the server will reject.
+  platform?: boolean
   fetcher?: typeof fetch
   onUnauthorized?: () => void
 }

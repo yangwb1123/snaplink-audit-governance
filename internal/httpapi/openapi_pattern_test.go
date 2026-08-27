@@ -28,7 +28,7 @@ func TestOpenAPIDocumentsKeyFramingPatterns(t *testing.T) {
 	// reject ':' on top of the generic rule because ':' is the stream-frame
 	// delimiter and the dev-token delimiter.
 	streamTenantPattern := `pattern: '^[^:\x00-\x1F\x7F\s/\\]+$'`
-	queryPattern := `pattern: '^$|^[^\x00-\x1F\x7F\s/\\]+$'`
+	queryPattern := `pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$'`
 
 	// Generic body pattern: Event.event_id, Event.source_system,
 	// Event.operation_id, Source.id, EventSchema.schema_id — exactly five.
@@ -40,10 +40,14 @@ func TestOpenAPIDocumentsKeyFramingPatterns(t *testing.T) {
 	if count := strings.Count(text, streamTenantPattern); count != 3 {
 		t.Errorf("stream/tenant key-framing pattern appears %d times, want exactly 3 (aggregate_type, aggregate_id, Tenant.id)", count)
 	}
-	// Query pattern: the three tenant_id query params (admin/actions,
-	// sources, schemas) — exactly three.
-	if count := strings.Count(text, queryPattern); count != 3 {
-		t.Errorf("query key-framing pattern appears %d times, want exactly 3 (tenant_id query params)", count)
+	// The reusable query selector and the body tenant selector share the
+	// same validation language. Query declarations are references rather than
+	// duplicated inline schemas, so their 31 operations cannot drift.
+	if count := strings.Count(text, queryPattern); count != 2 {
+		t.Errorf("tenant selector key-framing pattern appears %d times, want exactly 2 (query parameter and body selector)", count)
+	}
+	if count := strings.Count(text, "#/components/parameters/tenantId"); count != 31 {
+		t.Errorf("tenantId reusable parameter is referenced %d times, want 31", count)
 	}
 	// The five Event key components must each carry their pattern inline;
 	// non-key components (event_type, schema_id, idempotency_key) must not.
