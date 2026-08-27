@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"strings"
+
+	"github.com/segmentio/kafka-go"
 )
 
 type failureReason string
@@ -94,7 +96,42 @@ func strictFailureString(raw json.RawMessage) (string, bool) {
 	return value, true
 }
 
-const maxMalformedLogDetails = 10
+const (
+	maxMalformedLogDetails      = 10
+	maxMalformedRecordsPerRound = 1024
+	maxMalformedRecordBytes     = 256 << 10
+	maxMalformedBytesPerRound   = 1 << 20
+	maxDLQRecordsPerRound       = 4096
+)
+
+// malformedCollectionExceeded bounds the amount of malformed DLQ work kept
+// in one round. Malformed payload bytes are never retained in dlqRecord; the
+// byte budget also stops a flood before its physical identities accumulate
+// without bound. The triggering record remains uncommitted for redelivery.
+func malformedPayloadBytes(message kafka.Message) uint64 {
+	return uint64(len(message.Key) + len(message.Value))
+}
+
+func malformedCollectionExceeded(count int, bytes uint64, message kafka.Message) bool {
+	return count > maxMalformedRecordsPerRound ||
+		malformedPayloadBytes(message) > maxMalformedRecordBytes ||
+		bytes > maxMalformedBytesPerRound
+}
+
+// dlqRecordIdentity is the only commit identity needed after collection.
+// Production collection deliberately does not retain the fetched message's
+// key/value bytes, including for valid records.
+func dlqRecordIdentity(record dlqRecord) dlqRecordID {
+	if record.id != (dlqRecordID{}) {
+		return record.id
+	}
+	return dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
+}
+
+func dlqRecordCommitMessage(record dlqRecord) kafka.Message {
+	id := dlqRecordIdentity(record)
+	return kafka.Message{Topic: id.topic, Partition: id.partition, Offset: id.offset}
+}
 
 func logMalformedRecord(logger *log.Logger, topic string, partition int, offset int64, reason failureReason) {
 	logger.Printf("dlq record malformed topic=%s partition=%d offset=%d reason=%s",

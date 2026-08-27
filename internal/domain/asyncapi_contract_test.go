@@ -180,3 +180,27 @@ func TestEventEnvelopePayloadDisjunctionIsAnyOf(t *testing.T) {
 		t.Fatalf("both payload and payload_ref set err=%v, want nil (anyOf semantics)", err)
 	}
 }
+
+func TestAsyncAPIFailureDescription(t *testing.T) {
+	spec := readAsyncAPISpec(t)
+	start := strings.Index(spec, "    Failure:\n")
+	if start < 0 {
+		t.Fatal("Failure message description block not found")
+	}
+	end := strings.Index(spec[start:], "      payload:")
+	if end < 0 {
+		t.Fatal("Failure message payload boundary not found")
+	}
+	description := spec[start : start+end]
+	for _, phrase := range []string{
+		"one complete JSON object",
+		"one JSON value",
+		"Trailing whitespace is allowed",
+		"non-whitespace",
+		"multiple JSON values",
+	} {
+		if !strings.Contains(description, phrase) {
+			t.Fatalf("Failure description missing %q", phrase)
+		}
+	}
+}

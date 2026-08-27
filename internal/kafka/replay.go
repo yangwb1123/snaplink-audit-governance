@@ -669,12 +669,13 @@ type Replayer struct {
 	// tenantAware is true for production replayers. The legacy test seam is
 	// deliberately kept false so old byte-compatible event-ID fixtures remain
 	// useful; production Kafka and API modes both use canonical tenant state.
-	tenantAware  bool
-	logger       *log.Logger
-	drainTimeout time.Duration
-	dlqRecords   atomic.Uint64
-	malformed    atomic.Uint64
-	acceptedSeen atomic.Uint64
+	tenantAware       bool
+	logger            *log.Logger
+	malformedOverflow []dlqRecord // identity-only overflow record merged before commit
+	drainTimeout      time.Duration
+	dlqRecords        atomic.Uint64
+	malformed         atomic.Uint64
+	acceptedSeen      atomic.Uint64
 	// replayed counts only successful re-publishes (resolution path a).
 	// Every other first-resolution path has its own counter below, so the
 	// metric never conflates a replay with a convergence (REQ-1).
@@ -928,10 +929,14 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	// leaving scanAccepted with an already-expired context (real kafka-go
 	// returns ctx.Err() before any queued data, so the scan would replay
 	// nothing).
+	r.malformedOverflow = nil
 	collected, err := r.collectFailures(ctx)
 	if err != nil && !isDrained(ctx, err) {
 		return 0, err
 	}
+	// Include any identity-only budget overflow in quarantine/barrier handling.
+	collected = append(collected, r.malformedOverflow...)
+	r.malformedOverflow = nil
 	// Auth-blocked records (error_code=unauthorized, block enabled) are
 	// excluded from the wanted set below but stay pending as commit
 	// barriers. Surface them as the latest-round backlog gauge and one
@@ -1047,7 +1052,9 @@ type dlqRecordID struct {
 }
 
 // dlqRecord is one collected DLQ failure with its parsed event metadata and
-// physical record identity.
+// physical record identity. The collector retains only id/reason for malformed
+// records and no fetched message bytes; message is a compatibility fallback
+// for same-package fixtures that construct records directly.
 type dlqRecord struct {
 	id              dlqRecordID
 	message         kafka.Message
@@ -1179,10 +1186,7 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 		if record.class == dlqRecordMalformed {
 			continue
 		}
-		id := record.id
-		if id == (dlqRecordID{}) {
-			id = dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
-		}
+		id := dlqRecordIdentity(record)
 		if record.authBlocked || (record.wanted && !resolved[id]) {
 			key := partitionKey{topic: id.topic, partition: id.partition}
 			if offset, ok := firstPending[key]; !ok || id.offset < offset {
@@ -1191,18 +1195,15 @@ func (r *Replayer) commitResolved(ctx context.Context, collected []dlqRecord, re
 		}
 	}
 	for _, record := range collected {
-		id := record.id
-		if id == (dlqRecordID{}) {
-			id = dlqRecordID{topic: record.message.Topic, partition: record.message.Partition, offset: record.message.Offset}
-		}
-		if record.authBlocked || (record.wanted && !resolved[id]) {
-			continue // auth-blocked: config-fixable, stays pending until the credential is restored (or -replay-auth-blocked)
-		}
+		id := dlqRecordIdentity(record)
 		key := partitionKey{topic: id.topic, partition: id.partition}
 		if pending, ok := firstPending[key]; ok && id.offset >= pending {
 			continue // resolved but at/above the barrier: committing would leapfrog the pending record
 		}
-		if err := r.dlqReader.CommitMessages(ctx, record.message); err != nil {
+		if record.class != dlqRecordMalformed && (record.authBlocked || (record.wanted && !resolved[id])) {
+			continue // auth-blocked: config-fixable, stays pending until the credential is restored (or -replay-auth-blocked)
+		}
+		if err := r.dlqReader.CommitMessages(ctx, dlqRecordCommitMessage(record)); err != nil {
 			return err
 		}
 	}
@@ -1221,6 +1222,7 @@ func isDrained(ctx context.Context, err error) bool {
 // them pending for the next round. Returns the held messages and the event
 // IDs that are not yet marked replayed.
 func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
+	r.malformedOverflow = nil
 	drainCtx, cancel := context.WithTimeout(ctx, r.drainWindow())
 	defer cancel()
 	// Per-round budget for the per-record auth-blocked detail log lines:
@@ -1229,7 +1231,7 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 	r.authBlockedDetailBudget.Store(0)
 	var collected []dlqRecord
 	seenPhysical := map[dlqRecordID]uint32{}
-	malformedCount := 0
+	malformedCount, malformedBytes := 0, uint64(0)
 	defer func() {
 		if malformedCount > 0 {
 			logMalformedSummary(r.logger, malformedCount)
@@ -1249,15 +1251,23 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 			physicalID.sequence = sequence
 		}
 		seenPhysical[dlqRecordID{topic: effectiveTopic, partition: message.Partition, offset: message.Offset}]++
-		record := dlqRecord{id: physicalID, message: message}
+		record := dlqRecord{id: physicalID}
 		validation := decodeStrictFailure(message.Value)
 		if validation.Reason != "" {
-			record.class = dlqRecordMalformed
-			record.reason = validation.Reason
 			malformedCount++
 			r.malformed.Add(1)
+			malformedBytes += malformedPayloadBytes(message)
 			if malformedCount <= maxMalformedLogDetails {
 				logMalformedRecord(r.logger, effectiveTopic, message.Partition, message.Offset, validation.Reason)
+			}
+			record.class = dlqRecordMalformed
+			record.reason = validation.Reason
+			if malformedCollectionExceeded(malformedCount, malformedBytes, message) {
+				// Keep only the physical identity and fixed reason. RunOnce merges
+				// this one overflow record before applying partition barriers so a
+				// safe malformed offset is still quarantined.
+				r.malformedOverflow = append(r.malformedOverflow, record)
+				return collected, nil
 			}
 		} else {
 			failure := validation.Failure
@@ -1290,6 +1300,9 @@ func (r *Replayer) collectFailures(ctx context.Context) ([]dlqRecord, error) {
 			}
 		}
 		collected = append(collected, record)
+		if len(collected) >= maxDLQRecordsPerRound {
+			return collected, nil
+		}
 	}
 }
 

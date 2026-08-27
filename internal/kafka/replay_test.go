@@ -50,6 +50,9 @@ type fakeReplayReader struct {
 	fetchLog *[]int64
 	// closeErr, when non-nil, is returned by Close (F4: reset abort path).
 	closeErr error
+	// commitErr, when non-nil, makes CommitMessages fail without advancing
+	// the fake reader's commit log (commit-failure redelivery proof).
+	commitErr error
 }
 
 func (f *fakeReplayReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
@@ -76,6 +79,9 @@ func (f *fakeReplayReader) FetchMessage(ctx context.Context) (kafka.Message, err
 }
 
 func (f *fakeReplayReader) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
+	if f.commitErr != nil {
+		return f.commitErr
+	}
 	f.commits = append(f.commits, msgs...)
 	return nil
 }
