@@ -120,6 +120,28 @@ func TestAsyncAPIEventEnvelopeDocumentsSchemaVersionFloor(t *testing.T) {
 	}
 }
 
+// TestAsyncAPILedgeredPrevHashConditionality checks that tooling-visible
+// conditional rules match the runtime validation boundaries.
+func TestAsyncAPILedgeredPrevHashConditionality(t *testing.T) {
+	spec := readAsyncAPISpec(t)
+	ledgered := strings.SplitN(spec, "    LedgeredEvent:\n", 2)
+	if len(ledgered) != 2 {
+		t.Fatal("asyncapi.yaml LedgeredEvent schema is missing")
+	}
+	section := strings.SplitN(ledgered[1], "    IngestBatch:\n", 2)[0]
+	for _, fragment := range []string{
+		"const: 1",
+		"enum: ['']",
+		"minimum: 2",
+		"required: [prev_hash]",
+		"pattern: '\\S'",
+	} {
+		if !strings.Contains(section, fragment) {
+			t.Fatalf("LedgeredEvent schema missing conditional fragment %q", fragment)
+		}
+	}
+}
+
 // TestSchemaVersionZeroRejectedByValidateBasic is REQ-5 runtime half: the
 // positive check must stay aligned with the documented minimum.
 func TestSchemaVersionZeroRejectedByValidateBasic(t *testing.T) {

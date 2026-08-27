@@ -1381,7 +1381,11 @@ func (r *Replayer) scanAcceptedLegacy(ctx context.Context, wanted wantedSet) (in
 			replayed++
 			continue
 		}
-		if err := r.republish(ctx, message.Key, message.Value); err != nil {
+		// The payload event_id is authoritative. Normalize the outgoing
+		// transport key here as well as in Producer.Republish so every
+		// RepublishFunc implementation receives the contract key, regardless
+		// of stale or missing source-topic metadata.
+		if err := r.republish(ctx, []byte(payloadID), message.Value); err != nil {
 			r.republishFail.Add(1) // inclusive semantics unchanged (2026-08-15)
 			// REQ-PERM-1: a wanted error_code=permanent_error record gets ONE
 			// republish attempt in its lifetime; any failure closes it as a

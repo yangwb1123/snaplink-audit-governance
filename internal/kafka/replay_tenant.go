@@ -223,7 +223,10 @@ func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet
 			r.logTenantPendingRecord(record, true, 0)
 			continue
 		}
-		err := r.republish(ctx, candidate.message.Key, candidate.message.Value)
+		// The parsed payload identity is authoritative. Pass its normalized
+		// key to every replay implementation; Producer.Republish repeats this
+		// safeguard at the Kafka write boundary.
+		err := r.republish(ctx, []byte(candidate.eventID), candidate.message.Value)
 		if err != nil {
 			r.republishFail.Add(1)
 			if isTenantScopeFailure(err) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,42 @@ func (c *projectorTestConsumer) Run(context.Context) error {
 func (c *projectorTestConsumer) Close() error {
 	*c.events = append(*c.events, "close consumer")
 	return nil
+}
+
+func TestProjectorAlwaysUsesLedgeredSchema(t *testing.T) {
+	for _, sourceTopic := range []string{kafka.TopicLedgered, "migration.source.v1"} {
+		t.Run(sourceTopic, func(t *testing.T) {
+			var selected kafka.EventSchema
+			factories := projectorFactories{
+				openStore: func(string) (projectorStore, error) {
+					return &projectorTestStore{events: &[]string{}}, nil
+				},
+				newConsumer: func(_ []string, topic, _ string, _ kafka.IngestFunc, _ time.Duration, _ *log.Logger, options ...kafka.ConsumerOption) projectorConsumer {
+					probe := kafka.NewConsumer([]string{"broker"}, topic, "probe", nil, time.Millisecond, nil)
+					defer probe.Close()
+					for _, option := range options {
+						option(probe)
+					}
+					field := reflect.ValueOf(probe).Elem().FieldByName("inputSchema")
+					if !field.IsValid() {
+						t.Fatal("consumer inputSchema field is missing")
+					}
+					selected = kafka.EventSchema(field.String())
+					return &projectorTestConsumer{events: &[]string{}}
+				},
+			}
+			cfg := projectorConfig{
+				brokers: "broker", sourceTopic: sourceTopic, group: "group",
+				backoff: time.Millisecond, maxAttempts: 1,
+			}
+			if err := runProjector(context.Background(), cfg, log.New(&bytes.Buffer{}, "", 0), factories); err != nil {
+				t.Fatalf("runProjector() error = %v", err)
+			}
+			if selected != kafka.LedgeredEventSchema {
+				t.Fatalf("selected schema=%q, want %q", selected, kafka.LedgeredEventSchema)
+			}
+		})
+	}
 }
 
 func TestRunProjectorStartupOrderAndDLQLifecycle(t *testing.T) {

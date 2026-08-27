@@ -154,11 +154,16 @@ func (p *Producer) PublishFailure(ctx context.Context, failure Failure) error {
 	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(failure.EventID), Value: encoded})
 }
 
-// Republish writes a recovered accepted-topic message back to the producer's
-// topic byte-for-byte, preserving the original canonical encoding so the
-// digest chain stays intact.
-func (p *Producer) Republish(ctx context.Context, key, value []byte) error {
-	return p.writer.WriteMessages(ctx, kafka.Message{Key: key, Value: value})
+// Republish validates and writes a recovered accepted-topic message back to
+// the producer's topic byte-for-byte. The outgoing key is always derived from
+// the validated payload event_id; a source key is only a recovery hint and is
+// never propagated to Kafka.
+func (p *Producer) Republish(ctx context.Context, _ []byte, value []byte) error {
+	event, err := ValidateEventJSON(AcceptedEventSchema, value)
+	if err != nil {
+		return permanentDeliveryError("republish accepted event", err)
+	}
+	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(event.EventID), Value: value})
 }
 
 func (p *Producer) Close() error {
@@ -184,6 +189,26 @@ func eventIDFromValue(value []byte) string {
 		return ""
 	}
 	return probe.EventID
+}
+
+// decodeLegacyEvent preserves the intentionally permissive custom-topic
+// consumer path. Contract topics use validateSingleJSONValue first, so typed
+// JSON errors are not mistaken for malformed framing there.
+func decodeLegacyEvent(value []byte) (domain.Event, error) {
+	var event domain.Event
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
+	if err := decoder.Decode(&event); err != nil {
+		return domain.Event{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return domain.Event{}, errors.New("message value must contain one JSON value")
+		}
+		return domain.Event{}, err
+	}
+	return event, nil
 }
 
 // messageReader is the minimal Kafka surface Consumer needs; kafka.Reader
@@ -341,36 +366,31 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 		var event domain.Event
-		// UseNumber: the consumer re-ingests the event, so payload numbers
-		// must survive as exact json.Number values to keep the derived
-		// digest identical to the producer's digest for the same event.
-		decoder := json.NewDecoder(bytes.NewReader(message.Value))
-		decoder.UseNumber()
-		if err := decoder.Decode(&event); err != nil {
-			if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
-				return deadErr
-			}
-			continue
-		}
-		// REQ-1: the accepted topic's envelope is exactly one JSON value per
-		// message — the HTTP API enforces the same contract in decodeBody
-		// (internal/httpapi/server.go). A second value or trailing
-		// non-whitespace data makes the whole message malformed: the first
-		// value must never be ingested alone (silent partial ingest).
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
-			if err == nil {
-				// Second decode succeeded: a second JSON value exists.
-				err = errors.New("message value must contain one JSON value")
-			}
-			if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
-				return deadErr
-			}
-			continue
-		}
 		if c.inputSchema != "" {
-			if _, schemaErr := ValidateEventJSON(c.inputSchema, message.Value); schemaErr != nil {
-				if deadErr := c.deadLetter(ctx, message, event, ErrorCodePermanentError, schemaErr); deadErr != nil {
+			// Separate JSON framing from domain decoding. A malformed or
+			// multi-value payload is unparsable; a complete JSON value that
+			// violates the selected contract is permanent. This distinction
+			// keeps invalid ledger state from being retried as if the bytes
+			// themselves were truncated.
+			if err := validateSingleJSONValue(message.Value); err != nil {
+				if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
+					return deadErr
+				}
+				continue
+			}
+			validated, validationErr := ValidateEventMessage(c.inputSchema, message.Key, message.Value)
+			if validationErr != nil {
+				if deadErr := c.deadLetter(ctx, message, validated, ErrorCodePermanentError, validationErr); deadErr != nil {
+					return deadErr
+				}
+				continue
+			}
+			event = validated
+		} else {
+			var err error
+			event, err = decodeLegacyEvent(message.Value)
+			if err != nil {
+				if deadErr := c.deadLetterUnparsable(ctx, message, err); deadErr != nil {
 					return deadErr
 				}
 				continue

@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-08-27 — Strict accepted and ledgered Kafka channel schemas
+
+Accepted messages may be pre-ledger, while ledgered messages now require server-assigned stream, sequence, and hash state (including predecessor rules). Producers and consumers enforce the payload `event_id` Kafka key; invalid ledgered/projector inputs are permanently dead-lettered before ingest or database access. Projection and archive Kafka channels remain inactive and undisclosed.
+
 ## 2026-08-27 — Strict DLQ Failure validation before replay
 
 **For operators:** Malformed DLQ `Failure` values are now excluded from replay and quarantined only when their partition offset can be committed safely; they are never republished or replay-state marked. Monitor `audit_dlq_malformed_total` and the bounded malformed-record diagnostics.

@@ -9,10 +9,10 @@ channels:
     address: audit.events.accepted.v1
     description: >-
       Accepted, normalized audit events. Producers MUST set the Kafka message
-      key to the payload's canonical event_id; the replay recovery path also
-      matches by payload event_id, so an absent or mismatched key never blocks
-      recovery, but key alignment keeps dead-letter evidence and partitioning
-      correct.
+      key to the payload's canonical event_id; active consumers reject an
+      absent or mismatched key. Replay recovery identifies the source record
+      by payload event_id and derives the outgoing key from that payload, so a
+      stale source key cannot be propagated.
     messages:
       auditEvent:
         $ref: '#/components/messages/AcceptedEvent'
@@ -95,7 +95,7 @@ components:
     AcceptedEvent:
       allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
     LedgeredEvent:
-      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }, { type: object, description: 'stream_id, sequence, prev_hash, and hash are server-assigned ledger state. stream_id is non-empty and sequence is at least 1 on this channel. hash is non-empty. prev_hash may be empty or omitted only for the first event in a stream and is non-empty for subsequent service-produced events.', required: [stream_id, sequence, hash], properties: { stream_id: { type: string, minLength: 1, description: 'Server-assigned; client value is stripped on ingest.' }, sequence: { type: integer, minimum: 1 }, prev_hash: { type: string }, hash: { type: string, minLength: 1 } } }]
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }, { type: object, description: 'stream_id, sequence, prev_hash, and hash are server-assigned ledger state. stream_id is non-empty and sequence is at least 1 on this channel. hash is non-empty. prev_hash is optional but must be empty for the first event; it is required and non-whitespace for subsequent events.', required: [stream_id, sequence, hash], properties: { stream_id: { type: string, minLength: 1, description: 'Server-assigned; client value is stripped on ingest.' }, sequence: { type: integer, minimum: 1 }, prev_hash: { type: string }, hash: { type: string, minLength: 1 } }, allOf: [{ if: { properties: { sequence: { const: 1 } } }, then: { properties: { prev_hash: { enum: [''] } } } }, { if: { properties: { sequence: { minimum: 2 } } }, then: { required: [prev_hash], properties: { prev_hash: { type: string, minLength: 1, pattern: '\S' } } } }] }]
     IngestBatch:
       type: object
       description: >-

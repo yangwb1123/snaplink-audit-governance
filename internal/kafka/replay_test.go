@@ -1766,8 +1766,9 @@ func TestReplayPermanentClosureLogSanitizesEventID(t *testing.T) {
 }
 
 // AC-1 (REQ-1): an accepted-topic message with a missing key is still matched
-// by its payload event_id: the original is republished byte-for-byte (nil key
-// preserved) and the DLQ record is committed. A second round is a replay
+// by its payload event_id: the original value is republished byte-for-byte and
+// its outgoing key is normalized to the payload ID. The DLQ record is
+// committed. A second round is a replay
 // no-op: zero accepted fetches, zero republishes; the re-read record is only
 // re-committed (a real broker's committed group offset would not re-deliver
 // it).
@@ -1795,8 +1796,8 @@ func TestReplayEmptyKeyAcceptedMessageCommits(t *testing.T) {
 	if len(republished) != 1 {
 		t.Fatalf("republished=%d, want 1 (empty-key message must match by payload event_id)", len(republished))
 	}
-	if republished[0].Key != nil {
-		t.Fatalf("republish key=%q, want nil (original key preserved byte-for-byte)", republished[0].Key)
+	if got := string(republished[0].Key); got != "evt-e" {
+		t.Fatalf("republish key=%q, want payload event_id evt-e", got)
 	}
 	if !bytes.Equal(republished[0].Value, original) {
 		t.Fatalf("republished value=%s, want byte-identical original %s", republished[0].Value, original)
@@ -1832,8 +1833,8 @@ func TestReplayEmptyKeyAcceptedMessageCommits(t *testing.T) {
 
 // AC-2 (REQ-1): a key that differs from the payload event_id is overridden
 // by the payload: the accepted message is republished exactly once with its
-// original key preserved, the DLQ record is committed under the payload ID,
-// and the stale key is never marked replayed.
+// key normalized to the payload ID, the DLQ record is committed under the
+// payload ID, and the stale key is never marked replayed.
 func TestReplayMismatchedKeyResolvedByPayloadEventID(t *testing.T) {
 	original := []byte(`{"event_id":"evt-m","source_system":"crm"}`)
 	dlq := &fakeReplayReader{topic: TopicDLQ, messages: []kafka.Message{dlqMessage("evt-m")}}
@@ -1855,8 +1856,8 @@ func TestReplayMismatchedKeyResolvedByPayloadEventID(t *testing.T) {
 	if count != 1 || len(republished) != 1 {
 		t.Fatalf("replayed=%d republished=%d, want 1/1", count, len(republished))
 	}
-	if got := string(republished[0].Key); got != "stale-key" {
-		t.Fatalf("republish key=%q, want stale-key (original key preserved byte-for-byte)", got)
+	if got := string(republished[0].Key); got != "evt-m" {
+		t.Fatalf("republish key=%q, want payload event_id evt-m", got)
 	}
 	if !bytes.Equal(republished[0].Value, original) {
 		t.Fatalf("republished value=%s, want byte-identical original", republished[0].Value)

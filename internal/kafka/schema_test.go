@@ -139,6 +139,71 @@ func TestValidateEventJSONChannelSchemas(t *testing.T) {
 	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, value)); err == nil {
 		t.Fatal("subsequent ledgered event with empty prev_hash accepted")
 	}
+
+	firstWithPrev := ledgered
+	firstWithPrev.Sequence = 1
+	firstWithPrev.PrevHash = "previous-hash"
+	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, firstWithPrev)); err == nil {
+		t.Fatal("first ledgered event with a predecessor hash accepted")
+	}
+	firstWithWhitespacePrev := ledgered
+	firstWithWhitespacePrev.Sequence = 1
+	firstWithWhitespacePrev.PrevHash = "  "
+	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, firstWithWhitespacePrev)); err == nil {
+		t.Fatal("first ledgered event with whitespace predecessor accepted")
+	}
+	secondWithWhitespacePrev := ledgered
+	secondWithWhitespacePrev.Sequence = 2
+	secondWithWhitespacePrev.PrevHash = " \t"
+	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, secondWithWhitespacePrev)); err == nil {
+		t.Fatal("subsequent ledgered event with whitespace predecessor accepted")
+	}
+}
+
+func TestValidateEventMessageRequiresMatchingKafkaKey(t *testing.T) {
+	value := canonicalTestEvent(t, contractEvent())
+	for _, test := range []struct {
+		name string
+		key  []byte
+		want bool
+	}{
+		{name: "matching", key: []byte("evt-contract-1"), want: true},
+		{name: "empty", key: nil},
+		{name: "mismatched", key: []byte("stale-event-id")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ValidateEventMessage(AcceptedEventSchema, test.key, value)
+			if (err == nil) != test.want {
+				t.Fatalf("ValidateEventMessage() error=%v, want success=%v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestProducerRepublishNormalizesKeyAndValidatesAcceptedValue(t *testing.T) {
+	writer := &recordingProducerWriter{}
+	producer := &Producer{writer: writer, topic: TopicAccepted}
+	value := canonicalTestEvent(t, contractEvent())
+	if err := producer.Republish(context.Background(), []byte("stale-key"), value); err != nil {
+		t.Fatalf("Republish() error = %v", err)
+	}
+	if len(writer.messages) != 1 {
+		t.Fatalf("writer messages=%d, want 1", len(writer.messages))
+	}
+	if got := string(writer.messages[0].Key); got != "evt-contract-1" {
+		t.Fatalf("republish key=%q, want payload event_id", got)
+	}
+	if string(writer.messages[0].Value) != string(value) {
+		t.Fatalf("republish value=%s, want byte-identical %s", writer.messages[0].Value, value)
+	}
+
+	invalid := append(append([]byte(nil), value...), value...)
+	if err := producer.Republish(context.Background(), nil, invalid); err == nil {
+		t.Fatal("Republish() accepted multiple JSON values")
+	}
+	if len(writer.messages) != 1 {
+		t.Fatalf("writer messages=%d, want no write for invalid recovered value", len(writer.messages))
+	}
 }
 
 func TestProducerDeliverValidatesTopicSchemaBeforeWrite(t *testing.T) {
@@ -227,5 +292,88 @@ func TestConsumerRejectsAcceptedShapeBeforeIngestForLedgeredSchema(t *testing.T)
 	}
 	if metrics := consumer.Metrics(); metrics.IngestFailures != 0 || metrics.DeadLettered != 1 {
 		t.Fatalf("metrics=%+v, want schema rejection outside ingest retry counters", metrics)
+	}
+}
+
+func TestConsumerRejectsValidAcceptedEventOnLedgeredSchema(t *testing.T) {
+	value := canonicalTestEvent(t, contractEvent())
+	reader := &fakeReader{messages: []kafka.Message{{Key: []byte("evt-contract-1"), Value: value, Offset: 1}}}
+	ingested := 0
+	runConsumerWithMetrics(t, reader, func(context.Context, domain.Event) error {
+		ingested++
+		return nil
+	}, WithInputSchema(LedgeredEventSchema), WithDLQ(reader))
+	if ingested != 0 {
+		t.Fatalf("ingested=%d, want zero for a valid AcceptedEvent on ledgered input", ingested)
+	}
+	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodePermanentError {
+		t.Fatalf("published=%v, want one permanent_error", reader.published)
+	}
+	if len(reader.commits) != 1 {
+		t.Fatalf("commits=%d, want one commit after schema rejection", len(reader.commits))
+	}
+}
+
+func TestConsumerClassifiesCompleteSchemaViolationAsPermanent(t *testing.T) {
+	event := contractEvent()
+	event.StreamID = "tenant-a:source:crm"
+	event.Sequence = 1
+	event.Hash = "hash-1"
+	value := canonicalTestEvent(t, event)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(value, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["sequence"] = json.RawMessage(`"not-an-integer"`)
+	value, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &fakeReader{messages: []kafka.Message{{Key: []byte(event.EventID), Value: value, Offset: 1}}}
+	ingested := 0
+	runConsumerWithMetrics(t, reader, func(context.Context, domain.Event) error {
+		ingested++
+		return nil
+	}, WithInputSchema(LedgeredEventSchema), WithDLQ(reader))
+	if ingested != 0 {
+		t.Fatalf("ingested=%d, want zero for schema violation", ingested)
+	}
+	if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodePermanentError {
+		t.Fatalf("published=%v, want one permanent_error", reader.published)
+	}
+	if reader.published[0].EventID != event.EventID {
+		t.Fatalf("failure event_id=%q, want %q", reader.published[0].EventID, event.EventID)
+	}
+	if len(reader.commits) != 1 {
+		t.Fatalf("commits=%d, want one commit after schema rejection", len(reader.commits))
+	}
+}
+
+func TestConsumerRejectsEmptyOrMismatchedKafkaKey(t *testing.T) {
+	value := canonicalTestEvent(t, contractEvent())
+	for _, test := range []struct {
+		name string
+		key  []byte
+	}{
+		{name: "empty", key: nil},
+		{name: "mismatched", key: []byte("stale-event-id")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &fakeReader{messages: []kafka.Message{{Key: test.key, Value: value, Offset: 1}}}
+			ingested := 0
+			runConsumerWithMetrics(t, reader, func(context.Context, domain.Event) error {
+				ingested++
+				return nil
+			}, WithInputSchema(AcceptedEventSchema), WithDLQ(reader))
+			if ingested != 0 {
+				t.Fatalf("ingested=%d, want zero for invalid Kafka key", ingested)
+			}
+			if len(reader.published) != 1 || reader.published[0].ErrorCode != ErrorCodePermanentError {
+				t.Fatalf("published=%v, want one permanent_error", reader.published)
+			}
+			if len(reader.commits) != 1 {
+				t.Fatalf("commits=%d, want one commit after key rejection", len(reader.commits))
+			}
+		})
 	}
 }

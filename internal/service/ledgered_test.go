@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,6 +120,152 @@ func TestIngestRejectionsNeverPublish(t *testing.T) {
 			t.Fatalf("conflict publish count=%d, want 1", len(publisher.events))
 		}
 	})
+}
+
+type blockingLedgeredPublisher struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingLedgeredPublisher) Publish(ctx context.Context, _ domain.Event) error {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type sequenceLedgeredPublisher struct {
+	failOn int
+	calls  int
+	events []domain.Event
+}
+
+func (p *sequenceLedgeredPublisher) Publish(_ context.Context, event domain.Event) error {
+	p.calls++
+	if p.failOn > 0 && p.calls == p.failOn {
+		return errors.New("broker unavailable")
+	}
+	p.events = append(p.events, event)
+	return nil
+}
+
+func pendingLedgeredEvents(t *testing.T, svc *Service) map[string]domain.Event {
+	t.Helper()
+	var pending map[string]domain.Event
+	if err := svc.Store.Read(func(data *store.Snapshot) error {
+		pending = make(map[string]domain.Event, len(data.LedgeredOutbox))
+		for key, event := range data.LedgeredOutbox {
+			pending[key] = event
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return pending
+}
+
+func TestLedgeredPublishTimeoutRetainsOutbox(t *testing.T) {
+	svc := testService(t, false)
+	publisher := &blockingLedgeredPublisher{started: make(chan struct{}), release: make(chan struct{})}
+	svc.Config.LedgeredPublisher = publisher
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan struct {
+		receipt domain.EventReceipt
+		err     error
+	}, 1)
+	go func() {
+		receipt, err := svc.Ingest(ctx, "tenant-a", crmPrincipal, testEvent("ledgered-timeout", "op-timeout", time.Unix(1_700_000_530, 0).UTC()), domain.StatusLedgered)
+		result <- struct {
+			receipt domain.EventReceipt
+			err     error
+		}{receipt, err}
+	}()
+	select {
+	case <-publisher.started:
+	case <-time.After(time.Second):
+		t.Fatal("publisher was not called")
+	}
+	cancel()
+	select {
+	case outcome := <-result:
+		if outcome.err != nil || outcome.receipt.EventID != "ledgered-timeout" || outcome.receipt.StreamID == "" {
+			t.Fatalf("receipt=%+v err=%v, want committed ledger despite canceled publication", outcome.receipt, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ingest did not finish after publication context cancellation")
+	}
+	pending := pendingLedgeredEvents(t, svc)
+	if len(pending) != 1 {
+		t.Fatalf("pending outbox=%d, want 1 after timeout-uncertain publication", len(pending))
+	}
+	close(publisher.release)
+}
+
+func TestFlushLedgeredOutboxStopsAtFirstFailure(t *testing.T) {
+	svc := testService(t, false)
+	events := []domain.Event{
+		testEvent("ledgered-flush-a", "op-flush", time.Unix(1_700_000_540, 0).UTC()),
+		testEvent("ledgered-flush-b", "op-flush", time.Unix(1_700_000_541, 0).UTC()),
+	}
+	for index := range events {
+		events[index].TenantID = "tenant-a"
+		events[index].StreamID = "tenant-a:source:crm"
+		events[index].Sequence = int64(index + 1)
+		events[index].Hash = fmt.Sprintf("hash-%d", index+1)
+	}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		for _, event := range events {
+			data.LedgeredOutbox[store.EventKey(event.TenantID, event.EventID)] = event
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publisher := &sequenceLedgeredPublisher{failOn: 2}
+	svc.Config.LedgeredPublisher = publisher
+	flushed, err := svc.FlushLedgeredOutbox(context.Background(), 10)
+	if err != nil || flushed != 1 {
+		t.Fatalf("flush=%d err=%v, want one publication before first failure", flushed, err)
+	}
+	pending := pendingLedgeredEvents(t, svc)
+	if len(pending) != 1 || pending[store.EventKey("tenant-a", "ledgered-flush-b")].EventID != "ledgered-flush-b" {
+		t.Fatalf("pending=%v, want only second event retained", pending)
+	}
+	publisher.failOn = 0
+	flushed, err = svc.FlushLedgeredOutbox(context.Background(), 10)
+	if err != nil || flushed != 1 {
+		t.Fatalf("recovery flush=%d err=%v, want retained event published", flushed, err)
+	}
+	if pending := pendingLedgeredEvents(t, svc); len(pending) != 0 {
+		t.Fatalf("pending after recovery=%v, want empty", pending)
+	}
+}
+
+func TestLedgeredAckFailureRetainsOutbox(t *testing.T) {
+	backend := newFailSaveBackend()
+	svc := newServiceOn(t, store.NewWithBackend(backend))
+	seedTestDomain(t, svc)
+	publisher := &recordingLedgeredPublisher{}
+	svc.Config.LedgeredPublisher = publisher
+	backend.mu.Lock()
+	ackSave := backend.saves + 2 // ledger commit, then publication acknowledgement
+	backend.errorFrom, backend.errorTo, backend.sentinel = ackSave, ackSave, errors.New("ack persistence unavailable")
+	backend.mu.Unlock()
+
+	event := testEvent("ledgered-ack-failure", "op-ack", time.Unix(1_700_000_550, 0).UTC())
+	receipt, err := svc.Ingest(context.Background(), "tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err != nil || receipt.EventID != event.EventID || receipt.StreamID == "" {
+		t.Fatalf("receipt=%+v err=%v, want successful ingest despite ack failure", receipt, err)
+	}
+	pending := pendingLedgeredEvents(t, svc)
+	if len(pending) != 1 {
+		t.Fatalf("pending outbox=%d, want 1 after acknowledgement failure", len(pending))
+	}
 }
 
 func TestPublishFailureDoesNotFailIngest(t *testing.T) {

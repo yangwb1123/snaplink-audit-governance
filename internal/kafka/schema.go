@@ -65,6 +65,24 @@ func ValidateEventJSON(schema EventSchema, value []byte) (domain.Event, error) {
 	return event, nil
 }
 
+// ValidateEventMessage validates an event value against the selected channel
+// schema and enforces the Kafka identity invariant: the message key is the
+// payload event_id. The payload event is returned even when the key check
+// fails so callers can include its ID in dead-letter evidence.
+func ValidateEventMessage(schema EventSchema, key, value []byte) (domain.Event, error) {
+	event, err := ValidateEventJSON(schema, value)
+	if err != nil {
+		return event, err
+	}
+	if len(key) == 0 {
+		return event, fmt.Errorf("Kafka message key must equal event_id: key is empty")
+	}
+	if string(key) != event.EventID {
+		return event, fmt.Errorf("Kafka message key must equal event_id")
+	}
+	return event, nil
+}
+
 // eventSchemaForTopic maps only the exact public event addresses. A custom
 // topic is intentionally left unvalidated unless its owner explicitly adds
 // WithInputSchema; silently treating an unknown topic as accepted would make
@@ -100,6 +118,20 @@ func decodeJSONObject(value []byte, event *domain.Event) (map[string]json.RawMes
 		return nil, err
 	}
 	return fields, nil
+}
+
+// validateSingleJSONValue checks syntax and framing without decoding into the
+// domain model. Consumer admission uses it before schema validation so a
+// syntactically valid object with a contract/type violation is classified as
+// permanent_error, while malformed or multi-value Kafka bytes remain
+// unparsable_message.
+func validateSingleJSONValue(value []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	return requireSingleJSONValue(decoder)
 }
 
 func requireSingleJSONValue(decoder *json.Decoder) error {
@@ -319,6 +351,9 @@ func validateLedgerState(fields map[string]json.RawMessage, event domain.Event) 
 			return err
 		}
 	}
+	if event.Sequence == 1 && event.PrevHash != "" {
+		return fmt.Errorf("prev_hash must be empty for sequence 1")
+	}
 	if event.Sequence > 1 && strings.TrimSpace(event.PrevHash) == "" {
 		return fmt.Errorf("prev_hash must be non-empty for sequence greater than 1")
 	}
@@ -370,7 +405,23 @@ func validateTimestamp(raw json.RawMessage, name string) error {
 func stringIsNull(raw []byte) bool { return bytes.Equal(bytes.TrimSpace(raw), []byte("null")) }
 
 // WithInputSchema selects the schema applied after JSON syntax and single
-// value parsing but before the consumer invokes its ingest function.
+// value parsing but before the consumer invokes its ingest function. An
+// explicit non-empty schema is authoritative (the projector uses this when
+// its source address is overridden); only custom topics may intentionally
+// remain legacy-unvalidated when the option is empty.
 func WithInputSchema(schema EventSchema) ConsumerOption {
-	return func(c *Consumer) { c.inputSchema = schema }
+	return func(c *Consumer) {
+		// An explicit schema is authoritative. This is required by the
+		// projector, which intentionally applies LedgeredEventSchema when its
+		// source topic is overridden (including to an active accepted topic).
+		// An empty option cannot disable validation on an exact public topic;
+		// custom topics retain their legacy unvalidated behavior.
+		if schema == "" && c.reader != nil {
+			if topicSchema := eventSchemaForTopic(c.reader.Config().Topic); topicSchema != "" {
+				c.inputSchema = topicSchema
+				return
+			}
+		}
+		c.inputSchema = schema
+	}
 }

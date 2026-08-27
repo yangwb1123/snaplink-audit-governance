@@ -106,6 +106,13 @@ func (s *Service) FlushLedgeredOutbox(ctx context.Context, limit int) (int, erro
 			return published, err
 		}
 		if !s.publishLedgeredNow(ctx, events[key]) {
+			// The publication may fail because the bounded child timeout
+			// expired, in which case the caller can continue its next
+			// scheduled pass. A caller cancellation is different: surface it
+			// while retaining the unacknowledged outbox record.
+			if err := ctx.Err(); err != nil {
+				return published, err
+			}
 			break
 		}
 		if err := s.ackLedgered(events[key]); err != nil {
