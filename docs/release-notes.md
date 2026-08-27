@@ -1,5 +1,11 @@
 # Release Notes
 
+## 2026-08-27 — Strict DLQ Failure validation before replay
+
+**For operators:** Malformed DLQ `Failure` values are now excluded from replay and quarantined only when their partition offset can be committed safely; they are never republished or replay-state marked. Monitor `audit_dlq_malformed_total` and the bounded malformed-record diagnostics.
+
+**For developers:** Replay accepts exactly one complete JSON object with required string fields (`event_id`, `error_code`, and `error_message`), a non-empty `event_id`, and an optional string `tenant_id`. Trailing whitespace remains valid, while trailing data and multiple values are rejected. No topic, state-file, or persistence migration is required.
+
 ## 2026-08-26 — gRPC protobuf conversion rejects ambiguous and unknown data
 
 **写给运营：**
