@@ -78,7 +78,7 @@ func (r *Replayer) scanAcceptedTenantAware(ctx context.Context, wanted wantedSet
 		r.tenantScopePending.Store(uint64(len(wanted.replay)))
 		return 0, map[dlqRecordID]bool{}, nil
 	}
-	return r.resolveTenantCandidates(ctx, wanted, candidates, found)
+	return r.resolveTenantCandidates(ctx, wanted, candidates, found, drained)
 }
 
 // collectTenantCandidates scans from the first retained accepted offset and
@@ -107,6 +107,15 @@ func (r *Replayer) collectTenantCandidates(ctx context.Context, wanted wantedSet
 		}
 		lastMessage = time.Now()
 		r.acceptedSeen.Add(1)
+		// A message whose KEY is a wanted event_id occupies that event's
+		// canonical accepted slot even when its payload decodes to a different
+		// event_id (the key-fallback/versioning case). The original is then NOT
+		// proven gone, so the record must stay pending and must never be declared
+		// unresolvable — this preserves the tenant-replay regression where a
+		// valid payload with a different event_id defeats key fallback.
+		if key := string(message.Key); len(wanted.byEventID[key]) > 0 {
+			found[key] = true
+		}
 		event, err := decodeCanonicalReplayEvent(message.Value)
 		if err != nil {
 			// A malformed/key-only value is evidence that the wanted record
@@ -202,16 +211,57 @@ func tenantCandidateForRecord(record dlqRecord, wanted wantedSet, candidates map
 // after the full accepted scan proved the event_id→tenant correlation. A
 // missing candidate, ambiguous candidates, missing resolver credential, and
 // tenant_mismatch all remain pending and are counted in the scope backlog.
-func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, found map[string]bool) (int, map[dlqRecordID]bool, error) {
+// When the scan is drained and a wanted event_id has no usable canonical
+// candidate (the original is genuinely absent from the accepted topic, i.e.
+// retention expiry or never published there), the record is durably marked
+// unresolvable so commitResolved advances the DLQ offset and the loss signal
+// fires — mirroring scanAcceptedLegacy:1430-1448 (R1/R5/R6/R7).
+func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, found map[string]bool, drained bool) (int, map[dlqRecordID]bool, error) {
 	resolved := map[dlqRecordID]bool{}
 	scopePending := 0
 	replayed := 0
 	for _, id := range wanted.orderedIDs {
 		record := wanted.records[id]
+		items := candidates[record.eventID]
+		if len(items) == 0 {
+			// No canonical accepted candidate for this event_id.
+			if !drained || found[record.eventID] {
+				// R2: a quiet-topic scan has not proven absence, so the
+				// "original gone" conclusion is not definitive; stay pending
+				// and re-collect next round.
+				// R4: a key-matched (unparsable) original was scanned this round,
+				// so the record is governed by the pending/unparsable paths,
+				// never a permanent loss.
+				scopePending++
+				r.logTenantPendingRecord(record, found[record.eventID], 0)
+				continue
+			}
+			// R1: the original is definitively absent from the accepted topic.
+			// Record a durable unresolvable drop so commitResolved advances the
+			// DLQ offset and the loss signal fires — mirroring
+			// scanAcceptedLegacy:1430-1448.
+			if r.tenantUnresolvableAlreadyMarked(record) {
+				// FM-7: a prior round/restart already recorded this loss; let
+				// the offset commit converge without re-counting it.
+				resolved[id] = true
+				continue
+			}
+			r.logger.Printf("unresolvable event_id=%s tenant=%s reason=original-not-found-in-accepted-topic round=%s",
+				sanitizeLogField(record.eventID, 64), sanitizeLogField(record.claimedTenantID, 64), time.Now().Format(time.RFC3339))
+			if err := r.markTenantUnresolvable(record); err != nil {
+				return replayed, resolved, err
+			}
+			resolved[id] = true // commitResolved now advances the DLQ offset (R6)
+			r.unresolvable.Add(1)
+			replayed++ // legacy return-parity only; NOT r.replayed (R7)
+			continue
+		}
 		candidate, ok := tenantCandidateForRecord(record, wanted, candidates, r.state)
 		if !ok {
+			// R3: ambiguous candidates (>=2 tenants) or a mismatched untrusted
+			// claim → tenant-safety pending, never unresolvable.
 			scopePending++
-			r.logTenantPendingRecord(record, found[record.eventID], len(candidates[record.eventID]))
+			r.logTenantPendingRecord(record, found[record.eventID], len(items))
 			continue
 		}
 		if r.state.Marked(candidate.tenantID, candidate.eventID) {
@@ -257,6 +307,29 @@ func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet
 	}
 	r.tenantScopePending.Store(uint64(scopePending))
 	return replayed, resolved, nil
+}
+
+// tenantUnresolvableAlreadyMarked reports whether this record's durable
+// unresolvable drop was already recorded in a prior round/restart, so the
+// unresolvable counter is not inflated across re-deliveries (FM-7).
+func (r *Replayer) tenantUnresolvableAlreadyMarked(record dlqRecord) bool {
+	if record.claimedTenantID != "" {
+		return r.state.Marked(record.claimedTenantID, record.eventID)
+	}
+	return r.state.marked(record.eventID) // unscoped idempotency probe only
+}
+
+// markTenantUnresolvable durably records the loss. With a trusted tenant claim
+// we write a scoped (tenant,event) mark; with no tenant identity available
+// (optional Failure.tenant_id) we fall back to an unscoped mark used purely
+// for round/restart idempotency — Marked() only honors unscoped marks under an
+// explicit legacyTenantScope, so it never suppresses another tenant's
+// resolution (REQ-tenant-safety).
+func (r *Replayer) markTenantUnresolvable(record dlqRecord) error {
+	if record.claimedTenantID != "" {
+		return r.state.MarkTenant(record.claimedTenantID, record.eventID)
+	}
+	return r.state.Mark(record.eventID)
 }
 
 // closeTenantDeliveryFailure preserves the existing permanent/one-shot

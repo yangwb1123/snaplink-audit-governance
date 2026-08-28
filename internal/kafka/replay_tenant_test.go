@@ -1,10 +1,13 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -478,5 +481,534 @@ func TestTenantReplayRejectsAmbiguousAndKeyFallbackCandidates(t *testing.T) {
 				t.Fatalf("attempts=%d committed=%d state=%v, wanted pending without guess", attempts.Load(), broker.committed, state.Replayed)
 			}
 		})
+	}
+}
+
+// tenantWanted builds a single-record wantedSet for direct
+// resolveTenantCandidates calls in unit tests. It mirrors wantedEvents'
+// index bookkeeping but lets a test supply the dlqRecord directly.
+func tenantWanted(record dlqRecord) wantedSet {
+	wanted := wantedSet{
+		replay:     map[dlqRecordID]bool{},
+		oneShot:    map[dlqRecordID]bool{},
+		byEventID:  map[string][]dlqRecordID{},
+		orderedIDs: []dlqRecordID{},
+		records:    map[dlqRecordID]dlqRecord{},
+	}
+	id := wantedRecordID(record, 0)
+	record.id = id
+	wanted.replay[id] = true
+	wanted.records[id] = record
+	wanted.byEventID[record.eventID] = append(wanted.byEventID[record.eventID], id)
+	wanted.orderedIDs = append(wanted.orderedIDs, id)
+	if record.errorCode == ErrorCodePermanentError {
+		wanted.oneShot[id] = true
+	}
+	return wanted
+}
+
+// directUnresolvableReplayer returns a tenant-aware replayer for direct
+// resolveTenantCandidates calls. The readers are never consulted by the
+// unresolvable branch, so empty fakes suffice.
+func directUnresolvableReplayer(t *testing.T, state *ReplayState) *Replayer {
+	t.Helper()
+	return newTenantAwareReplayerWithFactories(
+		(&brokerDLQ{topic: TopicDLQ}).freshDLQSession(),
+		freshAcceptedReader(nil, nil),
+		state, nil, log.New(io.Discard, "", 0))
+}
+
+// TestTenantUnresolvableDrainedCommitsOffset (AC-1 + F2/R7 parity) pins the
+// production tenant-aware loss path: a wanted DLQ record whose original event_id
+// is absent from the accepted topic is durably marked unresolvable, surfaces the
+// Unresolvable counter, and commits its DLQ offset so the record is never
+// re-scanned. It also folds the legacy split-counter matrix (F2) and proves
+// republish is never called.
+func TestTenantUnresolvableDrainedCommitsOffset(t *testing.T) {
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+		tenantFailureMessage("evt-x", "tenant-a", ErrorCodeAttemptsExhausted, 0),
+	}}
+	// Accepted topic carries a DIFFERENT event so the scan completes (drain is
+	// deterministic) but never matches evt-x.
+	var logs bytes.Buffer
+	var republished atomic.Int64
+	replayer := newTenantAwareReplayerWithFactories(
+		broker.freshDLQSession(),
+		freshAcceptedReader([]kafka.Message{tenantAcceptedMessage("other", "tenant-z", 0)}, nil),
+		state,
+		func(context.Context, []byte, []byte) error {
+			republished.Add(1)
+			t.Fatal("republish must never be called for an unresolvable record")
+			return nil
+		},
+		log.New(&logs, "", 0),
+	)
+	replayer.drainTimeout = 10 * time.Millisecond
+	defer replayer.Close()
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("round1 replayed=%d, want 1 (unresolvable converges)", count)
+	}
+	metrics := replayer.Metrics()
+	if metrics.Unresolvable != 1 {
+		t.Fatalf("Unresolvable=%d, want 1", metrics.Unresolvable)
+	}
+	// F2/R7: the split-counter matrix must stay exactly 1/0/0/0 (unresolvable /
+	// replayed / permanent / unparsableMarks) — parity with the legacy oracle.
+	if metrics.Replayed != 0 || metrics.Permanent != 0 || metrics.UnparsableMarks != 0 {
+		t.Fatalf("split counters replayed=%d permanent=%d unparsable=%d, want 0/0/0", metrics.Replayed, metrics.Permanent, metrics.UnparsableMarks)
+	}
+	if republished.Load() != 0 {
+		t.Fatalf("republished=%d, want 0 (no re-publish for a loss)", republished.Load())
+	}
+	if broker.committed != 1 || len(broker.commits) != 1 || broker.commits[0].Offset != 0 {
+		t.Fatalf("round1 committed=%d commits=%v, want offset 0 committed exactly once", broker.committed, broker.commits)
+	}
+	if !state.Marked("tenant-a", "evt-x") {
+		t.Fatal("tenant-a/evt-x must be durably marked unresolvable")
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "unresolvable") ||
+		!strings.Contains(logged, "reason=original-not-found-in-accepted-topic") ||
+		!strings.Contains(logged, "tenant=tenant-a") {
+		t.Fatalf("log missing unresolvable evidence, got:\n%s", logged)
+	}
+
+	// Round 2: the record's DLQ offset is already committed, so it is not
+	// re-collected and the loss is not re-counted (idempotent convergence).
+	second, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != 0 {
+		t.Fatalf("round2 replayed=%d, want 0", second)
+	}
+	after := replayer.Metrics()
+	if after.Unresolvable != 1 || after.Replayed != 0 {
+		t.Fatalf("round2 counters unresolvable=%d replayed=%d, want 1/0 (no recount)", after.Unresolvable, after.Replayed)
+	}
+	if broker.committed != 1 {
+		t.Fatalf("round2 committed=%d, want 1 (record not re-delivered after offset commit)", broker.committed)
+	}
+}
+
+// TestResolveTenantCandidatesExpiredOriginal (AC-3) drives the unresolvable
+// branch directly: a drained scan with no candidate for the wanted event_id
+// resolves the record and increments the Unresolvable counter by exactly one.
+func TestResolveTenantCandidatesExpiredOriginal(t *testing.T) {
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := directUnresolvableReplayer(t, state)
+	record := dlqRecord{eventID: "evt-x", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+	wanted := tenantWanted(record)
+
+	replayed, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := wanted.orderedIDs[0]
+	if !resolved[id] {
+		t.Fatal("expired-original record must be resolved as unresolvable")
+	}
+	if got := replayer.unresolvable.Load(); got != 1 {
+		t.Fatalf("unresolvable=%d, want 1", got)
+	}
+	if replayed != 1 {
+		t.Fatalf("local replayed=%d, want 1 (legacy return parity)", replayed)
+	}
+	if replayer.replayed.Load() != 0 {
+		t.Fatalf("r.replayed=%d, want 0 (R7: durable counter untouched)", replayer.replayed.Load())
+	}
+}
+
+// TestResolveTenantCandidatesAmbiguousNotUnresolvable (AC-3 negative) pins R3:
+// two distinct tenant candidates never satisfy the absent-original condition,
+// so the record stays pending and is not counted as unresolvable.
+func TestResolveTenantCandidatesAmbiguousNotUnresolvable(t *testing.T) {
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := directUnresolvableReplayer(t, state)
+	record := dlqRecord{eventID: "evt-y", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+	wanted := tenantWanted(record)
+	candidates := map[string][]tenantAcceptedCandidate{
+		"evt-y": {
+			{message: kafka.Message{}, tenantID: "tenant-a", eventID: "evt-y"},
+			{message: kafka.Message{}, tenantID: "tenant-b", eventID: "evt-y"},
+		},
+	}
+
+	if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, candidates, map[string]bool{}, true); err != nil {
+		t.Fatal(err)
+	} else if resolved[wanted.orderedIDs[0]] {
+		t.Fatal("ambiguous candidates must stay pending, never unresolvable")
+	}
+	if got := replayer.unresolvable.Load(); got != 0 {
+		t.Fatalf("unresolvable=%d, want 0 (ambiguous must not be counted)", got)
+	}
+}
+
+// TestTenantFoundButUnparsableNotUnresolvable pins R4: a key-matched but
+// unparsable accepted message (found[eventID]=true) keeps the record pending
+// under the unparsable path and must not be counted as a permanent loss.
+func TestTenantFoundButUnparsableNotUnresolvable(t *testing.T) {
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := directUnresolvableReplayer(t, state)
+	record := dlqRecord{eventID: "evt-z", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+	wanted := tenantWanted(record)
+	found := map[string]bool{"evt-z": true}
+
+	if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, found, true); err != nil {
+		t.Fatal(err)
+	} else if resolved[wanted.orderedIDs[0]] {
+		t.Fatal("found-but-unparsable must stay pending, never unresolvable")
+	}
+	if got := replayer.unresolvable.Load(); got != 0 {
+		t.Fatalf("unresolvable=%d, want 0 (found original is not a loss)", got)
+	}
+}
+
+// TestTenantUnresolvableOnlyWhenDrained pins R2: before the accepted scan has
+// gone quiet (!drained), an absent candidate must NOT be counted as
+// unresolvable — it stays pending for the next round.
+func TestTenantUnresolvableOnlyWhenDrained(t *testing.T) {
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := directUnresolvableReplayer(t, state)
+	record := dlqRecord{eventID: "evt-x", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+	wanted := tenantWanted(record)
+
+	if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, false); err != nil {
+		t.Fatal(err)
+	} else if resolved[wanted.orderedIDs[0]] {
+		t.Fatal("not-drained absent candidate must stay pending")
+	}
+	if got := replayer.unresolvable.Load(); got != 0 {
+		t.Fatalf("unresolvable=%d, want 0 (no conclusion before drain)", got)
+	}
+}
+
+// TestTenantUnresolvableIdempotentAcrossRounds (FM-1/FM-7) proves the durable
+// mark makes the loss count exactly once across re-passes — including the
+// empty-claim unscoped-mark edge (FM-1), where only an unscoped idempotency
+// probe is available.
+func TestTenantUnresolvableIdempotentAcrossRounds(t *testing.T) {
+	t.Run("claimed tenant", func(t *testing.T) {
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayer := directUnresolvableReplayer(t, state)
+		record := dlqRecord{eventID: "evt-x", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+		wanted := tenantWanted(record)
+
+		if _, _, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true); err != nil {
+			t.Fatal(err)
+		}
+		if replayer.unresolvable.Load() != 1 {
+			t.Fatalf("unresolvable=%d, want 1 after first resolution", replayer.unresolvable.Load())
+		}
+		// Re-pass (e.g. crash before commit): the scoped mark converges the
+		// record without re-counting the loss.
+		if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true); err != nil {
+			t.Fatal(err)
+		} else if !resolved[wanted.orderedIDs[0]] {
+			t.Fatal("record must resolve on the idempotent re-pass")
+		}
+		if replayer.unresolvable.Load() != 1 {
+			t.Fatalf("unresolvable=%d after re-pass, want 1 (no double count)", replayer.unresolvable.Load())
+		}
+	})
+	t.Run("empty claim unscoped mark", func(t *testing.T) {
+		state, err := LoadReplayState("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayer := directUnresolvableReplayer(t, state)
+		record := dlqRecord{eventID: "evt-y", claimedTenantID: "", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+		wanted := tenantWanted(record)
+
+		if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true); err != nil {
+			t.Fatal(err)
+		} else if !resolved[wanted.orderedIDs[0]] || !state.marked("evt-y") {
+			t.Fatal("empty-claim record must resolve via the unscoped idempotency mark")
+		}
+		if replayer.unresolvable.Load() != 1 {
+			t.Fatalf("unresolvable=%d, want 1 after first resolution", replayer.unresolvable.Load())
+		}
+		if _, resolved, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true); err != nil {
+			t.Fatal(err)
+		} else if !resolved[wanted.orderedIDs[0]] {
+			t.Fatal("empty-claim record must resolve on the idempotent re-pass")
+		}
+		if replayer.unresolvable.Load() != 1 {
+			t.Fatalf("unresolvable=%d after re-pass, want 1 (no double count)", replayer.unresolvable.Load())
+		}
+	})
+}
+
+// TestTenantUnresolvableEmptyClaimFallsBackToUnscopedMark (FM-1 + F5) drives
+// the whole tenant-aware round with a DLQ Failure carrying no tenant_id. The
+// record is still durably dropped and committed; the unscoped mark provides
+// idempotency, and — critically (F5/REQ-tenant-safety) — it does NOT suppress a
+// later scoped tenant-B resolution of the same event_id.
+func TestTenantUnresolvableEmptyClaimFallsBackToUnscopedMark(t *testing.T) {
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+		tenantFailureMessage("evt-x", "", ErrorCodeAttemptsExhausted, 0), // no tenant_id
+	}}
+	var republished atomic.Int64
+	replayer := newTenantAwareReplayerWithFactories(
+		broker.freshDLQSession(),
+		freshAcceptedReader([]kafka.Message{tenantAcceptedMessage("other", "tenant-z", 0)}, nil),
+		state,
+		func(context.Context, []byte, []byte) error {
+			republished.Add(1)
+			t.Fatal("republish must never be called for an unresolvable record")
+			return nil
+		},
+		log.New(io.Discard, "", 0),
+	)
+	replayer.drainTimeout = 10 * time.Millisecond
+	defer replayer.Close()
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("replayed=%d, want 1 (unresolvable converges)", count)
+	}
+	if metrics := replayer.Metrics(); metrics.Unresolvable != 1 {
+		t.Fatalf("Unresolvable=%d, want 1", metrics.Unresolvable)
+	}
+	if republished.Load() != 0 {
+		t.Fatalf("republished=%d, want 0", republished.Load())
+	}
+	if broker.committed != 1 {
+		t.Fatalf("committed=%d, want 1 (offset committed via unscoped mark)", broker.committed)
+	}
+	// FM-1: the absent-claim case writes an unscoped (event-id-only) mark.
+	if !state.marked("evt-x") {
+		t.Fatal("unscoped event-id mark must be present for idempotency")
+	}
+	// F5 (REQ-tenant-safety): the unscoped mark must NOT be honored as a scoped
+	// (tenant,event) mark for any other tenant, so a legitimate tenant-B
+	// resolution of evt-x is never suppressed by it.
+	if state.Marked("tenant-b", "evt-x") {
+		t.Fatal("unscoped unresolvable mark must not suppress a different tenant")
+	}
+	if err := state.MarkTenant("tenant-b", "evt-x"); err != nil {
+		t.Fatalf("a legitimate tenant-b mark must succeed: %v", err)
+	}
+	if !state.Marked("tenant-b", "evt-x") {
+		t.Fatal("tenant-b mark must be honored after the unscoped mark")
+	}
+}
+
+// TestTenantUnresolvableBarrierHeldBehindPending (F4/FM-8) exercises the
+// per-partition commit barrier against the new unresolvable record. It proves
+// both directions: an unresolvable record BELOW a still-pending record commits
+// (no silent stall), and one ABOVE a pending record is held until the pending
+// record resolves (no leapfrog commit), with the loss counted exactly once.
+func TestTenantUnresolvableBarrierHeldBehindPending(t *testing.T) {
+	ambiguousAccepted := func() []kafka.Message {
+		return []kafka.Message{
+			tenantAcceptedMessage("evt-a", "tenant-a", 0),
+			tenantAcceptedMessage("evt-a", "tenant-b", 1),
+		}
+	}
+	singleAccepted := func() []kafka.Message {
+		return []kafka.Message{tenantAcceptedMessage("evt-a", "tenant-a", 0)}
+	}
+
+	t.Run("unresolvable held above pending", func(t *testing.T) {
+		state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// offset0 = evt-a (ambiguous → pending), offset1 = evt-b (absent original
+		// → unresolvable). The pending record sits BELOW the unresolvable one, so
+		// the barrier must hold the unresolvable offset this round.
+		broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+			tenantFailureMessage("evt-a", "tenant-a", ErrorCodeAttemptsExhausted, 0),
+			tenantFailureMessage("evt-b", "tenant-a", ErrorCodeAttemptsExhausted, 1),
+		}}
+		var deliveries atomic.Int64
+		deliver := func(context.Context, []byte, []byte) error { deliveries.Add(1); return nil }
+
+		replayer1 := runTenantReplayer(broker, ambiguousAccepted(), state, deliver)
+		defer replayer1.Close()
+		if _, err := replayer1.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 0 {
+			t.Fatalf("round1 committed=%d, want 0 (barrier holds unresolvable above pending)", broker.committed)
+		}
+		if got := replayer1.Metrics().Unresolvable; got != 1 {
+			t.Fatalf("round1 Unresolvable=%d, want 1 (loss counted even while held)", got)
+		}
+
+		// Round 2: the pending evt-a resolves (single candidate), unblocking
+		// the barrier so the held unresolvable offset commits too.
+		replayer2 := runTenantReplayer(broker, singleAccepted(), state, deliver)
+		defer replayer2.Close()
+		if _, err := replayer2.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 2 {
+			t.Fatalf("round2 committed=%d, want 2 (both offsets commit once pending clears)", broker.committed)
+		}
+		if got := replayer2.Metrics().Unresolvable; got != 0 {
+			t.Fatalf("round2 Unresolvable=%d, want 0 (fresh process: already-marked record not re-counted)", got)
+		}
+		if deliveries.Load() != 1 {
+			t.Fatalf("deliveries=%d, want 1 (only evt-a re-published)", deliveries.Load())
+		}
+	})
+
+	t.Run("unresolvable commits below pending", func(t *testing.T) {
+		state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// offset0 = evt-b (absent original → unresolvable), offset1 = evt-a
+		// (ambiguous → pending). The unresolvable record sits BELOW the pending
+		// one, so the barrier must let it commit (no silent stall).
+		broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
+			tenantFailureMessage("evt-b", "tenant-a", ErrorCodeAttemptsExhausted, 0),
+			tenantFailureMessage("evt-a", "tenant-a", ErrorCodeAttemptsExhausted, 1),
+		}}
+		var deliveries atomic.Int64
+		deliver := func(context.Context, []byte, []byte) error { deliveries.Add(1); return nil }
+
+		replayer1 := runTenantReplayer(broker, ambiguousAccepted(), state, deliver)
+		defer replayer1.Close()
+		if _, err := replayer1.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 1 || broker.commits[0].Offset != 0 {
+			t.Fatalf("round1 committed=%d commits=%v, want offset 0 committed (unresolvable below pending)", broker.committed, broker.commits)
+		}
+		if got := replayer1.Metrics().Unresolvable; got != 1 {
+			t.Fatalf("round1 Unresolvable=%d, want 1", got)
+		}
+
+		// Round 2: only the pending evt-a remains; it resolves and commits.
+		replayer2 := runTenantReplayer(broker, singleAccepted(), state, deliver)
+		defer replayer2.Close()
+		if _, err := replayer2.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if broker.committed != 2 {
+			t.Fatalf("round2 committed=%d, want 2", broker.committed)
+		}
+		if got := replayer2.Metrics().Unresolvable; got != 0 {
+			t.Fatalf("round2 Unresolvable=%d, want 0 (fresh process: already-marked record not re-counted)", got)
+		}
+		if deliveries.Load() != 1 {
+			t.Fatalf("deliveries=%d, want 1", deliveries.Load())
+		}
+	})
+}
+
+// TestTenantUnresolvableMarkFailureKeepsPending (FM-6) ensures that when the
+// durable mark cannot be written, the error surfaces, the loss counter is NOT
+// incremented, and the record stays pending (offset uncommitted) for the next
+// round — matching the "commit failure is fatal" invariant.
+func TestTenantUnresolvableMarkFailureKeepsPending(t *testing.T) {
+	// A state path under a non-existent directory makes MarkTenant's lock file
+	// impossible to create, forcing the durable mark to fail.
+	state := &ReplayState{path: filepath.Join(t.TempDir(), "missing", "state.json")}
+	replayer := directUnresolvableReplayer(t, state)
+	record := dlqRecord{eventID: "evt-x", claimedTenantID: "tenant-a", errorCode: ErrorCodeAttemptsExhausted, wanted: true}
+	wanted := tenantWanted(record)
+
+	if _, _, err := replayer.resolveTenantCandidates(context.Background(), wanted, map[string][]tenantAcceptedCandidate{}, map[string]bool{}, true); err == nil {
+		t.Fatal("expected mark failure to surface as an error")
+	}
+	if got := replayer.unresolvable.Load(); got != 0 {
+		t.Fatalf("unresolvable=%d, want 0 (loss not counted until the mark succeeds)", got)
+	}
+}
+
+// TestTenantUnresolvableIntegrationBroker (AC-2) is the broker-backed end-to-
+// end check that a genuinely-lost original raises the Unresolvable loss signal
+// through the real NewReplayer path. It is skipped without AUDIT_TEST_KAFKA_
+// BROKERS; run it against a disposable cluster to certify the metric→alert feed.
+func TestTenantUnresolvableIntegrationBroker(t *testing.T) {
+	brokers := os.Getenv("AUDIT_TEST_KAFKA_BROKERS")
+	if brokers == "" {
+		t.Skip("set AUDIT_TEST_KAFKA_BROKERS (comma-separated) to run the tenant unresolvable broker integration test")
+	}
+	brokerList := strings.Split(brokers, ",")
+	prefix := fmt.Sprintf("snaplink-test-utlq-%d", time.Now().UnixNano())
+	dlqTopic := prefix + "-dlq"
+	acceptedTopic := prefix + "-accepted"
+	client := &kafka.Client{Addr: kafka.TCP(brokerList...)}
+	ctx := context.Background()
+	if _, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{
+		Topics: []kafka.TopicConfig{
+			{Topic: dlqTopic, NumPartitions: 1, ReplicationFactor: 1},
+			{Topic: acceptedTopic, NumPartitions: 1, ReplicationFactor: 1},
+		},
+	}); err != nil {
+		t.Fatalf("create topics: %v", err)
+	}
+	defer func() {
+		_, _ = client.DeleteTopics(ctx, &kafka.DeleteTopicsRequest{Topics: []string{dlqTopic, acceptedTopic}})
+	}()
+
+	// Publish a DLQ Failure whose original is NEVER written to the accepted
+	// topic (lost to retention, or never published there).
+	failure := Failure{EventID: "evt-x", TenantID: "tenant-a", ErrorCode: ErrorCodeAttemptsExhausted, ErrorMessage: "boom"}
+	encoded, _ := json.Marshal(failure)
+	writer := &kafka.Writer{Topic: dlqTopic, Addr: kafka.TCP(brokerList...)}
+	if err := writer.WriteMessages(ctx, kafka.Message{Key: []byte("evt-x"), Value: encoded}); err != nil {
+		t.Fatalf("write DLQ failure: %v", err)
+	}
+	_ = writer.Close()
+
+	state, err := LoadReplayState(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayer := NewReplayer(brokerList, dlqTopic, acceptedTopic, prefix, state, func(context.Context, []byte, []byte) error {
+		t.Error("republish must never be called for an unresolvable record")
+		return nil
+	}, log.New(io.Discard, "", 0))
+	defer replayer.Close()
+
+	if _, err := replayer.RunOnce(ctx); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if got := replayer.Metrics().Unresolvable; got != 1 {
+		t.Fatalf("Unresolvable=%d, want 1 (lost original raised the loss signal)", got)
+	}
+	// A second drained round must not re-count the same loss.
+	if _, err := replayer.RunOnce(ctx); err != nil {
+		t.Fatalf("run once 2: %v", err)
+	}
+	if got := replayer.Metrics().Unresolvable; got != 1 {
+		t.Fatalf("Unresolvable=%d after second round, want 1 (no double count)", got)
 	}
 }
