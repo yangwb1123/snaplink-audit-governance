@@ -392,6 +392,59 @@ func TestConsumerDeadLettersNotLedgeredOnFirstAttempt(t *testing.T) {
 	}
 }
 
+// T1c (REQ-5): an ingest func returning projection.ErrTenantUnscoped — the
+// bare sentinel shape projection.Store.Insert returns or the %w-wrapped sibling
+// shape — is classified permanent and dead-lettered on the FIRST ingest attempt
+// with error_code=permanent_error: exactly one ingest call per message, zero
+// backoff waits, and the partition advances past the poison message. This is
+// the tenant-scoping guard's end-to-end wiring: a bad-tenant event is
+// dead-lettered immediately rather than burning max-attempts transient retries.
+func TestConsumerDeadLettersTenantUnscopedOnFirstAttempt(t *testing.T) {
+	cases := []struct {
+		name      string
+		ingestErr error
+	}{
+		{"bare sentinel", projection.ErrTenantUnscoped},
+		{"wrapped sentinel", fmt.Errorf("insert projection: %w", projection.ErrTenantUnscoped)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+			ingested := 0
+			// Zero-backoff proof: time.Hour backoff would blow the 100 ms harness
+			// deadline if the code regressed to the transient path.
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			consumer := newConsumerWithReader(reader, func(_ context.Context, event domain.Event) error {
+				ingested++
+				if event.EventID == "evt-1" {
+					return tc.ingestErr
+				}
+				return nil
+			}, time.Hour, WithDLQ(reader), WithMaxAttempts(3))
+			if err := consumer.Run(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run: %v", err)
+			}
+			if ingested != 2 {
+				t.Fatalf("ingested=%d, want 2 (poison message dead-lettered on first attempt, evt-2 ingested once)", ingested)
+			}
+			if len(reader.commits) != 2 || reader.committedOffset != 2 {
+				t.Fatalf("commits=%d committedOffset=%d, want 2/2 (partition advances past the poison message)", len(reader.commits), reader.committedOffset)
+			}
+			if len(reader.published) != 1 {
+				t.Fatalf("published=%d, want exactly 1", len(reader.published))
+			}
+			failure := reader.published[0]
+			if failure.EventID != "evt-1" || failure.ErrorCode != ErrorCodePermanentError {
+				t.Fatalf("published failure=%+v, want event_id=evt-1 code=%s", failure, ErrorCodePermanentError)
+			}
+			if !strings.Contains(failure.ErrorMessage, "tenant_id is empty or malformed") {
+				t.Fatalf("ErrorMessage=%q, want the self-describing sentinel text", failure.ErrorMessage)
+			}
+		})
+	}
+}
+
 // T2 (AC-2): the classification predicate is errors.Is, so sentinel identity
 // survives any %w wrapping — both real-world shapes match (the bare sentinel
 // returned by projection.Store.Insert and wrapped copies), and unrelated

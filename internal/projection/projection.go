@@ -21,6 +21,15 @@ import (
 // chain state; such an event must never materialize into the query surface.
 var ErrNotLedgered = errors.New("projection: event lacks ledger-assigned chain state")
 
+// ErrTenantUnscoped is returned when an event carries an empty or malformed
+// tenant_id. The projection is a single shared multi-tenant table keyed first
+// by tenant_id; such an event must never materialize into the query surface,
+// mirroring ErrNotLedgered for missing ledger chain state. The format check
+// uses domain.ValidTenantIDComponent, which rejects ':' and ids longer than
+// MaxArchiveComponentBytes (85); the empty case is a separate explicit check
+// because ValidTenantIDComponent("tenant_id", "") returns nil.
+var ErrTenantUnscoped = errors.New("projection: event tenant_id is empty or malformed")
+
 // Store writes the query projection table. tenant_id leads the sort key so
 // tenant-scoped time-range scans stay efficient; ReplacingMergeTree keeps
 // one row per (tenant_id, event_id) under at-least-once redelivery.
@@ -86,14 +95,31 @@ func projectionPayload(event domain.Event) ([]byte, error) {
 
 // Insert writes one canonical event into the projection. ClickHouse applies
 // the ReplacingMergeTree dedup asynchronously; queries must not assume
-// immediate uniqueness.
+// immediate uniqueness. An event with an empty or malformed tenant_id (':'
+// present, or > MaxArchiveComponentBytes) is rejected with ErrTenantUnscoped
+// before any database access, mirroring ErrNotLedgered (missing chain state)
+// and domain.ErrOccurredAtOutOfRange (out-of-range occurred_at); the
+// projection is a shared multi-tenant table keyed first by tenant_id, so a
+// tenant-scoping gap would write a phantom row invisible to scoped readers.
 func (s *Store) Insert(ctx context.Context, event domain.Event) error {
-	// Presence guard FIRST: before payload encoding and before any database
-	// access, so a zero-value *Store (nil db) returns ErrNotLedgered without
-	// panicking and no DB round-trip is wasted. Presence, not authenticity:
-	// chain state is assigned by the ledger upstream (the service strips
-	// client-supplied stream_id and stamps StreamID/Sequence/Hash in the
-	// commit closure), so a row lacking it is a non-fact.
+	// Tenant-scoping guard FIRST (fail-closed): an event whose tenant_id is
+	// empty or malformed must never enter the shared table. The check precedes
+	// payload encoding and any database access, so a zero-value *Store (nil db)
+	// returns ErrTenantUnscoped without panicking and no DB round-trip is
+	// wasted. The empty case is explicit because ValidTenantIDComponent("") is
+	// nil; the format guard covers ':' and the 85-byte archive-component cap.
+	if event.TenantID == "" {
+		return ErrTenantUnscoped
+	}
+	if err := domain.ValidTenantIDComponent("tenant_id", event.TenantID); err != nil {
+		return ErrTenantUnscoped
+	}
+	// Presence guard: before payload encoding and before any database access,
+	// so a zero-value *Store (nil db) returns ErrNotLedgered without panicking
+	// and no DB round-trip is wasted. Presence, not authenticity: chain state
+	// is assigned by the ledger upstream (the service strips client-supplied
+	// stream_id and stamps StreamID/Sequence/Hash in the commit closure), so a
+	// row lacking it is a non-fact.
 	if event.StreamID == "" || event.Sequence <= 0 || event.Hash == "" {
 		return ErrNotLedgered
 	}

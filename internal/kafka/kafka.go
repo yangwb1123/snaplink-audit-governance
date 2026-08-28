@@ -489,6 +489,15 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 		if errors.Is(err, projection.ErrNotLedgered) {
 			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
 		}
+
+		// 域边界拒绝（投影所需的租户作用域缺失/非法）与前者同级：tenant_id 为空或非法
+		// （含 ':' 或超 MaxArchiveComponentBytes=85 字节）的事件一旦入库即成为任何作用域查询
+		// 都不可寻址的幽灵行，投影端重试永远补不上也无法自愈，没有重试价值，立即死信为
+		// permanent_error（第一次尝试）——不烧 max-attempts 次退避，不产生 attempts_exhausted。
+		// 错误文本自带诊断（"projection: event tenant_id is empty or malformed"）。
+		if errors.Is(err, projection.ErrTenantUnscoped) {
+			return c.deadLetter(ctx, message, event, ErrorCodePermanentError, err)
+		}
 		// 瞬态错误：按 (partition, offset) 计数，达到上限后死信；否则
 		// 退避并重试同一条消息（背压；API 按 event_id 幂等，重试不会
 		// 产生重复事实）。

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,4 +246,83 @@ func TestInsertRejectsOutOfRangeOccurredAt(t *testing.T) {
 			t.Fatalf("Insert() error = %v, want ErrNotLedgered (presence guard first)", err)
 		}
 	})
+}
+
+// TestInsertRejectsUnscopedTenant is AC-1/AC-2: the tenant-scoping guard
+// precedes payload encoding and DB access. Empty, ':'-containing, and
+// over-85-byte tenant ids all fail with ErrTenantUnscoped on a zero-value
+// *Store (nil db) — proving no row can ever be written for an unscoped event
+// and the guard runs before any database round-trip (mirrors
+// TestInsertRejectsUnledgered / TestInsertRejectsOutOfRangeOccurredAt).
+func TestInsertRejectsUnscopedTenant(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*domain.Event)
+	}{
+		{"empty tenant id", func(e *domain.Event) { e.TenantID = "" }},
+		{"colon in tenant id", func(e *domain.Event) { e.TenantID = "acme:evil" }},
+		{"over-long tenant id", func(e *domain.Event) { e.TenantID = strings.Repeat("a", 86) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := ledgeredFixture("tenant-guard-probe")
+			tc.mutate(&event)
+			var store *Store // nil db: any DB touch would panic
+			if err := store.Insert(context.Background(), event); !errors.Is(err, ErrTenantUnscoped) {
+				t.Fatalf("Insert() error = %v, want ErrTenantUnscoped (guard before DB access)", err)
+			}
+		})
+	}
+}
+
+// TestInsertRejectsUnscopedTenantClickHouse is AC-3: against the real
+// schema, a properly-scoped tenant is unaffected and a bad-tenant event is
+// rejected at the boundary and writes no row — the core invariant is zero
+// tenant_id=” rows in the shared table.
+func TestInsertRejectsUnscopedTenantClickHouse(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_CLICKHOUSE_DSN to run ClickHouse projection tests")
+	}
+	ctx := context.Background()
+	store, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	good := ledgeredFixture("tenant-guard-good")
+	good.TenantID = "demo"
+	if err := store.Insert(ctx, good); err != nil {
+		t.Fatalf("insert good: %v", err)
+	}
+
+	bad := ledgeredFixture("tenant-guard-bad")
+	bad.TenantID = ""
+	if err := store.Insert(ctx, bad); !errors.Is(err, ErrTenantUnscoped) {
+		t.Fatalf("insert empty tenant: error = %v, want ErrTenantUnscoped", err)
+	}
+	badColon := ledgeredFixture("tenant-guard-bad-colon")
+	badColon.TenantID = "acme:evil"
+	if err := store.Insert(ctx, badColon); !errors.Is(err, ErrTenantUnscoped) {
+		t.Fatalf("insert colon tenant: error = %v, want ErrTenantUnscoped", err)
+	}
+
+	countGood, err := store.CountTenant(ctx, "demo")
+	if err != nil {
+		t.Fatalf("count demo: %v", err)
+	}
+	if countGood != 1 {
+		t.Fatalf("CountTenant(demo) = %d, want 1", countGood)
+	}
+	countPhantom, err := store.CountTenant(ctx, "")
+	if err != nil {
+		t.Fatalf("count empty: %v", err)
+	}
+	if countPhantom != 0 {
+		t.Fatalf("CountTenant(\"\") = %d, want 0 (no phantom tenant_id='' rows)", countPhantom)
+	}
 }
