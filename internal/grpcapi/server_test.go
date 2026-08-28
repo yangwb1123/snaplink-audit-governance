@@ -114,6 +114,122 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	assertGRPCSourceBinding(t, client, ctx)
 }
 
+// TestFromProtoRejectsNilActor pins the conversion boundary: a missing
+// actor is a validation error, not a panic or an event with an empty actor.
+func TestFromProtoRejectsNilActor(t *testing.T) {
+	nilActor := testProtoEvent("unit-nil-actor", "crm")
+	nilActor.Actor = nil
+	converted, err := fromProto(nilActor)
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("err=%v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "actor is required") {
+		t.Fatalf("err=%q, want actor-required detail", err)
+	}
+	if status.Code(toStatus(err)) != codes.InvalidArgument {
+		t.Fatalf("status=%v, want InvalidArgument", status.Code(toStatus(err)))
+	}
+	if converted.EventID != "" || converted.Actor.ID != "" {
+		t.Fatalf("converted=%+v, want zero event", converted)
+	}
+
+	valid := testProtoEvent("unit-nil-actor-control", "crm")
+	converted, err = fromProto(valid)
+	if err != nil {
+		t.Fatalf("non-nil actor rejected: %v", err)
+	}
+	if converted.Actor.ID != "service" {
+		t.Fatalf("actor id=%q, want service", converted.Actor.ID)
+	}
+}
+
+// TestGRPCWriteNilActor verifies that the unary RPC maps a missing actor to
+// InvalidArgument and does not send the event to Service.Ingest.
+func TestGRPCWriteNilActor(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	event := testProtoEvent("grpc-nil-actor-write", "crm")
+	event.Actor = nil
+	_, err := client.Write(ctx, &auditv1.WriteRequest{Event: event})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Write code=%v, want InvalidArgument", status.Code(err))
+	}
+	if !strings.Contains(status.Convert(err).Message(), "actor is required") {
+		t.Fatalf("Write message=%q, want actor-required detail", status.Convert(err).Message())
+	}
+	assertNoFramedKeys(t, st, event.GetEventId())
+}
+
+// TestGRPCWriteBatchNilActor preserves the existing batch contract: a
+// conversion failure returns no wire receipts, a successfully ingested
+// prefix remains committed, and the invalid member plus the suffix are not
+// persisted.
+func TestGRPCWriteBatchNilActor(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	validA := testProtoEvent("grpc-nil-actor-batch-prefix", "crm")
+	nilActor := testProtoEvent("grpc-nil-actor-batch", "crm")
+	nilActor.Actor = nil
+	validC := testProtoEvent("grpc-nil-actor-batch-suffix", "crm")
+	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{validA, nilActor, validC}})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	}
+	if len(response.GetReceipts()) != 0 {
+		t.Fatalf("WriteBatch receipts=%d, want none on error", len(response.GetReceipts()))
+	}
+	if !strings.Contains(status.Convert(err).Message(), "actor is required") {
+		t.Fatalf("WriteBatch message=%q, want actor-required detail", status.Convert(err).Message())
+	}
+	assertNoFramedKeys(t, st, nilActor.GetEventId(), validC.GetEventId())
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Events[store.EventKey("tenant-a", validA.GetEventId())]; !exists {
+			t.Fatal("valid batch prefix was not persisted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGRPCWriteStreamNilActor verifies that a valid stream prefix gets its
+// receipt, while a later missing actor terminates the stream with
+// InvalidArgument and leaves no event for the rejected message.
+func TestGRPCWriteStreamNilActor(t *testing.T) {
+	st, client, ctx := newGRPCHarness(t)
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := testProtoEvent("grpc-nil-actor-stream-prefix", "crm")
+	if err := stream.Send(&auditv1.WriteRequest{Event: valid}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("valid stream message rejected: %v", err)
+	}
+	if receipt.GetEventId() != valid.GetEventId() {
+		t.Fatalf("receipt event_id=%q, want %q", receipt.GetEventId(), valid.GetEventId())
+	}
+
+	nilActor := testProtoEvent("grpc-nil-actor-stream", "crm")
+	nilActor.Actor = nil
+	if err := stream.Send(&auditv1.WriteRequest{Event: nilActor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteStream code=%v, want InvalidArgument termination", status.Code(err))
+	}
+	assertNoFramedKeys(t, st, nilActor.GetEventId())
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
+			t.Fatal("valid stream event was not persisted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertGRPCSourceBinding(t *testing.T, client auditv1.IngestClient, ctx context.Context) {
 	t.Helper()
 	spoof := testProtoEvent("grpc-spoof", "erp")
