@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -37,33 +40,40 @@ func newHotColdPostgresTestDB(t *testing.T) *sql.DB {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping hot/cold postgres: %v", err)
 	}
-	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS audit_tenant (
-            tenant_id TEXT PRIMARY KEY,
-            snapshot JSONB NOT NULL,
-            version BIGINT NOT NULL DEFAULT 1,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )`,
-		`CREATE TABLE IF NOT EXISTS audit_ledger (
-            id BIGSERIAL PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            record_type TEXT NOT NULL CHECK (record_type IN ('receipt', 'segment', 'checkpoint')),
-            key TEXT NOT NULL,
-            version INTEGER NOT NULL CHECK (version > 0),
-            record JSONB NOT NULL,
-            written_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (tenant_id, record_type, key, version)
-        )`,
-		`CREATE INDEX IF NOT EXISTS audit_ledger_tenant_id_idx ON audit_ledger (tenant_id, id)`,
-		`CREATE INDEX IF NOT EXISTS audit_ledger_receipt_key_idx ON audit_ledger (tenant_id, record_type, key, version DESC) WHERE record_type = 'receipt'`,
-		`CREATE INDEX IF NOT EXISTS audit_ledger_receipt_idempotency_idx ON audit_ledger (tenant_id, ((record->'receipt'->>'idempotency_key'))) WHERE record_type = 'receipt' AND (record->'receipt'->>'idempotency_key') <> ''`,
-	} {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("apply hot/cold schema: %v", err)
-		}
-	}
+	applyHotColdMigrations(t, db)
 	resetHotColdPostgres(t, db)
 	return db
+}
+
+// applyHotColdMigrations makes the DSN-gated suite self-contained. The split
+// tables alone are insufficient: OpenPostgres and the reset helper also need
+// migration 004's snapshot row and migration 005's trail table. Applying the
+// complete ordered set mirrors the disposable database contract used by the
+// deployment and prevents a raw database from failing with a missing-table
+// error before the control-plane tests start.
+func applyHotColdMigrations(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate repository root for PostgreSQL migrations")
+	}
+	migrationDir := filepath.Join(filepath.Dir(filename), "..", "..", "migrations")
+	for _, name := range []string{
+		"001_control_plane.sql",
+		"002_source_identity_binding.sql",
+		"003_outbox_relay.sql",
+		"004_state_snapshot.sql",
+		"005_admin_action_trail.sql",
+		"006_hot_cold_split.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDir, name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
+	}
 }
 
 func resetHotColdPostgres(t *testing.T, db *sql.DB) {
@@ -72,6 +82,9 @@ func resetHotColdPostgres(t *testing.T, db *sql.DB) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`DELETE FROM audit_state_snapshot`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`TRUNCATE admin_action_trail RESTART IDENTITY`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -402,10 +415,60 @@ func TestUTCtrl03MergeControlDeltaUnion(t *testing.T) {
 	}
 }
 
+// TestUTCtrl05MergeControlSliceUnion covers the slice fields listed by
+// REQ-STORE-CTRL-1. A concurrent append must survive alongside the writer's
+// append, and re-applying the same delta on a conflict retry must not grow the
+// slices with duplicates.
+func TestUTCtrl05MergeControlSliceUnion(t *testing.T) {
+	baseline := NewSnapshot()
+	mutated := NewSnapshot()
+	current := NewSnapshot()
+	concurrentAction := domain.AdminAction{ID: "concurrent-action", TenantID: "tenant-b", Action: "tenant.created", CreatedAt: time.Unix(1_700_000_001, 0).UTC()}
+	writerAction := domain.AdminAction{ID: "writer-action", TenantID: "tenant-a", Action: "tenant.created", CreatedAt: time.Unix(1_700_000_002, 0).UTC()}
+	concurrentCheckpoint := domain.AggregateCheckpoint{ID: "concurrent-checkpoint", TenantID: "tenant-b", Root: "root-b", CreatedAt: time.Unix(1_700_000_003, 0).UTC()}
+	writerCheckpoint := domain.AggregateCheckpoint{ID: "writer-checkpoint", TenantID: "tenant-a", Root: "root-a", CreatedAt: time.Unix(1_700_000_004, 0).UTC()}
+
+	current.AdminActions = append(current.AdminActions, concurrentAction)
+	current.AggregateCheckpoints = append(current.AggregateCheckpoints, concurrentCheckpoint)
+	mutated.AdminActions = append(mutated.AdminActions, writerAction)
+	mutated.AggregateCheckpoints = append(mutated.AggregateCheckpoints, writerCheckpoint)
+
+	mergeControlDelta(current, baseline, mutated)
+	if len(current.AdminActions) != 2 || !containsAdminAction(current.AdminActions, concurrentAction) || !containsAdminAction(current.AdminActions, writerAction) {
+		t.Fatalf("admin action union=%+v, want both concurrent and writer entries", current.AdminActions)
+	}
+	if len(current.AggregateCheckpoints) != 2 || !containsAggregateCheckpoint(current.AggregateCheckpoints, concurrentCheckpoint) || !containsAggregateCheckpoint(current.AggregateCheckpoints, writerCheckpoint) {
+		t.Fatalf("aggregate checkpoint union=%+v, want both concurrent and writer entries", current.AggregateCheckpoints)
+	}
+
+	mergeControlDelta(current, baseline, mutated)
+	if len(current.AdminActions) != 2 || len(current.AggregateCheckpoints) != 2 {
+		t.Fatalf("reapplying slice delta grew union: admin=%d checkpoints=%d, want 2/2", len(current.AdminActions), len(current.AggregateCheckpoints))
+	}
+}
+
+func containsAdminAction(actions []domain.AdminAction, want domain.AdminAction) bool {
+	for _, action := range actions {
+		if reflect.DeepEqual(action, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAggregateCheckpoint(checkpoints []domain.AggregateCheckpoint, want domain.AggregateCheckpoint) bool {
+	for _, checkpoint := range checkpoints {
+		if reflect.DeepEqual(checkpoint, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestITCtrl01CrossTenantConcurrentArchive is the AC-1 integration contract:
-// two replicas archiving different tenants concurrently must both persist their
-// DeadLetters to the shared control row. The old whole-map replacement dropped
-// whichever writer committed second.
+// two independent replicas updating different tenants concurrently must both
+// persist their DeadLetters to the shared control row. The old whole-map
+// replacement dropped whichever writer committed second.
 func TestITCtrl01CrossTenantConcurrentArchive(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
@@ -456,9 +519,10 @@ func TestITCtrl01CrossTenantConcurrentArchive(t *testing.T) {
 	}
 }
 
-// TestITCtrl02SameTenantTwoEvents is the AC-2 integration contract: two replicas
-// archiving two distinct events of the SAME tenant must both persist their
-// DeadLetters (distinct EventKey prefixes), not clobber each other.
+// TestITCtrl02SameTenantTwoEvents is the AC-2 integration contract: two
+// independent replicas updating two distinct events of the SAME tenant must
+// both persist their DeadLetters (distinct EventKey prefixes), not clobber
+// each other.
 func TestITCtrl02SameTenantTwoEvents(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
