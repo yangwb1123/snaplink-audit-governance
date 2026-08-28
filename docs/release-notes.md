@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-08-28 — Postgres split store control-plane writes now merge instead of clobbering (direction internal-store-c7524028)
+
+**For operators (behavior change):** The Postgres hot/cold split store
+(`postgresSplitStore`) shares a single control-plane row (`audit_state_snapshot`,
+id=1) across all tenants and replicas. A control-plane write from an
+`UpdateTenant`/`updateTenantOnce` pass previously replaced whole maps
+(`DeadLetters`, `ArchiveConflictFailures`, `Tenants`, `LedgeredOutbox`, …) on
+every write. A concurrent archive pass — or a second replica archiving another
+event of the same tenant — could then silently discard control entries for
+tenants this update never touched, and an `ErrSnapshotConflict` retry
+re-applied the same stale whole-map replacement, so the winning writer's
+entries were permanently dropped (silent multi-tenant audit-evidence loss).
+
+The control write now overlays the writer's changed keys onto the freshly
+reloaded snapshot (per-entry union for maps; append + value-dedup for slices),
+preserving any entries a concurrent writer committed in the meantime and staying
+idempotent across retries. There is **no** behavioral change on the
+single-writer / no-conflict path, and **no** schema, API, or `Snapshot` shape
+change. The fix applies only to the full Postgres split deployment (migration
+006 + hot/cold cutover); the default file backend and the legacy single-row PG
+path are unaffected by construction.
+
+**For developers:**
+- `internal/store/postgres_hotcold.go`: `mergeControlDelta` rewritten to
+overlay semantics; new `overlayControlMap` (10 map fields) and `unionControlSlice`
+(`AdminActions` / `AggregateCheckpoints`, append + value-dedup) helpers.
+`saveControl` consults a `saveControlHook` test seam (nil in production). The
+`mergeControlDelta(current, baseline, mutated *Snapshot)` signature is unchanged
+and has exactly one call site.
+- Regression tests: `TestUTCtrl03MergeControlDeltaUnion` (map union — always
+on), `TestUTCtrl05MergeControlSliceUnion` (slice union + retry idempotency —
+always on), and DSN-gated integration tests `TestITCtrl01CrossTenantConcurrentArchive`,
+`TestITCtrl02SameTenantTwoEvents`, `TestITCtrl04ConflictRetryNoLoss` (skip cleanly
+without `AUDIT_TEST_POSTGRES_HOTCOLD_DSN` / `AUDIT_TEST_POSTGRES_DSN`).
+
 ## 2026-08-28 — projection.Store.Insert now fails closed on empty/malformed tenant_id (direction PROJ-TENANT)
 
 **For operators (behavior change):** The ClickHouse audit-event projection
