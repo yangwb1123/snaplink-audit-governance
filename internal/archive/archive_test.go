@@ -84,6 +84,58 @@ func TestFileStorePutRejectsNonRegularPreExisting(t *testing.T) {
 	})
 }
 
+// TestFileStoreGetRejectsNonRegular is AC-1/AC-2: Get must not follow a
+// symlink or read any other non-regular path at the requested key.
+func TestFileStoreGetRejectsNonRegular(t *testing.T) {
+	key := "events/demo/stream/00000000000000000001-evt.json"
+	wantErr := func(dir string) string {
+		return fmt.Sprintf("archive path %s exists and is not a regular file", filepath.Join(dir, filepath.FromSlash(key)))
+	}
+
+	t.Run("directory", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		target := filepath.Join(dir, filepath.FromSlash(key))
+		if err := os.MkdirAll(target, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		store := &FileStore{Dir: dir}
+		data, err := store.Get(context.Background(), key)
+		if err == nil || err.Error() != wantErr(dir) {
+			t.Fatalf("Get directory err=%v, want %q", err, wantErr(dir))
+		}
+		if data != nil {
+			t.Fatalf("Get returned data for a non-regular path: %q", data)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "archive")
+		target := filepath.Join(dir, filepath.FromSlash(key))
+		secret := filepath.Join(t.TempDir(), "secret")
+		secretBytes := []byte("outside archive secret")
+		if err := os.WriteFile(secret, secretBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(secret, target); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		store := &FileStore{Dir: dir}
+		data, err := store.Get(context.Background(), key)
+		if err == nil || err.Error() != wantErr(dir) {
+			t.Fatalf("Get symlink err=%v, want %q", err, wantErr(dir))
+		}
+		if data != nil {
+			t.Fatalf("Get followed a symlink and returned %q", data)
+		}
+		if bytes.Equal(data, secretBytes) {
+			t.Fatalf("Get returned the symlink target contents")
+		}
+	})
+}
+
 // TestFileStorePutVerifiesExistingContent is AC-2/AC-3: an existing regular
 // file is only "already archived" when it is byte-identical; a mismatch or
 // an unverifiable file is an error, and the pre-existing object is never

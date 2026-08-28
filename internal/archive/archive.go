@@ -340,6 +340,15 @@ func (f *FileStore) Get(_ context.Context, key string) ([]byte, error) {
 	// never observes a torn (mid-write) object.
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Lstat does not follow the final path component. Reject symlinks and
+	// other non-regular paths before ReadFile can follow or read them.
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("archive path %s exists and is not a regular file", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	return os.ReadFile(path)
 }
 
