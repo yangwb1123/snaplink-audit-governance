@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-08-28 — Configurable clock skew tolerance for JWT `exp`/`nbf` validation
+
+`Authenticator` now accepts a `ClockSkew time.Duration` field that widens the acceptance window for `exp` and `nbf` claim checks. A positive `ClockSkew` (e.g. `30 * time.Second`) lets the verifier accept tokens that expired up to `ClockSkew` seconds ago or are not-yet-active up to `ClockSkew` seconds in the future — absorbing typical IdP-to-verifier clock drift. The zero-value default preserves the existing strict zero-tolerance behaviour; no existing code is affected.
+
 ## 2026-08-27 — Executable OpenAPI HTTP contract
 
 The checked-in OpenAPI contract now records every runtime handler, required permission, and `statusForError` classification. Success and error payload schemas cover all routes, including batch receipts, list wrappers, receipt diagnostics, and query stream filters. `checks/route_contract.py` validates this metadata, and `cmd/openapi-contract` performs pinned OpenAPI 3.1 validation with kin-openapi v0.148.0.

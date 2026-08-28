@@ -44,6 +44,11 @@ type Authenticator struct {
 	// serves the last known-good set during an IdP outage (bounded
 	// staleness, see verifier.go).
 	JWKSRefreshInterval time.Duration
+	// ClockSkew extends the acceptance window for exp and nbf checks.
+	// A positive value accepts tokens that expired up to ClockSkew ago
+	// or are not-yet-active up to ClockSkew in the future. The zero
+	// value (default) preserves strict zero-tolerance behaviour.
+	ClockSkew time.Duration
 }
 
 func (a Authenticator) Authenticate(r *http.Request) (Claims, error) {
@@ -132,10 +137,10 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	if !hasExpiry {
 		return Claims{}, fmt.Errorf("token must contain exp")
 	}
-	if now >= int64(expiry) {
+	if now >= int64(expiry)+int64(a.ClockSkew.Seconds()) {
 		return Claims{}, fmt.Errorf("token is expired")
 	}
-	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore) {
+	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore)-int64(a.ClockSkew.Seconds()) {
 		return Claims{}, fmt.Errorf("token is not active")
 	}
 	if a.Issuer != "" && stringClaim(payload, "iss") != a.Issuer {
