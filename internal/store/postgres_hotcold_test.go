@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -308,4 +309,269 @@ func TestTenantCASConflictPartition(t *testing.T) {
 	if sameTenantConflicts == 0 || crossTenantConflicts*2 >= sameTenantConflicts {
 		t.Fatalf("conflict partition cross=%d same=%d, want cross < half of non-zero same-tenant baseline", crossTenantConflicts, sameTenantConflicts)
 	}
+}
+
+// openHotColdReplica opens an independent connection to the same PostgreSQL
+// database and returns a Store that shares the single audit_state_snapshot row.
+// This reproduces the multi-replica deployment where cross-writer control-plane
+// clobbering was observed.
+func openHotColdReplica(t *testing.T, dsn string) *Store {
+	t.Helper()
+	conn, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open hot/cold replica: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	st, err := OpenPostgres(conn)
+	if err != nil {
+		t.Fatalf("OpenPostgres replica: %v", err)
+	}
+	return st
+}
+
+// readControlDeadLetters fetches the persisted control-plane dead_letters jsonb
+// from the shared snapshot row, decoupling the assertion from any in-memory
+// state.
+func readControlDeadLetters(t *testing.T, db *sql.DB) map[string]domain.DeadLetter {
+	t.Helper()
+	var raw string
+	if err := db.QueryRow(`SELECT (snapshot->'dead_letters')::text FROM audit_state_snapshot WHERE id = 1`).Scan(&raw); err != nil {
+		t.Fatalf("read dead_letters: %v", err)
+	}
+	out := map[string]domain.DeadLetter{}
+	if raw == "" || raw == "null" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode dead_letters %q: %v", raw, err)
+	}
+	return out
+}
+
+// deadLetterClosure reproduces the two control-plane writes the archive worker
+// performs for a permanently un-archivable event: record a DeadLetter keyed by
+// EventKey(tenantID, eventID) and reset ArchiveConflictFailures for the tenant.
+func deadLetterClosure(tenantID, eventID string) func(*TenantView) error {
+	return func(view *TenantView) error {
+		key := EventKey(tenantID, eventID)
+		view.Global.DeadLetters[key] = domain.DeadLetter{
+			TenantID: tenantID, EventID: eventID, Reason: "archive-permanent", At: time.Now(),
+		}
+		view.Global.ArchiveConflictFailures[tenantID] = 0
+		return nil
+	}
+}
+
+// TestUTCtrl03MergeControlDeltaUnion is the AC-3 unit contract: mergeControlDelta
+// must OVERLAY the writer's delta onto the freshly reloaded current snapshot,
+// never replace whole map fields. The fixture carries a concurrent writer's
+// entry in `current` (absent from both baseline and mutated); a whole-field
+// replacement (the old behavior) would silently drop it.
+func TestUTCtrl03MergeControlDeltaUnion(t *testing.T) {
+	baseline := NewSnapshot()
+	mutated := NewSnapshot()
+	current := NewSnapshot()
+
+	// A concurrent writer added this entry to the live snapshot after the
+	// writer's baseline was captured.
+	current.DeadLetters[EventKey("b", "y")] = domain.DeadLetter{TenantID: "b", EventID: "y"}
+	current.ArchiveConflictFailures["b"] = 1
+	// A distinguishing value in an untouched field that must survive verbatim.
+	current.Tenants["b"] = domain.Tenant{ID: "b", Name: "keep"}
+
+	// The writer's own additions only; every other field equals baseline.
+	mutated.DeadLetters[EventKey("a", "x")] = domain.DeadLetter{TenantID: "a", EventID: "x"}
+	mutated.ArchiveConflictFailures["a"] = 0
+
+	mergeControlDelta(current, baseline, mutated)
+
+	if _, ok := current.DeadLetters[EventKey("a", "x")]; !ok {
+		t.Fatalf("writer's DeadLetter dropped: %+v", current.DeadLetters)
+	}
+	if _, ok := current.DeadLetters[EventKey("b", "y")]; !ok {
+		t.Fatalf("concurrent writer's DeadLetter clobbered: %+v", current.DeadLetters)
+	}
+	if v, ok := current.ArchiveConflictFailures["a"]; !ok || v != 0 {
+		t.Fatalf("writer's ArchiveConflictFailures dropped: %+v", current.ArchiveConflictFailures)
+	}
+	if v, ok := current.ArchiveConflictFailures["b"]; !ok || v != 1 {
+		t.Fatalf("concurrent writer's ArchiveConflictFailures clobbered: %+v", current.ArchiveConflictFailures)
+	}
+	if tv, ok := current.Tenants["b"]; !ok || tv.Name != "keep" {
+		t.Fatalf("untouched field overwritten: %+v", current.Tenants)
+	}
+}
+
+// TestITCtrl01CrossTenantConcurrentArchive is the AC-1 integration contract:
+// two replicas archiving different tenants concurrently must both persist their
+// DeadLetters to the shared control row. The old whole-map replacement dropped
+// whichever writer committed second.
+func TestITCtrl01CrossTenantConcurrentArchive(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	}
+	seed, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.UpdateControl(func(d *Snapshot) error {
+		d.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Active: true}
+		d.Tenants["tenant-b"] = domain.Tenant{ID: "tenant-b", Active: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st1 := openHotColdReplica(t, dsn)
+	st2 := openHotColdReplica(t, dsn)
+
+	const rounds = 8
+	var wg sync.WaitGroup
+	for r := 0; r < rounds; r++ {
+		wg.Add(2)
+		go func(r int) {
+			defer wg.Done()
+			if err := st1.UpdateTenant("tenant-a", ColdFirst, deadLetterClosure("tenant-a", fmt.Sprintf("e-a-%d", r))); err != nil {
+				t.Errorf("tenant-a update: %v", err)
+			}
+		}(r)
+		go func(r int) {
+			defer wg.Done()
+			if err := st2.UpdateTenant("tenant-b", ColdFirst, deadLetterClosure("tenant-b", fmt.Sprintf("e-b-%d", r))); err != nil {
+				t.Errorf("tenant-b update: %v", err)
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	dead := readControlDeadLetters(t, db)
+	for r := 0; r < rounds; r++ {
+		if _, ok := dead[EventKey("tenant-a", fmt.Sprintf("e-a-%d", r))]; !ok {
+			t.Fatalf("tenant-a dead letter e-a-%d dropped; have %d keys: %v", r, len(dead), keysOf(dead))
+		}
+		if _, ok := dead[EventKey("tenant-b", fmt.Sprintf("e-b-%d", r))]; !ok {
+			t.Fatalf("tenant-b dead letter e-b-%d dropped; have %d keys: %v", r, len(dead), keysOf(dead))
+		}
+	}
+}
+
+// TestITCtrl02SameTenantTwoEvents is the AC-2 integration contract: two replicas
+// archiving two distinct events of the SAME tenant must both persist their
+// DeadLetters (distinct EventKey prefixes), not clobber each other.
+func TestITCtrl02SameTenantTwoEvents(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	}
+	seed, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.UpdateControl(func(d *Snapshot) error {
+		d.Tenants["tenant-x"] = domain.Tenant{ID: "tenant-x", Active: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st1 := openHotColdReplica(t, dsn)
+	st2 := openHotColdReplica(t, dsn)
+
+	const rounds = 8
+	var wg sync.WaitGroup
+	for r := 0; r < rounds; r++ {
+		wg.Add(2)
+		go func(r int) {
+			defer wg.Done()
+			if err := st1.UpdateTenant("tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e1-%d", r))); err != nil {
+				t.Errorf("e1 update: %v", err)
+			}
+		}(r)
+		go func(r int) {
+			defer wg.Done()
+			if err := st2.UpdateTenant("tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e2-%d", r))); err != nil {
+				t.Errorf("e2 update: %v", err)
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	dead := readControlDeadLetters(t, db)
+	for r := 0; r < rounds; r++ {
+		if _, ok := dead[EventKey("tenant-x", fmt.Sprintf("e1-%d", r))]; !ok {
+			t.Fatalf("same-tenant e1-%d dropped; have %d keys: %v", r, len(dead), keysOf(dead))
+		}
+		if _, ok := dead[EventKey("tenant-x", fmt.Sprintf("e2-%d", r))]; !ok {
+			t.Fatalf("same-tenant e2-%d dropped; have %d keys: %v", r, len(dead), keysOf(dead))
+		}
+	}
+}
+
+// TestITCtrl04ConflictRetryNoLoss is the AC-4 integration contract: when a
+// control save loses the optimistic-lock race, the retry must reload current and
+// re-apply the writer's delta as a non-destructive overlay — never clobber the
+// winner's committed entries. A deterministic saveControlHook forces exactly one
+// conflict on replica 1 so the retry path is exercised without flaky timing.
+func TestITCtrl04ConflictRetryNoLoss(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	}
+	seed, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.UpdateControl(func(d *Snapshot) error {
+		d.Tenants["tenant-c"] = domain.Tenant{ID: "tenant-c", Active: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st1 := openHotColdReplica(t, dsn)
+	st2 := openHotColdReplica(t, dsn)
+
+	var conflictOnce sync.Once
+	st1.pgSplit.saveControlHook = func() error {
+		fired := false
+		conflictOnce.Do(func() { fired = true })
+		if fired {
+			return ErrSnapshotConflict
+		}
+		return nil
+	}
+	defer func() { st1.pgSplit.saveControlHook = nil }()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := st1.UpdateTenant("tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e1")); err != nil {
+			t.Errorf("st1 update: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := st2.UpdateTenant("tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e2")); err != nil {
+			t.Errorf("st2 update: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	dead := readControlDeadLetters(t, db)
+	if _, ok := dead[EventKey("tenant-c", "e1")]; !ok {
+		t.Fatalf("retried writer's DeadLetter e1 dropped after conflict; have %d keys: %v", len(dead), keysOf(dead))
+	}
+	if _, ok := dead[EventKey("tenant-c", "e2")]; !ok {
+		t.Fatalf("winner's DeadLetter e2 dropped after conflict; have %d keys: %v", len(dead), keysOf(dead))
+	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

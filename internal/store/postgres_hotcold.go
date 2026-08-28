@@ -33,6 +33,12 @@ type postgresSplitStore struct {
 	backend *postgresBackend
 	once    sync.Once
 	active  bool
+
+	// saveControlHook, when non-nil, is consulted before the real save and
+	// may inject a transient optimistic-lock conflict. It is nil in
+	// production; tests use it to force the conflict+retry path of
+	// updateControl deterministically (no flaky timing). See IT-CTRL-04.
+	saveControlHook func() error
 }
 
 func newPostgresSplitStore(backend *postgresBackend) *postgresSplitStore {
@@ -195,6 +201,11 @@ func (p *postgresSplitStore) updateControl(fn func(*Snapshot) error) error {
 }
 
 func (p *postgresSplitStore) saveControl(control *Snapshot, version int64) error {
+	if p.saveControlHook != nil {
+		if err := p.saveControlHook(); err != nil {
+			return err
+		}
+	}
 	control.LayoutVersion = hotColdLayoutVersion
 	p.backend.lastVersion = version
 	return p.backend.Save(control)
@@ -338,43 +349,84 @@ func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder
 	return nil
 }
 
+// mergeControlDelta applies the writer's intended control-plane change onto the
+// freshly reloaded current snapshot without clobbering entries a concurrent
+// writer committed in the meantime, and without re-applying a stale whole-field
+// replacement on a conflict+retry.
+//
+// The previous body did current.F = mutated.F for every field whose whole value
+// differed from baseline. That discarded every key another writer had added to F
+// after this writer's baseline was captured, and — on ErrSnapshotConflict — the
+// retry reloaded current but re-applied the same stale replacement, dropping the
+// winner's committed entries (archive DeadLetters / ArchiveConflictFailures).
+//
+// The fix overlays the writer's delta instead. For map fields every key the
+// writer set (mutated.F[k]) is written onto current; keys the writer left
+// untouched (mutated.F == baseline.F for the whole field) are skipped so
+// current.F is preserved verbatim. For the two slice fields the writer's
+// elements are appended (value-deduped) so concurrent appends survive. On the
+// no-conflict single-writer path current starts equal to baseline and the result
+// reduces byte-for-byte to mutated (Go json.Marshal sorts map keys
+// deterministically, slices are already ordered), so observable state is
+// unchanged. On conflict+retry the same stable (baseline, mutated) pair is
+// re-applied to the reloaded current: that is idempotent and non-lossy and
+// converges exactly like UpdateControl's re-run-on-retry semantics.
 func mergeControlDelta(current, baseline, mutated *Snapshot) {
-	if !reflect.DeepEqual(mutated.Tenants, baseline.Tenants) {
-		current.Tenants = mutated.Tenants
-	}
-	if !reflect.DeepEqual(mutated.Sources, baseline.Sources) {
-		current.Sources = mutated.Sources
-	}
-	if !reflect.DeepEqual(mutated.Schemas, baseline.Schemas) {
-		current.Schemas = mutated.Schemas
-	}
-	if !reflect.DeepEqual(mutated.Policies, baseline.Policies) {
-		current.Policies = mutated.Policies
-	}
-	if !reflect.DeepEqual(mutated.LegalHolds, baseline.LegalHolds) {
-		current.LegalHolds = mutated.LegalHolds
-	}
-	if !reflect.DeepEqual(mutated.Exports, baseline.Exports) {
-		current.Exports = mutated.Exports
-	}
-	if !reflect.DeepEqual(mutated.RestoreRuns, baseline.RestoreRuns) {
-		current.RestoreRuns = mutated.RestoreRuns
-	}
-	if !reflect.DeepEqual(mutated.LedgeredOutbox, baseline.LedgeredOutbox) {
-		current.LedgeredOutbox = mutated.LedgeredOutbox
-	}
+	current.Tenants = overlayControlMap(current.Tenants, baseline.Tenants, mutated.Tenants)
+	current.Sources = overlayControlMap(current.Sources, baseline.Sources, mutated.Sources)
+	current.Schemas = overlayControlMap(current.Schemas, baseline.Schemas, mutated.Schemas)
+	current.Policies = overlayControlMap(current.Policies, baseline.Policies, mutated.Policies)
+	current.LegalHolds = overlayControlMap(current.LegalHolds, baseline.LegalHolds, mutated.LegalHolds)
+	current.Exports = overlayControlMap(current.Exports, baseline.Exports, mutated.Exports)
+	current.RestoreRuns = overlayControlMap(current.RestoreRuns, baseline.RestoreRuns, mutated.RestoreRuns)
+	current.LedgeredOutbox = overlayControlMap(current.LedgeredOutbox, baseline.LedgeredOutbox, mutated.LedgeredOutbox)
+	current.ArchiveConflictFailures = overlayControlMap(current.ArchiveConflictFailures, baseline.ArchiveConflictFailures, mutated.ArchiveConflictFailures)
+	current.DeadLetters = overlayControlMap(current.DeadLetters, baseline.DeadLetters, mutated.DeadLetters)
 	if !reflect.DeepEqual(mutated.AdminActions, baseline.AdminActions) {
-		current.AdminActions = mutated.AdminActions
+		current.AdminActions = unionControlSlice(current.AdminActions, mutated.AdminActions)
 	}
 	if !reflect.DeepEqual(mutated.AggregateCheckpoints, baseline.AggregateCheckpoints) {
-		current.AggregateCheckpoints = mutated.AggregateCheckpoints
+		current.AggregateCheckpoints = unionControlSlice(current.AggregateCheckpoints, mutated.AggregateCheckpoints)
 	}
-	if !reflect.DeepEqual(mutated.ArchiveConflictFailures, baseline.ArchiveConflictFailures) {
-		current.ArchiveConflictFailures = mutated.ArchiveConflictFailures
+}
+
+// overlayControlMap returns current with the writer's keys from mutated applied
+// on top. If the writer left the whole field untouched (mutated == baseline),
+// current is returned unchanged so a concurrent writer's additions survive. Keys
+// not present in mutated are preserved.
+func overlayControlMap[K comparable, V any](current, baseline, mutated map[K]V) map[K]V {
+	if reflect.DeepEqual(mutated, baseline) {
+		return current
 	}
-	if !reflect.DeepEqual(mutated.DeadLetters, baseline.DeadLetters) {
-		current.DeadLetters = mutated.DeadLetters
+	if current == nil {
+		current = make(map[K]V, len(mutated))
 	}
+	for k, v := range mutated {
+		current[k] = v
+	}
+	return current
+}
+
+// unionControlSlice returns current with every element of mutated that is not
+// already present (by value) appended. It preserves current's existing order and
+// dedups against it, so re-applying a stable delta on retry converges instead of
+// growing without bound.
+func unionControlSlice[T any](current, mutated []T) []T {
+	union := make([]T, 0, len(current)+len(mutated))
+	union = append(union, current...)
+	for _, m := range mutated {
+		found := false
+		for _, c := range current {
+			if reflect.DeepEqual(c, m) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			union = append(union, m)
+		}
+	}
+	return union
 }
 
 func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
