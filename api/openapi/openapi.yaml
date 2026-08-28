@@ -1,4 +1,5 @@
 openapi: 3.1.0
+x-contract-version: 1
 info:
   title: Snaplink Audit Governance API
   version: 0.1.0
@@ -11,13 +12,17 @@ paths:
   /api/v1/compat/snaplink/audit/events:
     get:
       operationId: querySnaplinkConsoleAuditEvents
+      x-runtime-handler: querySnaplinkAuditEvents
+      x-required-permission: audit:event:read
+      x-allow-tenantless-console: true
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
         - { name: type, in: query, schema: { type: string } }
         - { name: event_type, in: query, schema: { type: string } }
         - { name: actor_id, in: query, schema: { type: string } }
-        - { name: client_id, in: query, description: Trusted source_system filter, schema: { type: string } }
+        - { name: client_id, in: query, description: 'Trusted source_system filter', schema: { type: string } }
         - { $ref: '#/components/parameters/tenantId' }
         - { name: outcome, in: query, schema: { type: string } }
         - { name: trace_id, in: query, schema: { type: string } }
@@ -26,27 +31,43 @@ paths:
         - { name: cursor, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
       responses:
-        '200': { description: Newest-first Console event page, content: { application/json: { schema: { $ref: '#/components/schemas/AuditExplorerResult' } } } }
+        '200': { description: 'Newest-first Console event page', content: { application/json: { schema: { $ref: '#/components/schemas/AuditExplorerResult' } } } }
         '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-  /api/v1/compat/snaplink/audit/events/{eventId}:
-    get:
-      operationId: getSnaplinkConsoleAuditEvent
-      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
-      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
-      parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
-      responses:
-        '200': { description: Canonical governance event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/compat/snaplink/audit/events/{eventId}:
+    get:
+      operationId: getSnaplinkConsoleAuditEvent
+      x-runtime-handler: getEvent
+      x-required-permission: audit:event:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
+      x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
+      parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
+      responses:
+        '200': { description: 'Canonical governance event', content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/compat/snaplink/audit/facets:
     get:
       operationId: querySnaplinkConsoleAuditFacets
+      x-runtime-handler: querySnaplinkAuditFacets
+      x-required-permission: audit:event:read
+      x-allow-tenantless-console: true
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
@@ -60,28 +81,43 @@ paths:
         - { name: since, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
         - { name: until, in: query, schema: { oneOf: [{ type: string, format: date-time }, { type: integer, format: int64 }] } }
       responses:
-        '200': { description: Facet counts, content: { application/json: { schema: { type: object, required: [facets], properties: { facets: { $ref: '#/components/schemas/EventFacets' } } } } } }
+        '200': { description: 'Facet counts', content: { application/json: { schema: { $ref: '#/components/schemas/EventFacetsResponse' } } } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/events:
     post:
       operationId: writeEvent
+      x-runtime-handler: postEvent
+      x-required-permission: audit:event:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       x-tenant-scope: { policy: scoped, selector: body, selector_path: tenant_id, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       description: 'Tenant scope: body-selected write; platform credentials must provide a non-empty Event.tenant_id; tenant credentials use the signed tenant and reject a mismatch. The server derives OAuth client identity from signed client_id (or compatible azp). When no tenant claim exists, tenant_id is uniquely resolved from server-side (client_id, source_system) registration. A non-empty body stream_id is stripped on ingest; the server derives the stream from tenant + aggregate/operation/source and stamps it. stream_id is a read/query filter only. sub is never used as client identity. Runtime caps are authoritative: applicable persisted strings are limited to 8192 UTF-8 bytes, not characters.'
       parameters:
         - { name: wait_for, in: query, schema: { type: string, enum: [accepted, ledgered, indexed, archived] } }
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventInput' } } } }
       responses:
-        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptResponse' } } } }
+        '202': { description: 'Accepted', content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptResponse' } } } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
-        '422': { $ref: '#/components/responses/Error', description: 'Envelope tenant_id does not match the resolved tenant, schema not found, or occurred_at outside [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (422 occurred_at_out_of_range)' }
+        '422': { $ref: '#/components/responses/Error', description: 'Envelope validation failure; 422 occurred_at_out_of_range is returned when occurred_at is outside the supported ledger horizon.' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: queryEvents
+      x-runtime-handler: queryEvents
+      x-required-permission: audit:event:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id). next_cursor resumes at exactly that position; a page walk reproduces the unpaginated result with no duplicates and no drops. Cursors issued before chronological ordering are rejected with 400; re-run the query to obtain a fresh cursor. Archived events are read from the configured WORM archive and remain visible after hot-payload eviction.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -105,40 +141,102 @@ paths:
         - { name: cursor, in: query, schema: { type: string } }
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
       responses:
-        '200': { description: Event page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
+        '200': { description: 'Event page', content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
         '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/events/{eventId}:
     get:
       operationId: getEvent
+      x-runtime-handler: getEvent
+      x-required-permission: audit:event:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Archived event payloads are read from the configured WORM archive and verified against the retained receipt hash before being returned.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: 'Event', content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/events/{eventId}/receipt:
     get:
       operationId: getReceipt
+      x-runtime-handler: getReceipt
+      x-required-permission: audit:event:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Receipt, content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } } }
+      responses:
+        '200': { description: 'Receipt', content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/events:batch:
     post:
       operationId: writeBatch
+      x-runtime-handler: postBatch
+      x-required-permission: audit:event:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: body-selected write; every platform batch member must provide a non-empty Event.tenant_id, tenant credentials use the signed tenant, and selector failures are rejected before any member is ingested.'
       x-tenant-scope: { policy: scoped, selector: body, selector_path: 'events[*].tenant_id', platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [events], properties: { events: { type: array, maxItems: 500, description: 'An over-count batch is rejected before any member is ingested.', items: { $ref: '#/components/schemas/Event' } }, wait_for: { type: string } } } } } }
-      responses: { '202': { description: Accepted batch }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '422': { $ref: '#/components/responses/Error', description: 'Envelope tenant_id does not match the resolved tenant, schema not found, or occurred_at outside [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (422 occurred_at_out_of_range)' } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [events], properties: { events: { type: array, maxItems: 500, description: 'An over-count batch is rejected before any member is ingested.', items: { $ref: '#/components/schemas/EventInput' } }, wait_for: { type: string } } } } } }
+      responses:
+        '202': { description: 'Accepted batch', content: { application/json: { schema: { $ref: '#/components/schemas/BatchReceiptResponse' } } } }
+        '400': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '401': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '403': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '404': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '409': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '422': { description: 'Batch error; 422 occurred_at_out_of_range identifies an occurred_at value outside the supported ledger horizon.', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '429': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '500': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
+        '503': { description: 'Batch error', content: { application/json: { schema: { oneOf: [{ $ref: '#/components/schemas/Error' }, { $ref: '#/components/schemas/BatchPartialError' }] } } } }
   /api/v1/operations/{operationId}:
     get:
       operationId: getOperation
+      x-runtime-handler: getOperation
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Operation summary } }
+      responses:
+        '200': { description: 'Operation summary', content: { application/json: { schema: { $ref: '#/components/schemas/OperationSummary' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/operations/{operationId}/timeline:
     get:
       operationId: getOperationTimeline
+      x-runtime-handler: getOperationTimeline
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -146,17 +244,43 @@ paths:
         - { $ref: '#/components/parameters/tenantId' }
         - { name: cursor, in: query, schema: { type: string } }
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
-      responses: { '200': { description: Operation timeline page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }, '400': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: 'Operation timeline page', content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/operations/{operationId}/replay:
     get:
       operationId: replayOperation
+      x-runtime-handler: replayOperation
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Side-effect-free replay } }
+      responses:
+        '200': { description: 'Side-effect-free replay', content: { application/json: { schema: { $ref: '#/components/schemas/ReplayResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/aggregates/{aggregateType}/{aggregateId}/timeline:
     get:
       operationId: getAggregateTimeline
+      x-runtime-handler: getAggregateTimeline
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (aggregate_version, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -165,196 +289,490 @@ paths:
         - { $ref: '#/components/parameters/tenantId' }
         - { name: cursor, in: query, schema: { type: string } }
         - { name: page_size, in: query, schema: { type: integer, maximum: 1000, default: 100 } }
-      responses: { '200': { description: Aggregate history page, content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }, '400': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: 'Aggregate history page', content: { application/json: { schema: { $ref: '#/components/schemas/QueryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/exports:
     post:
       operationId: createExport
+      x-runtime-handler: createExport
+      x-required-permission: audit:export:create
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before an export job or audit fact is created.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Query' } } } }
-      responses: { '202': { description: Export job }, '400': { $ref: '#/components/responses/Error' } }
+      responses:
+        '202': { description: 'Export job', content: { application/json: { schema: { $ref: '#/components/schemas/ExportJob' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/exports/{jobId}:
     get:
       operationId: getExport
+      x-runtime-handler: getExport
+      x-required-permission: audit:export:create
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Export status } }
+      responses:
+        '200': { description: 'Export status', content: { application/json: { schema: { $ref: '#/components/schemas/ExportJob' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/exports/{jobId}/download:
     get:
       operationId: downloadExport
+      x-runtime-handler: downloadExport
+      x-required-permission: audit:export:create
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before export bytes are read.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
         '200': { description: Export JSON Lines download, content: { application/x-ndjson: { schema: { type: string, format: binary } } } }
         '404': { $ref: '#/components/responses/Error' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/integrity/verify:
     post:
       operationId: verifyIntegrity
+      x-runtime-handler: verifyIntegrity
+      x-required-permission: audit:integrity:verify
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before integrity work or its audit fact.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { content: { application/json: { schema: { type: object, properties: { stream_id: { type: string } } } } } }
-      responses: { '200': { description: Integrity result }, '400': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: 'Integrity result', content: { application/json: { schema: { $ref: '#/components/schemas/IntegrityResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/legal-holds:
     post:
       operationId: createLegalHold
+      x-runtime-handler: createLegalHold
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
-      responses: { '201': { description: Legal hold }, '400': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LegalHoldInput' } } } }
+      responses:
+        '201': { description: 'Legal hold', content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: listLegalHolds
+      x-runtime-handler: listLegalHolds
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Legal holds } }
+      responses:
+        '200': { description: 'Legal holds', content: { application/json: { schema: { $ref: '#/components/schemas/LegalHoldList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/legal-holds/{holdId}/release:
     post:
       operationId: releaseLegalHold
+      x-runtime-handler: releaseLegalHold
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: holdId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Released legal hold } }
+      responses:
+        '200': { description: 'Released legal hold', content: { application/json: { schema: { $ref: '#/components/schemas/LegalHold' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/restores/preview:
     post:
       operationId: previewRestore
+      x-runtime-handler: previewRestore
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before restore preview.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
-      responses: { '200': { description: Restore preview }, '400': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: 'Restore preview', content: { application/json: { schema: { $ref: '#/components/schemas/RestorePreview' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/restores:
     post:
       operationId: createRestore
+      x-runtime-handler: createRestore
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before a restore run is created.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRequest' } } } }
-      responses: { '202': { description: Pending approval restore run }, '400': { $ref: '#/components/responses/Error' } }
+      responses:
+        '202': { description: 'Pending approval restore run', content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRun' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/restores/{runId}:
     get:
       operationId: getRestore
+      x-runtime-handler: getRestore
+      x-required-permission: audit:operation:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Restore run } }
+      responses:
+        '200': { description: 'Restore run', content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRun' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/restores/{runId}/approve:
     post:
       operationId: approveRestore
+      x-runtime-handler: approveRestore
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. The approval decision is recorded without executing business calls.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
-        '200': { description: Approved restore run }
+        '200': { description: 'Approved restore run', content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRun' } } } }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/restores/{runId}/reject:
     post:
       operationId: rejectRestore
+      x-runtime-handler: rejectRestore
+      x-required-permission: audit:legal_hold:manage
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
       responses:
-        '200': { description: Rejected restore run }
+        '200': { description: 'Rejected restore run', content: { application/json: { schema: { $ref: '#/components/schemas/RestoreRun' } } } }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/admin/actions:
     get:
       operationId: listAdminActions
+      x-runtime-handler: listAdminActions
+      x-required-permission: audit:policy:read
+      x-allow-tenantless-console: true
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: approved all-tenant platform or tenantless Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
         - { $ref: '#/components/parameters/tenantId' }
         - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100, default: 100 } }
       responses:
-        '200': { description: Admin actions, content: { application/json: { schema: { $ref: '#/components/schemas/AdminAction' } } } }
+        '200': { description: 'Admin actions page', content: { application/json: { schema: { $ref: '#/components/schemas/AdminActionList' } } } }
         '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/tenants:
     post:
       operationId: createTenant
+      x-runtime-handler: createTenant
+      x-required-permission: audit:platform:cross_tenant
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Platform management: Tenant.id is the new resource identity, not an implicit tenant scope selector.'
       x-platform-management: { enabled: true }
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
-      responses: { '201': { description: Tenant }, '400': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TenantInput' } } } }
+      responses:
+        '201': { description: 'Tenant', content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: listTenants
+      x-runtime-handler: listTenants
+      x-required-permission: audit:platform:cross_tenant
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Platform management: this explicitly lists tenants and has no tenant_id scope selector.'
       x-platform-management: { enabled: true }
-      responses: { '200': { description: Tenants } }
+      responses:
+        '200': { description: 'Tenants', content: { application/json: { schema: { $ref: '#/components/schemas/TenantList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/sources:
     post:
       operationId: createSource
+      x-runtime-handler: createSource
+      x-required-permission: audit:policy:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
-      responses: { '201': { description: Source system }, '400': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceInput' } } } }
+      responses:
+        '201': { description: 'Source system', content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: listSources
+      x-runtime-handler: listSources
+      x-required-permission: audit:policy:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { $ref: '#/components/parameters/tenantId' }
-      responses: { '200': { description: Source systems } }
+      responses:
+        '200': { description: 'Source systems', content: { application/json: { schema: { $ref: '#/components/schemas/SourceList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/sources/{sourceId}:
     put:
       operationId: updateSource
+      x-runtime-handler: updateSource
+      x-required-permission: audit:policy:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; tenant_id in the query selects the source tenant for platform credentials, body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { name: sourceId, in: path, required: true, schema: { type: string } }
         - { $ref: '#/components/parameters/tenantId' }
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceUpdate' } } } }
-      responses: { '200': { description: Updated source system }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceUpdateInput' } } } }
+      responses:
+        '200': { description: 'Updated source system', content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/schemas:
     post:
       operationId: createSchema
+      x-runtime-handler: createSchema
+      x-required-permission: audit:policy:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventSchema' } } } }
-      responses: { '201': { description: Event schema }, '400': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EventSchemaInput' } } } }
+      responses:
+        '201': { description: 'Event schema', content: { application/json: { schema: { $ref: '#/components/schemas/EventSchema' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: listSchemas
+      x-runtime-handler: listSchemas
+      x-required-permission: audit:policy:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
         - { $ref: '#/components/parameters/tenantId' }
-      responses: { '200': { description: Event schemas } }
+      responses:
+        '200': { description: 'Event schemas', content: { application/json: { schema: { $ref: '#/components/schemas/EventSchemaList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/policies/retention:
     put:
       operationId: setRetentionPolicy
+      x-runtime-handler: setRetention
+      x-required-permission: audit:policy:write
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
-      responses: { '200': { description: Retention policy }, '400': { $ref: '#/components/responses/Error' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicyInput' } } } }
+      responses:
+        '200': { description: 'Retention policy', content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
     get:
       operationId: getRetentionPolicy
+      x-runtime-handler: getRetention
+      x-required-permission: audit:policy:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Retention policy } }
+      responses:
+        '200': { description: 'Retention policy', content: { application/json: { schema: { $ref: '#/components/schemas/RetentionPolicy' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/retention/evaluate:
     post:
       operationId: evaluateRetention
+      x-runtime-handler: evaluateRetention
+      x-required-permission: audit:policy:read
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Immutable ledger events are never deleted by this endpoint.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
-      responses: { '200': { description: Retention evaluation; immutable ledger is never deleted by this endpoint } }
+      responses:
+        '200': { description: 'Retention evaluation; immutable ledger is never deleted by this endpoint', content: { application/json: { schema: { $ref: '#/components/schemas/RetentionReport' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
-    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Asymmetric production JWT using EdDSA/Ed25519, ES256/384/512, RS256 or PS256. Remote JWKS metadata is strictly matched before signature verification. }
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: 'Asymmetric production JWT using EdDSA/Ed25519, ES256/384/512, RS256 or PS256. Remote JWKS metadata is strictly matched before signature verification.' }
   parameters:
     tenantId: { name: tenant_id, in: query, required: false, description: 'Required and non-empty for platform credentials on scoped operations. Ignored as an override for tenant-scoped credentials. Optional only on explicitly all-tenant operations. Empty has the same semantics as omitted.', schema: { type: string, pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$' } }
     from: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
@@ -362,22 +780,43 @@ components:
     eventId: { name: eventId, in: path, required: true, schema: { type: string } }
     operationId: { name: operationId, in: path, required: true, schema: { type: string } }
   responses:
-    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Error: { description: 'Error', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Actor: { type: object, required: [id], description: 'Applicable strings are capped at 8192 UTF-8 bytes at runtime, not characters.', properties: { id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, department: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, roles: { type: array, maxItems: 64, description: 'At most 64 role entries; each role is capped at 8192 UTF-8 bytes at runtime.', items: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }
-    Event: { type: object, description: 'Runtime validation is authoritative. Applicable persisted envelope strings are capped at 8192 UTF-8 bytes, not characters.', required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key], properties: { event_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, tenant_id: { type: string, pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$', description: 'Platform body selector for writeEvent/writeBatch; a tenant token uses the signed claim and a present value is a consistency assertion. Empty or absent is resolved from the authenticated source registration only for non-platform credentials without a tenant claim, then server-stamped. It never participates in query scope resolution.' }, source_system: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }, received_at: { type: string, format: date-time, description: Platform receive time, server-generated }, operation_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, maxItems: 64, description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.', items: { type: object, properties: { type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }, aggregate_type: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_version: { type: integer }, workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, changed_fields: { type: object, maxProperties: 256, description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.', propertyNames: { maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, additionalProperties: { type: object, properties: { before: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 }, after: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 } } } }, payload: { type: object }, payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, source_digest: { type: string, description: SHA-256 of the canonical source content, server-generated }, data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, stream_id: { type: string, description: Ledger stream, server-assigned. A client-supplied value is stripped on ingest and never participates in stream resolution or storage (stream consistency). The server derives the stream from tenant + aggregate/operation/source and stamps it. }, sequence: { type: integer, description: Monotonic stream sequence, server-assigned }, prev_hash: { type: string, description: Previous event hash in the stream chain }, hash: { type: string, description: This event's chain hash }, server_version: { type: string } } }
-    Receipt: { type: object, required: [event_id, tenant_id, status, accepted_at], properties: { event_id: { type: string }, tenant_id: { type: string }, idempotency_key: { type: string, description: Retained receipt key used to enforce idempotency after event payload eviction. }, status: { type: string }, accepted_at: { type: string, format: date-time }, ledgered_at: { type: string, format: date-time }, indexed_at: { type: string, format: date-time }, archived_at: { type: string, format: date-time }, stream_id: { type: string }, sequence: { type: integer }, hash: { type: string }, duplicate: { type: boolean }, conflict: { type: boolean } } }
-    ReceiptResponse: { type: object, properties: { receipt: { $ref: '#/components/schemas/Receipt' }, receipt_url: { type: string } } }
-    Query: { type: object, required: [from, to], description: 'tenant_id is intentionally not a Query property. If sent as an unknown nested field, it cannot affect the outer operation scope; use the operation query parameter instead.', properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
-    QueryResult: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
+    EventInput: { type: object, description: 'Runtime validation is authoritative. Applicable persisted envelope strings are capped at 8192 UTF-8 bytes, not characters. Server-assigned fields (tenant_id on tenant tokens, received_at, source_digest, stream_id, sequence, prev_hash, hash, server_version) are never read from the body: a client-supplied stream_id is stripped on ingest, and a client-supplied tenant_id is a platform body selector or a consistency assertion, never a stream-selection mechanism.', required: [event_id, source_system, event_type, schema_id, schema_version, occurred_at, actor, action, outcome, data_classification, retention_class, idempotency_key], properties: { event_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, tenant_id: { type: string, description: 'Platform body selector for writeEvent/writeBatch; a tenant token uses the signed claim and a present value is a consistency assertion. Empty or absent is resolved from the authenticated source registration only for non-platform credentials without a tenant claim, then server-stamped. It never participates in query scope resolution.' }, source_system: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z] (ClickHouse DateTime64 projection range); out-of-range values are rejected with status 422 at ingest.' }, operation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, maxItems: 64, description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.', items: { type: object, properties: { type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }, aggregate_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_version: { type: integer }, workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, changed_fields: { type: object, maxProperties: 256, description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.', propertyNames: { maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, additionalProperties: { type: object, properties: { before: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 }, after: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 } } } }, payload: { type: object }, payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, stream_id: { type: string, writeOnly: true, description: 'Accepted for backward compatibility but ignored on ingest: the server derives the stream from tenant + aggregate/operation/source and stamps it. stream_id is a read/query filter only. x-ignored-on-ingest: true', x-ignored-on-ingest: true } } }
+    Event: { type: object, description: 'Runtime validation is authoritative. Server-materialized governance event returned by reads. readOnly properties are stamped by the server and are never accepted as input selectors.', required: [event_id, tenant_id, source_system, event_type, schema_id, schema_version, occurred_at, received_at, actor, action, outcome, data_classification, retention_class, idempotency_key, stream_id, sequence, hash], properties: { event_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, tenant_id: { type: string, readOnly: true, pattern: '^$|^[^:\x00-\x1F\x7F\s/\\]+$', description: 'Server-stamped ownership. Never participates in query scope resolution.' }, source_system: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, event_type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, schema_version: { type: integer, minimum: 1 }, occurred_at: { type: string, format: date-time, description: 'Business occurrence time, UTC. Must be within [1900-01-01T00:00:00Z, 2299-12-31T23:59:59.999Z]; out-of-range values are rejected 422 occurred_at_out_of_range at ingest.' }, received_at: { type: string, format: date-time, readOnly: true, description: 'Platform receive time, server-generated.' }, operation_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, causation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, correlation_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, trace_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, span_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, actor: { $ref: '#/components/schemas/Actor' }, targets: { type: array, maxItems: 64, description: 'At most 64 targets; applicable target strings are capped at 8192 UTF-8 bytes at runtime.', items: { type: object, properties: { type: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, name: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' } } } }, aggregate_type: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$', maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, aggregate_version: { type: integer }, workflow_instance_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, execution_run_id: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, action: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, outcome: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, reason: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, changed_fields: { type: object, maxProperties: 256, description: 'At most 256 changed-field entries. Keys are capped at 8192 UTF-8 bytes; before and after values are capped at 8192 bytes after canonical JSON serialization.', propertyNames: { maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, additionalProperties: { type: object, properties: { before: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 }, after: { description: 'Canonical JSON serialization is capped at 8192 UTF-8 bytes at runtime.', x-maxCanonicalJsonBytes: 8192 } } } }, payload: { type: object }, payload_ref: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, source_digest: { type: string, readOnly: true, description: 'SHA-256 of the canonical source content, server-generated.' }, data_classification: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, retention_class: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, idempotency_key: { type: string, maxLength: 8192, description: 'Runtime limit is 8192 UTF-8 bytes, not characters.' }, stream_id: { type: string, readOnly: true, description: 'Ledger stream, server-assigned.' }, sequence: { type: integer, readOnly: true, description: 'Monotonic stream sequence, server-assigned' }, prev_hash: { type: string, readOnly: true, description: 'Previous event hash in the stream chain' }, hash: { type: string, readOnly: true, description: "This event's chain hash" }, server_version: { type: string, readOnly: true, description: 'Server build version that materialized the event' } } }
+    Receipt: { type: object, required: [event_id, tenant_id, status, accepted_at], properties: { event_id: { type: string }, tenant_id: { type: string }, idempotency_key: { type: string, description: 'Retained receipt key used to enforce idempotency after event payload eviction.' }, status: { type: string }, accepted_at: { type: string, format: date-time }, ledgered_at: { type: string, format: date-time }, indexed_at: { type: string, format: date-time }, archived_at: { type: string, format: date-time }, stream_id: { type: string }, sequence: { type: integer }, hash: { type: string }, duplicate: { type: boolean }, conflict: { type: boolean } } }
+    ReceiptResponse: { type: object, required: [receipt, receipt_url], properties: { receipt: { $ref: '#/components/schemas/Receipt' }, receipt_url: { type: string } } }
+    BatchReceiptResponse: { type: object, required: [receipts], description: 'Successful whole-batch acceptance. Partial-failure responses instead carry both the receipts accepted so far and an error object (see BatchPartialError).', properties: { receipts: { type: array, items: { $ref: '#/components/schemas/Receipt' } } } }
+    BatchPartialError: { type: object, required: [receipts, error], description: 'Batch ingestion stops at the first failing member; receipts contains the members accepted before the failure and error carries the first-failure classification. All batch statuses (2xx success aside) are documented against this body via oneOf with Error.', properties: { receipts: { type: array, items: { $ref: '#/components/schemas/Receipt' } }, error: { $ref: '#/components/schemas/Error' } } }
+    Query: { type: object, required: [from, to], description: 'tenant_id is intentionally not a Query property. If sent as an unknown nested field, it cannot affect the outer operation scope; use the operation query parameter instead.', properties: { from: { type: string, format: date-time }, to: { type: string, format: date-time }, event_type: { type: string }, source_system: { type: string }, actor_id: { type: string }, target_id: { type: string }, operation_id: { type: string }, causation_id: { type: string }, correlation_id: { type: string }, aggregate_type: { type: string }, aggregate_id: { type: string }, trace_id: { type: string }, outcome: { type: string }, payload_field: { type: string }, payload_digest: { type: string }, stream_id: { type: string }, cursor: { type: string }, page_size: { type: integer, maximum: 1000 } } }
+    QueryResult: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
     AuditExplorerResult: { type: object, required: [events, count], properties: { events: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_cursor: { type: string }, count: { type: integer } } }
+    EventFacetsResponse: { type: object, required: [facets], properties: { facets: { $ref: '#/components/schemas/EventFacets' } } }
     EventFacets: { type: object, required: [total, outcomes, types, clients, providers], properties: { total: { type: integer }, outcomes: { type: object, additionalProperties: { type: integer } }, types: { type: object, additionalProperties: { type: integer } }, clients: { type: object, additionalProperties: { type: integer } }, providers: { type: object, additionalProperties: { type: integer } } } }
-    LegalHold: { type: object, required: [name, reason], description: 'tenant_id is an optional consistency assertion; the query tenant_id selects ownership and the server resolves the response field.', properties: { id: { type: string }, tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
+    OperationSummary: { type: object, required: [operation_id, tenant_id, event_count, first_at, last_at, outcomes], properties: { operation_id: { type: string }, tenant_id: { type: string }, event_count: { type: integer }, first_at: { type: string, format: date-time }, last_at: { type: string, format: date-time }, outcomes: { type: array, items: { type: string } } } }
+    ReplayResult: { type: object, required: [tenant_id, event_count, state, last_sequence], properties: { tenant_id: { type: string }, operation_id: { type: string }, aggregate_id: { type: string }, event_count: { type: integer }, state: { type: object, additionalProperties: true }, last_sequence: { type: integer, format: int64 } } }
+    ExportJob: { type: object, required: [id, tenant_id, requested_by, query, status, created_at, event_count], properties: { id: { type: string }, tenant_id: { type: string }, requested_by: { type: string }, query: { $ref: '#/components/schemas/Query' }, status: { type: string }, created_at: { type: string, format: date-time }, finished_at: { type: string, format: date-time }, object_path: { type: string }, digest: { type: string }, event_count: { type: integer }, error: { type: string } } }
+    IntegrityResult: { type: object, required: [valid, tenant_id, event_count, segment_count, checked_at], properties: { valid: { type: boolean }, tenant_id: { type: string }, stream_id: { type: string }, event_count: { type: integer }, segment_count: { type: integer }, checked_at: { type: string, format: date-time }, errors: { type: array, items: { type: string } } } }
+    LegalHoldInput: { type: object, required: [name, reason], description: 'tenant_id is an optional consistency assertion; the query tenant_id selects ownership and the server resolves the response field.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' } } }
+    LegalHold: { type: object, required: [id, tenant_id, name, reason, filter, created_by, created_at], description: 'Server-materialized legal hold. tenant_id, created_by and created_at are stamped by the server.', properties: { id: { type: string, readOnly: true }, tenant_id: { type: string, readOnly: true, description: 'Server-resolved ownership output; not a selector.' }, name: { type: string }, reason: { type: string }, filter: { $ref: '#/components/schemas/Query' }, created_by: { type: string, readOnly: true }, created_at: { type: string, format: date-time, readOnly: true }, released_at: { type: string, format: date-time, readOnly: true }, released_by: { type: string, readOnly: true } } }
+    LegalHoldList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/LegalHold' } }, count: { type: integer } } }
     RestoreRequest: { type: object, required: [operation_id, reason], properties: { operation_id: { type: string }, reason: { type: string } } }
-    Tenant: { type: object, required: [id, name], properties: { id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$' }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }
-    Source: { type: object, required: [id, name], description: 'tenant_id is server-resolved ownership output and is never a platform selector; createSource selects ownership with the query tenant_id.', properties: { id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, tenant_id: { type: string, description: 'Server-resolved ownership output; not a selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
-    SourceUpdate: { type: object, required: [name, active], description: 'tenant_id is an optional consistency assertion; query tenant_id selects the source tenant.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to the path sourceId., items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    RestorePreview: { type: object, required: [id, tenant_id, operation_id, proposed_state, external_calls, requires_approval], properties: { id: { type: string }, tenant_id: { type: string }, operation_id: { type: string }, proposed_state: { type: object, additionalProperties: true }, external_calls: { type: array, items: { type: string } }, requires_approval: { type: boolean } } }
+    RestoreRun: { type: object, required: [id, tenant_id, operation_id, status, reason, created_at], properties: { id: { type: string }, tenant_id: { type: string }, operation_id: { type: string }, status: { type: string }, reason: { type: string }, created_by: { type: string }, created_at: { type: string, format: date-time }, approved_by: { type: string }, approved_at: { type: string, format: date-time }, rejected_by: { type: string }, rejected_at: { type: string, format: date-time } } }
+    TenantInput: { type: object, required: [id, name], description: 'Tenant.id is the new resource identity, not an implicit tenant scope selector.', properties: { id: { type: string }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }
+    Tenant: { type: object, required: [id, name], description: 'Server-materialized tenant. active defaults to true on create.', properties: { id: { type: string, pattern: '^[^:\x00-\x1F\x7F\s/\\]+$' }, name: { type: string }, home_region: { type: string }, data_region: { type: string }, active: { type: boolean }, events_per_second: { type: integer }, burst: { type: integer } } }
+    TenantList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/Tenant' } }, count: { type: integer } } }
+    SourceInput: { type: object, required: [id, name], description: 'tenant_id is an optional consistency assertion; query tenant_id selects ownership for platform writes.', properties: { id: { type: string }, tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: 'Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id.', items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    Source: { type: object, required: [id, name], description: 'tenant_id is server-resolved ownership output and is never a platform selector; createSource selects ownership with the query tenant_id.', properties: { id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, tenant_id: { type: string, readOnly: true, description: 'Server-resolved ownership output; not a selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: 'Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to id.', items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    SourceList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/Source' } }, count: { type: integer } } }
+    SourceUpdateInput: { type: object, required: [name, active], description: 'tenant_id is an optional consistency assertion; query tenant_id selects the source tenant.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, name: { type: string }, allowed_client_ids: { type: array, uniqueItems: true, description: 'Exact signed OAuth client_id values allowed to write this source. Empty means only client_id equal to the path sourceId.', items: { type: string, minLength: 1 } }, active: { type: boolean } } }
+    EventSchemaInput: { type: object, required: [schema_id, version, event_type], description: 'tenant_id is an optional consistency assertion; query tenant_id selects platform writes.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, schema_id: { type: string }, version: { type: integer }, event_type: { type: string }, required_fields: { type: array, items: { type: string } }, allowed_fields: { type: array, items: { type: string } }, encrypted_fields: { type: array, items: { type: string } }, searchable_fields: { type: array, items: { type: string } }, classification: { type: string }, active: { type: boolean } } }
     EventSchema: { type: object, required: [schema_id, version, event_type], description: 'tenant_id is server-resolved ownership output or an optional consistency assertion; query tenant_id selects platform writes.', properties: { tenant_id: { type: string, description: 'Consistency/output field; never a platform selector.' }, schema_id: { type: string, pattern: '^[^\x00-\x1F\x7F\s/\\]+$' }, version: { type: integer }, event_type: { type: string }, required_fields: { type: array, items: { type: string } }, allowed_fields: { type: array, items: { type: string } }, encrypted_fields: { type: array, items: { type: string } }, searchable_fields: { type: array, items: { type: string } }, classification: { type: string }, active: { type: boolean } } }
-    RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], description: 'tenant_id in a response is required ownership output; for writes query tenant_id selects the tenant and the body value is only a consistency assertion.', properties: { tenant_id: { type: string, description: 'Ownership output or consistency assertion; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: Exact event retention class evaluated by this policy; other compliance classes are unaffected. } } }
-    Error: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } } }
+    EventSchemaList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/EventSchema' } }, count: { type: integer } } }
+    RetentionPolicyInput: { type: object, required: [hot_days, warm_days, archive_days, retention_class], description: 'tenant_id is an optional consistency assertion; query tenant_id selects the tenant.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: 'Exact event retention class evaluated by this policy; other compliance classes are unaffected.' } } }
+    RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], description: 'tenant_id in a response is required ownership output; for writes query tenant_id selects the tenant and the body value is only a consistency assertion.', properties: { tenant_id: { type: string, description: 'Ownership output or consistency assertion; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: 'Exact event retention class evaluated by this policy; other compliance classes are unaffected.' } } }
+    RetentionReport: { type: object, required: [tenant_id, evaluated_at, policy, eligible_events, protected_events, action], properties: { tenant_id: { type: string }, evaluated_at: { type: string, format: date-time }, policy: { $ref: '#/components/schemas/RetentionPolicy' }, eligible_events: { type: integer }, protected_events: { type: integer }, hold_ids: { type: array, items: { type: string } }, action: { type: string } } }
+    Error: { type: object, required: [error], description: 'Standard error envelope. code is one of invalid_request, unauthorized, forbidden, not_found, conflict, occurred_at_out_of_range, schema_not_found, tenant_mismatch, quota_exceeded, snapshot_conflict, internal_error. A 400 internal_error may surface when a raw body-decoding failure precedes error classification; message is redacted to internal server error on any 5xx.', properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, description: 'Machine-readable classification code.' }, message: { type: string }, request_id: { type: string } } } } }
+    AdminActionList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/AdminAction' } }, count: { type: integer } } }
     AdminAction: { type: object, required: [id, actor, action, created_at], properties: { id: { type: string }, tenant_id: { type: string }, actor: { type: string }, action: { type: string }, target_type: { type: string }, target_id: { type: string }, detail: { type: string }, created_at: { type: string, format: date-time } } }

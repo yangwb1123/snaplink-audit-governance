@@ -147,6 +147,11 @@ def cmd_check_routes() -> int:
     return run(root=ROOT)
 
 
+def cmd_openapi_contract() -> int:
+    """Validate the checked-in OpenAPI document with the pinned Go validator."""
+    return run("go", "run", "./cmd/openapi-contract")
+
+
 def cmd_check_root() -> int:
     allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
@@ -370,7 +375,8 @@ def cmd_coverage() -> int:
 
 
 def cmd_check() -> int:
-    for command in (cmd_fmt, cmd_check_filesize, cmd_check_routes, cmd_vet, cmd_test):
+    for command in (cmd_fmt, cmd_check_filesize, cmd_check_routes,
+                    cmd_openapi_contract, cmd_vet, cmd_test):
         if command() != 0:
             return 1
     return 0
@@ -411,7 +417,8 @@ def cmd_quality() -> int:
     from checks.tenant_scope import run as tenant_scope
     for command in (cmd_fmt, filesize, complexity, architecture, directory_fanout,
                     root_files, root_business_code, invariants, exemptions,
-                    adr_compliance, make_help, route_contract, contract_fields,
+                    adr_compliance, make_help, route_contract, cmd_openapi_contract,
+                    contract_fields,
                     asyncapi_channels,
                     proto_sync,  # proto drift guard: fails fast, before the ~95s Go stages
                     dev_auth_manifest, tenant_consistency, tenant_scope, stream_consistency,
@@ -487,6 +494,7 @@ COMMANDS = {
     "self-test": cmd_self_test,
     "check-invariants": cmd_check_invariants,
     "check-routes": cmd_check_routes,
+    "check-openapi": cmd_openapi_contract,
     "check-root": cmd_check_root,
     "root-files": lambda: check_module("root_files"),
     "root-business-code": lambda: check_module("root_business_code"),

@@ -461,6 +461,47 @@ class RouteContractTest(unittest.TestCase):
 
     # -- AC-4: corrected real repo passes ---------------------------------
 
+    def make_real_contract_tree(self) -> Path:
+        tree = tempfile.TemporaryDirectory()
+        root = Path(tree.name)
+        self.addCleanup(tree.cleanup)
+        (root / "api" / "openapi").mkdir(parents=True)
+        shutil.copytree(ROOT / "internal", root / "internal")
+        (root / "api" / "openapi" / "openapi.yaml").write_text(
+            (ROOT / "api" / "openapi" / "openapi.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        return root
+
+    def test_executable_contract_missing_permission_fails(self):
+        root = self.make_real_contract_tree()
+        path = root / "api" / "openapi" / "openapi.yaml"
+        spec = path.read_text(encoding="utf-8")
+        spec = spec.replace(
+            "x-required-permission: audit:event:read",
+            "x-required-permission: ''",
+            1,
+        )
+        path.write_text(spec, encoding="utf-8")
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("missing x-required-permission", output)
+
+    def test_executable_contract_status_mapping_must_match_runtime(self):
+        root = self.make_real_contract_tree()
+        path = root / "api" / "openapi" / "openapi.yaml"
+        spec = path.read_text(encoding="utf-8")
+        spec = spec.replace(
+            "x-error-mappings: [{ code: invalid_request, status: 400 }",
+            "x-error-mappings: [{ code: invalid_request, status: 401 }",
+            1,
+        )
+        path.write_text(spec, encoding="utf-8")
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("invalid_request", output)
+        self.assertIn("want runtime status 400", output)
+
     def test_real_repo_clean_and_cli_wiring(self):
         code, output = run_capture(run)
         self.assertEqual(code, 0, output)

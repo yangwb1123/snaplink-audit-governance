@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-08-27 — Executable OpenAPI HTTP contract
+
+The checked-in OpenAPI contract now records every runtime handler, required permission, and `statusForError` classification. Success and error payload schemas cover all routes, including batch receipts, list wrappers, receipt diagnostics, and query stream filters. `checks/route_contract.py` validates this metadata, and `cmd/openapi-contract` performs pinned OpenAPI 3.1 validation with kin-openapi v0.148.0.
+
 ## 2026-08-27 — Explicit tenant scope for platform-capable API operations
 
 Scoped API operations now reject omitted, empty, malformed, or repeated platform tenant selectors before service access. Tenant credentials remain bound to their signed tenant, while only Console event/facet reads and admin-action reads retain approved all-tenant filtering. Platform event writes select each event tenant from the body, and source, schema, retention, and legal-hold writes treat query selection as authoritative.

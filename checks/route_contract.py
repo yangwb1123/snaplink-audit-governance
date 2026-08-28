@@ -2,6 +2,12 @@ import re
 import sys
 from http import HTTPStatus
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - the quality image provides PyYAML
+    yaml = None
+
 from .config import ROOT
 
 
@@ -190,6 +196,206 @@ def _component_names(text: str) -> dict[str, set[str]]:
     return names
 
 
+EXECUTABLE_CONTRACT_VERSION = 1
+OPENAPI_METHODS = frozenset({"get", "post", "put", "delete", "patch"})
+ERROR_CODE_BY_SENTINEL = {
+    "ErrOccurredAtOutOfRange": "occurred_at_out_of_range",
+    "ErrInvalid": "invalid_request",
+    "ErrUnauthorized": "unauthorized",
+    "ErrForbidden": "forbidden",
+    "ErrNotFound": "not_found",
+    "ErrConflict": "conflict",
+    "ErrQuotaExceeded": "quota_exceeded",
+    "ErrSchemaNotFound": "schema_not_found",
+    "ErrTenantMismatch": "tenant_mismatch",
+    "ErrSnapshotConflict": "snapshot_conflict",
+}
+
+
+def _load_openapi(root: Path) -> dict:
+    """Load the executable contract without allowing a parser failure to pass."""
+    if yaml is None:
+        raise RouteContractError(
+            "executable OpenAPI contract requires the pinned quality environment "
+            "to provide PyYAML"
+        )
+    spec = root / "api/openapi/openapi.yaml"
+    try:
+        document = yaml.safe_load(spec.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise RouteContractError(f"OpenAPI YAML cannot be loaded: {error}") from None
+    if not isinstance(document, dict):
+        raise RouteContractError("OpenAPI document must be a mapping")
+    return document
+
+
+def _openapi_operations(document: dict):
+    """Yield (path, method, operation) entries from a parsed OpenAPI document."""
+    paths = document.get("paths")
+    if not isinstance(paths, dict):
+        raise RouteContractError("OpenAPI paths must be a mapping")
+    for path, path_item in paths.items():
+        if not isinstance(path, str) or not isinstance(path_item, dict):
+            raise RouteContractError(f"invalid OpenAPI path item {path!r}")
+        for method, operation in path_item.items():
+            if method.lower() not in OPENAPI_METHODS:
+                continue
+            if not isinstance(operation, dict):
+                raise RouteContractError(
+                    f"{method.upper()} {path} operation must be a mapping"
+                )
+            yield path, method.lower(), operation
+
+
+def _response_schema(document: dict, response: object) -> object | None:
+    """Resolve a local response reference and require a media schema."""
+    if not isinstance(response, dict):
+        return None
+    if "$ref" in response:
+        reference = response["$ref"]
+        prefix = "#/components/responses/"
+        if not isinstance(reference, str) or not reference.startswith(prefix):
+            return None
+        responses = document.get("components", {}).get("responses", {})
+        response = responses.get(reference[len(prefix):])
+        if not isinstance(response, dict):
+            return None
+    content = response.get("content")
+    if not isinstance(content, dict) or not content:
+        return None
+    for media in content.values():
+        if isinstance(media, dict) and isinstance(media.get("schema"), dict):
+            return media["schema"]
+    return None
+
+
+def _runtime_error_mappings(root: Path) -> dict[str, int]:
+    """Extract statusForError's ordered sentinel mapping plus its default."""
+    source = root / "internal/httpapi/server.go"
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RouteContractError(f"cannot read statusForError source: {error}") from None
+    function = re.search(
+        r"func statusForError\(err error\) int \{(?P<body>.*?\n\})",
+        text,
+        re.DOTALL,
+    )
+    if not function:
+        raise RouteContractError("statusForError function is not discoverable")
+    mappings: dict[str, int] = {}
+    for match in re.finditer(
+        r"case\s+errors\.Is\(err,\s*(?:domain|store)\.(Err\w+)\):"
+        r".*?return\s+http\.Status(\w+)",
+        function.group("body"),
+        re.DOTALL,
+    ):
+        sentinel, status_name = match.groups()
+        code = ERROR_CODE_BY_SENTINEL.get(sentinel)
+        if code is None:
+            raise RouteContractError(f"unmapped statusForError sentinel {sentinel}")
+        mappings[code] = _status_code(status_name)
+    if not mappings:
+        raise RouteContractError("statusForError has no discoverable sentinel mappings")
+    mappings["internal_error"] = HTTPStatus.INTERNAL_SERVER_ERROR
+    return mappings
+
+
+def _executable_contract_violations(root: Path) -> list[str]:
+    """Validate the opt-in executable OpenAPI metadata and response contract."""
+    document = _load_openapi(root)
+    operations = list(_openapi_operations(document))
+    enabled = document.get("x-contract-version") == EXECUTABLE_CONTRACT_VERSION
+    enabled = enabled or any(
+        "x-runtime-handler" in operation for _, _, operation in operations
+    )
+    if not enabled:
+        return []
+
+    runtime_ops, _ = _build_index(root)
+    runtime_errors = _runtime_error_mappings(root)
+    findings: list[str] = []
+    operation_ids: dict[str, str] = {}
+    for path, method, operation in operations:
+        display = f"{method.upper()} {path}"
+        operation_id = operation.get("operationId")
+        if not isinstance(operation_id, str) or not operation_id:
+            findings.append(f"{display} missing operationId")
+        elif operation_id in operation_ids:
+            findings.append(
+                f"duplicate operationId {operation_id} ({operation_ids[operation_id]} and {display})"
+            )
+        else:
+            operation_ids[operation_id] = display
+
+        key = (method.upper(), normalize(path))
+        expected_handler = runtime_ops.get(key)
+        handler = operation.get("x-runtime-handler")
+        if not isinstance(handler, str) or not handler:
+            findings.append(f"{display} missing x-runtime-handler")
+        elif expected_handler and handler != expected_handler:
+            findings.append(
+                f"{display} maps to {handler}, runtime registers {expected_handler}"
+            )
+        if not isinstance(operation.get("x-required-permission"), str) or not operation[
+            "x-required-permission"
+        ].strip():
+            findings.append(f"{display} missing x-required-permission")
+
+        responses = operation.get("responses")
+        mappings = operation.get("x-error-mappings")
+        if not isinstance(responses, dict) or not responses:
+            findings.append(f"{display} missing responses")
+            continue
+        if not isinstance(mappings, list) or not mappings:
+            findings.append(f"{display} missing x-error-mappings")
+            mappings = []
+
+        status_codes: set[int] = set()
+        for raw_status, response in responses.items():
+            try:
+                status = int(raw_status)
+            except (TypeError, ValueError):
+                findings.append(f"{display} has non-numeric response status {raw_status!r}")
+                continue
+            status_codes.add(status)
+            if 200 <= status < 300 and status != 204:
+                if _response_schema(document, response) is None:
+                    findings.append(f"{display} 2xx response {status} has no payload schema")
+            elif 400 <= status < 600 and _response_schema(document, response) is None:
+                findings.append(f"{display} error response {status} has no payload schema")
+
+        declared: dict[str, int] = {}
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                findings.append(f"{display} has malformed x-error-mappings entry")
+                continue
+            code = mapping.get("code")
+            status = mapping.get("status")
+            if not isinstance(code, str) or not code:
+                findings.append(f"{display} has error mapping without code")
+                continue
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                findings.append(f"{display} maps {code} to non-numeric status")
+                continue
+            if code in declared:
+                findings.append(f"{display} duplicates error mapping {code}")
+            declared[code] = status
+            if status not in status_codes:
+                findings.append(f"{display} maps {code} to undocumented status {status}")
+
+        for code, status in runtime_errors.items():
+            if declared.get(code) != status:
+                findings.append(
+                    f"{display} maps {code} to {declared.get(code)!r}, want runtime status {status}"
+                )
+        for code in sorted(set(declared) - set(runtime_errors)):
+            findings.append(f"{display} maps unknown runtime error code {code}")
+    return findings
+
+
 def schema_violations(root: Path) -> list[str]:
     """R3: dangling $refs (schemas/responses/parameters) and defined-but-
     unreferenced top-level schemas. Both directions are safe: atypical
@@ -220,6 +426,9 @@ def run(root: Path | None = None) -> int:
     statusForError mapping is out of scope by design).
     Stage 3 (schema): every $ref must resolve; every top-level schema must be
     referenced.
+    Stage 4 (executable contract): the marked OpenAPI document must expose
+    unique operation IDs, runtime handlers, permissions, response schemas, and
+    the complete statusForError mapping.
 
     root defaults to the repository root (computed from checks/config.py), so
     zero-arg callers (checks/self_test.py, cmd_quality) keep working and the
@@ -274,6 +483,12 @@ def _collect_findings(
     # Stage 3: schema integrity.
     for violation in schema_violations(root):
         findings.append(("schema", violation))
+
+    # Stage 4: opt-in executable contract. Minimal historical fixtures do not
+    # carry the marker/extensions and retain the original route-gate contract;
+    # the checked-in OpenAPI document opts in explicitly.
+    for violation in _executable_contract_violations(root):
+        findings.append(("executable", violation))
     return findings
 
 
