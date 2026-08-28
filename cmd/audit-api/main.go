@@ -65,6 +65,7 @@ func main() {
 	allowDev := flag.Bool("allow-dev-auth", strictBoolEnv(envDevAuth, false), "enable dev:<tenant>:<role> tokens; disable in production")
 	allowDevSecrets := flag.Bool("allow-dev-secrets", strictBoolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, then exit without opening the store or network")
+	consistencyKeyMode := flag.Bool("consistency-key", false, "resolve and print the non-secret signer/archive consistency key without opening the store or probing external services")
 	bootstrapTenant := flag.String("bootstrap-tenant", envOr("AUDIT_BOOTSTRAP_TENANT", "demo"), "create a local bootstrap tenant when missing")
 	segmentSize := flag.Int("segment-size", intEnv("AUDIT_SEGMENT_SIZE", 100), "events per integrity segment")
 	// adminActionsCap bounds Snapshot.AdminActions (control-plane mutation
@@ -109,6 +110,9 @@ func main() {
 	}
 	cfg := service.Config{ServerVersion: "audit-governance/0.1.0", ArchiveDir: *archiveDir, SegmentSize: *segmentSize, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, MaxAdminActions: *adminActionsCap, MaxAdminTrailActions: *adminTrailCap}
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
+	if *consistencyKeyMode {
+		os.Exit(runConsistencyKey(logger, cfg, external))
+	}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
 		os.Exit(runCheckConfigWithMTLS(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey, *grpcTLSClientCA, *grpcRequireMTLS))
@@ -286,6 +290,11 @@ func wireExternal(logger *log.Logger, svc *service.Service, external runtimeconf
 			logger.Printf("archive=s3 bucket=%s endpoint=%s", s3Bucket, s3Endpoint)
 		}
 	}
+	key, keyErr := external.ConsistencyKey()
+	if keyErr != nil {
+		return fmt.Errorf("consistency_key: %w", keyErr)
+	}
+	logger.Printf("consistency_key=%s", key)
 	return nil
 }
 
@@ -392,6 +401,31 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
+// runConsistencyKey resolves only the signer/archive identity needed by the
+// cross-process parity gate. It deliberately skips authentication, state-store,
+// gRPC and archive-readiness checks; Transport() validates the pure endpoint
+// syntax without constructing a client or making a network call.
+func runConsistencyKey(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive) int {
+	svc, err := service.New(nil, cfg)
+	if err != nil {
+		logger.Printf("invalid secrets: %v", err)
+		return 1
+	}
+	external.SigningSecret = svc.Config.SigningSecret
+	external.EncryptionKey = svc.Config.EncryptionKey
+	if _, _, err := external.Transport(); err != nil {
+		logger.Printf("consistency_key: %v", err)
+		return 1
+	}
+	key, err := external.ConsistencyKey()
+	if err != nil {
+		logger.Printf("consistency_key: %v", err)
+		return 1
+	}
+	logger.Printf("consistency_key=%s", key)
+	return 0
+}
+
 // runCheckConfig validates the resolved configuration without opening the
 // store or touching the network: service.New performs the secret fail-fast
 // checks (and resolves dev defaults), the authentication configuration is
@@ -473,7 +507,12 @@ func runCheckConfigWithMTLS(logger *log.Logger, cfg service.Config, external run
 		logger.Printf("%v", transportGRPCErr)
 		return 1
 	}
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d jwt_secret_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), len(authenticator.JWTSecret), signerName, archiveName, s3Transport, vaultTransport, grpcTransport)
+	consistencyKey, keyErr := external.ConsistencyKey()
+	if keyErr != nil {
+		logger.Printf("consistency_key: %v", keyErr)
+		return 1
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d jwt_secret_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s consistency_key=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), len(authenticator.JWTSecret), signerName, archiveName, s3Transport, vaultTransport, grpcTransport, consistencyKey)
 	return 0
 }
 

@@ -1007,6 +1007,81 @@ func buildAuditAPIBinary() (string, error) {
 	return apiBinPath, apiBinErr
 }
 
+// TestRunConsistencyKey is the worker-side pure pre-deploy path: it resolves
+// the key without probing the archive or requiring an authentication config.
+func TestRunConsistencyKey(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	cfg := runtimeconfig.SigningArchive{ArchiveDir: t.TempDir()}
+	if exit := runConsistencyKey(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, cfg); exit != 0 {
+		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "consistency_key=HMAC-SHA256|file:") {
+		t.Fatalf("missing consistency key, got: %q", out)
+	}
+	if strings.Contains(out, "archive_ready=") || strings.Contains(out, "check_config=") {
+		t.Fatalf("pure consistency mode must not run preflight probes, got: %q", out)
+	}
+}
+
+// TestConsistencyKeySubprocessDoesNotProbe is the cross-process regression for
+// the dedicated flag (F-A/F-1): an unreachable S3 endpoint still yields the
+// same pure key from both binaries because neither command constructs a store
+// or calls Ready. It deliberately supplies no JWT configuration.
+func TestConsistencyKeySubprocessDoesNotProbe(t *testing.T) {
+	workerBinary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	apiBinary, err := buildAuditAPIBinary()
+	if err != nil {
+		t.Skipf("audit-api binary unavailable: %v", err)
+	}
+	env := func() []string {
+		result := make([]string, 0, len(os.Environ())+8)
+		for _, item := range os.Environ() {
+			if strings.HasPrefix(item, "AUDIT_") {
+				continue
+			}
+			result = append(result, item)
+		}
+		return append(result,
+			"AUDIT_SIGNING_SECRET=test-signing-secret",
+			"AUDIT_ENCRYPTION_KEY=test-encryption-key",
+			"AUDIT_S3_ENDPOINT=127.0.0.1:1",
+			"AUDIT_S3_BUCKET=worm",
+			"AUDIT_S3_ACCESS_KEY=access",
+			"AUDIT_S3_SECRET_KEY=secret",
+			"AUDIT_ARCHIVE_RETENTION_DAYS=365",
+		)
+	}
+	run := func(binary string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "-consistency-key")
+		cmd.Env = env()
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("%s -consistency-key failed: %v\n%s", binary, runErr, out)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("%s -consistency-key exceeded timeout", binary)
+		}
+		return string(out)
+	}
+	workerOutput := run(workerBinary)
+	apiOutput := run(apiBinary)
+	for name, output := range map[string]string{"worker": workerOutput, "api": apiOutput} {
+		if !strings.Contains(output, "consistency_key=HMAC-SHA256|s3:worm") {
+			t.Fatalf("%s output missing expected key: %q", name, output)
+		}
+		if strings.Contains(output, "archive_ready=") || strings.Contains(output, "check_config=") {
+			t.Fatalf("%s pure key output ran a preflight: %q", name, output)
+		}
+	}
+}
+
 // TestCheckConfigSubprocessExitCodes is T1e (AC-1): the real binary's
 // -check-config exits non-zero and prints archive_ready=failed (never
 // check_config=ok) when the archive dir is occupied by a regular file, and

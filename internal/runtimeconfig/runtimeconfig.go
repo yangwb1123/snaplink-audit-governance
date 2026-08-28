@@ -134,6 +134,40 @@ func (s SigningArchive) Archive() (archive.Store, error) {
 	return newS3Store(endpoint, s.S3AccessKey, s.S3SecretKey, s.S3Bucket, useSSL, retainFor)
 }
 
+// ConsistencyKey returns the non-secret identity shared by the API and
+// governance worker. It deliberately contains the resolved signing scheme and
+// the selected archive destination, but never signing/encryption material,
+// Vault tokens, or S3 credentials. The key is a name-level parity signal:
+// Vault's algorithm includes the Transit key name and S3 identity includes the
+// bucket name; endpoint hosts and retention parameters are validated by their
+// respective transport/archive gates, not encoded here.
+//
+// This method performs no I/O and does not construct an archive client. Its S3
+// partial-configuration check mirrors Archive's selection branch exactly so a
+// direct caller cannot silently turn an invalid S3 configuration into a file
+// identity. The full Archive validation remains the responsibility of the
+// normal startup and -check-config paths.
+func (s SigningArchive) ConsistencyKey() (string, error) {
+	signer, err := s.Signer()
+	if err != nil {
+		return "", fmt.Errorf("consistency key: signer: %w", err)
+	}
+	algorithm := "HMAC-SHA256"
+	if signer != nil {
+		algorithm = signer.Algorithm()
+	}
+
+	configured := s.S3Endpoint != "" || s.S3Bucket != "" || s.S3AccessKey != "" || s.S3SecretKey != ""
+	if configured && (s.S3Endpoint == "" || s.S3Bucket == "" || s.S3AccessKey == "" || s.S3SecretKey == "") {
+		return "", fmt.Errorf("consistency key: archive: s3 archive requires endpoint, bucket, access key and secret key together")
+	}
+	archiveID := "file:" + s.ArchiveDir
+	if s.S3Endpoint != "" {
+		archiveID = "s3:" + s.S3Bucket
+	}
+	return fmt.Sprintf("%s|%s", algorithm, archiveID), nil
+}
+
 // resolveS3Transport returns the minio-ready endpoint (scheme stripped), the
 // resolved useSSL flag, and the resolved transport label ("tls"/"http"). It
 // is the single source of truth used by both Archive() and Transport(): the

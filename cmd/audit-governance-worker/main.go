@@ -67,6 +67,7 @@ func main() {
 	allowInsecureVaultLoopback := flag.Bool("allow-insecure-vault-loopback", strictBoolEnv(runtimeconfig.EnvAllowInsecureVaultLoopback, false), "allow plaintext HTTP Vault only on loopback hosts (AUDIT_ALLOW_INSECURE_VAULT_LOOPBACK)")
 	allowDevSecrets := flag.Bool("allow-dev-secrets", boolEnv(runtimeconfig.EnvDevSecrets, false), "enable well-known development signing/encryption secrets; never enable in production")
 	checkConfig := flag.Bool("check-config", false, "validate secrets and external signing/archive configuration, probe the archive destination (bounded; S3 touches the network), then exit without opening the state store or binding listeners")
+	consistencyKeyMode := flag.Bool("consistency-key", false, "resolve and print the non-secret signer/archive consistency key without opening the store or probing external services")
 	interval := flag.Duration("interval", durationEnv("AUDIT_GOVERNANCE_INTERVAL", 5*time.Minute), "retention evaluation interval")
 	stuckExportAge := flag.Duration("stuck-export-age", durationEnv("AUDIT_GOVERNANCE_STUCK_EXPORT_AGE", service.DefaultStuckExportAge), "fail export jobs stuck in running past this age (0 = default)")
 	once := flag.Bool("once", false, "evaluate once and exit")
@@ -97,6 +98,9 @@ func main() {
 	}
 	cfg := service.Config{ArchiveDir: *archiveDir, SigningSecret: os.Getenv(runtimeconfig.EnvSigningSecret), EncryptionKey: os.Getenv(runtimeconfig.EnvEncryptionKey), AllowDevSecrets: *allowDevSecrets, AggregateCheckpointRetention: aggregateRetention, StuckExportAge: *stuckExportAge}
 	external := runtimeconfig.SigningArchive{ArchiveDir: *archiveDir, VaultAddr: *vaultAddr, VaultToken: *vaultToken, VaultTransitKey: *vaultTransitKey, S3Endpoint: *s3Endpoint, S3Bucket: *s3Bucket, S3AccessKey: *s3AccessKey, S3SecretKey: *s3SecretKey, S3UseSSL: *s3UseSSL, ArchiveRetentionDays: *archiveRetentionDays, AllowInsecureVaultLoopback: *allowInsecureVaultLoopback}
+	if *consistencyKeyMode {
+		os.Exit(runConsistencyKey(logger, cfg, external))
+	}
 	if *checkConfig {
 		os.Exit(runCheckConfig(logger, cfg, external))
 	}
@@ -126,6 +130,11 @@ func main() {
 	if *s3Endpoint != "" {
 		logger.Printf("archive=s3 bucket=%s", *s3Bucket)
 	}
+	key, keyErr := external.ConsistencyKey()
+	if keyErr != nil {
+		logger.Fatalf("consistency_key: %v", keyErr)
+	}
+	logger.Printf("consistency_key=%s", key)
 	// REQ-1: probe the archive destination before the first pass (also in
 	// -once mode). A misconfigured destination is a boot error, not a
 	// per-pass surprise: with S3 the bucket must exist with Object Lock and
@@ -339,6 +348,31 @@ func strictBoolEnv(name string, fallback bool) bool {
 	return parsed
 }
 
+// runConsistencyKey resolves only the signer/archive identity needed by the
+// cross-process parity gate. It deliberately skips authentication, state-store
+// and archive-readiness checks; Transport() validates pure endpoint syntax
+// without constructing a client or making a network call.
+func runConsistencyKey(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive) int {
+	svc, err := service.New(nil, cfg)
+	if err != nil {
+		logger.Printf("invalid secrets: %v", err)
+		return 1
+	}
+	external.SigningSecret = svc.Config.SigningSecret
+	external.EncryptionKey = svc.Config.EncryptionKey
+	if _, _, err := external.Transport(); err != nil {
+		logger.Printf("consistency_key: %v", err)
+		return 1
+	}
+	key, err := external.ConsistencyKey()
+	if err != nil {
+		logger.Printf("consistency_key: %v", err)
+		return 1
+	}
+	logger.Printf("consistency_key=%s", key)
+	return 0
+}
+
 // runCheckConfig validates the resolved configuration without opening the
 // state store or binding listeners. service.New performs the secret fail-fast
 // checks (and resolves dev defaults), then the external signer/archive
@@ -392,7 +426,12 @@ func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconf
 	// has no gRPC listener, so it is unconditionally "disabled", keeping the
 	// ok-line field set/order byte-identical in shape to the API's line (C6:
 	// CI compares API and worker outputs).
-	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport, "disabled")
+	consistencyKey, keyErr := external.ConsistencyKey()
+	if keyErr != nil {
+		logger.Printf("consistency_key: %v", keyErr)
+		return 1
+	}
+	logger.Printf("check_config=ok signing_secret_length=%d encryption_key_length=%d signer=%s archive=%s transport_s3=%s transport_vault=%s transport_grpc=%s consistency_key=%s", len(svc.Config.SigningSecret), len(svc.Config.EncryptionKey), signerName, archiveName, s3Transport, vaultTransport, "disabled", consistencyKey)
 	return 0
 }
 

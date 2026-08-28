@@ -87,7 +87,20 @@
   `-allow-dev-auth` 的开发认证均失败关闭；开发认证白名单仅接受环境变量
   `AUDIT_ALLOW_DEV_AUTH=true`（见 ADR-0007）。
 
-### 3.7 外部基础设施传输（B1/B2）
+### 3.7 跨进程配置一致性键
+- `audit-api` 与 `audit-governance-worker` 都提供无网络的
+  `-consistency-key` 模式；`python3 cli.py consistency-check` 在构建后用同一
+  部署环境执行两者，并在任一进程失败、缺失/重复输出或值不一致时失败关闭。
+  这条门禁专门捕获 HMAC 与 Vault、Transit key 名称、S3 桶和本地归档目录的
+  配置漂移，不依赖 S3/WORM 可达性。
+- 键只含规范方案名和归档名称（`HMAC-SHA256|file:<dir>` 或
+  `vault-transit:<key>|s3:<bucket>`），不含签名/加密密钥、Vault token 或 S3
+  凭据。它是名称级 parity oracle，不是后端身份或密钥正确性 oracle；endpoint
+  主机、保留时长和密钥值仍由完整 `-check-config`、传输门禁及秘密管理流程
+  单独校验。HMAC 的 `HMAC-SHA256` 键标识与日志中的
+  `HMAC-SHA256(dev-compatible)` 是有意不同的展示层字符串。
+
+### 3.8 外部基础设施传输（B1/B2）
 - **边界 B1（进程 → Vault Transit）：** `AUDIT_VAULT_ADDR` 必须为
   `https://…`，或为本机 loopback（`localhost`/`host.docker.internal`/
   `gateway.docker.internal`/loopback IP）+ 显式

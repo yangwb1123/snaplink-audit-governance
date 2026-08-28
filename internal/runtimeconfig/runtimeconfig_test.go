@@ -38,6 +38,162 @@ func TestSignerSelection(t *testing.T) {
 	}
 }
 
+func TestConsistencyKeyStableForIdenticalConfig(t *testing.T) {
+	h1 := SigningArchive{SigningSecret: "test-signing-secret", ArchiveDir: t.TempDir()}
+	h2 := h1
+	key1, err := h1.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key2, err := h2.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key1 != key2 {
+		t.Fatalf("hmac key not stable: %q vs %q", key1, key2)
+	}
+	if want := "HMAC-SHA256|file:" + h1.ArchiveDir; key1 != want {
+		t.Fatalf("hmac key=%q, want %q", key1, want)
+	}
+	repeated, err := h1.ConsistencyKey()
+	if err != nil || repeated != key1 {
+		t.Fatalf("repeated hmac key=%q err=%v, want %q", repeated, err, key1)
+	}
+
+	vault := fullVault(t, "https://vault.example.com:8200", false)
+	s3 := fullS3(t, "https://s3.example.com", true)
+	base := vault
+	base.EncryptionKey = s3.EncryptionKey
+	base.S3Endpoint = s3.S3Endpoint
+	base.S3Bucket = s3.S3Bucket
+	base.S3AccessKey = s3.S3AccessKey
+	base.S3SecretKey = s3.S3SecretKey
+	base.S3UseSSL = s3.S3UseSSL
+	base.ArchiveRetentionDays = s3.ArchiveRetentionDays
+	copyOfBase := base
+	vaultKey1, err := base.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultKey2, err := copyOfBase.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vaultKey1 != vaultKey2 {
+		t.Fatalf("vault key not stable: %q vs %q", vaultKey1, vaultKey2)
+	}
+	if want := "vault-transit:audit-checkpoints|s3:worm"; vaultKey1 != want {
+		t.Fatalf("vault key=%q, want %q", vaultKey1, want)
+	}
+}
+
+func TestConsistencyKeyChangesWhenTransitKeyChanges(t *testing.T) {
+	vault := fullVault(t, "https://vault.example.com:8200", false)
+	s3 := fullS3(t, "https://s3.example.com", true)
+	base := vault
+	base.EncryptionKey = s3.EncryptionKey
+	base.S3Endpoint = s3.S3Endpoint
+	base.S3Bucket = s3.S3Bucket
+	base.S3AccessKey = s3.S3AccessKey
+	base.S3SecretKey = s3.S3SecretKey
+	base.S3UseSSL = s3.S3UseSSL
+	base.ArchiveRetentionDays = s3.ArchiveRetentionDays
+
+	key1, err := base.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedTransitKey := base
+	changedTransitKey.VaultTransitKey = "audit-checkpoints-2"
+	key2, err := changedTransitKey.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key1 == key2 {
+		t.Fatalf("transit key change must change key: %q", key1)
+	}
+
+	changedBucket := base
+	changedBucket.S3Bucket = "worm-2"
+	bucketKey, err := changedBucket.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucketKey == key1 {
+		t.Fatalf("bucket change must change key: %q", key1)
+	}
+
+	fileConfig := base
+	fileConfig.S3Endpoint = ""
+	fileConfig.S3Bucket = ""
+	fileConfig.S3AccessKey = ""
+	fileConfig.S3SecretKey = ""
+	fileConfig.ArchiveDir = t.TempDir()
+	fileKey, err := fileConfig.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileKey == key1 {
+		t.Fatalf("S3-to-file change must change key: %q", key1)
+	}
+
+	hmacConfig := SigningArchive{SigningSecret: "test-signing-secret", ArchiveDir: t.TempDir()}
+	hmacKey, err := hmacConfig.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hmacKey == key1 {
+		t.Fatalf("HMAC-to-Vault change must change key: %q", key1)
+	}
+}
+
+func TestConsistencyKeyRejectsInvalidConfiguration(t *testing.T) {
+	partialS3 := SigningArchive{S3Endpoint: "s3.example.com:9000", ArchiveDir: "/safe/archive"}
+	if key, err := partialS3.ConsistencyKey(); err == nil || key != "" || !strings.Contains(err.Error(), "together") {
+		t.Fatalf("partial S3 config key=%q err=%v, want no key and a together error", key, err)
+	}
+
+	partialVault := SigningArchive{VaultAddr: "https://vault.example.com:8200"}
+	if key, err := partialVault.ConsistencyKey(); err == nil || key != "" || !strings.Contains(err.Error(), "together") {
+		t.Fatalf("partial Vault config key=%q err=%v, want no key and a together error", key, err)
+	}
+}
+
+// TestConsistencyKeyIsNameLevelAndNonSecret documents the intentionally
+// narrow v1 identity: transport/backend-host and credentials are checked by
+// other gates, while this key stays stable for those changes and contains no
+// secret material.
+func TestConsistencyKeyIsNameLevelAndNonSecret(t *testing.T) {
+	cfg := fullS3(t, "s3.example.com:9000", false)
+	cfg.SigningSecret = "unique-signing-secret-not-in-key"
+	cfg.EncryptionKey = "unique-encryption-secret-not-in-key"
+	cfg.S3AccessKey = "unique-access-secret-not-in-key"
+	cfg.S3SecretKey = "unique-s3-secret-not-in-key"
+	key, err := cfg.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportChanged := cfg
+	transportChanged.S3UseSSL = true
+	transportChanged.S3Endpoint = "other-s3.example.com:9000"
+	transportChanged.S3AccessKey = "different-access-key"
+	transportChanged.S3SecretKey = "different-secret-key"
+	transportChanged.EncryptionKey = "different-encryption-key"
+	transportChanged.SigningSecret = "different-signing-secret"
+	changedKey, err := transportChanged.ConsistencyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedKey != key {
+		t.Fatalf("name-level key changed for excluded identity fields: %q vs %q", key, changedKey)
+	}
+	for _, secret := range []string{cfg.SigningSecret, cfg.EncryptionKey, cfg.VaultToken, cfg.S3AccessKey, cfg.S3SecretKey} {
+		if secret != "" && strings.Contains(key, secret) {
+			t.Fatalf("key %q contains secret material %q", key, secret)
+		}
+	}
+}
+
 func TestArchiveSelection(t *testing.T) {
 	cfg := SigningArchive{ArchiveDir: "/tmp/archive"}
 	store, err := cfg.Archive()

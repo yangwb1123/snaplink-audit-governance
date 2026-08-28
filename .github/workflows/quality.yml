@@ -1,0 +1,25 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run repository quality gate
+        run: python3 cli.py quality
+      - name: Compare API and worker consistency keys
+        env:
+          # The repository's local fallback is safe for this wiring smoke test;
+          # production/pre-deploy jobs must inject the real merged values.
+          AUDIT_ALLOW_DEV_SECRETS: "true"
+        run: python3 cli.py consistency-check

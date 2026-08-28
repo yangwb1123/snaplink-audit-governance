@@ -1,5 +1,33 @@
 # Release Notes
 
+## 2026-08-28 — Fail-closed cross-process signer/archive consistency key
+
+**For operators:** `audit-api` and `audit-governance-worker` now emit a
+non-secret `consistency_key=` at startup and on successful `-check-config`.
+After building, run `python3 cli.py consistency-check` (or
+`python3 cli.py predeploy`) with the same merged deployment environment; a
+missing, failed, ambiguous, or mismatched key exits non-zero. The dedicated
+`-consistency-key` mode performs no archive readiness probe, state-store open,
+or network call, so it can detect configuration drift before external services
+are reachable. It does not replace the full `-check-config`/readiness gates.
+
+**For developers:** `SigningArchive.ConsistencyKey()` uses the stable
+`algorithm|s3:<bucket>` / `algorithm|file:<dir>` format, rejects partial S3
+configuration, embeds the Vault Transit key name through
+`vault-transit:<keyname>`, and never includes secret material. The HMAC key
+uses the canonical `HMAC-SHA256` token; the runtime signer/log labels may say
+`HMAC-SHA256(dev-compatible)` or `hmac-sha256` by design. The key is a
+name-level parity signal, not an endpoint-host, retention, or secret-material
+fingerprint. The checker runs built binaries and is covered by mocked mismatch
+and fail-closed tests; the trailing `consistency_key` field preserves the
+existing `check_config=ok` field order.
+
+**Deployment scope:** the repository CI workflow runs the quality gate and a
+network-free wiring smoke test. This repository still provides only the
+`deploy/*.verify.*` reference fixtures, not production IaC or secret delivery;
+production deployment automation must supply the authoritative merged values
+and invoke the same pre-deploy check.
+
 ## 2026-08-28 — FileStore.Get mirrors Put's Lstat+IsRegular guard and no longer follows symlinks / reads non-regular files (direction internal-archive-b9e968b8)
 
 **For operators (behavior change):** `internal/archive`'s local `FileStore.Get` previously read through `os.ReadFile`, which follows a symlink planted at the requested key and returns the target's bytes — defeating directory containment and the tenant-isolation boundary the service layer assumes when it treats `Get` output as authoritative WORM content. `Get` now refuses to read a non-regular final path (symlink, directory, device, fifo, …) and returns an error instead of the followed/target bytes. This closes the write/read asymmetry with the already-hardened `Put` path. A key whose underlying file does not exist still returns the missing-object error unchanged (`os.IsNotExist`), so the missing-key contract is preserved.

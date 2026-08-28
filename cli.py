@@ -91,6 +91,19 @@ def cmd_build() -> int:
     return 0
 
 
+def cmd_consistency_check() -> int:
+    """Compare the pure signer/archive keys from the built API and worker."""
+    from checks.consistency_key import run as consistency_key
+    return consistency_key(root=ROOT)
+
+
+def cmd_predeploy() -> int:
+    """Build release binaries, then run the network-free parity gate."""
+    if cmd_build() != 0:
+        return 1
+    return cmd_consistency_check()
+
+
 def cmd_check_filesize() -> int:
     # The sibling CLI treats this as a gate.  Keep a generous threshold for
     # service implementations while still catching accidental generated blobs.
@@ -155,7 +168,7 @@ def cmd_openapi_contract() -> int:
 def cmd_check_root() -> int:
     allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
                "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
-               "docs", "internal", "migrations", "checks", "test", "bin", "scripts", "web",
+               "docs", "internal", "migrations", "checks", "test", "bin", "scripts", "web", ".github",
                ".trends", ".pi-batch", "engineering.yaml", "__pycache__"}
     unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed and not path.name.startswith(".pi-batch.lock")]
     if unexpected:
@@ -318,7 +331,7 @@ def cmd_adr_compliance() -> int:
 
 
 def cmd_self_test() -> int:
-    required = {"check", "test", "race", "vet", "fmt", "build", "check-routes", "help"}
+    required = {"check", "test", "race", "vet", "fmt", "build", "check-routes", "consistency-check", "help"}
     missing = sorted(required - COMMANDS.keys())
     if missing:
         print("CLI self-test failed:", *missing, sep="\n  ")
@@ -509,6 +522,8 @@ COMMANDS = {
     "vet": cmd_vet,
     "fmt": cmd_fmt,
     "build": cmd_build,
+    "consistency-check": cmd_consistency_check,
+    "predeploy": cmd_predeploy,
     "configure": cmd_generate,
     "modules": cmd_modules,
     "capabilities": cmd_capabilities,

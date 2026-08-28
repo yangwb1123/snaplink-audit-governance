@@ -97,6 +97,15 @@ AUDIT_SIGNING_SECRET=... AUDIT_ENCRYPTION_KEY=... ./bin/audit-governance-worker 
 新增 `jwt_secret_length` 字段（无 JWT 信任源时为 0，仅输出长度、不输出
 密钥值）。
 
+跨进程一致性预检使用独立的无网络模式，避免把 S3 可用性误报为一致性
+失败：构建两个二进制后，以同一份合并部署环境运行
+`./bin/audit-api -consistency-key` 与
+`./bin/audit-governance-worker -consistency-key`，或运行
+`python3 cli.py consistency-check`。该命令要求两边都成功输出且仅输出一个
+`consistency_key=`，值不一致或缺失均以非零退出；它不能替代下面的完整
+`-check-config`（worker 的归档 WORM 探针仍需单独执行）。`consistency_key`
+只表达方案和归档名称级一致性，不包含密钥、token、凭据或 endpoint 主机。
+
 ## 验证顺序
 
 1. Schema、规范化 JSON、哈希和游标单元测试。

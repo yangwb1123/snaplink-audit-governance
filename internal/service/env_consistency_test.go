@@ -29,7 +29,7 @@ func TestEnvConsistencyAcrossBinaries(t *testing.T) {
 				t.Errorf("%s must reference %s (shared env-name constants)", rel, needle)
 			}
 		}
-		for _, needle := range []string{"transport_s3=%s", "transport_vault=%s"} {
+		for _, needle := range []string{"transport_s3=%s", "transport_vault=%s", "consistency_key=%s"} {
 			if !strings.Contains(text, needle) {
 				t.Errorf("%s must emit per-leg transport labels in check_config=ok (%s)", rel, needle)
 			}
@@ -45,12 +45,12 @@ func TestEnvConsistencyAcrossBinaries(t *testing.T) {
 // TestCheckConfigOkLineShapeIdenticalAcrossBinaries pins C6/F11: both
 // binaries must print the same check_config=ok field set and order for the
 // fields they share (signing/encryption lengths, signer, archive, transport
-// labels). The audit-api line is a deliberate superset: it also reports
-// jwt_secret_length (the local HS256 trust-source metric) because the API
-// carries an authenticator; the worker has no JWT trust source, so its line
-// is unchanged. The exact literals are extracted from each main and compared
-// so a drift in either file — field order, names, or the transport
-// suffixes — fails the gate.
+// labels and consistency key). The audit-api line is a deliberate superset:
+// it also reports jwt_secret_length (the local HS256 trust-source metric)
+// because the API carries an authenticator; the worker has no JWT trust
+// source, so its line omits only that field. The exact literals are extracted
+// from each main and compared so a drift in either file — field order, names,
+// transport suffixes, or the trailing key — fails the gate.
 func TestCheckConfigOkLineShapeIdenticalAcrossBinaries(t *testing.T) {
 	apiSrc, err := os.ReadFile(filepath.Join("..", "..", "cmd", "audit-api", "main.go"))
 	if err != nil {
@@ -66,8 +66,8 @@ func TestCheckConfigOkLineShapeIdenticalAcrossBinaries(t *testing.T) {
 	if apiFormat == "" || workerFormat == "" {
 		t.Fatal("both binaries must contain the check_config=ok format literal")
 	}
-	// The worker line is unchanged; the API line is exactly the worker line
-	// with jwt_secret_length inserted after encryption_key_length.
+	// The worker line is the shared shape; the API line is exactly the worker
+	// line with jwt_secret_length inserted after encryption_key_length.
 	wantAPILine := strings.Replace(workerFormat, "encryption_key_length=%d ", "encryption_key_length=%d jwt_secret_length=%d ", 1)
 	if apiFormat != wantAPILine {
 		t.Errorf("check_config=ok format strings must agree except for the API-only jwt_secret_length field:\n  api:    %s\n  worker: %s", apiFormat, workerFormat)

@@ -945,8 +945,8 @@ func TestWireExternal(t *testing.T) {
 		if s.Config.Signer == nil {
 			t.Fatal("signer must remain the service default")
 		}
-		if buf.Len() != 0 {
-			t.Fatalf("no provider log expected, got: %q", buf.String())
+		if !strings.Contains(buf.String(), "consistency_key=HMAC-SHA256|file:") {
+			t.Fatalf("consistency key log expected for the default wiring, got: %q", buf.String())
 		}
 	})
 }
@@ -987,6 +987,34 @@ func writeTestTLSFiles(t *testing.T) (certFile, keyFile string) {
 		t.Fatal(err)
 	}
 	return certFile, keyFile
+}
+
+// TestRunConsistencyKey is the API-side pure pre-deploy path: it resolves
+// secrets and external identity without auth, state-store, gRPC, or archive
+// readiness work, and fails closed on invalid external configuration.
+func TestRunConsistencyKey(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	keyConfig := runtimeconfig.SigningArchive{ArchiveDir: t.TempDir()}
+	if exit := runConsistencyKey(logger, validConfig(), keyConfig); exit != 0 {
+		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "consistency_key=HMAC-SHA256|file:") {
+		t.Fatalf("missing consistency key, got: %q", out)
+	}
+	if strings.Contains(out, "archive_ready=") || strings.Contains(out, "check_config=") {
+		t.Fatalf("pure consistency mode must not run preflight probes, got: %q", out)
+	}
+
+	buf.Reset()
+	invalid := runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200"}
+	if exit := runConsistencyKey(logger, validConfig(), invalid); exit != 1 {
+		t.Fatalf("invalid configuration exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), "together") {
+		t.Fatalf("invalid configuration must report a fail-closed key error, got: %q", buf.String())
+	}
 }
 
 // TestLoopbackListenAddr pins REQ-3.1's fail-closed loopback determination
@@ -1187,18 +1215,20 @@ func TestRunCheckConfigGRPCFieldPosition(t *testing.T) {
 			posS3 := strings.Index(okLine, "transport_s3=")
 			posVault := strings.Index(okLine, "transport_vault=")
 			posGRPC := strings.Index(okLine, "transport_grpc=")
-			if !(posS3 >= 0 && posS3 < posVault && posVault < posGRPC) {
-				t.Fatalf("field order must be transport_s3 < transport_vault < transport_grpc, got: %q", okLine)
+			posKey := strings.Index(okLine, "consistency_key=")
+			if !(posS3 >= 0 && posS3 < posVault && posVault < posGRPC && posGRPC < posKey) {
+				t.Fatalf("field order must be transport_s3 < transport_vault < transport_grpc < consistency_key, got: %q", okLine)
 			}
-			value := okLine[posGRPC+len("transport_grpc="):]
+			tail := okLine[posGRPC+len("transport_grpc=") : posKey]
+			value := strings.TrimSpace(tail)
 			if value != "tls" && value != "insecure" && value != "disabled" {
 				t.Fatalf("transport_grpc value %q not in the fixed set, got: %q", value, okLine)
 			}
 			if value != tc.want {
 				t.Fatalf("transport_grpc=%s, want %s; got: %q", value, tc.want, okLine)
 			}
-			if !strings.HasSuffix(okLine, "transport_grpc="+value) {
-				t.Fatalf("transport_grpc must be the final field, got: %q", okLine)
+			if !strings.HasSuffix(okLine, "consistency_key=HMAC-SHA256|file:") {
+				t.Fatalf("consistency_key must be the final field, got: %q", okLine)
 			}
 		})
 	}

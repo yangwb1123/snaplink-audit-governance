@@ -2,7 +2,7 @@
 
 **Module:** `internal/runtimeconfig`
 **Direction:** Add a fail-closed cross-process consistency key for signer + archive
-**Status:** Design (evidence verified; implementation pending)
+**Status:** Implemented (evidence verified; see ADR-0010 and release notes)
 
 ---
 
@@ -40,12 +40,13 @@ if s.S3Endpoint == "" {            // <-- effective S3-vs-file branch
 }
 ```
 
-The **AND** form in FR-1 (`… != "" && … != "" && … != "" && … != ""`) is the
-**more correct** choice for a deterministic key and is what we will implement.
-Both forms converge to "S3" exactly when all four fields are set — which is the
-only state in which `-check-config` emits a key (it fails at `Archive()`
-otherwise). **Action:** implement the AND form as written; the "identical
-predicate" wording is wrong and should not be copied verbatim into code/comments.
+The **AND** form in FR-1 (`… != "" && … != "" && … != "" && … != ""`) would
+produce a file identity for a partial S3 configuration. That is not fail-closed
+and is not the same branch as `Archive()`. **Implementation correction:** the
+method now mirrors `Archive()`'s OR-then-partial-error check and then branches on
+`S3Endpoint == ""`; a direct caller therefore receives the same partial-S3
+error instead of a misleading file key. Both forms converge on valid
+configurations, but the exact `Archive()` branch is the safer contract.
 
 ### Correction 2 — vault `Algorithm()` already embeds the transit *key name*
 
@@ -98,10 +99,12 @@ func (s SigningArchive) ConsistencyKey() (string, error) {
 	} else {
 		algorithm = signer.Algorithm() // vault: "vault-transit:<keyname>"
 	}
-	// AND form (all four present) — see Correction 1; converges with Archive().
-	s3Configured := s.S3Endpoint != "" && s.S3Bucket != "" && s.S3AccessKey != "" && s.S3SecretKey != ""
+	configured := s.S3Endpoint != "" || s.S3Bucket != "" || s.S3AccessKey != "" || s.S3SecretKey != ""
+	if configured && (s.S3Endpoint == "" || s.S3Bucket == "" || s.S3AccessKey == "" || s.S3SecretKey == "") {
+		return "", fmt.Errorf("consistency key: archive: s3 archive requires endpoint, bucket, access key and secret key together")
+	}
 	archiveID := "file:" + s.ArchiveDir
-	if s3Configured {
+	if s.S3Endpoint != "" {
 		archiveID = "s3:" + s.S3Bucket
 	}
 	return fmt.Sprintf("%s|%s", algorithm, archiveID), nil
@@ -170,51 +173,20 @@ unchanged, so the API↔worker line comparison (C6) stays valid.
 
 ### FR-3 — cross-process deployment assertion (fail-closed)
 
-New `checks/consistency_key.py` (matches the existing `checks/*.py` guard
-style) plus a `cli.py` command `consistency-check`. It runs both binaries'
-`-check-config` against the **same** deployment env, extracts `consistency_key=`,
-and exits non-zero on mismatch or missing key.
+`checks/consistency_key.py` and the `cli.py consistency-check` command run the
+**built** `audit-api` and `audit-governance-worker` binaries with their pure
+`-consistency-key` mode against one copied deployment environment. The mode
+performs no state-store open, authentication preflight, gRPC validation, S3
+client construction, archive readiness probe, or network call. The check fails
+closed when a binary is missing, exits non-zero, emits no key, emits ambiguous
+keys, or emits different keys. It prints both values on a mismatch.
 
-```python
-# checks/consistency_key.py  (sketch)
-import re, subprocess, sys
-from .config import ROOT
-
-KEY_RE = re.compile(r"consistency_key=([^\s]+)")
-LINE_RE = re.compile(r"check_config=ok\b")
-
-def _run(binary, env):
-    p = subprocess.run([sys.executable, "-m", "go", "run", "./cmd/" + binary, "-check-config"],
-                       env=env, capture_output=True, text=True)
-    if p.returncode != 0:
-        print(f"FAIL: {binary} -check-config exited {p.returncode}")
-        return None
-    key = None
-    for line in p.stdout.splitlines():
-        if LINE_RE.search(line):
-            m = KEY_RE.search(line)
-            if m:
-                key = m.group(1)
-    return key
-
-def run(env=None) -> int:
-    env = env or {**os.environ}
-    api = _run("audit-api", env)
-    worker = _run("audit-governance-worker", env)
-    if api is None or worker is None:
-        return 1
-    if api != worker:
-        print(f"FAIL: consistency_key mismatch\n  audit-api:           {api}\n  audit-governance-worker: {worker}")
-        return 1
-    print(f"PASS: consistency_key identical across processes ({api})")
-    return 0
-```
-
-Wire into `cli.py` as `cmd_consistency_check` and call it from the pre-deploy /
-CI stage (run **after** `cmd_build` so the binaries exist). Keep it out of the
-unit-gate `cmd_quality` sequence to avoid requiring a full deployment env during
-the local quality gate (the Go unit tests already cover key derivation; this
-gate covers the cross-binary wiring). See §5.
+The command is intentionally separate from `quality`: deployment automation
+runs `python3 cli.py build` followed by `python3 cli.py consistency-check` (or
+`python3 cli.py predeploy`). The in-repository CI workflow performs that same
+sequence with an explicitly development-only local fallback; production jobs
+must pass the merged deployment environment and retain the normal full
+`-check-config`/readiness gates as a separate check.
 
 ### FR-4 — unit tests (append to `internal/runtimeconfig/runtimeconfig_test.go`)
 
@@ -303,17 +275,56 @@ gate (which runs `cmd_test`/`cmd_race` and the python checks).
 | F2 | **Partial external config in one process** | e.g. worker missing `AUDIT_VAULT_TOKEN` | That process's `-check-config` already fails at `Signer()`/`Archive()` (existing fail-closed) → no `consistency_key` emitted → FR-3 reports a missing key on one side → fails. | None needed; existing guard covers it. |
 | F3 | **Archive identity omits endpoint host** *(limitation)* | Same `S3Bucket` name on two different `S3Endpoint`s (cross-account/region) | Key is identical (`s3:<bucket>`) despite pointing at different destinations. | By-design per FR-1 (`archiveID := "s3:" + s.S3Bucket`). If stronger guarantee is needed later, include `S3Endpoint` host — out of scope here. |
 | F4 | **Retention-days drift not detected** *(limitation)* | `AUDIT_ARCHIVE_RETENTION_DAYS` differs between processes | Key is identical (retention is a per-object Put parameter, not a destination identity). | Out of scope; both processes read the same Helm value. Document that the key pins *destination identity*, not every Put parameter. |
-| F5 | **ConsistencyKey on partially-configured S3 archive** *(low risk)* | Direct call with e.g. only `S3Endpoint` set | `Signer()` succeeds, predicate → `file:<dir>` key, **no error**. | Acceptable: such config is rejected by `-check-config`'s `Archive()` before the key is emitted, so it never enters the FR-3 comparison. |
+| F5 | **ConsistencyKey on partially-configured S3 archive** | Direct call with e.g. only `S3Endpoint` set | The method mirrors `Archive()` and returns the partial-S3 error; no file key is produced. | Direct unit test plus both normal preflight paths remain fail-closed. |
 | F6 | **Both processes wrong-but-identical** | e.g. Vault env missing in *both* → both fall back to HMAC | Keys match → gate passes. The key is a *consistency* oracle, not a correctness oracle. | Separate concern (config validity) already enforced by secret/transport gates. Document. |
 | F7 | **Canonical HMAC token ≠ runtime `Algorithm()`** | HMAC default | Key shows `HMAC-SHA256`; runtime signer reports `HMAC-SHA256(dev-compatible)`; `check_config` `signer=` shows `hmac-sha256`. | Documented design choice (§0 Correction 2). |
 
 ---
 
+## Review disposition and implementation evidence
+
+- **F-A / architect F-1:** resolved with `-consistency-key` in both binaries.
+  The mode resolves secrets and pure endpoint syntax only; it does not run the
+  worker's S3 readiness probe or the API's gRPC preflight. The checker invokes
+  the built binaries and has mocked comparison tests.
+- **F2 / security F-2:** resolved by `checks/consistency_key.py`, which uses
+  `ROOT/bin/*`, copies one environment to both processes, handles missing or
+  failed binaries, rejects ambiguous output, and is wired through
+  `cli.py consistency-check`.
+- **F-B (first design correction):** resolved by mirroring `Archive()`'s
+  OR-configured/partial-error/`S3Endpoint == ""` branch in `ConsistencyKey`;
+  partial S3 input cannot produce a file key.
+- **F-C (second design correction):** resolved and documented: Vault's
+  `vault-transit:<keyname>` algorithm includes the Transit key name, never the
+  Vault token. The canonical HMAC token is intentionally `HMAC-SHA256`.
+- **DevOps F3 (no in-repository CI wiring):** resolved for this repository by
+  `.github/workflows/quality.yml` and the `predeploy`/`consistency-check`
+  commands. The workflow uses a development-only fallback solely to exercise
+  wiring; a release job must inject the merged deployment environment.
+- **DevOps F0 (no production IaC):** explicitly rejected as outside this
+  direction, not silently marked complete. This repository remains a runnable
+  reference implementation; `deploy/*.verify.*` is not a production manifest,
+  and neither this feature nor its CI workflow makes a production-readiness
+  claim. A production IaC/secret-delivery direction must supply its own values
+  and invoke the documented pre-deploy command.
+- **Security F-3 (endpoint/transport/HMAC-secret drift):** explicitly rejected
+  as a widening of the fixed v1 contract. FR-1/C3/I4 require a non-secret,
+  name-level key with the exact `algorithm|s3:<bucket>` or
+  `algorithm|file:<dir>` shape; encoding a secret fingerprint would violate
+  that boundary. Endpoint and transport correctness remains fail-closed in
+  `Signer`/`Archive`/`Transport` and the full `-check-config` path. The
+  limitation is tested and documented rather than presented as backend
+  identity assurance.
+- **F7/F8:** the canonical HMAC token and the additive trailing field are
+  documented in the release notes and runbook; the API-only
+  `jwt_secret_length` difference remains intentional and the consistency
+  checker reads only the dedicated key output.
+
 ## 4. Migration steps
 
 1. **Add `ConsistencyKey()`** to `internal/runtimeconfig/runtimeconfig.go`
-   (after `Archive()`), implementing §1 FR-1 with the **AND** predicate
-   (Correction 1). No new imports.
+   (after `Archive()`), implementing §1 FR-1 with the exact `Archive()` branch
+   and partial-S3 rejection (Correction 1). No new imports.
 2. **Append the two unit tests** (`TestConsistencyKeyStableForIdenticalConfig`,
    `TestConsistencyKeyChangesWhenTransitKeyChanges`) to
    `internal/runtimeconfig/runtimeconfig_test.go`, reusing `fullS3`/`fullVault`.
@@ -324,7 +335,8 @@ gate (which runs `cmd_test`/`cmd_race` and the python checks).
    FR-2, at the tail (C4).
 5. `gofmt` + `go vet ./...` + `go build ./...`.
 6. **Add `checks/consistency_key.py`** and a `cli.py` `consistency-check`
-   command; document it as a pre-deploy/CI stage run **after** build.
+   command using the dedicated network-free `-consistency-key` mode; document
+   it as a pre-deploy/CI stage run **after** build.
 7. `python3 cli.py quality` → QUALITY PASS (architecture/filesize/complexity
    gates remain green; no new dependency edge).
 8. **Docs/changelog:** note the new `consistency_key` field (last on
