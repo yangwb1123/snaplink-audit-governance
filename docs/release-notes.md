@@ -1,5 +1,43 @@
 # Release Notes
 
+## 2026-08-28 — projection.Store.Insert now fails closed on empty/malformed tenant_id (direction PROJ-TENANT)
+
+**For operators (behavior change):** The ClickHouse audit-event projection
+(`audit_events`) is a single shared multi-tenant table keyed first by
+`tenant_id`. Previously an event whose `tenant_id` was empty or malformed was
+written directly, producing phantom `tenant_id=''` rows (present in the shared
+table yet invisible to any scoped `WHERE tenant_id = ?` reader) and sort-key
+pollution from `':'` delimiters or over-85-byte ids. `projection.Store.Insert`
+now rejects such events with `ErrTenantUnscoped` before any database access.
+The kafka consumer classifies that sentinel as a permanent error and
+dead-letters the message on the *first* attempt instead of burning
+`max-attempts` transient retries. No schema migration is required and
+existing well-formed tenant rows are unaffected.
+
+**For developers:**
+- `internal/projection/projection.go`: new exported, `errors.Is`-comparable
+sentinel `ErrTenantUnscoped`; `Store.Insert` evaluates the tenant-scoping
+guard as its *first* statement — `event.TenantID == ""` then
+`domain.ValidTenantIDComponent("tenant_id", event.TenantID)` — returning the
+sentinel directly (no wrap), before payload encoding and before
+`s.db.ExecContext` (so a zero-value `*Store` with nil `db` returns the
+sentinel without panicking). The presence/format guards mirror
+`ErrNotLedgered` and `domain.ErrOccurredAtOutOfRange`.
+- `internal/kafka/kafka.go`: the existing permanent-error dead-letter branch
+now also handles `errors.Is(err, projection.ErrTenantUnscoped)` →
+`ErrorCodePermanentError` (reuses the branch; no new retry/metrics/DLQ
+schema changes).
+- Regression tests: `TestInsertRejectsUnscopedTenant` (empty / `acme:evil` /
+86-byte, nil `*Store`), `TestInsertRejectsUnscopedTenantClickHouse`
+(`AUDIT_TEST_CLICKHOUSE_DSN`-gated; `CountTenant("demo")==1`,
+`CountTenant("")==0`), and `TestConsumerDeadLettersTenantUnscopedOnFirstAttempt`
+(bare + `%w`-wrapped sentinel).
+
+**Deployment scope:** no config, OpenAPI, or DB migration change. Rollback =
+redeploy the previous signed binary; no durable data change. Advisory only
+(out of scope): a one-off `DELETE FROM audit_events WHERE tenant_id = ''` clears
+any pre-existing phantom rows.
+
 ## 2026-08-28 — Fail-closed cross-process signer/archive consistency key
 
 **For operators:** `audit-api` and `audit-governance-worker` now emit a
