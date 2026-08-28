@@ -295,10 +295,11 @@ func TestStatusErrorLogsDetailServerSide(t *testing.T) {
 }
 
 // grpcHarnessOptions tunes newGRPCHarnessOpts for tests that need a custom
-// server logger or transport-level server options.
+// server logger, transport-level server options, or a ledgered publisher.
 type grpcHarnessOptions struct {
-	logger     *log.Logger         // nil => Server.Logger stays nil (nil-guard exercised)
-	serverOpts []grpc.ServerOption // e.g. grpc.MaxRecvMsgSize for the production-cap harness
+	logger     *log.Logger               // nil => Server.Logger stays nil (nil-guard exercised)
+	serverOpts []grpc.ServerOption       // e.g. grpc.MaxRecvMsgSize for the production-cap harness
+	publisher  service.LedgeredPublisher // when set, Service.Ingest writes LedgeredOutbox rows
 }
 
 // newGRPCHarness builds the bufconn-based ingest harness used by the
@@ -317,7 +318,7 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true})
+	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true, LedgeredPublisher: opts.publisher})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +392,122 @@ func keysOf[V any](m map[string]V) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// failingLedgeredPublisher always fails publication, so a committed event's
+// LedgeredOutbox row is retained instead of being acknowledged away. That
+// makes the outbox oracle non-vacuous: a valid event must appear in
+// Events, Receipts, AND LedgeredOutbox, while a rejected event must appear
+// in none of them.
+type failingLedgeredPublisher struct{}
+
+func (p *failingLedgeredPublisher) Publish(_ context.Context, _ domain.Event) error {
+	return fmt.Errorf("simulated broker failure")
+}
+
+// TestGRPCRejectedConversionDoesNotMutatePersistence closes the F-04 oracle
+// gap: with a real file-backed store and a ledgered publisher configured, a
+// rejected duplicate/unknown envelope must leave no Events, Receipts, or
+// LedgeredOutbox entry, and must not prevent a valid batch prefix or a valid
+// prior stream message from committing.
+func TestGRPCRejectedConversionDoesNotMutatePersistence(t *testing.T) {
+	st, client, ctx := newGRPCHarnessOpts(t, grpcHarnessOptions{publisher: &failingLedgeredPublisher{}})
+
+	// The non-vacuous witness: a valid event lands in all three maps, and the
+	// failing publisher keeps its outbox row in place.
+	witness := testProtoEvent("witness-persisted", "crm")
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: witness}); err != nil {
+		t.Fatalf("witness write rejected: %v", err)
+	}
+
+	// Duplicate changed-field names: rejected, nothing persisted.
+	duplicate := testProtoEvent("dup-not-persisted", "crm")
+	duplicate.ChangedFields = []*auditv1.FieldChange{
+		{Field: "x", BeforeJson: `"a"`},
+		{Field: "x", AfterJson: `"b"`},
+	}
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: duplicate}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("duplicate Write code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	// Unknown field on the envelope: rejected, nothing persisted.
+	unknown := testProtoEvent("unknown-not-persisted", "crm")
+	unknown.ProtoReflect().SetUnknown(validationUnknownWire())
+	if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: roundTripEnvelope(t, unknown)}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unknown-field Write code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	// Mixed batch: the valid prefix commits, the invalid member and every
+	// later member leave no trace.
+	prefix := testProtoEvent("batch-prefix-persisted", "crm")
+	batchInvalid := testProtoEvent("batch-invalid-not-persisted", "crm")
+	batchInvalid.ChangedFields = []*auditv1.FieldChange{{Field: "y"}, {Field: "y"}}
+	later := testProtoEvent("batch-later-not-persisted", "crm")
+	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{prefix, batchInvalid, later}})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	}
+	if len(response.GetReceipts()) != 0 {
+		t.Fatalf("WriteBatch receipts=%d, want none on error", len(response.GetReceipts()))
+	}
+
+	// Stream: the valid first message commits; the duplicate terminates the
+	// stream and leaves no trace.
+	streamValid := testProtoEvent("stream-valid-persisted", "crm")
+	streamDuplicate := testProtoEvent("stream-dup-not-persisted", "crm")
+	streamDuplicate.ChangedFields = []*auditv1.FieldChange{{Field: "z"}, {Field: "z"}}
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&auditv1.WriteRequest{Event: streamValid}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("valid stream message rejected: %v", err)
+	}
+	if err := stream.Send(&auditv1.WriteRequest{Event: streamDuplicate}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteStream duplicate code=%v, want InvalidArgument", status.Code(err))
+	}
+
+	rejected := []string{
+		duplicate.GetEventId(),
+		unknown.GetEventId(),
+		batchInvalid.GetEventId(),
+		later.GetEventId(),
+		streamDuplicate.GetEventId(),
+	}
+	assertNoFramedKeys(t, st, rejected...)
+
+	if err := st.Read(func(data *store.Snapshot) error {
+		for _, id := range []string{
+			witness.GetEventId(),
+			prefix.GetEventId(),
+			streamValid.GetEventId(),
+		} {
+			key := store.EventKey("tenant-a", id)
+			if _, exists := data.Events[key]; !exists {
+				t.Errorf("valid event %q was not persisted", id)
+			}
+			if _, exists := data.Receipts[key]; !exists {
+				t.Errorf("valid event %q was not receipted", id)
+			}
+			if _, exists := data.LedgeredOutbox[key]; !exists {
+				t.Errorf("valid event %q is missing from the ledgered outbox (oracle not armed)", id)
+			}
+		}
+		for _, id := range rejected {
+			if _, exists := data.LedgeredOutbox[store.EventKey("tenant-a", id)]; exists {
+				t.Errorf("rejected event %q left a ledgered outbox row", id)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGRPCRejectsKeyFramingEventInvalidArgument is F-1: the gRPC ingest

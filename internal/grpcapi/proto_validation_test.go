@@ -90,6 +90,41 @@ func TestFromProtoRejectsDuplicateChangedFields(t *testing.T) {
 	}
 }
 
+// FuzzRejectDuplicateChangedFields pins the exact-string duplicate invariant:
+// a repeated FieldChange.field is rejected with domain.ErrInvalid, while a
+// slice of distinct names that survives conversion must preserve every key.
+// Names differing only by case or whitespace are distinct, and "" is a
+// valid single key whose second occurrence is a duplicate.
+func FuzzRejectDuplicateChangedFields(f *testing.F) {
+	f.Add("status", "status", "amount")
+	f.Add("", "", "x")
+	f.Add("status", "Status", " status")
+	f.Fuzz(func(t *testing.T, a, b, c string) {
+		event := testProtoEvent("fuzz-duplicate", "crm")
+		event.ChangedFields = []*auditv1.FieldChange{
+			{Field: a, BeforeJson: `"a"`},
+			{Field: b, BeforeJson: `"b"`},
+			{Field: c, BeforeJson: `"c"`},
+		}
+		converted, err := fromProto(event)
+		hasDuplicate := a == b || a == c || b == c
+		if hasDuplicate {
+			if !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("duplicate fields %q/%q/%q accepted: err=%v, want ErrInvalid", a, b, c, err)
+			}
+			return
+		}
+		if err != nil {
+			return // rejection for unrelated reasons (caps, JSON) is out of scope
+		}
+		for _, name := range []string{a, b, c} {
+			if _, ok := converted.ChangedFields[name]; !ok {
+				t.Fatalf("distinct field %q missing from converted event", name)
+			}
+		}
+	})
+}
+
 func TestChangedFieldOrderDoesNotChangeSourceDigest(t *testing.T) {
 	first := testProtoEvent("changed-order-digest", "crm")
 	first.ChangedFields = []*auditv1.FieldChange{
@@ -290,8 +325,27 @@ func TestUnknownFieldsOutsideSupportedScopeRemainAccepted(t *testing.T) {
 		t.Fatalf("unknown WriteBatchRequest/Timestamp rejected: %v", err)
 	}
 
+	// Stream: the per-message WriteRequest wrapper and the Timestamp are also
+	// outside the supported-message validation scope, so unknown fields on
+	// them must not terminate the stream.
+	stream, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamMsg := &auditv1.WriteRequest{Event: testProtoEvent("grpc-unknown-stream-wrapper", "crm")}
+	streamMsg.ProtoReflect().SetUnknown(unknown)
+	streamMsg.Event.OccurredAt.ProtoReflect().SetUnknown(unknown)
+	decodedStreamMsg := &auditv1.WriteRequest{}
+	roundTripProtoMessage(t, streamMsg, decodedStreamMsg)
+	if err := stream.Send(decodedStreamMsg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("unknown WriteRequest/Timestamp in stream rejected: %v", err)
+	}
+
 	if err := st.Read(func(data *store.Snapshot) error {
-		for _, id := range []string{"grpc-unknown-wrapper", "grpc-unknown-batch-wrapper"} {
+		for _, id := range []string{"grpc-unknown-wrapper", "grpc-unknown-batch-wrapper", "grpc-unknown-stream-wrapper"} {
 			if _, exists := data.Events[store.EventKey("tenant-a", id)]; !exists {
 				t.Fatalf("accepted out-of-scope unknown event %q was not persisted", id)
 			}
