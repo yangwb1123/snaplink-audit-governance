@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-08-28 — Fix `fromProto` nil-Actor panic on missing actor field
+
+A server-side panic was possible when a gRPC `Write`, `WriteBatch`, or `WriteStream` request omitted the `actor` field from the `EventEnvelope`. The `fromProto` function dereferenced the nil `*Actor` pointer in a struct literal before the nil guard could execute. The fix reorders the existing nil guard to precede the struct literal — no new logic, no API surface change. Missing-actor requests now return `InvalidArgument` with message `"actor is required"` instead of panicking with `Internal`. Four new tests (unit, Write, WriteBatch, WriteStream) cover the previously untested nil-Actor path.
+
 ## 2026-08-28 — Configurable clock skew tolerance for JWT `exp`/`nbf` validation
 
 `Authenticator` now accepts a `ClockSkew time.Duration` field that widens the acceptance window for `exp` and `nbf` claim checks. A positive `ClockSkew` (e.g. `30 * time.Second`) lets the verifier accept tokens that expired up to `ClockSkew` seconds ago or are not-yet-active up to `ClockSkew` seconds in the future — absorbing typical IdP-to-verifier clock drift. The zero-value default preserves the existing strict zero-tolerance behaviour; no existing code is affected.
