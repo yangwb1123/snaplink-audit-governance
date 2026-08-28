@@ -539,12 +539,13 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			// Idempotency keys are tenant-scoped and must not silently be reused
 			// for another event. This mirrors the control-plane uniqueness
 			// constraint and protects the file-backed reference implementation.
-			if existingKey, ok := idempotencyConflictKey(data, tenantID, key, event.IdempotencyKey); ok {
-				receipt = data.Receipts[existingKey]
-				receipt.Conflict = true
-				receipt.ErrorCode = "idempotency_key_conflict"
-				receipt.ErrorMessage = "idempotency_key is already associated with another event"
-				data.Receipts[existingKey] = receipt
+			if idempotencyKeyReused(data, tenantID, key, event.IdempotencyKey) {
+				// The colliding (rejected) caller observes a freshly built,
+				// self-describing conflict receipt. The pre-existing owner
+				// event's stored receipt is intentionally left untouched (R1/R3):
+				// we never read or write it here, so a successful ingest can
+				// never be corrupted by a later idempotency-key collision.
+				receipt = conflictReceipt(tenantID, event)
 				return fmt.Errorf("%w: idempotency_key is already associated with another event", domain.ErrConflict)
 			}
 
@@ -668,6 +669,22 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 		return receipt, nil
 	}
 	return receipt, nil
+}
+
+// conflictReceipt builds a self-describing conflict receipt for the colliding
+// (rejected) ingest. It deliberately does NOT reference the pre-existing
+// owner event's stored receipt: on an idempotency-key collision the owner's
+// receipt must remain clean in the snapshot, and only the colliding caller
+// observes a conflict (see direction idempotency-key-conflict-...).
+func conflictReceipt(tenantID string, event domain.Event) domain.EventReceipt {
+	return domain.EventReceipt{
+		EventID:        event.EventID,
+		TenantID:       tenantID,
+		IdempotencyKey: event.IdempotencyKey,
+		Conflict:       true,
+		ErrorCode:      "idempotency_key_conflict",
+		ErrorMessage:   "idempotency_key is already associated with another event",
+	}
 }
 
 func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventReceipt, error) {

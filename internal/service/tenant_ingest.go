@@ -29,12 +29,12 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 			receipt = existing
 			return existingErr
 		}
-		if _, existingReceipt, ok := tenantIdempotencyConflict(view, tenantID, key, event.IdempotencyKey); ok {
-			receipt = existingReceipt
-			receipt.Conflict = true
-			receipt.ErrorCode = "idempotency_key_conflict"
-			receipt.ErrorMessage = "idempotency_key is already associated with another event"
-			view.Ledger.SetReceipt(receipt)
+		if idempotencyKeyReusedTenant(view, tenantID, key, event.IdempotencyKey) {
+			// The colliding (rejected) caller observes a freshly built,
+			// self-describing conflict receipt. The pre-existing owner event's
+			// receipt is never read or persisted here (R1/R3), so a successful
+			// ingest cannot be corrupted by a later idempotency-key collision.
+			receipt = conflictReceipt(tenantID, event)
 			return fmt.Errorf("%w: idempotency_key is already associated with another event", domain.ErrConflict)
 		}
 		now := event.ReceivedAt
@@ -102,21 +102,21 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 	return event, receipt, sealed, nil
 }
 
-func tenantIdempotencyConflict(view *store.TenantView, tenantID, eventKey, idempotencyKey string) (string, domain.EventReceipt, bool) {
+func idempotencyKeyReusedTenant(view *store.TenantView, tenantID, eventKey, idempotencyKey string) bool {
 	if receipt, ok := view.Ledger.FindReceiptByIdempotencyKey(idempotencyKey); ok {
 		key := store.EventKey(tenantID, receipt.EventID)
 		if key != eventKey {
-			return key, receipt, true
+			return true
 		}
 	}
 	for key, event := range view.Hot.Events {
 		if key != eventKey && event.TenantID == tenantID && event.IdempotencyKey == idempotencyKey {
-			if receipt, ok := view.Ledger.Receipt(key); ok {
-				return key, receipt, true
+			if _, ok := view.Ledger.Receipt(key); ok {
+				return true
 			}
 		}
 	}
-	return "", domain.EventReceipt{}, false
+	return false
 }
 
 func (s *Service) checkExistingTenantIngest(ctx context.Context, view *store.TenantView, tenantID, eventID, inputDigest string) (domain.EventReceipt, bool, error) {

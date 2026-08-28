@@ -113,21 +113,24 @@ func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, 
 	return events, nil
 }
 
-// idempotencyConflictKey checks both hot events and retained cold receipts.
+// idempotencyKeyReused reports whether idempotencyKey is already bound to a
+// different event for the tenant (hot events and retained cold receipts).
 // Old snapshots may not have the additive receipt field, so their hot event
-// remains the compatibility fallback.
-func idempotencyConflictKey(data *store.Snapshot, tenantID, eventKey, idempotencyKey string) (string, bool) {
+// remains the compatibility fallback. The predicate intentionally returns
+// only a bool: callers must build a fresh conflict receipt for the colliding
+// ingest and must NOT read or mutate the pre-existing owner receipt.
+func idempotencyKeyReused(data *store.Snapshot, tenantID, eventKey, idempotencyKey string) bool {
 	for key, event := range data.Events {
 		if key != eventKey && event.TenantID == tenantID && event.IdempotencyKey == idempotencyKey {
-			return key, true
+			return true
 		}
 	}
 	for key, receipt := range data.Receipts {
 		if key != eventKey && receipt.TenantID == tenantID && receipt.IdempotencyKey != "" && receipt.IdempotencyKey == idempotencyKey {
-			return key, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // checkExistingIngest handles event-id idempotency for both retained and
