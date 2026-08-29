@@ -427,9 +427,13 @@ func TestInsertIdenticalEventReturnsNil(t *testing.T) {
 
 func TestInsertZoneVariantReturnsNil(t *testing.T) {
 	// Same logical event, same instant, different zone encoding: jsonb =
-	// says different, EventContentDigest says identical -> nil.
+	// says different, EventContentDigest says identical -> nil. The source
+	// digest also differs to prove it is not part of content identity.
 	event := outboxEvent("outbox-zone", "idem-zone")
-	stored, err := json.Marshal(zoneVariant(event))
+	event.SourceDigest = "candidate-source-digest"
+	storedEvent := zoneVariant(event)
+	storedEvent.SourceDigest = "stored-source-digest"
+	stored, err := json.Marshal(storedEvent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,6 +443,53 @@ func TestInsertZoneVariantReturnsNil(t *testing.T) {
 	}}
 	if err := Insert(context.Background(), fake, event); err != nil {
 		t.Fatalf("zone-variant re-insert must be idempotent: %v", err)
+	}
+}
+
+// TestInsertSameContentDifferentSourceDigestReturnsNil pins that a caller
+// cannot turn an otherwise identical event into a content conflict by
+// changing SourceDigest. The scripted false equality forces the JSONB-unequal
+// read-back path even though this is the only differing stored field.
+func TestInsertSameContentDifferentSourceDigestReturnsNil(t *testing.T) {
+	event := outboxEvent("outbox-source", "idem-source")
+	event.SourceDigest = "candidate-source-digest"
+	storedEvent := event
+	storedEvent.SourceDigest = "stored-source-digest"
+	stored, err := json.Marshal(storedEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTx{execResult: fakeZeroResult{}, rows: []fakeRow{
+		rowStatusIdentical(StatusPending, false),
+		rowPayload(stored),
+	}}
+	if err := Insert(context.Background(), fake, event); err != nil {
+		t.Fatalf("same content with different source digests must be idempotent: %v", err)
+	}
+}
+
+// TestInsertConflictWithSameSourceDigest is the regression for caller-
+// controlled digest spoofing: differing payloads must remain a conflict even
+// when both stored and candidate events carry the same non-empty digest.
+func TestInsertConflictWithSameSourceDigest(t *testing.T) {
+	event := outboxEvent("outbox-source-conflict", "idem-source-conflict")
+	event.SourceDigest = "shared-source-digest"
+	storedEvent := event
+	storedEvent.Payload = map[string]any{"value": 2}
+	stored, err := json.Marshal(storedEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTx{execResult: fakeZeroResult{}, rows: []fakeRow{
+		rowStatusIdentical(StatusPending, false),
+		rowPayload(stored),
+	}}
+	err = Insert(context.Background(), fake, event)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same SourceDigest with different payload: got %v, want ErrConflict", err)
+	}
+	if !strings.Contains(err.Error(), "event_id already exists with different canonical content") {
+		t.Fatalf("message must identify the canonical-content conflict: %v", err)
 	}
 }
 

@@ -199,15 +199,15 @@ func classifyContentConflict(ctx context.Context, tx Execer, event domain.Event,
 	if err != nil {
 		return fmt.Errorf("insert audit outbox: classify payload: %w", err)
 	}
-	eventDigest, err := domain.EventDigest(event)
+	candidateDigest, err := domain.EventContentDigest(event)
 	if err != nil {
 		return fmt.Errorf("insert audit outbox: classify digest: %w", err)
 	}
-	storedDigest, err := domain.EventDigest(storedEvent)
+	storedDigest, err := domain.EventContentDigest(storedEvent)
 	if err != nil {
 		return fmt.Errorf("insert audit outbox: classify digest: %w", err)
 	}
-	if eventDigest != storedDigest {
+	if candidateDigest != storedDigest {
 		return fmt.Errorf("%w: event_id already exists with different canonical content", domain.ErrConflict)
 	}
 	return duplicateOutcome(status)

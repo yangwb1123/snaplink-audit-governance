@@ -146,18 +146,33 @@ VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, now(), 'pending', 0, now() 
 		t.Fatalf("S1 row count=%d, want 1", n)
 	}
 
-	// S2: same event_id, different canonical content -> ErrConflict.
+	// S2: same event_id and caller-supplied SourceDigest, different payload
+	// -> ErrConflict; the original row remains unchanged.
 	reset()
 	first := base
-	first.EventID, first.IdempotencyKey = "sdk-2", "sdk-idem-2"
+	first.EventID, first.IdempotencyKey, first.SourceDigest = "sdk-2", "sdk-idem-2", "shared-source-digest"
 	if err := Insert(ctx, db, first); err != nil {
 		t.Fatalf("S2 first Insert: %v", err)
 	}
 	other := first
-	other.Action = "delete"
+	other.Payload = map[string]any{"n": 2}
 	err = Insert(ctx, db, other)
 	if !errors.Is(err, domain.ErrConflict) || !strings.Contains(err.Error(), "event_id already exists with different canonical content") {
 		t.Fatalf("S2 content conflict: %v", err)
+	}
+	if n := countOutbox(); n != 1 {
+		t.Fatalf("S2 row count=%d, want 1", n)
+	}
+	var storedPayload []byte
+	if err := db.QueryRowContext(ctx, `SELECT payload FROM audit_outbox WHERE event_id = 'sdk-2'`).Scan(&storedPayload); err != nil {
+		t.Fatalf("S2 read original payload: %v", err)
+	}
+	var storedEvent domain.Event
+	if err := json.Unmarshal(storedPayload, &storedEvent); err != nil {
+		t.Fatalf("S2 decode original payload: %v", err)
+	}
+	if storedEvent.SourceDigest != first.SourceDigest || storedEvent.Payload["n"] != float64(1) {
+		t.Fatalf("S2 original row changed: source_digest=%q payload=%#v", storedEvent.SourceDigest, storedEvent.Payload)
 	}
 
 	// S3: idempotency_key reuse for a different event -> ErrConflict.
