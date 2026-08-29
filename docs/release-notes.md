@@ -1,5 +1,26 @@
 # Release Notes
 
+## 2026-08-29 — Outbox duplicate classification derives identity from event content
+
+**For operators (behavior change):** an `audit_outbox` insert that reuses an
+`event_id` with different canonical content now returns `ErrConflict` even when
+the candidate copied or supplied the same non-empty `SourceDigest`. An
+otherwise equivalent duplicate remains idempotent, including differences in
+`SourceDigest`, server-assigned fields, or time-zone representation. The
+existing row is never replaced, and no migration or relay change is required.
+
+**For developers:** `internal/outbox/classifyContentConflict` now compares
+`domain.EventContentDigest` for both candidate and stored events; `EventDigest`
+keeps its existing source-digest shortcut for other consumers. Regression
+coverage includes the seven-field exclusion/non-mutation matrix, direct
+`EventDigest` compatibility, same-digest/different-payload conflict handling,
+and PostgreSQL row preservation. The writer inventory and rollout decision are
+recorded in [docs/outbox-writer-rollout.md](outbox-writer-rollout.md): this
+checkout and the available sibling source trees contain no external consumer
+of this repository's `internal/outbox` SDK. Any deployment artifact outside
+that inventory must be checked before release because the relay cannot repair
+an old writer.
+
 ## 2026-08-28 — Postgres split store control-plane writes now merge instead of clobbering (direction internal-store-c7524028)
 
 **For operators (behavior change):** The Postgres hot/cold split store

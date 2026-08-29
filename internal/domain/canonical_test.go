@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,97 @@ func TestEventContentDigestEqualsEventDigestWhenSourceDigestUnset(t *testing.T) 
 	}
 	if contentDigest2 != contentDigest {
 		t.Fatalf("EventContentDigest must ignore the stored SourceDigest field: %s != %s", contentDigest2, contentDigest)
+	}
+}
+
+// TestEventDigestPreservesNonEmptySourceDigest pins the compatibility
+// contract for consumers that intentionally use a source-provided digest.
+// Outbox classification must use EventContentDigest instead; EventDigest's
+// shortcut remains unchanged for service and chain callers.
+func TestEventDigestPreservesNonEmptySourceDigest(t *testing.T) {
+	const sourceDigest = "caller-supplied-digest"
+	got, err := EventDigest(Event{SourceDigest: sourceDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != sourceDigest {
+		t.Fatalf("EventDigest = %q, want the supplied digest %q", got, sourceDigest)
+	}
+}
+
+// TestEventContentDigestExclusionMatrix is AC-2: changing each excluded
+// processing field independently leaves content identity unchanged and does
+// not mutate the caller's event graph.
+func TestEventContentDigestExclusionMatrix(t *testing.T) {
+	base := Event{
+		EventID:            "evt-exclusion",
+		TenantID:           "tenant-a",
+		SourceSystem:       "crm",
+		EventType:          "audit.event",
+		SchemaID:           "audit.event",
+		SchemaVersion:      2,
+		OccurredAt:         time.Date(2024, 1, 2, 3, 4, 5, 6, time.UTC),
+		ReceivedAt:         time.Date(2024, 1, 2, 3, 5, 5, 6, time.UTC),
+		Actor:              Actor{ID: "user-1", Type: "user", Roles: []string{"operator"}},
+		Targets:            []Target{{Type: "invoice", ID: "inv-1", Name: "January"}},
+		Action:             "update",
+		Outcome:            "success",
+		ChangedFields:      map[string]FieldChange{"status": {Before: "open", After: "paid"}},
+		Payload:            map[string]any{"nested": map[string]any{"value": json.Number("7")}},
+		SourceDigest:       "source-digest-a",
+		DataClassification: "internal",
+		RetentionClass:     "standard",
+		IdempotencyKey:     "idem-exclusion",
+		StreamID:           "stream-a",
+		Sequence:           7,
+		PrevHash:           "prev-hash-a",
+		Hash:               "hash-a",
+		ServerVersion:      "server-a",
+	}
+	baseline, err := EventContentDigest(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{"SourceDigest", func(event *Event) { event.SourceDigest = "source-digest-b" }},
+		{"ReceivedAt", func(event *Event) { event.ReceivedAt = event.ReceivedAt.Add(time.Minute) }},
+		{"ServerVersion", func(event *Event) { event.ServerVersion = "server-b" }},
+		{"Hash", func(event *Event) { event.Hash = "hash-b" }},
+		{"PrevHash", func(event *Event) { event.PrevHash = "prev-hash-b" }},
+		{"Sequence", func(event *Event) { event.Sequence++ }},
+		{"StreamID", func(event *Event) { event.StreamID = "stream-b" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := base
+			tc.mutate(&event)
+			before := event
+			beforeJSON, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := EventContentDigest(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != baseline {
+				t.Fatalf("excluded field changed content digest: got %s, want %s", got, baseline)
+			}
+			if !reflect.DeepEqual(event, before) {
+				t.Fatalf("EventContentDigest mutated the event: before=%+v after=%+v", before, event)
+			}
+			afterJSON, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(afterJSON) != string(beforeJSON) {
+				t.Fatalf("EventContentDigest mutated nested event data: before=%s after=%s", beforeJSON, afterJSON)
+			}
+		})
 	}
 }
 

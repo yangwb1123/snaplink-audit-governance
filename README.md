@@ -21,6 +21,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - [SLO、告警与错误预算](docs/SLO_ALERTS.md)
 - [本机性能基线](docs/BENCHMARKS.md)
 - [威胁模型](docs/THREAT_MODEL.md)
+- [Outbox writer inventory and rollout verification](docs/outbox-writer-rollout.md)
 - [术语表](docs/GLOSSARY.md)
 - [平台批次联合核查报告（G1–G8 门禁矩阵）](docs/platform-gate-status.md)
 - [ADR-0001 消息传输与接入](docs/adr/ADR-0001.md)
