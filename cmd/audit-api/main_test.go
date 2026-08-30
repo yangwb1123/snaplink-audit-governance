@@ -14,6 +14,8 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +32,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
+	"go.opentelemetry.io/otel"
 )
 
 // validAuthenticator is the AC-3-correct authenticator: a zero-value
@@ -58,7 +61,7 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -75,7 +78,7 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 	buf.Reset()
 	external.S3UseSSL = true
 	external.ArchiveRetentionDays = 365
-	exit = runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
+	exit = runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 	if exit != 0 {
 		t.Fatalf("positive control exit=%d, want 0; log: %q", exit, buf.String())
 	}
@@ -105,7 +108,7 @@ func TestRunCheckConfigVaultFailFast(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
 			external := runtimeconfig.SigningArchive{VaultAddr: tc.addr, VaultToken: "t", VaultTransitKey: "audit-checkpoints", AllowInsecureVaultLoopback: tc.allow}
-			exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
+			exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 			if exit != tc.wantExit {
 				t.Fatalf("exit=%d, want %d; log: %q", exit, tc.wantExit, buf.String())
 			}
@@ -147,7 +150,7 @@ func TestCheckConfigTransportLine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
-			exit := runCheckConfig(logger, validConfig(), tc.external, validAuthenticator(), "", "", "")
+			exit := runCheckConfig(logger, validConfig(), tc.external, validAuthenticator(), "", "", "", "")
 			if exit != 0 {
 				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 			}
@@ -170,7 +173,7 @@ func TestTransportErrorFailsCheckConfig(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000"} // partial S3
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -189,7 +192,7 @@ func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
-	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "")
+	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -199,6 +202,54 @@ func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
 	}
 	if strings.Contains(out, "check_config=ok") {
 		t.Fatalf("check_config=ok must not be printed, got: %q", out)
+	}
+}
+
+// TestRunCheckConfigOTLPValidation pins the shared, side-effect-free OTLP
+// validation path used by preflight. It also verifies that preflight does not
+// initialize the global OTel provider or contact a collector.
+func TestRunCheckConfigOTLPValidation(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	collectorRequests := 0
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		collectorRequests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	tests := []struct {
+		name     string
+		endpoint string
+		wantExit int
+		wantText string
+	}{
+		{name: "missing scheme", endpoint: "collector:4318", wantExit: 1, wantText: "scheme"},
+		{name: "missing host", endpoint: "http:///missing-host", wantExit: 1, wantText: "host"},
+		{name: "unsupported scheme", endpoint: "ftp://collector:4318", wantExit: 1, wantText: "scheme"},
+		{name: "disabled", endpoint: "", wantExit: 0, wantText: "check_config=ok"},
+		{name: "gateway prefix", endpoint: collector.URL + "/otlp", wantExit: 0, wantText: "check_config=ok"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "", test.endpoint)
+			if exit != test.wantExit {
+				t.Fatalf("exit=%d, want %d; log: %q", exit, test.wantExit, buf.String())
+			}
+			if !strings.Contains(buf.String(), test.wantText) {
+				t.Fatalf("log must contain %q, got: %q", test.wantText, buf.String())
+			}
+			if test.wantExit != 0 && strings.Contains(buf.String(), "check_config=ok") {
+				t.Fatal("invalid endpoint must not print check_config=ok")
+			}
+			if otel.GetTracerProvider() != previousProvider || otel.GetTextMapPropagator() != previousPropagator {
+				t.Fatal("check-config must not mutate the global OTel provider or propagator")
+			}
+		})
+	}
+	if collectorRequests != 0 {
+		t.Fatalf("check-config contacted the OTLP collector %d time(s)", collectorRequests)
 	}
 }
 
@@ -412,6 +463,39 @@ func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
 	})
 }
 
+// TestCheckConfigOTLPEnvironmentWiring proves the real CLI passes
+// AUDIT_OTLP_ENDPOINT into preflight and that the explicit flag still takes
+// precedence over the environment default.
+func TestCheckConfigOTLPEnvironmentWiring(t *testing.T) {
+	binary, err := buildAPIBinary()
+	if err != nil {
+		t.Skipf("api binary unavailable: %v", err)
+	}
+	baseEnv := []string{
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
+		"AUDIT_JWT_SECRET=" + testJWTSecret,
+		"AUDIT_ALLOW_LOCAL_HS256=true",
+		"AUDIT_OTLP_ENDPOINT=collector:4318",
+	}
+	cmd := exec.Command(binary, "-check-config")
+	cmd.Env = append(os.Environ(), baseEnv...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("invalid AUDIT_OTLP_ENDPOINT must fail check-config, output: %s", out)
+	}
+	if !strings.Contains(string(out), "check_config=fail otlp_endpoint=invalid") || strings.Contains(string(out), "check_config=ok") {
+		t.Fatalf("output must report only the OTLP preflight failure, got: %s", out)
+	}
+
+	cmd = exec.Command(binary, "-check-config", "-otlp-endpoint", "")
+	cmd.Env = append(os.Environ(), baseEnv...)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "check_config=ok") {
+		t.Fatalf("empty flag must override invalid environment endpoint: err=%v output=%s", err, out)
+	}
+}
+
 // TestStartupVaultHTTPFatal is QA F5/REQ-TLS-5: startup fails fast (logger
 // path — non-zero exit, actionable text, no listen= line) when the Vault
 // addr is plaintext non-loopback, proving preflight and runtime agree.
@@ -621,7 +705,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 	t.Setenv(envDevAuth, "")
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -631,7 +715,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 	}
 	buf.Reset()
 	t.Setenv(envDevAuth, "true")
-	exit = runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
+	exit = runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "", "")
 	if exit != 0 || !strings.Contains(buf.String(), "check_config=ok") {
 		t.Fatalf("exit=%d, want 0 with check_config=ok; log: %q", exit, buf.String())
 	}
@@ -642,7 +726,7 @@ func TestRunCheckConfigDevAuthGate(t *testing.T) {
 func TestRunCheckConfigInvalidSecrets(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, service.Config{}, runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "")
+	exit := runCheckConfig(logger, service.Config{}, runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "", "")
 	if exit != 1 || !strings.Contains(buf.String(), "invalid secrets") {
 		t.Fatalf("exit=%d, want 1 with invalid secrets; log: %q", exit, buf.String())
 	}
@@ -656,7 +740,7 @@ func TestRunCheckConfigInvalidSecrets(t *testing.T) {
 func TestRunCheckConfigInvalidAuth(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, auth.Authenticator{}, "", "", "")
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, auth.Authenticator{}, "", "", "", "")
 	if exit != 1 || !strings.Contains(buf.String(), "invalid authentication configuration") {
 		t.Fatalf("exit=%d, want 1 with invalid auth; log: %q", exit, buf.String())
 	}
@@ -672,7 +756,7 @@ func TestRunCheckConfigRejectsShortJWTSecret(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	authn := auth.Authenticator{JWTSecret: "short", AllowLocalHS256: true}
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "")
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, authn, "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 	}
@@ -694,7 +778,7 @@ func TestRunCheckConfigRejectsShortJWTSecret(t *testing.T) {
 func TestRunCheckConfigReportsJWTSecretLength(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "")
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), "", "", "", "")
 	if exit != 0 {
 		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 	}
@@ -741,7 +825,7 @@ func TestRunCheckConfigReportsZeroJWTLengthWhenUnset(t *testing.T) {
 			t.Setenv(envDevAuth, "true")
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
-			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, tc.authn, "", "", "")
+			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, tc.authn, "", "", "", "")
 			if exit != 0 {
 				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 			}
@@ -774,7 +858,7 @@ func TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets(t *testing.T) {
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
 			authn := auth.Authenticator{JWTSecret: tc.secret, AllowLocalHS256: true}
-			exit := runCheckConfig(logger, cfg, runtimeconfig.SigningArchive{}, authn, "", "", "")
+			exit := runCheckConfig(logger, cfg, runtimeconfig.SigningArchive{}, authn, "", "", "", "")
 			if exit != 1 {
 				t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
 			}
@@ -1115,7 +1199,7 @@ func TestRunCheckConfigGRPCPlaintextFailsClosed(t *testing.T) {
 			t.Setenv(grpcInsecureAllowlistEnv, tc.allow)
 			var buf bytes.Buffer
 			logger := log.New(&buf, "", 0)
-			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key)
+			exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key, "")
 			if exit != tc.wantExit {
 				t.Fatalf("exit=%d, want %d; log: %q", exit, tc.wantExit, buf.String())
 			}
@@ -1171,7 +1255,7 @@ func TestRunCheckConfigGRPCDeterministic(t *testing.T) {
 			t.Setenv(grpcInsecureAllowlistEnv, cell.allow)
 			run := func() (int, string) {
 				var buf bytes.Buffer
-				exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), cell.listen, cell.cert, cell.key)
+				exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), cell.listen, cell.cert, cell.key, "")
 				return exit, buf.String()
 			}
 			exit1, out1 := run()
@@ -1204,7 +1288,7 @@ func TestRunCheckConfigGRPCFieldPosition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(grpcInsecureAllowlistEnv, tc.allow)
 			var buf bytes.Buffer
-			exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key)
+			exit := runCheckConfig(log.New(&buf, "", 0), validConfig(), runtimeconfig.SigningArchive{}, validAuthenticator(), tc.listen, tc.cert, tc.key, "")
 			if exit != 0 {
 				t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 			}

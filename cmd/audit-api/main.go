@@ -115,7 +115,7 @@ func main() {
 	}
 	authenticator := auth.Authenticator{JWTSecret: *jwtSecret, AllowLocalHS256: *allowLocalHS256, JWTPublicKeyPEM: *jwtPublicKey, JWTPublicKeyAlgorithm: *jwtPublicKeyAlgorithm, JWKSURL: *jwksURL, AllowInsecureJWKSLoopback: *allowInsecureJWKS, Issuer: *issuer, Audience: *audience, AllowDev: *allowDev}
 	if *checkConfig {
-		os.Exit(runCheckConfigWithMTLS(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey, *grpcTLSClientCA, *grpcRequireMTLS))
+		os.Exit(runCheckConfigWithMTLS(logger, cfg, external, authenticator, *grpcListen, *grpcTLSCert, *grpcTLSKey, *grpcTLSClientCA, *grpcRequireMTLS, *otlpEndpoint))
 	}
 	var ledgeredProducer *kafka.Producer
 	if *ledgeredBrokers != "" {
@@ -436,19 +436,23 @@ func runConsistencyKey(logger *log.Logger, cfg service.Config, external runtimec
 // The dev-auth allowlist is environment-only: -allow-dev-auth alone can never
 // satisfy the preflight (AC-3), so a flag-only CI invocation fails with an
 // auditable marker instead of blessing a config that diverges from startup.
-// grpcListen/grpcTLSCert/grpcTLSKey are the resolved gRPC listener inputs:
-// runCheckConfig applies the same fail-closed transport gate as startup
-// (REQ-4, shared resolveGRPCTransport) and reports transport_grpc on the ok
-// line.
-func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey string) int {
-	return runCheckConfigWithClientCA(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, "")
+// grpcListen/grpcTLSCert/grpcTLSKey are the resolved gRPC listener inputs;
+// otlpEndpoint is the resolved OTLP endpoint. runCheckConfig applies the same
+// fail-closed transport gate as startup (REQ-4, shared resolveGRPCTransport)
+// and reports transport_grpc on the ok line.
+func runCheckConfig(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, otlpEndpoint string) int {
+	return runCheckConfigWithClientCA(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, "", otlpEndpoint)
 }
 
-func runCheckConfigWithClientCA(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA string) int {
-	return runCheckConfigWithMTLS(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA, false)
+func runCheckConfigWithClientCA(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA, otlpEndpoint string) int {
+	return runCheckConfigWithMTLS(logger, cfg, external, authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA, false, otlpEndpoint)
 }
 
-func runCheckConfigWithMTLS(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA string, requireMTLS bool) int {
+func runCheckConfigWithMTLS(logger *log.Logger, cfg service.Config, external runtimeconfig.SigningArchive, authenticator auth.Authenticator, grpcListen, grpcTLSCert, grpcTLSKey, grpcTLSClientCA string, requireMTLS bool, otlpEndpoint string) int {
+	if _, err := telemetry.NormalizeEndpoint(otlpEndpoint); err != nil {
+		logger.Printf("check_config=fail otlp_endpoint=invalid: %v", err)
+		return 1
+	}
 	svc, err := service.New(nil, cfg)
 	if err != nil {
 		logger.Printf("invalid secrets: %v", err)

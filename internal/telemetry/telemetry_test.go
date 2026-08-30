@@ -37,6 +37,38 @@ func TestInitDisabledReturnsNil(t *testing.T) {
 	}
 }
 
+func TestNormalizeEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     string
+		wantErr  string
+	}{
+		{name: "disabled", endpoint: "", want: ""},
+		{name: "collector", endpoint: "http://collector:4318", want: "http://collector:4318/v1/traces"},
+		{name: "trimmed", endpoint: " https://collector:4318/otlp ", want: "https://collector:4318/otlp/v1/traces"},
+		{name: "gateway prefix", endpoint: "https://collector:4318/otlp", want: "https://collector:4318/otlp/v1/traces"},
+		{name: "complete signal path", endpoint: "https://collector:4318/otlp/v1/traces/", want: "https://collector:4318/otlp/v1/traces"},
+		{name: "invalid scheme", endpoint: "collector:4318", wantErr: "scheme"},
+		{name: "missing host", endpoint: "http:///missing-host", wantErr: "host"},
+		{name: "unsupported scheme", endpoint: "ftp://collector:4318", wantErr: "scheme"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NormalizeEndpoint(test.endpoint)
+			if test.wantErr == "" {
+				if err != nil || got != test.want {
+					t.Fatalf("NormalizeEndpoint(%q) = %q, %v; want %q, nil", test.endpoint, got, err, test.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("NormalizeEndpoint(%q) error=%v; want error containing %q", test.endpoint, err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestInitAndShutdown(t *testing.T) {
 	// OTLP export to a closed port still succeeds at Init (batcher retries
 	// asynchronously); the important contract is that Shutdown returns

@@ -32,12 +32,12 @@ type Tracer struct {
 // export) without error. The returned Tracer must be shut down on process
 // exit to flush buffered spans.
 func Init(ctx context.Context, endpoint, serviceName string) (*Tracer, error) {
-	if endpoint == "" {
-		return nil, nil
-	}
-	traceEndpoint, err := traceEndpointURL(endpoint)
+	traceEndpoint, err := NormalizeEndpoint(endpoint)
 	if err != nil {
 		return nil, err
+	}
+	if traceEndpoint == "" {
+		return nil, nil
 	}
 	if serviceName == "" {
 		serviceName = "audit-governance"
@@ -55,10 +55,14 @@ func Init(ctx context.Context, endpoint, serviceName string) (*Tracer, error) {
 	return &Tracer{shutdown: provider.Shutdown}, nil
 }
 
-// traceEndpointURL validates the collector URL and appends the OTLP traces
-// signal path to an optional gateway prefix. A caller may also provide the
-// complete signal URL; in that case the operation is idempotent.
-func traceEndpointURL(endpoint string) (string, error) {
+// NormalizeEndpoint validates an OTLP/HTTP collector URL and appends the
+// OTLP traces signal path to an optional gateway prefix. It is pure: it does
+// not construct an exporter or perform any network operation. A caller may
+// provide the complete signal URL; in that case normalization is idempotent.
+func NormalizeEndpoint(endpoint string) (string, error) {
+	if endpoint == "" {
+		return "", nil
+	}
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil {
 		return "", fmt.Errorf("parse OTLP endpoint: %w", err)
