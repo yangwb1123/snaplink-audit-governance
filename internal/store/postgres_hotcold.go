@@ -153,15 +153,14 @@ validity AS (
             AND EXISTS (
                 SELECT 1 FROM pg_constraint c
                 WHERE c.conrelid = l.oid AND c.contype = 'c'
-                  AND position('record_type=any' IN lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))) > 0
-                  AND position('receipt' IN lower(pg_get_constraintdef(c.oid))) > 0
-                  AND position('segment' IN lower(pg_get_constraintdef(c.oid))) > 0
-                  AND position('checkpoint' IN lower(pg_get_constraintdef(c.oid))) > 0
+                  AND lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))
+                      = 'check((record_type=any(array[''receipt''::text,''segment''::text,''checkpoint''::text])))'
             )
             AND EXISTS (
                 SELECT 1 FROM pg_constraint c
                 WHERE c.conrelid = l.oid AND c.contype = 'c'
-                  AND position('version>0' IN lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))) > 0
+                  AND lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))
+                      = 'check((version>0))'
             )
             AND EXISTS (
                 SELECT 1

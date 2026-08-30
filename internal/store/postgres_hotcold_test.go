@@ -204,7 +204,8 @@ func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
 	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "006") {
 		t.Fatalf("migration error=%v, want migration 006 schema error", err)
 	}
-	var snapshots, backup, tenants, ledger int
+	var snapshots int
+	var backup, tenants, ledger bool
 	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot`).Scan(&snapshots); err != nil {
 		t.Fatal(err)
 	}
@@ -217,8 +218,8 @@ func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
 	if err := db.QueryRow(`SELECT to_regclass('audit_ledger') IS NOT NULL`).Scan(&ledger); err != nil {
 		t.Fatal(err)
 	}
-	if snapshots != 0 || backup != 0 || tenants != 0 || ledger != 0 {
-		t.Fatalf("failed cutover mutated database: snapshots=%d backup=%d tenant=%d ledger=%d", snapshots, backup, tenants, ledger)
+	if snapshots != 0 || backup || tenants || ledger {
+		t.Fatalf("failed cutover mutated database: snapshots=%d backup=%t tenant=%t ledger=%t", snapshots, backup, tenants, ledger)
 	}
 }
 
@@ -258,7 +259,8 @@ INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{
 	}
 	var after string
 	var afterVersion int64
-	var tenants, records, backups int
+	var tenants, records int
+	var backups bool
 	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&after, &afterVersion); err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +273,8 @@ INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{
 	if err := db.QueryRow(`SELECT to_regclass('audit_state_snapshot_v1_backup') IS NOT NULL`).Scan(&backups); err != nil {
 		t.Fatal(err)
 	}
-	if before != after || sourceVersion != afterVersion || tenants != 1 || records != 1 || backups != 0 {
-		t.Fatalf("failed validation mutated database: source %s/%d -> %s/%d, target=%d/%d, backup=%d", before, sourceVersion, after, afterVersion, tenants, records, backups)
+	if before != after || sourceVersion != afterVersion || tenants != 1 || records != 1 || backups {
+		t.Fatalf("failed validation mutated database: source %s/%d -> %s/%d, target=%d/%d, backup=%t", before, sourceVersion, after, afterVersion, tenants, records, backups)
 	}
 }
 
