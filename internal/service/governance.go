@@ -572,6 +572,15 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 // bound (newArchiveStore precedent).
 var archivePutTimeout = 30 * time.Second
 
+// exportTerminalRetryLimit bounds the terminal-persistence attempts in
+// finishExport/failExportBlocked. Var (not const) as a test seam: failure
+// tests shrink it. The store's own snapshotConflictRetries (3) applies inside
+// each UpdateChecked call, so worst-case total Saves =
+// (exportTerminalRetryLimit + 1) * (1 + snapshotConflictRetries). Bounded,
+// finite, no goroutine spin. Mirrors archivePutTimeout precedent
+// (governance.go:573).
+var exportTerminalRetryLimit = 3
+
 // ArchivePending retries local WORM-compatible archive writes for events that
 // were ledgered/indexed before the archive destination became available.
 // It is intentionally idempotent: a byte-identical existing object is treated
@@ -1072,19 +1081,19 @@ func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, quer
 
 // failExportBlocked transitions a job to failed because an active legal hold
 // covers its query, and appends the export.blocked fact (actor
-// "governance-worker"). No archive object is written on this path. Errors
-// are ignored to mirror finishExport's convention; access-time gate R4
-// remains authoritative.
+// "governance-worker"). No archive object is written on this path. The
+// transition and fact ride the same atomic Save via persistTerminalExport, so
+// the fact is never committed on a no-op (e.g. a concurrent recovery already
+// failed the job) and a transient Store error is retried rather than silently
+// discarded (FR-1). The legal-hold access-time gate R4 remains authoritative.
 func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
-	_ = s.Store.Update(func(data *store.Snapshot) error {
-		job := data.Exports[jobID]
-		now := s.Now()
-		job.Status, job.FinishedAt, job.ObjectPath, job.Digest, job.EventCount = "failed", &now, "", "", 0
-		job.Error = fmt.Sprintf("export blocked by active legal hold %s", hold.ID)
-		data.Exports[jobID] = job
-		s.appendAdminAction(data, s.adminAction(job.TenantID, "governance-worker", domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
-		return nil
-	})
+	s.persistTerminalExport(jobID, "failed", "", "", 0,
+		fmt.Sprintf("export blocked by active legal hold %s", hold.ID),
+		func(data *store.Snapshot, job *domain.ExportJob) {
+			s.appendAdminAction(data, s.adminAction(job.TenantID, "governance-worker",
+				domain.AdminActionExportBlocked, "legal_hold", hold.ID,
+				fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+		})
 }
 
 func (s *Service) runExport(jobID string) {
@@ -1184,14 +1193,59 @@ func (s *Service) runExport(jobID string) {
 	s.finishExport(jobID, "completed", key, domain.HashBytes(bytesWritten), len(events), "")
 }
 
+// persistTerminalExport writes the terminal outcome for jobID, but ONLY when the
+// durable record is still terminal-eligible: status == "running" and
+// FinishedAt == nil. It is idempotent and safe:
+//   - missing job        -> no write, no Save, never created (FR-2)
+//   - already terminal    -> no write, no Save (no late overwrite; T3)
+//   - worker-recovered     -> no write, no Save (no duplicate export.recovered)
+//
+// onWrite (may be nil) runs INSIDE the same atomic Save as the state change so
+// any admin fact commits atomically (mirrors RecoverStuckExports). On a
+// persistent or conflict-exhausted Store.Update error it retries up to
+// exportTerminalRetryLimit times; if every attempt fails the durable "running"
+// record is deliberately left in place so RecoverStuckExports converges it
+// (FR-1 / AC-1). Failures are observed only via bounded, non-sensitive logs
+// (FR-7) — never raw error text, payload, path, or credential.
+func (s *Service) persistTerminalExport(
+	jobID, status, path, digest string, count int, failure string,
+	onWrite func(data *store.Snapshot, job *domain.ExportJob),
+) {
+	for attempt := 0; attempt <= exportTerminalRetryLimit; attempt++ {
+		err := s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+			value, ok := data.Exports[jobID]
+			if !ok || value.Status != "running" || value.FinishedAt != nil {
+				return false, nil // no-op: missing or already terminal (FR-2)
+			}
+			now := s.Now()
+			value.Status = status
+			value.FinishedAt = &now
+			value.ObjectPath = path
+			value.Digest = digest
+			value.EventCount = count
+			value.Error = failure
+			data.Exports[jobID] = value
+			if onWrite != nil {
+				onWrite(data, &value)
+			}
+			return true, nil
+		})
+		if err == nil {
+			return // committed, or already-converged no-op
+		}
+		category := "write"
+		if errors.Is(err, store.ErrSnapshotConflict) {
+			category = "conflict"
+		}
+		s.logf("export terminal persistence failed job_id=%s state=%s attempt=%d category=%s",
+			jobID, status, attempt+1, category)
+	}
+	s.logf("export terminal persistence exhausted job_id=%s state=%s attempts=%d category=write",
+		jobID, status, exportTerminalRetryLimit+1)
+}
+
 func (s *Service) finishExport(jobID, status, path, digest string, count int, failure string) {
-	_ = s.Store.Update(func(data *store.Snapshot) error {
-		job := data.Exports[jobID]
-		now := s.Now()
-		job.Status, job.FinishedAt, job.ObjectPath, job.Digest, job.EventCount, job.Error = status, &now, path, digest, count, failure
-		data.Exports[jobID] = job
-		return nil
-	})
+	s.persistTerminalExport(jobID, status, path, digest, count, failure, nil)
 }
 
 func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([]domain.AdminAction, error) {

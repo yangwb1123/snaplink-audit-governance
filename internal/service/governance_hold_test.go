@@ -225,12 +225,13 @@ func TestRecordExportDownloadBlockFactUpdateFailure(t *testing.T) {
 	}
 }
 
-// §4 FM-2 (run leg): block-fact Update failure inside runExport is ignored
-// (mirrors finishExport) — no export.blocked fact is committed and the
-// status transition is discarded with the failed atomic Save (the job stays
-// non-terminal, exactly the stuck state RecoverStuckExports exists for), so
-// no archive object is written; access stays fail-closed via the R4 gate
-// until the store recovers.
+// §4 FM-2 (run leg): a single transient block-fact Update failure inside
+// runExport is retried and converges (FR-1) — the job reaches terminal
+// "failed", exactly one export.blocked fact is committed atomically with the
+// transition, and no archive object is written; the legal-hold R4 gate stays
+// authoritative (GetExport is still denied). A persistent failure would instead
+// leave the job running for RecoverStuckExports (see
+// TestFinishExportPersistentFailureThenRecover).
 func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	backend, svc := holdGateService(t)
 	t0 := ingestHeldEvent(t, svc)
@@ -242,7 +243,8 @@ func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// runExport Saves: #1 "running" stamp, #2 failExportBlocked. Fail #2.
+	// runExport Saves: #1 "running" stamp, #2 failExportBlocked. Fail #2 only:
+	// the bounded retry converges on the next Save and commits the transition.
 	backend.armSaveFailure(2)
 	svc.runExport(job.ID)
 	var got domain.ExportJob
@@ -252,16 +254,15 @@ func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The failed atomic Save discarded the status change AND the fact: the
-	// job is not regressed to failed (it stays running — worker-recoverable)
-	// and no export.blocked fact exists. R4 keeps access closed meanwhile.
-	if got.Status != "running" {
-		t.Fatalf("status=%s, want running (failed Save discards the block transition)", got.Status)
+	// The transient failure is retried and converges: the job is terminal
+	// "failed" and the export.blocked fact is committed atomically with it.
+	if got.Status != "failed" {
+		t.Fatalf("status=%s, want failed (bounded retry converges after transient Save failure)", got.Status)
 	}
 	if n := countAdminActions(t, svc, func(a domain.AdminAction) bool {
 		return a.Action == domain.AdminActionExportBlocked
-	}); n != 0 {
-		t.Fatalf("export.blocked facts=%d, want 0 (fact append failed and was ignored)", n)
+	}); n != 1 {
+		t.Fatalf("export.blocked facts=%d, want 1 (committed atomically with the transition)", n)
 	}
 	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden (R4 gate still authoritative)", err)
