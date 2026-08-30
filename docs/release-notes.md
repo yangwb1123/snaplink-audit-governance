@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-08-30 — Record HTTP outcomes on server spans
+
+Matched-route OpenTelemetry server spans now record the effective
+`http.status_code`, including implicit `200` responses, and mark `5xx` and
+recovered-panic responses as errors. Client errors remain non-server-error
+spans; existing panic events, redacted responses, and HTTP behavior are
+unchanged.
+
 ## 2026-08-30 — Require minimum configured secret length outside development
 
 **For operators (behavior change):** `AUDIT_SIGNING_SECRET` and
