@@ -223,6 +223,36 @@ func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
 	}
 }
 
+func TestZPostgresStoreRejectsIncompleteCatalog(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if _, err := db.Exec(`DROP TABLE audit_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Snapshot(); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("split store accepted incomplete catalog: %v", err)
+	}
+	if err := st.Update(func(data *Snapshot) error {
+		data.LayoutVersion = hotColdLayoutVersion
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("split store update accepted incomplete catalog: %v", err)
+	}
+	var snapshots int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 {
+		t.Fatalf("incomplete catalog update created snapshot row: %d", snapshots)
+	}
+	if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("readiness accepted incomplete catalog: %v", err)
+	}
+}
+
 func TestZPostgresMigrationRejectsIncompatibleSchemaBeforeMutation(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
@@ -275,6 +305,13 @@ INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{
 	}
 	if before != after || sourceVersion != afterVersion || tenants != 1 || records != 1 || backups {
 		t.Fatalf("failed validation mutated database: source %s/%d -> %s/%d, target=%d/%d, backup=%t", before, sourceVersion, after, afterVersion, tenants, records, backups)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Snapshot(); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("split store accepted incompatible catalog: %v", err)
 	}
 }
 

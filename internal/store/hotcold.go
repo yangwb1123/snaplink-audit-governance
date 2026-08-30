@@ -913,17 +913,30 @@ type TenantView struct {
 // It is intentionally read-only; callers use it to select a mutation path
 // without inspecting backend implementation details.
 func (s *Store) HotCold() bool {
-	return s.split != nil || s.pgSplit != nil && s.pgSplit.enabled()
+	if s.split != nil {
+		return true
+	}
+	if s.pgSplit == nil {
+		return false
+	}
+	enabled, _ := s.pgSplit.enabled()
+	return enabled
 }
 
 // ReadTenant executes fn against one tenant without materializing other
 // tenants or the cold ledger into a global snapshot.
 func (s *Store) ReadTenant(tenantID string, fn func(*TenantView) error) error {
 	if s.split == nil {
-		if s.pgSplit != nil && s.pgSplit.enabled() {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			return s.pgSplit.readTenant(tenantID, fn)
+		if s.pgSplit != nil {
+			enabled, err := s.pgSplit.enabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				return s.pgSplit.readTenant(tenantID, fn)
+			}
 		}
 		return s.readLegacyTenant(tenantID, fn)
 	}
@@ -937,10 +950,16 @@ func (s *Store) ReadTenant(tenantID string, fn func(*TenantView) error) error {
 // idempotent so a half-completed two-phase pass converges safely.
 func (s *Store) UpdateTenant(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
 	if s.split == nil {
-		if s.pgSplit != nil && s.pgSplit.enabled() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			return s.pgSplit.updateTenant(tenantID, order, fn)
+		if s.pgSplit != nil {
+			enabled, err := s.pgSplit.enabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.pgSplit.updateTenant(tenantID, order, fn)
+			}
 		}
 		return s.updateLegacyTenant(tenantID, fn)
 	}
@@ -954,10 +973,16 @@ func (s *Store) UpdateTenant(tenantID string, order CommitOrder, fn func(*Tenant
 // deterministic migration, integrity and export scans.
 func (s *Store) LedgerScan(tenantID string, fn func(LedgerRecord) error) error {
 	if s.split == nil {
-		if s.pgSplit != nil && s.pgSplit.enabled() {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			return s.pgSplit.ledgerScan(tenantID, fn)
+		if s.pgSplit != nil {
+			enabled, err := s.pgSplit.enabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				return s.pgSplit.ledgerScan(tenantID, fn)
+			}
 		}
 		return s.scanLegacyLedger(tenantID, fn)
 	}
@@ -982,10 +1007,16 @@ func (s *Store) LedgerScan(tenantID string, fn func(LedgerRecord) error) error {
 // materializes cold receipts, segments, checkpoints or archived events.
 func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 	if s.split == nil {
-		if s.pgSplit != nil && s.pgSplit.enabled() {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			return s.pgSplit.readControl(fn)
+		if s.pgSplit != nil {
+			enabled, err := s.pgSplit.enabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				return s.pgSplit.readControl(fn)
+			}
 		}
 		return s.Read(fn)
 	}
@@ -999,10 +1030,16 @@ func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 // materializes cold receipts, segments, checkpoints or archived events.
 func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
 	if s.split == nil {
-		if s.pgSplit != nil && s.pgSplit.enabled() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			return s.pgSplit.updateControl(fn)
+		if s.pgSplit != nil {
+			enabled, err := s.pgSplit.enabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.pgSplit.updateControl(fn)
+			}
 		}
 		return s.Update(fn)
 	}

@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-08-30 — Fail closed on invalid PostgreSQL hot/cold schemas
+
+`audit-pg-migrate` now validates the complete migration 006-compatible catalog
+before creating a marker, backup, or moving data. Missing, partial, malformed,
+or incompatible target tables fail without mutation; v2 markers are not treated
+as idempotent unless the target schema is valid. PostgreSQL store operations also
+refuse to fall back to the legacy layout for an invalid split catalog.
+
 ## 2026-08-30 — Gate PostgreSQL startup and worker passes on store readiness
 
 The API and governance worker now run the full PostgreSQL store readiness

@@ -245,9 +245,10 @@ ON CONFLICT (tenant_id, record_type, key, version) DO NOTHING`
 // for old deployments, which lets operators apply the expand migration before
 // switching binaries.
 type postgresSplitStore struct {
-	backend *postgresBackend
-	once    sync.Once
-	active  bool
+	backend      *postgresBackend
+	once         sync.Once
+	catalogErr   error
+	catalogState string
 
 	// saveControlHook, when non-nil, is consulted before the real save and
 	// may inject a transient optimistic-lock conflict. It is nil in
@@ -363,12 +364,22 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 	return nil
 }
 
-func (p *postgresSplitStore) enabled() bool {
+func (p *postgresSplitStore) enabled() (bool, error) {
 	p.once.Do(func() {
 		status, err := postgresHotColdCatalogStatus(context.Background(), p.backend.db)
-		p.active = err == nil && status == postgresHotColdCatalogStatusComplete
+		if err != nil {
+			p.catalogErr = fmt.Errorf("hot/cold catalog detection: %w", err)
+			return
+		}
+		p.catalogState = status
+		if status != postgresHotColdCatalogStatusAbsent && status != postgresHotColdCatalogStatusComplete {
+			p.catalogErr = postgresHotColdCatalogError(status)
+		}
 	})
-	return p.active
+	if p.catalogErr != nil {
+		return false, p.catalogErr
+	}
+	return p.catalogState == postgresHotColdCatalogStatusComplete, nil
 }
 
 func (p *postgresSplitStore) loadControl() (*Snapshot, int64, error) {

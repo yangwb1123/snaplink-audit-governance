@@ -218,10 +218,16 @@ func (s *Store) Read(fn func(*Snapshot) error) error {
 		defer s.mu.RUnlock()
 		return s.split.read(fn)
 	}
-	if s.pgSplit != nil && s.pgSplit.enabled() {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		return s.pgSplit.read(fn)
+	if s.pgSplit != nil {
+		enabled, err := s.pgSplit.enabled()
+		if err != nil {
+			return err
+		}
+		if enabled {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			return s.pgSplit.read(fn)
+		}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -266,10 +272,16 @@ func (s *Store) Update(fn func(*Snapshot) error) error {
 		defer s.mu.Unlock()
 		return s.split.update(fn)
 	}
-	if s.pgSplit != nil && s.pgSplit.enabled() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.pgSplit.update(fn)
+	if s.pgSplit != nil {
+		enabled, err := s.pgSplit.enabled()
+		if err != nil {
+			return err
+		}
+		if enabled {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.pgSplit.update(fn)
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,10 +331,16 @@ func (s *Store) UpdateChecked(fn func(*Snapshot) (bool, error)) error {
 		defer s.mu.Unlock()
 		return s.split.updateChecked(fn)
 	}
-	if s.pgSplit != nil && s.pgSplit.enabled() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.pgSplit.updateChecked(fn)
+	if s.pgSplit != nil {
+		enabled, err := s.pgSplit.enabled()
+		if err != nil {
+			return err
+		}
+		if enabled {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.pgSplit.updateChecked(fn)
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,10 +402,16 @@ func (s *Store) Snapshot() (*Snapshot, error) {
 		defer s.mu.RUnlock()
 		return s.split.materialize()
 	}
-	if s.pgSplit != nil && s.pgSplit.enabled() {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		return s.pgSplit.materialize()
+	if s.pgSplit != nil {
+		enabled, err := s.pgSplit.enabled()
+		if err != nil {
+			return nil, err
+		}
+		if enabled {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			return s.pgSplit.materialize()
+		}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
