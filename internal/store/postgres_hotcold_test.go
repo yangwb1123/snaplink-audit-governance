@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -191,6 +193,138 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	}
 	if tenants != 1 || records != 1 || backups != 1 {
 		t.Fatalf("migration counts tenants=%d records=%d backups=%d, want 1/1/1", tenants, records, backups)
+	}
+}
+
+func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "006") {
+		t.Fatalf("migration error=%v, want migration 006 schema error", err)
+	}
+	var snapshots, backup, tenants, ledger int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT to_regclass('audit_state_snapshot_v1_backup') IS NOT NULL`).Scan(&backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT to_regclass('audit_tenant') IS NOT NULL`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT to_regclass('audit_ledger') IS NOT NULL`).Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 || backup != 0 || tenants != 0 || ledger != 0 {
+		t.Fatalf("failed cutover mutated database: snapshots=%d backup=%d tenant=%d ledger=%d", snapshots, backup, tenants, ledger)
+	}
+}
+
+func TestZPostgresMigrationRejectsIncompatibleSchemaBeforeMutation(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE audit_tenant (
+    tenant_id TEXT PRIMARY KEY,
+    snapshot JSONB NOT NULL,
+    version BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE audit_ledger (
+    id BIGINT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    record JSONB NOT NULL,
+    written_at TIMESTAMPTZ NOT NULL
+);
+INSERT INTO audit_tenant VALUES ('tenant-a', '{}', 3, '2025-01-01T00:00:00Z');
+INSERT INTO audit_ledger VALUES (1, 'tenant-a', 'receipt', 'key-a', 1, '{}', '2025-01-01T00:00:00Z');
+INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{}}', 7);`); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	var sourceVersion int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&before, &sourceVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("migration error=%v, want incompatible schema error", err)
+	}
+	var after string
+	var afterVersion int64
+	var tenants, records, backups int
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&after, &afterVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT to_regclass('audit_state_snapshot_v1_backup') IS NOT NULL`).Scan(&backups); err != nil {
+		t.Fatal(err)
+	}
+	if before != after || sourceVersion != afterVersion || tenants != 1 || records != 1 || backups != 0 {
+		t.Fatalf("failed validation mutated database: source %s/%d -> %s/%d, target=%d/%d, backup=%d", before, sourceVersion, after, afterVersion, tenants, records, backups)
+	}
+}
+
+func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("fresh MigratePostgresSnapshot: %v", err)
+	}
+	var layout string
+	if err := db.QueryRow(`SELECT snapshot->>'layout_version' FROM audit_state_snapshot WHERE id = 1`).Scan(&layout); err != nil {
+		t.Fatal(err)
+	}
+	if layout != "2" {
+		t.Fatalf("layout marker=%q, want 2", layout)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ready(context.Background()); err != nil {
+		t.Fatalf("fresh split store readiness: %v", err)
+	}
+}
+
+func TestZPostgresMigrationRejectsInvalidV2Marker(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"layout_version":2}', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	if err := db.QueryRow(`SELECT snapshot::text FROM audit_state_snapshot WHERE id = 1`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil {
+		t.Fatal("invalid v2 marker migration unexpectedly succeeded")
+	}
+	var after string
+	if err := db.QueryRow(`SELECT snapshot::text FROM audit_state_snapshot WHERE id = 1`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("failed validation rewrote marker: before=%s after=%s", before, after)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ready(context.Background()); err == nil {
+		t.Fatal("readiness accepted v2 marker without target schema")
 	}
 }
 

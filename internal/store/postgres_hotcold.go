@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,221 @@ import (
 	"github.com/snaplink/audit-governance/internal/domain"
 )
 
-const postgresHotColdCatalogQuery = `SELECT to_regclass('audit_tenant') IS NOT NULL AND to_regclass('audit_ledger') IS NOT NULL`
+// postgresHotColdCatalogQuery returns one of absent, incomplete, incompatible,
+// or complete. It deliberately validates the catalog contract used by both
+// the cutover and the split-store SQL; relation names alone are not evidence
+// that the layout is safe to use.
+const postgresHotColdCatalogQuery = `
+WITH target AS (
+    SELECT 'tenant' AS name, to_regclass('audit_tenant') AS oid
+    UNION ALL
+    SELECT 'ledger' AS name, to_regclass('audit_ledger') AS oid
+),
+tenant_relation AS (
+    SELECT oid FROM target WHERE name = 'tenant'
+),
+ledger_relation AS (
+    SELECT oid FROM target WHERE name = 'ledger'
+),
+validity AS (
+    SELECT
+        t.oid IS NOT NULL AS tenant_present,
+        l.oid IS NOT NULL AS ledger_present,
+        (
+            EXISTS (
+                SELECT 1 FROM pg_class c
+                WHERE c.oid = t.oid AND c.relkind IN ('r', 'p')
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'tenant_id'
+                  AND NOT a.attisdropped AND a.atttypid = 'text'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'snapshot'
+                  AND NOT a.attisdropped AND a.atttypid = 'jsonb'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'version'
+                  AND NOT a.attisdropped AND a.atttypid = 'int8'::regtype
+                  AND a.attnotnull AND a.atthasdef
+                  AND EXISTS (
+                      SELECT 1 FROM pg_attrdef d
+                      WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                        AND regexp_replace(lower(pg_get_expr(d.adbin, d.adrelid)), '[[:space:]()]', '', 'g')
+                            IN ('1', '1::bigint', '1::integer', '1::numeric')
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = t.oid AND a.attname = 'updated_at'
+                  AND NOT a.attisdropped AND a.atttypid = 'timestamptz'::regtype
+                  AND a.attnotnull AND a.atthasdef
+                  AND EXISTS (
+                      SELECT 1 FROM pg_attrdef d
+                      WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                        AND lower(pg_get_expr(d.adbin, d.adrelid)) NOT LIKE 'null%'
+                  )
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_am am ON am.oid = ic.relam
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = 'tenant_id'
+                WHERE i.indrelid = t.oid AND i.indisunique AND i.indisvalid
+                  AND i.indpred IS NULL AND i.indnkeyatts = 1
+                  AND i.indkey[0] = a.attnum AND am.amname = 'btree'
+            )
+        ) AS tenant_valid,
+        (
+            EXISTS (
+                SELECT 1 FROM pg_class c
+                WHERE c.oid = l.oid AND c.relkind IN ('r', 'p')
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'id'
+                  AND NOT a.attisdropped AND a.atttypid = 'int8'::regtype
+                  AND a.attnotnull
+                  AND (
+                      a.attidentity IN ('a', 'd')
+                      OR EXISTS (
+                          SELECT 1 FROM pg_attrdef d
+                          WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                            AND lower(pg_get_expr(d.adbin, d.adrelid)) LIKE 'nextval(%'
+                      )
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'tenant_id'
+                  AND NOT a.attisdropped AND a.atttypid = 'text'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'record_type'
+                  AND NOT a.attisdropped AND a.atttypid = 'text'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'key'
+                  AND NOT a.attisdropped AND a.atttypid = 'text'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'version'
+                  AND NOT a.attisdropped AND a.atttypid = 'int4'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'record'
+                  AND NOT a.attisdropped AND a.atttypid = 'jsonb'::regtype
+                  AND a.attnotnull
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = l.oid AND a.attname = 'written_at'
+                  AND NOT a.attisdropped AND a.atttypid = 'timestamptz'::regtype
+                  AND a.attnotnull AND a.atthasdef
+                  AND EXISTS (
+                      SELECT 1 FROM pg_attrdef d
+                      WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                        AND lower(pg_get_expr(d.adbin, d.adrelid)) NOT LIKE 'null%'
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_attribute a ON a.attrelid = l.oid AND a.attname = 'id'
+                WHERE c.conrelid = l.oid AND c.contype = 'p'
+                  AND c.conkey = ARRAY[a.attnum]::smallint[]
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conrelid = l.oid AND c.contype = 'c'
+                  AND position('record_type=any' IN lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))) > 0
+                  AND position('receipt' IN lower(pg_get_constraintdef(c.oid))) > 0
+                  AND position('segment' IN lower(pg_get_constraintdef(c.oid))) > 0
+                  AND position('checkpoint' IN lower(pg_get_constraintdef(c.oid))) > 0
+            )
+            AND EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conrelid = l.oid AND c.contype = 'c'
+                  AND position('version>0' IN lower(regexp_replace(pg_get_constraintdef(c.oid), '[[:space:]]', '', 'g'))) > 0
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_am am ON am.oid = ic.relam
+                JOIN pg_attribute a1 ON a1.attrelid = l.oid AND a1.attname = 'tenant_id'
+                JOIN pg_attribute a2 ON a2.attrelid = l.oid AND a2.attname = 'record_type'
+                JOIN pg_attribute a3 ON a3.attrelid = l.oid AND a3.attname = 'key'
+                JOIN pg_attribute a4 ON a4.attrelid = l.oid AND a4.attname = 'version'
+                WHERE i.indrelid = l.oid AND i.indisunique AND i.indisvalid
+                  AND i.indpred IS NULL AND i.indnkeyatts = 4
+                  AND i.indkey[0] = a1.attnum AND i.indkey[1] = a2.attnum
+                  AND i.indkey[2] = a3.attnum AND i.indkey[3] = a4.attnum
+                  AND am.amname = 'btree'
+            )
+        ) AS ledger_valid
+    FROM tenant_relation t CROSS JOIN ledger_relation l
+)
+SELECT CASE
+    WHEN NOT tenant_present AND NOT ledger_present THEN 'absent'
+    WHEN NOT tenant_present OR NOT ledger_present THEN 'incomplete'
+    WHEN tenant_valid AND ledger_valid THEN 'complete'
+    ELSE 'incompatible'
+END
+FROM validity`
+
+const postgresHotColdCatalogStatusAbsent = "absent"
+const postgresHotColdCatalogStatusIncomplete = "incomplete"
+const postgresHotColdCatalogStatusIncompatible = "incompatible"
+const postgresHotColdCatalogStatusComplete = "complete"
+
+func postgresHotColdCatalogStatus(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (string, error) {
+	var status string
+	if err := queryer.QueryRowContext(ctx, postgresHotColdCatalogQuery).Scan(&status); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func postgresHotColdCatalogError(status string) error {
+	switch status {
+	case postgresHotColdCatalogStatusAbsent:
+		return fmt.Errorf("hot/cold schema is absent; apply migration 006_hot_cold_split.sql or provide an equivalent compatible schema")
+	case postgresHotColdCatalogStatusIncomplete:
+		return fmt.Errorf("hot/cold schema is incomplete; apply migration 006_hot_cold_split.sql or provide an equivalent compatible schema")
+	case postgresHotColdCatalogStatusIncompatible:
+		return fmt.Errorf("hot/cold schema is incompatible with migration 006; repair it or provide an equivalent compatible schema")
+	case postgresHotColdCatalogStatusComplete:
+		return nil
+	default:
+		return fmt.Errorf("hot/cold schema validation returned unknown status %q", status)
+	}
+}
+
+func validatePostgresHotColdCatalog(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	status, err := postgresHotColdCatalogStatus(ctx, queryer)
+	if err != nil {
+		return fmt.Errorf("hot/cold catalog validation: %w", err)
+	}
+	return postgresHotColdCatalogError(status)
+}
 
 const postgresTenantLoadQuery = `SELECT snapshot, version FROM audit_tenant WHERE tenant_id = $1`
 
@@ -26,9 +241,10 @@ const postgresLedgerAppendQuery = `INSERT INTO audit_ledger (tenant_id, record_t
 VALUES ($1, $2, $3, $4, $5::jsonb, $6)
 ON CONFLICT (tenant_id, record_type, key, version) DO NOTHING`
 
-// postgresSplitStore is selected only when migration 006's two tables exist.
-// The legacy postgresBackend remains the fallback for old deployments, which
-// lets operators apply the expand migration before switching binaries.
+// postgresSplitStore is selected only when migration 006's complete compatible
+// target contract is present. The legacy postgresBackend remains the fallback
+// for old deployments, which lets operators apply the expand migration before
+// switching binaries.
 type postgresSplitStore struct {
 	backend *postgresBackend
 	once    sync.Once
@@ -62,6 +278,12 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 	}()
 	var encoded []byte
 	var version int64
+	// This is the first database inspection after BEGIN. In particular, do
+	// not create the marker or backup until the complete target contract has
+	// passed; a relation-name check is not sufficient for a safe cutover.
+	if err := validatePostgresHotColdCatalog(context.Background(), tx); err != nil {
+		return err
+	}
 	err = tx.QueryRow(`SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encoded, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := tx.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, `{"layout_version":2}`); err != nil {
@@ -144,9 +366,8 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 
 func (p *postgresSplitStore) enabled() bool {
 	p.once.Do(func() {
-		if err := p.backend.db.QueryRow(postgresHotColdCatalogQuery).Scan(&p.active); err != nil {
-			p.active = false
-		}
+		status, err := postgresHotColdCatalogStatus(context.Background(), p.backend.db)
+		p.active = err == nil && status == postgresHotColdCatalogStatusComplete
 	})
 	return p.active
 }

@@ -106,11 +106,12 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 	if !trailExists {
 		return fmt.Errorf("admin action trail table missing: apply migration 005_admin_action_trail.sql")
 	}
-	var splitExists bool
-	if err := p.db.QueryRowContext(ctx, postgresHotColdCatalogQuery).Scan(&splitExists); err != nil {
+	catalogStatus, err := postgresHotColdCatalogStatus(ctx, p.db)
+	if err != nil {
 		return fmt.Errorf("hot/cold catalog: %w", err)
 	}
-	if !splitExists {
+	switch catalogStatus {
+	case postgresHotColdCatalogStatusAbsent:
 		var layout string
 		err := p.db.QueryRowContext(ctx, `SELECT COALESCE(snapshot->>'layout_version', '0') FROM audit_state_snapshot WHERE id = 1`).Scan(&layout)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -119,7 +120,9 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 		if layout == fmt.Sprint(hotColdLayoutVersion) {
 			return fmt.Errorf("hot/cold layout marker is present but migration 006 tables are missing: apply 006_hot_cold_split.sql")
 		}
-	} else {
+	case postgresHotColdCatalogStatusIncomplete, postgresHotColdCatalogStatusIncompatible:
+		return postgresHotColdCatalogError(catalogStatus)
+	case postgresHotColdCatalogStatusComplete:
 		// Applying 006 is an expand step; an existing v1 row must not be
 		// served through the split store until the explicit cutover has moved
 		// its ledger data. Keep this check in readiness so operators see the
@@ -140,6 +143,8 @@ FROM audit_state_snapshot WHERE id = 1`).Scan(&layout, &legacyLedger)
 		if layout != fmt.Sprint(hotColdLayoutVersion) && legacyLedger {
 			return fmt.Errorf("hot/cold migration pending: audit_state_snapshot still contains v1 ledger data; run audit-pg-migrate after applying 006_hot_cold_split.sql")
 		}
+	default:
+		return postgresHotColdCatalogError(catalogStatus)
 	}
 	return nil
 }
