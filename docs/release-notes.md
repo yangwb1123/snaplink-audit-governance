@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-08-30 — Validate OTLP endpoints during `-check-config`
+
+`audit-api -check-config` now validates `AUDIT_OTLP_ENDPOINT` (or the
+`-otlp-endpoint` override) with the same side-effect-free normalization used at
+runtime. Invalid schemes or hosts fail preflight without creating an exporter
+or contacting a collector; empty and valid gateway-prefixed endpoints retain
+the existing behavior.
+
 ## 2026-08-30 — Record HTTP outcomes on server spans
 
 Matched-route OpenTelemetry server spans now record the effective
