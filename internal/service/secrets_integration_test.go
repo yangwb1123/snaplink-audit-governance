@@ -138,8 +138,8 @@ func TestCheckConfigDevModeOptIn(t *testing.T) {
 }
 
 func TestCheckConfigPrintsNoSecretValues(t *testing.T) {
-	signing := "signing-very-secret-value-12345"
-	encryption := "encryption-very-secret-value-67890"
+	signing := "signing-very-secret-value-12345-" + strings.Repeat("s", 20)
+	encryption := "encryption-very-secret-value-67890-" + strings.Repeat("e", 20)
 	for name, bin := range map[string]string{"audit-api": apiBin, "worker": workerBin} {
 		cmd := exec.Command(bin, "-check-config")
 		cmd.Env = append(withoutSecretsEnv(), "AUDIT_SIGNING_SECRET="+signing, "AUDIT_ENCRYPTION_KEY="+encryption)
@@ -156,6 +156,43 @@ func TestCheckConfigPrintsNoSecretValues(t *testing.T) {
 		}
 		if !strings.Contains(text, "signing_secret_length=") || !strings.Contains(text, "encryption_key_length=") {
 			t.Fatalf("%s -check-config output must report lengths only:\n%s", name, text)
+		}
+	}
+}
+
+func TestCheckConfigWeakSecretsFailBeforeExternalValidation(t *testing.T) {
+	weakSigning := "weak-signing-secret-31-bytes!"
+	strongEncryption := "encryption-" + strings.Repeat("e", 40)
+	weakEncryption := "weak-encryption-secret-31byt"
+	strongSigning := "signing-" + strings.Repeat("s", 40)
+	for name, bin := range map[string]string{"audit-api": apiBin, "worker": workerBin} {
+		for _, tc := range []struct {
+			name       string
+			signing    string
+			encryption string
+			variable   string
+		}{
+			{"signing", weakSigning, strongEncryption, "AUDIT_SIGNING_SECRET"},
+			{"encryption", strongSigning, weakEncryption, "AUDIT_ENCRYPTION_KEY"},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				cmd := exec.Command(bin, "-check-config", "-vault-addr", "http://invalid external config")
+				cmd.Env = append(withoutSecretsEnv(),
+					"AUDIT_SIGNING_SECRET="+tc.signing,
+					"AUDIT_ENCRYPTION_KEY="+tc.encryption,
+					"AUDIT_ALLOW_DEV_AUTH=true")
+				out, err := cmd.CombinedOutput()
+				text := string(out)
+				if err == nil || !strings.Contains(text, tc.variable) || !strings.Contains(text, "at least 32 bytes") {
+					t.Fatalf("weak %s must fail with secret validation: err=%v output=%s", tc.variable, err, text)
+				}
+				if strings.Contains(text, "check_config=ok") || strings.Contains(text, "signer:") || strings.Contains(text, "archive:") {
+					t.Fatalf("external validation must not run after weak secret failure: %s", text)
+				}
+				if strings.Contains(text, tc.signing) || strings.Contains(text, tc.encryption) {
+					t.Fatalf("secret values must not be printed: %s", text)
+				}
+			})
 		}
 	}
 }

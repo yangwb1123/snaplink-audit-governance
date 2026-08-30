@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-08-30 — Require minimum configured secret length outside development
+
+**For operators (behavior change):** `AUDIT_SIGNING_SECRET` and
+`AUDIT_ENCRYPTION_KEY` must each contain at least 32 configured UTF-8 bytes
+outside development mode. Empty, known-default, shared, or weak values fail
+startup and both `-check-config` paths before external signer/archive
+validation. Diagnostics name only the affected variable and minimum; secret
+values are never printed. Use two independent random values, for example by
+running `openssl rand -base64 48` twice. `AUDIT_ALLOW_DEV_SECRETS=true` (or
+`-allow-dev-secrets`) remains the explicit development opt-in and is
+independent of development authentication.
+
+This is a configuration boundary, not an entropy proof: padding a weak phrase
+is insufficient. Replacing a weak deployed key changes cryptographic key
+material; existing ciphertext, signatures, and checkpoints require an
+operator-controlled decrypt/re-encrypt and evidence migration. There is no
+automatic rotation or database migration.
+
+**For developers:** The authoritative minimum is
+`internal/security.MinConfiguredSecretBytes`; `internal/service.resolveSecrets`
+returns `ErrWeakSecret` with `errors.Is` support. Direct short keys passed to
+`internal/security` remain compatible, including `enc:v1:` and `export:v1:`.
+
 ## 2026-08-30 — Bound stale JWKS acceptance during IdP outages
 
 **For operators (behavior change):** A successfully fetched JWKS set may now

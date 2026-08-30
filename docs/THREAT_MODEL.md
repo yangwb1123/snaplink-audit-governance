@@ -70,9 +70,11 @@
   的签名清单与 WORM 归档（O_EXCL）是最终锚点。签名密钥由
   `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY` 显式配置：公开默认值
   （`development-signing-key-change-me`/`development-encryption-key-change-me`）、
-  空值与两值相同在非开发模式一律启动失败（`service.New` 校验 + 二进制
-  非零退出，`-check-config` 可预检），开发模式必须显式
-  `AUDIT_ALLOW_DEV_SECRETS=true`。曾以默认密钥运行过的部署必须把既有
+  空值、两值相同或任一值少于 32 个配置字节在非开发模式一律启动失败
+  （`service.New` 校验 + 二进制非零退出，`-check-config` 可预检），开发模式必须显式
+  `AUDIT_ALLOW_DEV_SECRETS=true`。该长度门禁不证明熵，给弱口令补 padding
+  不足以改善安全性；生产应使用两个独立的充分随机值（例如分别运行两次
+  `openssl rand -base64 48`）。曾以默认密钥运行过的部署必须把既有
   证据视为已泄露（签名可伪造、密文可解密），需要轮换密钥并重新密封；
   本参考实现不做多密钥历史验证。
 
@@ -81,7 +83,9 @@
   构建）；生产：最小运行时镜像、非 root、SBOM、镜像签名、依赖扫描、
   GitOps 发布、Canary 验证。
 - 部署前必须通过 `audit-api -check-config` / `audit-governance-worker
-  -check-config` 预检（退出码 0 且无 `=well-known-default` 警告），API
+  -check-config` 预检（退出码 0 且无 `=well-known-default` 警告）；长度不足的旧
+  密钥更换会改变密钥材料，既有密文、签名和 checkpoint 不会自动迁移，须由
+  操作员控制解密/重加密与证据迁移。API
   与 worker 必须使用相同的 `AUDIT_SIGNING_SECRET`/`AUDIT_ENCRYPTION_KEY`。
   预检同时校验认证配置（与启动同一规则）：无 JWT 信任源或仅凭
   `-allow-dev-auth` 的开发认证均失败关闭；开发认证白名单仅接受环境变量

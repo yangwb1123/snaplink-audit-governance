@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/snaplink/audit-governance/internal/security"
 )
 
 func TestNewRejectsMissingSecrets(t *testing.T) {
@@ -49,19 +51,54 @@ func TestNewRejectsDefaultEncryptionKey(t *testing.T) {
 }
 
 func TestNewAcceptsNearMissSecrets(t *testing.T) {
-	// Exact-match deny-list (REQ-6): the distinct local-only values used by
-	// deploy/docker-compose.verify.yml and a near-miss suffix must pass.
-	for _, cfg := range []Config{
-		{SigningSecret: "local-only-change-me", EncryptionKey: "local-only-encryption-key"},
-		{SigningSecret: "development-signing-key-change-me2", EncryptionKey: "a-distinct-strong-encryption-key"},
-	} {
-		svc, err := New(nil, cfg)
-		if err != nil {
-			t.Fatalf("New(%+v) err=%v, want accepted", cfg, err)
-		}
-		if svc.Config.SigningSecret != cfg.SigningSecret || svc.Config.EncryptionKey != cfg.EncryptionKey {
-			t.Fatalf("resolved secrets %q/%q differ from input", svc.Config.SigningSecret, svc.Config.EncryptionKey)
-		}
+	// Exact-match deny-list: a compliant near-miss suffix remains accepted.
+	cfg := Config{SigningSecret: "development-signing-key-change-me2", EncryptionKey: "a-distinct-strong-encryption-key"}
+	svc, err := New(nil, cfg)
+	if err != nil {
+		t.Fatalf("New(%+v) err=%v, want accepted", cfg, err)
+	}
+	if svc.Config.SigningSecret != cfg.SigningSecret || svc.Config.EncryptionKey != cfg.EncryptionKey {
+		t.Fatalf("resolved secrets %q/%q differ from input", svc.Config.SigningSecret, svc.Config.EncryptionKey)
+	}
+}
+
+func TestNewRejectsWeakSecrets(t *testing.T) {
+	strongSigning := "signing-" + strings.Repeat("s", 40)
+	strongEncryption := "encryption-" + strings.Repeat("e", 40)
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"signing", Config{SigningSecret: strings.Repeat("s", 31), EncryptionKey: strongEncryption}, "AUDIT_SIGNING_SECRET"},
+		{"encryption", Config{SigningSecret: strongSigning, EncryptionKey: strings.Repeat("e", 31)}, "AUDIT_ENCRYPTION_KEY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(nil, tc.cfg)
+			if !errors.Is(err, ErrWeakSecret) {
+				t.Fatalf("err=%v, want ErrWeakSecret", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "32 bytes") {
+				t.Fatalf("error %q does not identify the variable and minimum", err)
+			}
+			if strings.Contains(err.Error(), tc.cfg.SigningSecret) || strings.Contains(err.Error(), tc.cfg.EncryptionKey) {
+				t.Fatalf("error must not contain secret values: %q", err)
+			}
+		})
+	}
+}
+
+func TestNewSecretLengthUsesUTF8Bytes(t *testing.T) {
+	strong := strings.Repeat("x", security.MinConfiguredSecretBytes)
+	shortUTF8 := strings.Repeat("é", 15) // 30 UTF-8 bytes, not 15 runes.
+	_, err := New(nil, Config{SigningSecret: shortUTF8, EncryptionKey: strong})
+	if !errors.Is(err, ErrWeakSecret) || !strings.Contains(err.Error(), "AUDIT_SIGNING_SECRET") {
+		t.Fatalf("15 repetitions of é err=%v, want weak signing secret", err)
+	}
+	_, err = New(nil, Config{SigningSecret: strings.Repeat("é", 16), EncryptionKey: strong})
+	if err != nil {
+		t.Fatalf("16 repetitions of é (32 bytes) err=%v, want accepted", err)
 	}
 }
 
@@ -85,6 +122,11 @@ func TestDevModePreservesLegacyBehavior(t *testing.T) {
 	}
 	if svc.Config.Archive == nil || svc.Config.Now == nil {
 		t.Fatal("archive/now defaults missing")
+	}
+	// Explicitly supplied short values retain legacy development behavior.
+	shortSvc, err := New(nil, Config{AllowDevSecrets: true, SigningSecret: "short-signing", EncryptionKey: "short-encryption"})
+	if err != nil || shortSvc.Config.SigningSecret != "short-signing" || shortSvc.Config.EncryptionKey != "short-encryption" {
+		t.Fatalf("short explicit development secrets were not preserved: svc=%+v err=%v", shortSvc, err)
 	}
 	// REQ-3: dev secrets are independent of the auth-scoped dev flag; the
 	// service config has no AllowDev field, so the plain config (what a

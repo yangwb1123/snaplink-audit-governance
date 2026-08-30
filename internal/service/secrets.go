@@ -26,6 +26,9 @@ var (
 	// ErrSharedSecret reports SigningSecret equal to EncryptionKey outside
 	// dev mode (removes the silent key-reuse fallback).
 	ErrSharedSecret = errors.New("service: signing and encryption secrets must be distinct")
+	// ErrWeakSecret reports a configured signing or encryption secret shorter
+	// than security.MinConfiguredSecretBytes outside development mode.
+	ErrWeakSecret = errors.New("service: secret is shorter than the minimum length")
 )
 
 // KnownDefaultSecrets returns the exact well-known development secrets that

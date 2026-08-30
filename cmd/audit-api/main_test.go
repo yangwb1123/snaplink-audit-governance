@@ -377,8 +377,8 @@ func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
 		t.Skipf("api binary unavailable: %v", err)
 	}
 	baseEnv := []string{
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 		"AUDIT_JWT_SECRET=" + testJWTSecret,
 		"AUDIT_ALLOW_LOCAL_HS256=true",
 	}
@@ -422,8 +422,8 @@ func TestStartupVaultHTTPFatal(t *testing.T) {
 	}
 	cmd := exec.Command(binary, "-state", filepath.Join(t.TempDir(), "state.json"))
 	cmd.Env = append(os.Environ(),
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 		"AUDIT_VAULT_ADDR=http://vault.example.com:8200",
 		"AUDIT_VAULT_TOKEN=t",
 		"AUDIT_VAULT_TRANSIT_KEY=audit-checkpoints",
@@ -1246,8 +1246,8 @@ func TestStrictBoolEnvSubprocessGRPCGate(t *testing.T) {
 		t.Skipf("api binary unavailable: %v", err)
 	}
 	baseEnv := []string{
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 		"AUDIT_JWT_SECRET=" + testJWTSecret,
 		"AUDIT_ALLOW_LOCAL_HS256=true",
 	}
@@ -1326,8 +1326,8 @@ func TestStartupGRPCPlaintextFatal(t *testing.T) {
 	}
 	cmd := exec.Command(binary, "-state", filepath.Join(t.TempDir(), "state.json"))
 	cmd.Env = append(os.Environ(),
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 		"AUDIT_JWT_SECRET="+testJWTSecret,
 		"AUDIT_ALLOW_LOCAL_HS256=true",
 		"AUDIT_GRPC_LISTEN=:50051",

@@ -1047,8 +1047,8 @@ func TestConsistencyKeySubprocessDoesNotProbe(t *testing.T) {
 			result = append(result, item)
 		}
 		return append(result,
-			"AUDIT_SIGNING_SECRET=test-signing-secret",
-			"AUDIT_ENCRYPTION_KEY=test-encryption-key",
+			"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+			"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 			"AUDIT_S3_ENDPOINT=127.0.0.1:1",
 			"AUDIT_S3_BUCKET=worm",
 			"AUDIT_S3_ACCESS_KEY=access",
@@ -1267,8 +1267,8 @@ func TestStrictBoolEnvSubprocessPositive(t *testing.T) {
 	}
 	archiveDir := t.TempDir()
 	baseEnv := []string{
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 	}
 	run := func(env ...string) (string, error) {
 		cmd := exec.Command(binary, "-check-config", "-archive", archiveDir)
@@ -1310,8 +1310,8 @@ func TestStartupVaultHTTPFatal(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(binary, "-once", "-state", filepath.Join(dir, "state.json"), "-archive", filepath.Join(dir, "archive"))
 	cmd.Env = append(os.Environ(),
-		"AUDIT_SIGNING_SECRET=test-secret",
-		"AUDIT_ENCRYPTION_KEY=test-key",
+		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
 		"AUDIT_VAULT_ADDR=http://vault.example.com:8200",
 		"AUDIT_VAULT_TOKEN=t",
 		"AUDIT_VAULT_TRANSIT_KEY=audit-checkpoints",

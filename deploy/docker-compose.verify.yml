@@ -23,6 +23,9 @@ services:
       # G1 模式（AUDIT_IDP_* 配置存在时 fullstack.sh 注入 false + JWKS）：
       # 过渡期默认 true（dev token），IdP fixture 接入后显式 false。
       AUDIT_ALLOW_DEV_AUTH: ${AUDIT_ALLOW_DEV_AUTH:-true}
+      # This is an isolated development verification stack; short fixture
+      # secrets are permitted only through this explicit opt-in.
+      AUDIT_ALLOW_DEV_SECRETS: "true"
       AUDIT_JWKS_URL: ${AUDIT_JWKS_URL:-}
       AUDIT_JWT_ISSUER: ${AUDIT_JWT_ISSUER:-}
       AUDIT_JWT_AUDIENCE: ${AUDIT_JWT_AUDIENCE:-}
@@ -126,6 +129,9 @@ services:
       # 冲突重试的真实载体）；归档目标与签名/加密密钥必须与 audit-api 一致。
       AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
       AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
+      # Keep the worker's development-secret opt-in explicit and independent
+      # from AUDIT_ALLOW_DEV_AUTH, matching the API above.
+      AUDIT_ALLOW_DEV_SECRETS: "true"
       AUDIT_SIGNING_SECRET: local-only-change-me
       AUDIT_ENCRYPTION_KEY: local-only-encryption-key
       AUDIT_S3_ENDPOINT: minio:9000

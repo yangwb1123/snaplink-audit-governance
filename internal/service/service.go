@@ -174,10 +174,12 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 
 // resolveSecrets fills the development defaults when explicitly allowed and
 // otherwise enforces the production fail-fast rules: missing secrets are
-// rejected, well-known defaults are rejected and the signing and encryption
-// secrets must be distinct. The order matters: a missing secret is reported
-// before a default/equality problem, and validation completes before any
-// key material is derived (hmacSigner) or any external client is built.
+// rejected, well-known defaults are rejected, the signing and encryption
+// secrets must be distinct and each configured value must meet the
+// security.MinConfiguredSecretBytes byte minimum. The order matters: a
+// missing secret is reported before a default/equality/length problem, and
+// validation completes before any key material is derived (hmacSigner) or any
+// external client is built.
 func resolveSecrets(cfg *Config) error {
 	if cfg.SigningSecret == "" {
 		if !cfg.AllowDevSecrets {
@@ -202,6 +204,16 @@ func resolveSecrets(cfg *Config) error {
 	}
 	if cfg.SigningSecret == cfg.EncryptionKey {
 		return fmt.Errorf("%w: %s and %s must be distinct values", ErrSharedSecret, "AUDIT_SIGNING_SECRET", "AUDIT_ENCRYPTION_KEY")
+	}
+	if err := validateSecretLength("AUDIT_SIGNING_SECRET", cfg.SigningSecret); err != nil {
+		return err
+	}
+	return validateSecretLength("AUDIT_ENCRYPTION_KEY", cfg.EncryptionKey)
+}
+
+func validateSecretLength(envName, value string) error {
+	if len([]byte(value)) < security.MinConfiguredSecretBytes {
+		return fmt.Errorf("%w: %s must be at least %d bytes", ErrWeakSecret, envName, security.MinConfiguredSecretBytes)
 	}
 	return nil
 }

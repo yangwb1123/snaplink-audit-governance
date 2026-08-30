@@ -64,12 +64,14 @@ Compose 使用 `19000+` 端口和独立网络/数据卷，不应复用本机已�
 
 checkpoint 签名密钥 `AUDIT_SIGNING_SECRET` 与加密密钥
 `AUDIT_ENCRYPTION_KEY`（schema 加密字段、导出文件）必须显式配置为两个
-不同的强随机值（如 `openssl rand -base64 48`，两次取值不同）。任一为空、
-等于公开默认值（`development-signing-key-change-me` /
-`development-encryption-key-change-me`）或两者相同时，两个二进制在
-非开发模式启动失败（退出码非零，错误信息指明需设置的变量）；本机开发
-须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或 `-allow-dev-secrets`，
-独立于 `AUDIT_ALLOW_DEV_AUTH`）才恢复旧默认行为。
+不同的强随机值（例如分别运行两次 `openssl rand -base64 48`）。非开发模式
+下每个配置值还必须至少有 32 个 UTF-8 字节。任一为空、等于公开默认值
+（`development-signing-key-change-me` / `development-encryption-key-change-me`）、
+两者相同或长度不足时，两个二进制启动失败（退出码非零，错误信息指明需设置的变量）。
+这是长度门禁而非熵证明，不能通过给弱口令补 padding 规避。长度不足的既有部署
+需要操作员保留旧密钥并执行解密/重加密及签名/checkpoint 迁移，本项目不自动轮换
+或重加密。仅本机开发须显式设置 `AUDIT_ALLOW_DEV_SECRETS=true`（或
+`-allow-dev-secrets`，独立于 `-allow-dev-auth`）才恢复旧默认行为。
 
 部署预检（不打开状态存储、不绑定监听器；API 的 `-check-config` 不发起网络，
 worker 的会做一次有界归档目的地探测——S3 触网且要求桶已启用 Object Lock、
