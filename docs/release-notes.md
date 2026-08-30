@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-08-30 — Reject cross-tenant legacy records during PostgreSQL cutover
+
+`audit-pg-migrate` now validates every legacy event, receipt, stream, segment,
+and checkpoint using the composite key and payload tenant before creating the
+cutover backup or v2 rows. Malformed, unregistered, or mismatched ownership
+fails closed with no migration writes; valid migrations retain archived-event
+handling and the existing `-confirm MIGRATE` contract.
+
 ## 2026-08-30 — Fail closed on invalid PostgreSQL hot/cold schemas
 
 `audit-pg-migrate` now validates the complete migration 006-compatible catalog

@@ -319,7 +319,7 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 	if tenantCount != 0 || ledgerCount != 0 {
 		return fmt.Errorf("hot/cold target tables are partially populated; restore the cutover backup before retrying")
 	}
-	prepared, err := splitSnapshot(&data)
+	prepared, err := splitLegacySnapshot(&data)
 	if err != nil {
 		return err
 	}
