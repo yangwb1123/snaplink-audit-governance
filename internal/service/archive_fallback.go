@@ -157,8 +157,9 @@ func (s *Service) checkExistingIngest(ctx context.Context, data *store.Snapshot,
 	}
 	receipt = data.Receipts[key]
 	if existingDigest == inputDigest {
+		// Duplicate is response metadata, not durable event state. Do not
+		// rewrite the receipt on an idempotent retry.
 		receipt.Duplicate = true
-		data.Receipts[key] = receipt
 		return receipt, true, nil
 	}
 	receipt.Conflict = true

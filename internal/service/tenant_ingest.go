@@ -147,8 +147,9 @@ func (s *Service) checkExistingTenantIngest(ctx context.Context, view *store.Ten
 		}
 	}
 	if digest == inputDigest {
+		// Duplicate is response metadata, not durable event state. Do not
+		// rewrite the receipt on an idempotent retry.
 		stored.Duplicate = true
-		view.Ledger.SetReceipt(stored)
 		return stored, true, nil
 	}
 	stored.Conflict = true

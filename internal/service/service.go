@@ -625,18 +625,29 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 		return domain.EventReceipt{}, err
 	}
 	if receipt.Duplicate {
+		// A duplicate must never create another ledger entry. However, a
+		// caller explicitly waiting for archival cannot be told success when
+		// the durable receipt is still ledgered/indexed. The archive worker can
+		// converge the existing event; the caller retries the same idempotent
+		// request rather than creating a new event.
+		if waitFor == domain.StatusArchived && archive.Configured(s.Config.Archive) && receipt.Status != domain.StatusArchived {
+			return receipt, fmt.Errorf("event %s is not archived; retry archival", receipt.EventID)
+		}
 		return receipt, nil
 	}
 	event = committedEvent
 	s.publishLedgered(ctx, event)
 	if archive.Configured(s.Config.Archive) {
-		archived := s.archiveEvent(ctx, event) == nil
+		var archiveErrors []error
+		if err := s.archiveEvent(ctx, event); err != nil {
+			archiveErrors = append(archiveErrors, fmt.Errorf("archive event: %w", err))
+		}
 		for _, segment := range sealedSegments {
-			if s.archiveSegment(ctx, segment) != nil {
-				archived = false
+			if err := s.archiveSegment(ctx, segment); err != nil {
+				archiveErrors = append(archiveErrors, fmt.Errorf("archive segment: %w", err))
 			}
 		}
-		if archived {
+		if len(archiveErrors) == 0 {
 			updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusArchived, true)
 			if err != nil {
 				// Durability boundary (store.go Update): the status write is
@@ -655,6 +666,9 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 				return receipt, err
 			}
 			receipt = updated
+			if waitFor == domain.StatusArchived {
+				return receipt, errors.Join(archiveErrors...)
+			}
 		}
 	} else {
 		updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusIndexed, false)
