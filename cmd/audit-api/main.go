@@ -350,6 +350,12 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 			_ = db.Close()
 			return nil, err
 		}
+		readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer readyCancel()
+		if err := st.Ready(readyCtx); err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("postgres store is not ready: %w", err)
+		}
 		logger.Printf("state_backend=postgres")
 		return st, nil
 	}

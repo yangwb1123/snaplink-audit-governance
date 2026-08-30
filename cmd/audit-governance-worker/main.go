@@ -182,6 +182,10 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 	// ctx without touching the production constant.
 	ctx, cancel := context.WithTimeout(ctx, archivePassTimeout)
 	defer cancel()
+	if err := svc.Store.Ready(ctx); err != nil {
+		logger.Printf("store_not_ready=%v", err)
+		return
+	}
 	tenants, listErr := svc.ListTenants()
 	if listErr != nil {
 		logger.Printf("list tenants: %v", listErr)
@@ -302,6 +306,12 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 		if err != nil {
 			_ = db.Close()
 			return nil, err
+		}
+		readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer readyCancel()
+		if err := st.Ready(readyCtx); err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("postgres store is not ready: %w", err)
 		}
 		logger.Printf("state_backend=postgres")
 		return st, nil

@@ -36,6 +36,7 @@ type scriptedConflictBackend struct {
 	data      *store.Snapshot
 	conflicts int // remaining conflicts before Save commits
 	saves     int
+	readyErr  error
 }
 
 func (b *scriptedConflictBackend) Load() (*store.Snapshot, error) { return b.data, nil }
@@ -62,6 +63,8 @@ func (b *scriptedConflictBackend) Save(data *store.Snapshot) error {
 	return nil
 }
 
+func (b *scriptedConflictBackend) Ready(context.Context) error { return b.readyErr }
+
 // workerService builds a Service over the scripted backend; the conflict
 // counter needs no tenant domain (tenant IDs are plain map keys).
 func workerService(t *testing.T, backend *scriptedConflictBackend) *service.Service {
@@ -71,6 +74,27 @@ func workerService(t *testing.T, backend *scriptedConflictBackend) *service.Serv
 		t.Fatal(err)
 	}
 	return svc
+}
+
+func TestRunEvaluatePassStopsWhenStoreIsNotReady(t *testing.T) {
+	backend := &scriptedConflictBackend{
+		data:     store.NewSnapshot(),
+		readyErr: errors.New("database unavailable"),
+	}
+	backend.data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Active: true}
+	svc := workerService(t, backend)
+	var buf bytes.Buffer
+	runEvaluatePass(context.Background(), log.New(&buf, "", 0), svc)
+
+	if !strings.Contains(buf.String(), "store_not_ready=database unavailable") {
+		t.Fatalf("readiness failure must be logged, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "tenant=tenant-a") {
+		t.Fatalf("worker must not evaluate tenants before readiness, got %q", buf.String())
+	}
+	if backend.saves != 0 {
+		t.Fatalf("worker must not mutate state before readiness, saves=%d", backend.saves)
+	}
 }
 
 func TestHandleArchiveErrorPersistsExhaustedConflict(t *testing.T) {

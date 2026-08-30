@@ -1,5 +1,15 @@
 # Release Notes
 
+## 2026-08-30 — Gate PostgreSQL startup and worker passes on store readiness
+
+The API and governance worker now run the full PostgreSQL store readiness
+check, including hot/cold catalog validation, before startup proceeds. The
+worker repeats the bounded check before each governance pass and performs no
+pass work when the store is unavailable or has an incomplete/incompatible
+migration. File-backed stores retain their existing behavior. This prevents
+bootstrap, listeners, or worker mutations from running against an invalid
+PostgreSQL layout; no API or CLI contract changes are introduced.
+
 ## 2026-08-30 — Validate OTLP endpoints during `-check-config`
 
 `audit-api -check-config` now validates `AUDIT_OTLP_ENDPOINT` (or the
