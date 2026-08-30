@@ -581,10 +581,9 @@ func TestJWKSCacheFetchesOnceWithinTTLAndNeverForGarbage(t *testing.T) {
 	}
 }
 
-// TestJWKSCacheServesStaleSetDuringIdPOutage pins the stale-on-outage
-// posture: once a set was fetched successfully, an IdP outage must not turn
-// into a total auth outage; the cached set keeps authenticating until the
-// refresh interval recovers. A set that never fetched stays fail-closed.
+// TestJWKSCacheServesStaleSetDuringIdPOutage pins the bounded stale-on-outage
+// posture: a last-known-good set remains usable after TTL expiry, but not
+// after three refresh intervals have elapsed from its successful fetch.
 func TestJWKSCacheServesStaleSetDuringIdPOutage(t *testing.T) {
 	fixture := fixtureNamed(t, signingFixtures(t), "RS256")
 	var requests atomic.Int32
@@ -603,17 +602,71 @@ func TestJWKSCacheServesStaleSetDuringIdPOutage(t *testing.T) {
 	}))
 	defer server.Close()
 	authenticator := remoteAuthenticator(server.URL)
-	authenticator.JWKSRefreshInterval = 10 * time.Millisecond
+	ttl := 20 * time.Millisecond
+	authenticator.JWKSRefreshInterval = ttl
 	valid := signFixtureJWT(t, fixture, validJWTClaims())
 	if _, err := authenticator.AuthenticateToken(valid); err != nil {
 		t.Fatalf("prime cache: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond) // let the TTL expire so the next auth refetches
+	time.Sleep(30 * time.Millisecond) // TTL expired, but age is below 3*TTL.
 	if _, err := authenticator.AuthenticateToken(valid); err != nil {
-		t.Fatalf("stale set must keep authentication working during IdP outage: %v", err)
+		t.Fatalf("stale set must work within the grace period: %v", err)
 	}
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests=%d, want 2 (prime + failed refresh)", got)
+	}
+	if _, err := authenticator.AuthenticateToken(valid); err != nil {
+		t.Fatalf("stale set must remain usable during the failure cooldown: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests=%d, want 2 while refresh failure is cooling down", got)
+	}
+	time.Sleep(50 * time.Millisecond) // age is now strictly beyond 3*TTL and cooldown.
+	_, err := authenticator.AuthenticateToken(valid)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("expired stale set error=%v, want the refresh error", err)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests=%d, want 3 (one refresh after the cap)", got)
+	}
+}
+
+// TestJWKSForcedRefreshFailsClosedBeyondGrace ensures a kid-miss forced
+// refresh cannot bypass the same stale-age limit used by normal refreshes.
+func TestJWKSForcedRefreshFailsClosedBeyondGrace(t *testing.T) {
+	fixture := fixtureNamed(t, signingFixtures(t), "RS256")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) > 1 {
+			http.Error(response, "idp down", http.StatusServiceUnavailable)
+			return
+		}
+		body, err := json.Marshal(jwkSetOf(t, fixture.publicKey))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	authenticator := remoteAuthenticator(server.URL)
+	ttl := 10 * time.Millisecond
+	authenticator.JWKSRefreshInterval = ttl
+	valid := signFixtureJWT(t, fixture, validJWTClaims())
+	if _, err := authenticator.AuthenticateToken(valid); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	time.Sleep(35 * time.Millisecond) // strictly beyond 3*TTL
+	payload, err := json.Marshal(validJWTClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := compactAttackToken(t, map[string]any{"alg": "RS256", "kid": "missing"}, payload)
+	if _, err := authenticator.AuthenticateToken(unknown); err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("forced refresh error=%v, want the refresh error", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests=%d, want 2 (prime + forced refresh)", got)
 	}
 }
 
@@ -657,6 +710,87 @@ func TestJWKSCacheRefreshesOnKidMiss(t *testing.T) {
 	}
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests=%d after reuse, want still 2", got)
+	}
+}
+
+func TestJWKSRotationResetsStaleGracePeriod(t *testing.T) {
+	fixtures := signingFixtures(t)
+	oldFixture := fixtureNamed(t, fixtures, "RS256")
+	newFixture := fixtureNamed(t, fixtures, "PS256")
+	var requests atomic.Int32
+	var outage atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if outage.Load() {
+			requests.Add(1)
+			http.Error(response, "idp down", http.StatusServiceUnavailable)
+			return
+		}
+		request := requests.Add(1)
+		key := oldFixture.publicKey
+		if request > 1 {
+			key = newFixture.publicKey
+		}
+		body, err := json.Marshal(jwkSetOf(t, key))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	authenticator := remoteAuthenticator(server.URL)
+	ttl := 10 * time.Millisecond
+	authenticator.JWKSRefreshInterval = ttl
+	oldToken := signFixtureJWT(t, oldFixture, validJWTClaims())
+	newToken := signFixtureJWT(t, newFixture, validJWTClaims())
+	if _, err := authenticator.AuthenticateToken(oldToken); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if _, err := authenticator.AuthenticateToken(oldToken); err == nil {
+		t.Fatal("old key remained usable after a successful rotation")
+	}
+	if _, err := authenticator.AuthenticateToken(newToken); err != nil {
+		t.Fatalf("new key was not usable after rotation: %v", err)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests=%d, want 3 (prime, rotation, forced recheck)", got)
+	}
+	outage.Store(true)
+	time.Sleep(15 * time.Millisecond) // new set TTL expires, still inside its 3*TTL grace.
+	if _, err := authenticator.AuthenticateToken(newToken); err != nil {
+		t.Fatalf("new key should use the reset stale grace period: %v", err)
+	}
+	time.Sleep(25 * time.Millisecond) // beyond the new set's 3*TTL grace.
+	if _, err := authenticator.AuthenticateToken(newToken); err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("post-rotation stale key error=%v, want refresh failure", err)
+	}
+	if got := requests.Load(); got != 5 {
+		t.Fatalf("requests=%d, want 5 after rotation and outage", got)
+	}
+}
+
+func TestStaleAgeWithinGraceIsOverflowSafe(t *testing.T) {
+	fetchedAt := time.Unix(0, 0)
+	cases := []struct {
+		name string
+		ttl  time.Duration
+		age  time.Duration
+		want bool
+	}{
+		{"just below", time.Second, 3*time.Second - time.Nanosecond, true},
+		{"exactly at cap", time.Second, 3 * time.Second, true},
+		{"just beyond", time.Second, 3*time.Second + time.Nanosecond, false},
+		{"large interval saturates", time.Duration(1<<63/3 + 1), time.Duration(1<<63 - 1), true},
+		{"zero interval", 0, time.Second, false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := staleAgeWithinGrace(fetchedAt, test.ttl, fetchedAt.Add(test.age)); got != test.want {
+				t.Fatalf("staleAgeWithinGrace(ttl=%v, age=%v)=%v, want %v", test.ttl, test.age, got, test.want)
+			}
+		})
 	}
 }
 

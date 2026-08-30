@@ -890,7 +890,7 @@ func TestErrorBodyRedactsServerErrors(t *testing.T) {
 		wantMsg  string
 	}{
 		{"invalid-400", http.StatusBadRequest, fmt.Errorf("%w: events must not be empty", domain.ErrInvalid), "invalid_request", "invalid request: events must not be empty"},
-		{"unauthorized-401", http.StatusUnauthorized, fmt.Errorf("%w: bad token", domain.ErrUnauthorized), "unauthorized", "unauthorized: bad token"},
+		{"unauthorized-401", http.StatusUnauthorized, fmt.Errorf("%w: JWKS https://idp.example/keys: connection refused", domain.ErrUnauthorized), "unauthorized", "unauthorized"},
 		{"forbidden-403", http.StatusForbidden, domain.ErrForbidden, "forbidden", "forbidden"},
 		{"not-found-404", http.StatusNotFound, domain.ErrNotFound, "not_found", "not found"},
 		{"conflict-409", http.StatusConflict, fmt.Errorf("%w: event_id content differs", domain.ErrConflict), "conflict", "conflict: event_id content differs"},

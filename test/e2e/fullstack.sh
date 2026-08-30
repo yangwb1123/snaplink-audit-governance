@@ -110,6 +110,8 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/003_outbox_relay.sql" >/dev/null
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/005_admin_action_trail.sql" >/dev/null
 
 # 自举归档依赖：S3Store.Ready 要求 bucket 存在、启用 Object Lock（WORM）、
 # versioning，并且（自 R-1 收口起）默认留存为 COMPLIANCE 模式 + 正有效期。

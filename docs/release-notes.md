@@ -1,5 +1,26 @@
 # Release Notes
 
+## 2026-08-30 — Bound stale JWKS acceptance during IdP outages
+
+**For operators (behavior change):** A successfully fetched JWKS set may now
+be trusted during an IdP outage for at most three times the effective
+`JWKSRefreshInterval`. The default 10-minute interval therefore permits a
+maximum 30-minute stale grace period. Once that period elapses, a failed
+refresh rejects authentication instead of continuing to trust revoked or
+rotated-out keys. A successful refresh replaces the set and restarts the
+stale-age window; the same bound applies to forced refreshes for unknown
+`kid` values.
+
+**For developers:** The cache retains `fetchedAt` only from successful JWKS
+fetches and uses an overflow-safe `jwksMaxStaleFactor = 3` age check for both
+normal and forced refresh paths. Regression tests cover the grace boundary,
+forced-refresh fail-closed behavior, successful rotation, and large duration
+arithmetic. HTTP 401 and gRPC `Unauthenticated` responses retain their status
+contracts while authentication details are redacted at the protocol boundary.
+No configuration, API, token, or data migration is required. Mixed-version
+rollouts are not security-equivalent until all authentication-serving
+instances enforce the bound.
+
 ## 2026-08-29 — Outbox duplicate classification derives identity from event content
 
 **For operators (behavior change):** an `audit_outbox` insert that reuses an

@@ -1164,6 +1164,9 @@ func (s *Server) requireAdminActionRead(r *http.Request) (auth.Claims, error) {
 func (s *Server) requirePermission(r *http.Request, permission string, allowTenantlessConsole bool) (auth.Claims, error) {
 	claims, err := s.Auth.Authenticate(r)
 	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("authentication failed: %v", err)
+		}
 		return auth.Claims{}, fmt.Errorf("%w: %v", domain.ErrUnauthorized, err)
 	}
 	if !claims.Allows(permission) && !(allowTenantlessConsole && claims.CrossTenantAuditRead) {
@@ -1316,7 +1319,12 @@ func errorBody(status int, err error, r *http.Request) map[string]any {
 		code = "snapshot_conflict"
 	}
 	message := err.Error()
-	if status >= 500 {
+	if status == http.StatusUnauthorized {
+		// Authentication errors can contain JWKS endpoint, transport, or
+		// parser details. Keep those details server-side and expose only the
+		// stable protocol message.
+		message = "unauthorized"
+	} else if status >= 500 {
 		message = "internal server error"
 	}
 	return map[string]any{"error": map[string]any{"code": code, "message": message, "request_id": r.Context().Value(requestIDKey)}}

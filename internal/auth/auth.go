@@ -38,11 +38,12 @@ type Authenticator struct {
 	AllowDev                  bool
 	AllowLocalHS256           bool
 	AllowInsecureJWKSLoopback bool
-	// JWKSRefreshInterval bounds how long a parsed JWKS set is reused
+	// JWKSRefreshInterval controls how long a parsed JWKS set is reused
 	// without refetching (0 means 10 minutes). A shorter interval trades
-	// IdP round trips for faster key rotation adoption; the cache also
-	// serves the last known-good set during an IdP outage (bounded
-	// staleness, see verifier.go).
+	// IdP round trips for faster key rotation adoption. During an IdP outage,
+	// last-known-good keys may be trusted for at most three times the effective
+	// interval; with the default interval that maximum stale grace period is
+	// 30 minutes, after which refresh failure fails authentication closed.
 	JWKSRefreshInterval time.Duration
 	// ClockSkew extends the acceptance window for exp and nbf checks.
 	// A positive value accepts tokens that expired up to ClockSkew ago

@@ -385,6 +385,31 @@ func TestToStatusRedactsInternalErrors(t *testing.T) {
 	}
 }
 
+// TestAuthenticateRedactsFailure pins the authentication boundary: a token
+// verification detail is logged server-side but never returned to a gRPC
+// client, which still receives Unauthenticated.
+func TestAuthenticateRedactsFailure(t *testing.T) {
+	var logged strings.Builder
+	server := &Server{
+		Auth:   auth.Authenticator{AllowDev: true},
+		Logger: log.New(&logged, "", 0),
+	}
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer dev:malformed"))
+	_, err := server.authenticate(ctx, "audit:event:write")
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("code=%v, want Unauthenticated", status.Code(err))
+	}
+	if message := status.Convert(err).Message(); message != "authentication failed" {
+		t.Fatalf("message=%q, want fixed authentication message", message)
+	}
+	if !strings.Contains(logged.String(), "invalid development token") {
+		t.Fatalf("authentication detail was not logged server-side: %q", logged.String())
+	}
+	if strings.Contains(status.Convert(err).Message(), "development") {
+		t.Fatal("authentication detail leaked to gRPC client")
+	}
+}
+
 // TestStatusErrorLogsDetailServerSide pins the diagnostic half of M-1: the
 // full error text is written to the server log before the redacted status is
 // returned, so operators can still diagnose without the client seeing it.

@@ -22,8 +22,12 @@ const (
 	maxJWTBytes               = 1 << 20
 	maxJWKSBytes              = 2 << 20
 	jwksFetchTimeout          = 5 * time.Second
-	// defaultJWKSRefreshInterval bounds JWKS staleness between refetches.
+	// defaultJWKSRefreshInterval is the default interval between JWKS refreshes.
 	defaultJWKSRefreshInterval = 10 * time.Minute
+	// jwksMaxStaleFactor bounds trust in a last-known-good JWKS set during
+	// an IdP outage. With the default interval, this is a 30-minute grace
+	// period; after it, refresh failure fails authentication closed.
+	jwksMaxStaleFactor = 3
 	// negativeCacheCap bounds the per-URL negative cache so a distinct-kid
 	// flood cannot grow memory without bound. Eviction is FIFO; an evicted
 	// entry can cause at most one fetch and only after the forced-refresh
@@ -92,7 +96,12 @@ type jwksCacheEntry struct {
 	// elapsed (FR-2). Independent of fetchedAt: a successful forced refresh
 	// re-stamps fetchedAt without reopening the forced-refresh budget.
 	forcedAt time.Time
-	inflight *fetchOutcome // non-nil while a fetch is in flight (FR-3b)
+	// lastFailureAt/lastFailureErr suppress repeated completed refresh
+	// failures for one interval. This cooldown limits outage amplification;
+	// it does not change fetchedAt or the stale-grace calculation.
+	lastFailureAt  time.Time
+	lastFailureErr error
+	inflight       *fetchOutcome // non-nil while a fetch is in flight (FR-3b)
 }
 
 // jwksCache maps JWKS URL to its cache entry. A process uses one trust
@@ -315,25 +324,34 @@ func (a Authenticator) remoteVerificationKey(ctx context.Context, header verifie
 
 // cachedJWKS returns the parsed JWKS set for a.JWKSURL, fetching it at most
 // once per refresh interval. force bypasses the freshness check (kid-miss
-// refresh). On a fetch failure the last known-good set is served when one
-// exists (stale-on-outage: an IdP outage is not a total auth outage, and
-// staleness is bounded by the refresh interval); a set that never fetched
-// keeps the fail-closed behavior. All fetches — initial, TTL refresh, and
-// forced — funnel through one single-flight outcome per URL, so at most one
-// fetch is in flight at a time (FR-3b); a fresh-set read never waits on an
-// in-flight fetch (FR-3a); joiners wait bounded by their own context
-// (FR-3c).
+// refresh). Last-known-good keys may be trusted for at most three times the
+// effective refresh interval while the IdP is unreachable. With the default
+// 10-minute interval, the maximum stale grace period is 30 minutes. After
+// that period, refresh failure causes authentication to fail closed. A set
+// that never fetched also keeps the fail-closed behavior. All fetches —
+// initial, TTL refresh, and forced — funnel through one single-flight outcome
+// per URL, so at most one fetch is in flight at a time (FR-3b); a fresh-set
+// read never waits on an in-flight fetch (FR-3a); joiners wait bounded by
+// their own context (FR-3c).
 func (a Authenticator) cachedJWKS(ctx context.Context, force bool) (jwk.Set, error) {
 	entry := a.cacheEntry()
-	if !force {
-		entry.mu.RLock()
-		if entry.set != nil && time.Since(entry.fetchedAt) < entry.ttl {
-			set := entry.set
-			entry.mu.RUnlock()
+	entry.mu.RLock()
+	if !entry.lastFailureAt.IsZero() && time.Since(entry.lastFailureAt) < entry.ttl {
+		set := entry.set
+		err := entry.lastFailureErr
+		withinGrace := set != nil && staleAgeWithinGrace(entry.fetchedAt, entry.ttl, time.Now())
+		entry.mu.RUnlock()
+		if withinGrace {
 			return set, nil
 		}
-		entry.mu.RUnlock()
+		return nil, err
 	}
+	if !force && entry.set != nil && time.Since(entry.fetchedAt) < entry.ttl {
+		set := entry.set
+		entry.mu.RUnlock()
+		return set, nil
+	}
+	entry.mu.RUnlock()
 	outcome, leader := entry.beginFetch()
 	if leader {
 		// The fetch runs inside an inner closure so finishFetch (deferred)
@@ -351,6 +369,9 @@ func (a Authenticator) cachedJWKS(ctx context.Context, force bool) (jwk.Set, err
 					// slot or clobber a last-known-good set: record the outcome
 					// as failed, then re-panic to the caller.
 					entry.finishFetch(outcome, nil, fmt.Errorf("fetch JWKS: panic"))
+					// A panic is not a completed upstream failure; do not let the
+					// outage cooldown suppress the recovery fetch.
+					entry.clearFetchFailure()
 					panic(recovered)
 				}
 				entry.finishFetch(outcome, set, err)
@@ -371,8 +392,8 @@ func (a Authenticator) cachedJWKS(ctx context.Context, force bool) (jwk.Set, err
 	}
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
-	if outcome.err != nil && entry.set != nil {
-		return entry.set, nil // stale-on-outage, unchanged
+	if outcome.err != nil && entry.set != nil && staleAgeWithinGrace(entry.fetchedAt, entry.ttl, time.Now()) {
+		return entry.set, nil // bounded stale-on-outage fallback
 	}
 	return outcome.set, outcome.err
 }
@@ -412,9 +433,24 @@ func (e *jwksCacheEntry) finishFetch(outcome *fetchOutcome, set jwk.Set, err err
 	if err == nil {
 		e.set = set
 		e.fetchedAt = time.Now()
+		e.lastFailureAt = time.Time{}
+		e.lastFailureErr = nil
+	} else {
+		e.lastFailureAt = time.Now()
+		e.lastFailureErr = err
 	}
 	e.inflight = nil
 	close(outcome.done)
+	e.mu.Unlock()
+}
+
+// clearFetchFailure removes the cooldown after a local fetch panic. A
+// panic is rethrown to the caller, and the next request must be able to
+// attempt recovery immediately.
+func (e *jwksCacheEntry) clearFetchFailure() {
+	e.mu.Lock()
+	e.lastFailureAt = time.Time{}
+	e.lastFailureErr = nil
 	e.mu.Unlock()
 }
 
@@ -529,6 +565,25 @@ func (a Authenticator) jwksRefreshInterval() time.Duration {
 		return a.JWKSRefreshInterval
 	}
 	return defaultJWKSRefreshInterval
+}
+
+// staleAgeWithinGrace reports whether a last-known-good JWKS set may still be
+// used after a failed refresh. Saturating the multiplication prevents an
+// unusually large configured interval from wrapping the stale-age limit.
+func staleAgeWithinGrace(fetchedAt time.Time, ttl time.Duration, now time.Time) bool {
+	if fetchedAt.IsZero() || ttl <= 0 {
+		return false
+	}
+	age := now.Sub(fetchedAt)
+	if age < 0 {
+		return true
+	}
+	const maxDuration = time.Duration(1<<63 - 1)
+	maxAge := maxDuration
+	if ttl <= maxDuration/jwksMaxStaleFactor {
+		maxAge = ttl * jwksMaxStaleFactor
+	}
+	return age <= maxAge
 }
 
 func uniqueKey(set jwk.Set, wantedID string) (jwk.Key, error) {

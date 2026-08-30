@@ -144,7 +144,10 @@ func (s *Server) authenticate(ctx context.Context, permission string) (auth.Clai
 	}
 	claims, err := s.Auth.AuthenticateTokenContext(ctx, token)
 	if err != nil {
-		return auth.Claims{}, status.Error(codes.Unauthenticated, err.Error())
+		if s.Logger != nil {
+			s.Logger.Printf("grpc authentication failed: %v", err)
+		}
+		return auth.Claims{}, status.Error(codes.Unauthenticated, "authentication failed")
 	}
 	if !claims.Allows(permission) {
 		return claims, status.Error(codes.PermissionDenied, "permission denied")
