@@ -16,6 +16,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
@@ -164,16 +165,27 @@ func (s *Server) spanWrap(handler http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("X-Trace-ID", sc.TraceID().String())
 		}
 		r = r.WithContext(ctx)
+		trackedWriter := &statusResponseWriter{ResponseWriter: w}
 		defer func() {
+			panicked := false
 			if recovered := recover(); recovered != nil {
+				panicked = true
 				// writeError counts the 500: the panic is one error response.
 				span.RecordError(fmt.Errorf("panic: %v", recovered))
 				s.Logger.Printf("request_id=%s panic=%v", requestID, recovered)
-				s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
+				s.writeError(trackedWriter, r, http.StatusInternalServerError, fmt.Errorf("internal server error"))
+			}
+			statusCode := trackedWriter.StatusCode()
+			span.SetAttributes(attribute.Int("http.status_code", statusCode))
+			if panicked || (statusCode >= http.StatusInternalServerError && statusCode <= 599) {
+				// Deliberately omit a description: error text can contain internal
+				// diagnostics, while the panic exception above is a compatibility
+				// event whose existing contents must be retained.
+				span.SetStatus(codes.Error, "")
 			}
 			span.End()
 		}()
-		handler(w, r)
+		handler(trackedWriter, r)
 	}
 }
 

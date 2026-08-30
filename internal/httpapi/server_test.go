@@ -25,6 +25,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
@@ -1778,6 +1779,117 @@ func TestHTTPSpanWrapPanicRecovered(t *testing.T) {
 	}
 	if !found {
 		t.Error("span has no exception event carrying the panic message (RecordError did not land on a live span)")
+	}
+	if value, ok := spanAttribute(span, "http.status_code"); !ok || value.AsInt64() != http.StatusInternalServerError {
+		t.Errorf("http.status_code=%v (present=%v), want 500", value, ok)
+	}
+	if span.Status().Code != codes.Error {
+		t.Errorf("span status=%v, want Error", span.Status().Code)
+	}
+}
+
+// TestHTTPSpanWrapResponseOutcomes covers implicit responses, client errors,
+// rate limiting, server errors, and the recovery path without relying on an
+// exporter. It also proves that internal error details do not enter spans.
+func TestHTTPSpanWrapResponseOutcomes(t *testing.T) {
+	capture := captureSpans(t)
+	s := &Server{Logger: log.New(io.Discard, "", 0)}
+	internalDetails := "disk failure: /srv/audit/secret/database.db"
+	cases := []struct {
+		name       string
+		wantStatus int
+		wantError  bool
+		handler    http.HandlerFunc
+	}{
+		{
+			name:       "implicit 200 body",
+			wantStatus: http.StatusOK,
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("ordinary response body"))
+			},
+		},
+		{
+			name:       "implicit 200 without writes",
+			wantStatus: http.StatusOK,
+			handler:    func(http.ResponseWriter, *http.Request) {},
+		},
+		{
+			name:       "explicit 400",
+			wantStatus: http.StatusBadRequest,
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+			},
+		},
+		{
+			name:       "rate limited",
+			wantStatus: http.StatusTooManyRequests,
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+		},
+		{
+			name:       "ordinary 500 error",
+			wantStatus: http.StatusInternalServerError,
+			wantError:  true,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				s.writeError(w, r, http.StatusInternalServerError, errors.New(internalDetails))
+			},
+		},
+		{
+			name:       "recovered panic",
+			wantStatus: http.StatusInternalServerError,
+			wantError:  true,
+			handler: func(http.ResponseWriter, *http.Request) {
+				panic("outcome-boom")
+			},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			s.spanWrap(testCase.handler)(recorder, httptest.NewRequest(http.MethodGet, "/outcome", nil))
+			if recorder.Code != testCase.wantStatus {
+				t.Fatalf("response status=%d, want %d", recorder.Code, testCase.wantStatus)
+			}
+			if len(capture.spans) != 1 {
+				t.Fatalf("captured %d spans, want exactly 1", len(capture.spans))
+			}
+			span := capture.spans[0]
+			capture.spans = capture.spans[:0]
+			value, present := spanAttribute(span, "http.status_code")
+			if !present || value.AsInt64() != int64(testCase.wantStatus) {
+				t.Errorf("http.status_code=%v (present=%v), want %d", value, present, testCase.wantStatus)
+			}
+			if testCase.wantError && span.Status().Code != codes.Error {
+				t.Errorf("span status=%v, want Error", span.Status().Code)
+			}
+			if !testCase.wantError && span.Status().Code == codes.Error {
+				t.Errorf("span status=%v, want no server error", span.Status().Code)
+			}
+			serialized := fmt.Sprintf("%v %v", span.Attributes(), span.Events())
+			for _, forbidden := range []string{"ordinary response body", internalDetails, "secret/database.db"} {
+				if strings.Contains(serialized, forbidden) {
+					t.Errorf("span contains forbidden telemetry content %q: %s", forbidden, serialized)
+				}
+			}
+			if testCase.name == "recovered panic" {
+				foundPanic := false
+				for _, event := range span.Events() {
+					if event.Name != "exception" {
+						continue
+					}
+					for _, kv := range event.Attributes {
+						if string(kv.Key) == "exception.message" && strings.Contains(kv.Value.AsString(), "outcome-boom") {
+							foundPanic = true
+						}
+					}
+				}
+				if !foundPanic {
+					t.Error("recovered panic span has no exception event")
+				}
+			}
+		})
 	}
 }
 
