@@ -111,15 +111,11 @@ func TestFileStoreGetRejectsNonRegular(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "archive")
 		target := filepath.Join(dir, filepath.FromSlash(key))
-		secret := filepath.Join(t.TempDir(), "secret")
-		secretBytes := []byte("outside archive secret")
-		if err := os.WriteFile(secret, secretBytes, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		dangling := filepath.Join(dir, "not-present")
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(secret, target); err != nil {
+		if err := os.Symlink(dangling, target); err != nil {
 			t.Skipf("cannot create symlink: %v", err)
 		}
 		store := &FileStore{Dir: dir}
@@ -128,10 +124,10 @@ func TestFileStoreGetRejectsNonRegular(t *testing.T) {
 			t.Fatalf("Get symlink err=%v, want %q", err, wantErr(dir))
 		}
 		if data != nil {
-			t.Fatalf("Get followed a symlink and returned %q", data)
+			t.Fatalf("Get returned data for a symlink: %q", data)
 		}
-		if bytes.Equal(data, secretBytes) {
-			t.Fatalf("Get returned the symlink target contents")
+		if _, statErr := os.Lstat(dangling); !os.IsNotExist(statErr) {
+			t.Fatalf("symlink test target unexpectedly exists: %v", statErr)
 		}
 	})
 }

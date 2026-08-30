@@ -17,8 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,8 +24,6 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-
-	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 // ErrObjectConflict marks a permanent, non-retryable archive failure: an
@@ -71,327 +67,28 @@ func Configured(store Store) bool {
 	}
 }
 
-// FileStore writes into a local append-only directory: O_EXCL creation,
-// read-only permissions and fsync. Put never writes through an existing
-// final component, and a Put that fails after creating the object removes
-// it, so an error never leaves a partial object at the key.
+// FileStore writes into a local append-only directory using descriptor-relative
+// traversal, atomic unpublished-file publication, read-only permissions and
+// fsync. Put never writes through an existing final component; failed writes
+// are discarded before publication, while a post-publication durability
+// error leaves a complete immutable object available for a later retry.
 type FileStore struct {
 	Dir string
 
-	// syncDir is the per-directory fsync hook used by Put's and Ready's
-	// directory-chain durability step. It defaults to fsutil.SyncDir; tests
-	// replace it to record the ordered sync set or fault-inject a specific
-	// path. Nil at construction (all production literals), so there is no
-	// constructor and no exported surface change.
+	// syncDir is retained as a test seam. Production synchronization uses the
+	// directory descriptors returned by the secure resolver; a non-nil hook is
+	// used only by package tests to observe historical path labels.
 	syncDir func(path string) error
 
-	// mu serializes Put/Get so the create→write→sync→remove critical
-	// section cannot interleave with a concurrent idempotent retry: without
-	// it, a failing Put could remove an object that a concurrent retry had
-	// just verified as byte-identical and reported as archived, violating
-	// the "nil ⇒ durable" contract. It also prevents torn reads of an
-	// object mid-write.
+	// mu serializes Put/Get so one store cannot observe an object before its
+	// complete publication and directory synchronization. It also keeps the
+	// root durability state transitions ordered.
 	mu sync.Mutex
 
-	// rootState tracks whether this instance created the archive root and
-	// whether its parent dentry has been confirmed durable (see rootState).
-	// A single atomic.Value keeps the fields consistent for the lock-free
-	// Ready and the locked Put without a data race; lost updates between
-	// concurrent observations are benign (any recorded missingBase is a
-	// valid chain root that covers the parent).
+	// rootState records whether this instance created the root without yet
+	// confirming its parent dentry durable. It is kept for retry durability
+	// when the first operation fails after creating a fresh root.
 	rootState atomic.Value
-}
-
-// containedPath validates key against the archive-root containment contract
-// and returns the joined filesystem path. Keys are relative POSIX-style
-// object names; anything absolute, empty, or containing a ".." component
-// that escapes the root is rejected before any filesystem mutation, so a
-// caller (or a compromised upstream) cannot write or read outside the
-// archive directory. The empty-Dir error is byte-identical to Ready's so the
-// existing fail-closed preflight message is preserved.
-func containedPath(dir, key string) (string, error) {
-	if dir == "" {
-		return "", fmt.Errorf("archive directory is not configured")
-	}
-	clean := filepath.Clean(filepath.FromSlash(key))
-	if clean == "." || filepath.IsAbs(clean) || clean == ".." ||
-		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive key %q escapes the archive directory", key)
-	}
-	return filepath.Join(dir, clean), nil
-}
-
-// ErrArchiveKeyTooLong reports an archive key that exceeds the destination's
-// length limits before any write is attempted. It is typed so callers can
-// distinguish a permanently over-limit key (an out-of-contract identifier,
-// e.g. one whose 3× percent-encoded archive component exceeds NAME_MAX) from
-// a transient storage error: a governance pass isolates the failing object
-// and lets the rest of the tenant's backlog converge instead of aborting on
-// the first failure.
-var ErrArchiveKeyTooLong = errors.New("archive key exceeds the destination length limit")
-
-const (
-	// maxKeyBytes bounds the total encoded key, matching the S3 object-key
-	// limit. The local store's PATH_MAX sits far above any
-	// component-bound-derived total, so this is the effective composite-key
-	// ceiling for both destinations. The per-component bound is POSIX
-	// NAME_MAX; both constants are defined once in fsutil and pinned by the
-	// FM-1 threshold tests there.
-	maxKeyBytes = fsutil.MaxS3KeyBytes
-)
-
-// checkKeyLength validates key against the destination length limits
-// (maxKeyComponentBytes per component, maxKeyBytes total). It is a pre-flight
-// check: both stores run it before any filesystem mutation or network I/O, so
-// an over-limit key fails with the typed ErrArchiveKeyTooLong instead of a
-// backend-specific error after partial work.
-func checkKeyLength(key string) error {
-	if len(key) > maxKeyBytes {
-		return fmt.Errorf("%w: key %q is %d bytes (limit %d)", ErrArchiveKeyTooLong, key, len(key), maxKeyBytes)
-	}
-	for _, component := range strings.Split(key, "/") {
-		if len(component) > fsutil.MaxFileStoreComponentBytes {
-			return fmt.Errorf("%w: key %q component %q is %d bytes (limit %d)", ErrArchiveKeyTooLong, key, component, len(component), fsutil.MaxFileStoreComponentBytes)
-		}
-	}
-	return nil
-}
-
-// rootState is the durability bookkeeping for the archive root within one
-// FileStore instance. missingBase is the deepest existing ancestor observed
-// when this instance last saw the root missing — the chain root that covers
-// every directory created since (including the fresh root's own dentry in
-// its parent); missingSeen records that observation. parentDurable records
-// that a chain sync reaching missingBase has since succeeded, so later
-// operations may terminate the chain at the configured root again.
-//
-// A root that pre-existed this instance (missingSeen false) is treated as
-// durable per the scope guard: steady-state chains keep terminating at the
-// configured root. A root created by this instance whose covering sync
-// failed keeps missingBase in the chain until one sync succeeds, so a
-// nil-returning Put can never treat a non-durable root as durable (M-12).
-type rootState struct {
-	missingBase   string
-	missingSeen   bool
-	parentDurable bool
-}
-
-// loadRootState returns the current root durability state.
-func (f *FileStore) loadRootState() rootState {
-	if v := f.rootState.Load(); v != nil {
-		return v.(rootState)
-	}
-	return rootState{}
-}
-
-// observeRootMissing records that this operation observed the archive root
-// missing before its MkdirAll: the root is (being) created within this
-// instance's lifetime, probed is the deepest existing ancestor whose child
-// was created, and the parent dentry is unconfirmed until a chain reaching
-// probed succeeds.
-func (f *FileStore) observeRootMissing(probed string) {
-	st := f.loadRootState()
-	st.missingSeen = true
-	st.missingBase = probed
-	st.parentDurable = false
-	f.rootState.Store(st)
-}
-
-// markRootDurable records that a chain sync reaching the root's parent
-// dentry just succeeded.
-func (f *FileStore) markRootDurable() {
-	st := f.loadRootState()
-	st.parentDurable = true
-	f.rootState.Store(st)
-}
-
-// chainRoot returns the chain root for the durability sync. probed is the
-// deepest existing ancestor of f.Dir observed before this operation's
-// MkdirAll: when it lies above f.Dir the root is (being) created by this
-// operation, so the chain must extend through the parent to make the fresh
-// root's dentry durable (M-12). When the root pre-exists, the chain
-// terminates at f.Dir — unless this instance itself observed the root
-// missing earlier and has not yet confirmed the parent dentry durable (a
-// failed first attempt created the root but its covering sync never
-// succeeded): then the chain extends to the originally observed deepest
-// existing ancestor, so every directory created since is covered.
-func (f *FileStore) chainRoot(probed string) string {
-	if probed != f.Dir {
-		return probed
-	}
-	st := f.loadRootState()
-	if st.missingSeen && !st.parentDurable {
-		return st.missingBase
-	}
-	return f.Dir
-}
-
-func (f *FileStore) Put(_ context.Context, key string, data []byte) error {
-	path, err := containedPath(f.Dir, key)
-	if err != nil {
-		return err
-	}
-	// Pre-flight length guard before any filesystem mutation: an over-limit
-	// key (3× encoded out-of-contract identifier) fails typed and leaves no
-	// partial directory or object behind.
-	if err := checkKeyLength(key); err != nil {
-		return err
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// REQ-2: chain root = deepest ancestor that pre-exists this Put, probed
-	// BEFORE MkdirAll so a freshly created archive root is included in the
-	// sync chain (its dentry inside the parent must be durable for
-	// "nil ⇒ durable", M-12). When f.Dir pre-exists the probe returns f.Dir
-	// and the chain is unchanged (root == dir collapses to one sync); a root
-	// this instance created earlier without confirming the parent dentry
-	// durable keeps the parent in the chain (see chainRoot).
-	probed := fsutil.DeepestExistingAncestor(f.Dir)
-	root := f.chainRoot(probed)
-	if probed != f.Dir {
-		f.observeRootMissing(probed)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	// A pre-existing non-regular path (symlink, directory, device) is never
-	// "already archived": reject it instead of silently accepting the key.
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("archive path %s exists and is not a regular file", path)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o440)
-	if err != nil {
-		if os.IsExist(err) {
-			// The object already exists: only a byte-identical retry is an
-			// idempotent success. O_EXCL guarantees this call never wrote
-			// through the existing final component.
-			return verifyExistingObject(path, data)
-		}
-		return err
-	}
-	// The object at key was created by this call: any failure from here on
-	// must remove it so the invariant "error ⇒ no object at key" holds.
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return err
-	}
-	// The directory entry of the new object must be durable before Put
-	// reports success (M-12): a crash right after close can otherwise lose
-	// the object from a power failure even though the file itself was
-	// synced. Directory fsync is per-directory, so the object's immediate
-	// parent and every ancestor up to the chain root must each be synced,
-	// leaf-to-root; the chain root is the deepest pre-existing ancestor
-	// probed before MkdirAll when this Put created the archive root, and
-	// the configured f.Dir otherwise. The mutex guarantees no concurrent
-	// retry can observe or remove the object mid-sync.
-	syncDir := f.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
-	}
-	if err := fsutil.SyncDirChain(root, filepath.Dir(path), syncDir); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("sync directory chain for %s: %w", path, err)
-	}
-	// A chain whose root is above the configured root covered the parent
-	// dentry; once that succeeds the root is durable for subsequent
-	// operations (chainRoot terminates at f.Dir again).
-	if root != f.Dir {
-		f.markRootDurable()
-	}
-	return nil
-}
-
-// verifyExistingObject returns nil only when the object already at path is
-// byte-identical to data. A mismatch — or a file that cannot be read and
-// therefore cannot be verified — is an error, so tampering becomes loud
-// instead of being silently reported as archived. The pre-existing object
-// is never modified or removed (WORM).
-func verifyExistingObject(path string, data []byte) error {
-	existing, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("archive path %s already exists and cannot be verified: %w", path, err)
-	}
-	if !bytes.Equal(existing, data) {
-		return fmt.Errorf("archive path %s: %w", path, ErrObjectConflict)
-	}
-	return nil
-}
-
-func (f *FileStore) Get(_ context.Context, key string) ([]byte, error) {
-	path, err := containedPath(f.Dir, key)
-	if err != nil {
-		return nil, err
-	}
-	// The mutex also serializes Get against an in-flight Put, so a reader
-	// never observes a torn (mid-write) object.
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Lstat does not follow the final path component. Reject symlinks and
-	// other non-regular paths before ReadFile can follow or read them.
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("archive path %s exists and is not a regular file", path)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	return os.ReadFile(path)
-}
-
-func (f *FileStore) Ready(_ context.Context) error {
-	if f.Dir == "" {
-		return fmt.Errorf("archive directory is not configured")
-	}
-	// REQ-3: probe before MkdirAll so a root freshly created by this Ready
-	// is included in the sync chain; its dentry inside the parent is made
-	// durable (M-12). A pre-existing root collapses to one sync (root ==
-	// dir), so steady-state readiness does not re-sync ancestors above the
-	// configured root; a root this instance created earlier without a
-	// confirmed parent dentry keeps the parent in the chain (chainRoot).
-	probed := fsutil.DeepestExistingAncestor(f.Dir)
-	root := f.chainRoot(probed)
-	if probed != f.Dir {
-		f.observeRootMissing(probed)
-	}
-	probe := filepath.Join(f.Dir, ".ready-probe")
-	if err := os.MkdirAll(f.Dir, 0o750); err != nil {
-		return err
-	}
-	if err := os.WriteFile(probe, []byte("ok"), 0o640); err != nil {
-		return err
-	}
-	if err := os.Remove(probe); err != nil {
-		return err
-	}
-	// The probe-file removal — and, when the root is fresh, the root's own
-	// dentry inside its parent — must be durable before Ready reports
-	// ready: a non-durable root is not ready, so a chain-sync failure here
-	// fails Ready closed.
-	syncDir := f.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
-	}
-	if err := fsutil.SyncDirChain(root, f.Dir, syncDir); err != nil {
-		return fmt.Errorf("sync archive root %s: %w", f.Dir, err)
-	}
-	if root != f.Dir {
-		f.markRootDurable()
-	}
-	return nil
 }
 
 // S3Client is the subset of the minio client used by S3Store. The interface
