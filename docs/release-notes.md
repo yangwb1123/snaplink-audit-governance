@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-08-31 — Require issuer and audience pins for asymmetric JWT trust
+
+**For operators (behavior change):** configurations using a JWKS URL or local
+asymmetric public key must set non-empty `AUDIT_JWT_ISSUER` and
+`AUDIT_JWT_AUDIENCE`. Startup and `-check-config` now fail closed when either
+pin is absent; tokens must contain matching `iss` and `aud` claims, including
+when `AUDIT_ALLOW_DEV_AUTH=true` is used alongside an asymmetric source. The
+explicit local HS256 profile and dev-token-only profile remain unchanged. Add
+the two values before migrating an existing JWKS/public-key deployment; no
+ledger or database migration is required.
+
 ## 2026-08-30 — Fail-safe asynchronous export terminal-state persistence
 
 **For operators (behavior change):** a transient failure of the terminal

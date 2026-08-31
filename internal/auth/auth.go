@@ -144,10 +144,20 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore)-int64(a.ClockSkew.Seconds()) {
 		return Claims{}, fmt.Errorf("token is not active")
 	}
-	if a.Issuer != "" && stringClaim(payload, "iss") != a.Issuer {
+	// Asymmetric trust always requires both configured pins. This remains
+	// fail-closed even when AllowDev lets a local process start with an
+	// incomplete asymmetric configuration: dev tokens take the separate path,
+	// while a real JWT cannot bypass issuer/audience validation.
+	if a.requiresIssuerAudience() {
+		if strings.TrimSpace(a.Issuer) == "" || stringClaim(payload, "iss") != a.Issuer {
+			return Claims{}, fmt.Errorf("token issuer mismatch")
+		}
+		if strings.TrimSpace(a.Audience) == "" || !audienceClaim(payload, a.Audience) {
+			return Claims{}, fmt.Errorf("token audience mismatch")
+		}
+	} else if a.Issuer != "" && stringClaim(payload, "iss") != a.Issuer {
 		return Claims{}, fmt.Errorf("token issuer mismatch")
-	}
-	if a.Audience != "" && !audienceClaim(payload, a.Audience) {
+	} else if a.Audience != "" && !audienceClaim(payload, a.Audience) {
 		return Claims{}, fmt.Errorf("token audience mismatch")
 	}
 	subject, hasSubject, err := strictIdentityClaim(payload, "sub")

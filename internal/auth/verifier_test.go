@@ -186,13 +186,42 @@ func TestValidateConfigurationRejectsShortHS256Secret(t *testing.T) {
 	}
 }
 
+func TestAsymmetricTrustRequiresIssuerAndAudience(t *testing.T) {
+	cases := []struct {
+		name     string
+		issuer   string
+		audience string
+		want     string
+	}{
+		{"missing issuer and audience", "", "", "issuer"},
+		{"missing issuer", "", "audit-governance", "issuer"},
+		{"missing audience", "https://snaplink.example", "", "audience"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authenticator := Authenticator{JWKSURL: "https://issuer.example/jwks", Issuer: tc.issuer, Audience: tc.audience}
+			err := authenticator.ValidateConfiguration()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateConfiguration() error=%v, want missing %s", err, tc.want)
+			}
+		})
+	}
+
+	// AllowDev is an explicit local-development exception for starting with an
+	// incomplete asymmetric source so dev tokens remain usable. Real JWTs are
+	// still checked by parseJWT and cannot use the exception to skip the pins.
+	if err := (Authenticator{JWKSURL: "https://issuer.example/jwks", AllowDev: true}).ValidateConfiguration(); err != nil {
+		t.Fatalf("explicit development mode should permit incomplete JWKS config: %v", err)
+	}
+}
+
 func TestLocalPublicKeyPinsAlgorithmAgainstHMACConfusion(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
 	publicPEM := marshalPublicKey(t, &privateKey.PublicKey)
-	authenticator := Authenticator{JWTPublicKeyPEM: publicPEM, JWTPublicKeyAlgorithm: "RS256"}
+	authenticator := Authenticator{JWTPublicKeyPEM: publicPEM, JWTPublicKeyAlgorithm: "RS256", Issuer: "https://snaplink.example", Audience: "audit-governance"}
 	hmacToken := signHMAC(t, validJWTClaims(), []byte(publicPEM))
 	if _, err := authenticator.AuthenticateToken(hmacToken); err == nil {
 		t.Fatal("RSA public key was accepted as an HMAC secret")
@@ -220,7 +249,7 @@ func TestJWKSURLRequiresHTTPSOrExplicitLoopback(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := (Authenticator{JWKSURL: test.url, AllowInsecureJWKSLoopback: test.loopback}).ValidateConfiguration()
+			err := (Authenticator{JWKSURL: test.url, AllowInsecureJWKSLoopback: test.loopback, Issuer: "https://snaplink.example", Audience: "audit-governance"}).ValidateConfiguration()
 			if (err != nil) != test.wantError {
 				t.Fatalf("ValidateConfiguration() error=%v wantError=%v", err, test.wantError)
 			}
@@ -233,13 +262,19 @@ func TestVerifiedJWTClaimsChecksRemainEnforced(t *testing.T) {
 	server := serveJWK(t, fixture.publicKey)
 	defer server.Close()
 	authenticator := remoteAuthenticator(server.URL)
+	missingIssuer := validJWTClaims()
+	delete(missingIssuer, "iss")
+	missingAudience := validJWTClaims()
+	delete(missingAudience, "aud")
 	tests := []struct {
 		name   string
 		claims map[string]any
 	}{
 		{"expired", mergeClaims(validJWTClaims(), map[string]any{"exp": time.Now().Add(-time.Minute).Unix()})},
 		{"issuer", mergeClaims(validJWTClaims(), map[string]any{"iss": "https://other.example"})},
+		{"missing issuer", missingIssuer},
 		{"audience", mergeClaims(validJWTClaims(), map[string]any{"aud": "other-audience"})},
+		{"missing audience", missingAudience},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

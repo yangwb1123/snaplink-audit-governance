@@ -844,14 +844,12 @@ func TestRunCheckConfigReportsJWTSecretLength(t *testing.T) {
 
 // TestRunCheckConfigReportsZeroJWTLengthWhenUnset is F-3 (REQ-6): the
 // jwt_secret_length field is unconditional — 0 when no JWT trust source is
-// configured (JWKS-only and dev-only configs) — never omitted and never the
-// value.
+// configured (dev-only config) — never omitted and never the value.
 func TestRunCheckConfigReportsZeroJWTLengthWhenUnset(t *testing.T) {
 	cases := []struct {
 		name  string
 		authn auth.Authenticator
 	}{
-		{"jwks-only", auth.Authenticator{JWKSURL: "https://issuer.example/jwks"}},
 		{"dev-only", auth.Authenticator{AllowDev: true}},
 	}
 	for _, tc := range cases {
@@ -878,6 +876,21 @@ func TestRunCheckConfigReportsZeroJWTLengthWhenUnset(t *testing.T) {
 // secrets, so one operator-chosen string cannot both forge tokens and sign
 // checkpoints or decrypt protected fields and exports. The distinctness
 // check runs after the length gate, so the fixture secret is >=32 bytes.
+func TestRunCheckConfigRejectsUnpinnedJWKS(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	exit := runCheckConfig(logger, validConfig(), runtimeconfig.SigningArchive{}, auth.Authenticator{JWKSURL: "https://issuer.example/jwks"}, "", "", "", "")
+	if exit == 0 {
+		t.Fatalf("JWKS without issuer/audience must fail check-config; log=%q", buf.String())
+	}
+	if strings.Contains(buf.String(), "check_config=ok") {
+		t.Fatalf("failed auth preflight must not emit check_config=ok: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "issuer") {
+		t.Fatalf("failure must identify the missing issuer/audience pin: %q", buf.String())
+	}
+}
+
 func TestRunCheckConfigRejectsJWTSecretSharedWithServiceSecrets(t *testing.T) {
 	signing := strings.Repeat("s", 32)
 	encryption := strings.Repeat("k", 32)

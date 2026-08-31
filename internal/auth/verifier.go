@@ -134,14 +134,43 @@ func (a Authenticator) ValidateConfiguration() error {
 		return fmt.Errorf("local HS256 JWT secret must be at least %d bytes", minJWTSecretBytes)
 	}
 	if hasRemote {
-		return validateJWKSURL(a.JWKSURL, a.AllowInsecureJWKSLoopback)
+		if err := validateJWKSURL(a.JWKSURL, a.AllowInsecureJWKSLoopback); err != nil {
+			return err
+		}
+		return a.validateIssuerAudience(hasRemote)
 	}
 	if hasPublicKey {
-		_, err := a.localPublicKey()
-		return err
+		if _, err := a.localPublicKey(); err != nil {
+			return err
+		}
+		return a.validateIssuerAudience(hasPublicKey)
 	}
 	if !hasSecret && !a.AllowDev {
 		return fmt.Errorf("no JWT verification trust source is configured")
+	}
+	return nil
+}
+
+// validateIssuerAudience makes issuer and audience an explicit trust-source
+// boundary for asymmetric JWT verification. Local HS256 is intentionally
+// exempt because its explicit opt-in is itself the local trust boundary; the
+// development-token-only profile is also exempt. AllowDev permits a local
+// development process to start with an asymmetric source while it uses only
+// dev tokens, but parseJWT still rejects ordinary JWTs until both pins are
+// configured.
+func (a Authenticator) requiresIssuerAudience() bool {
+	return strings.TrimSpace(a.JWKSURL) != "" || strings.TrimSpace(a.JWTPublicKeyPEM) != ""
+}
+
+func (a Authenticator) validateIssuerAudience(asymmetric bool) error {
+	if !asymmetric || a.AllowDev {
+		return nil
+	}
+	if strings.TrimSpace(a.Issuer) == "" {
+		return fmt.Errorf("asymmetric JWT trust requires a non-empty issuer")
+	}
+	if strings.TrimSpace(a.Audience) == "" {
+		return fmt.Errorf("asymmetric JWT trust requires a non-empty audience")
 	}
 	return nil
 }
