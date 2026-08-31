@@ -225,7 +225,7 @@ func TestArchiveSelection(t *testing.T) {
 // no-retention default), and a duration beyond the 100-year cap is rejected
 // so retainFor stays overflow-safe.
 func TestArchiveRequiresPositiveRetentionDays(t *testing.T) {
-	base := SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	base := SigningArchive{S3Endpoint: "localhost:19010", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
 	if _, err := base.Archive(); err == nil || !strings.Contains(err.Error(), EnvArchiveRetentionDays) {
 		t.Fatalf("archive without retention days must fail naming %s, got: %v", EnvArchiveRetentionDays, err)
 	}
@@ -249,7 +249,7 @@ func TestArchivePassesRetentionDaysToConstructor(t *testing.T) {
 	}
 	t.Cleanup(func() { newS3Store = original })
 
-	cfg := fullS3(t, "s3.example.com:9000", false)
+	cfg := fullS3(t, "localhost:19010", false)
 	cfg.ArchiveRetentionDays = 2
 	if _, err := cfg.Archive(); err != nil {
 		t.Fatal(err)
@@ -356,10 +356,10 @@ func fullVault(t *testing.T, addr string, allowInsecureLoopback bool) SigningArc
 	return SigningArchive{SigningSecret: "test-secret", VaultAddr: addr, VaultToken: "t", VaultTransitKey: "audit-checkpoints", AllowInsecureVaultLoopback: allowInsecureLoopback}
 }
 
-// TestArchiveResolvesS3TransportUseSSL is AC-1 (REQ-TLS-1/2/3): the seam
-// captures the resolved endpoint and useSSL flag so the transport is proven
-// data-driven. Uppercase-scheme rows (F1) must resolve exactly like their
-// lowercase counterparts.
+// TestArchiveResolvesS3TransportUseSSL is the resolver and constructor-seam
+// contract: permitted plaintext is local-only (plus the exact verify-stack
+// endpoint), while TLS remains available for remote S3. Every rejection is
+// checked before the constructor seam is called.
 func TestArchiveResolvesS3TransportUseSSL(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -370,13 +370,19 @@ func TestArchiveResolvesS3TransportUseSSL(t *testing.T) {
 		wantTransport   string
 		wantErrContains string
 	}{
-		{"schemeless plaintext", "s3.example.com:9000", false, false, "s3.example.com:9000", "http", ""},
-		{"schemeless tls", "s3.example.com:9000", true, true, "s3.example.com:9000", "tls", ""},
+		{"localhost plaintext", "localhost:19010", false, false, "localhost:19010", "http", ""},
+		{"loopback plaintext", "127.0.0.1:9000", false, false, "127.0.0.1:9000", "http", ""},
+		{"explicit localhost http", "http://localhost:19010", false, false, "localhost:19010", "http", ""},
+		{"exact verify endpoint", "minio:9000", false, false, "minio:9000", "http", ""},
+		{"verify endpoint host case insensitive", "HTTP://MINIO:9000", false, false, "MINIO:9000", "http", ""},
+		{"remote plaintext rejected", "s3.example.com:9000", false, false, "", "", EnvS3UseSSL},
+		{"remote explicit http rejected", "http://s3.example.com:9000", false, false, "", "", EnvS3UseSSL},
+		{"private remote plaintext rejected", "10.0.0.8:9000", false, false, "", "", EnvS3UseSSL},
+		{"near miss allowlist rejected", "minio:9001", false, false, "", "", EnvS3UseSSL},
+		{"remote tls", "s3.example.com:9000", true, true, "s3.example.com:9000", "tls", ""},
 		{"https scheme stripped", "https://s3.example.com", true, true, "s3.example.com", "tls", ""},
 		{"uppercase https scheme stripped", "HTTPS://s3.example.com", true, true, "s3.example.com", "tls", ""},
-		{"uppercase http scheme stripped", "HTTP://s3.example.com", false, false, "s3.example.com", "http", ""},
 		{"https scheme without flag fails", "https://s3.example.com", false, false, "", "", EnvS3UseSSL},
-		{"uppercase https scheme without flag fails", "HTTPS://s3.example.com", false, false, "", "", EnvS3UseSSL},
 		{"http scheme conflicts with flag", "http://s3.example.com", true, false, "", "", EnvS3UseSSL},
 	}
 	for _, tc := range cases {
@@ -562,7 +568,7 @@ func TestTransportPerLegLabels(t *testing.T) {
 	}{
 		{"no external legs", SigningArchive{}, "local", "local", false},
 		{"s3 tls only", fullS3(t, "https://s3.example.com", true), "tls", "local", false},
-		{"s3 http only", fullS3(t, "s3.example.com:9000", false), "http", "local", false},
+		{"s3 http only", fullS3(t, "localhost:19010", false), "http", "local", false},
 		{"vault tls only", fullVault(t, "https://vault.example.com:8200", false), "local", "tls", false},
 		{"mixed s3 tls + vault tls", func() SigningArchive {
 			cfg := fullS3(t, "https://s3.example.com", true)
@@ -573,7 +579,7 @@ func TestTransportPerLegLabels(t *testing.T) {
 			return cfg
 		}(), "tls", "tls", false},
 		{"mixed s3 http + vault loopback http", func() SigningArchive {
-			cfg := fullS3(t, "http://s3.example.com", false)
+			cfg := fullS3(t, "http://minio:9000", false)
 			cfg.SigningSecret = "test-secret"
 			cfg.VaultAddr = "http://127.0.0.1:8200"
 			cfg.VaultToken = "t"
@@ -615,11 +621,11 @@ func TestTransportMatchesResolvedStores(t *testing.T) {
 		useSSL   bool
 		want     string
 	}{
-		{"s3.example.com:9000", false, "http"},
+		{"localhost:19010", false, "http"},
 		{"s3.example.com:9000", true, "tls"},
 		{"https://s3.example.com", true, "tls"},
 		{"HTTPS://s3.example.com", true, "tls"},
-		{"HTTP://s3.example.com", false, "http"},
+		{"HTTP://MINIO:9000", false, "http"},
 	}
 	for _, row := range s3Rows {
 		t.Run("s3/"+row.endpoint+"/"+row.want, func(t *testing.T) {
@@ -727,30 +733,40 @@ func TestValidationErrorsNeverEchoCredentials(t *testing.T) {
 	}
 }
 
-// TestS3PlaintextNonLoopbackPermitted pins the F2 decision (documented
-// residual): a scheme-less (or explicit-http) non-loopback S3 endpoint with
-// S3UseSSL=false resolves to plaintext http without error. The trade-off is
-// deliberate and observable — transport_s3=http — and this test is the marker
-// that must change if the posture is ever hardened.
-func TestS3PlaintextNonLoopbackPermitted(t *testing.T) {
-	for _, endpoint := range []string{"s3.example.com:9000", "http://s3.example.com:9000", "minio:9000"} {
-		t.Run(endpoint, func(t *testing.T) {
+// TestS3PlaintextPolicy replaces the former non-loopback residual. Remote
+// plaintext fails before construction; local development and the exact
+// verify-stack endpoint remain observable as transport_s3=http.
+func TestS3PlaintextPolicy(t *testing.T) {
+	for _, endpoint := range []string{"s3.example.com:9000", "http://s3.example.com:9000", "10.0.0.8:9000", "minio:9001"} {
+		t.Run("reject/"+endpoint, func(t *testing.T) {
+			called := false
 			original := newS3Store
 			newS3Store = func(endpoint, accessKey, secretKey, bucket string, useSSL bool, retainFor time.Duration) (*archive.S3Store, error) {
+				called = true
 				return archive.NewS3StoreWithClient(nil, bucket), nil
 			}
 			t.Cleanup(func() { newS3Store = original })
 
+			if _, err := fullS3(t, endpoint, false).Archive(); err == nil || !strings.Contains(err.Error(), EnvS3UseSSL) {
+				t.Fatalf("remote plaintext endpoint must fail naming %s", EnvS3UseSSL)
+			}
+			if called {
+				t.Fatal("S3 constructor must not be called for rejected plaintext")
+			}
+		})
+	}
+	for _, endpoint := range []string{"localhost:19010", "http://127.0.0.1:9000", "minio:9000", "http://MINIO:9000"} {
+		t.Run("allow/"+endpoint, func(t *testing.T) {
 			cfg := fullS3(t, endpoint, false)
 			if _, err := cfg.Archive(); err != nil {
-				t.Fatalf("plaintext non-loopback S3 must resolve (documented F2 residual): %v", err)
+				t.Fatal(err)
 			}
 			s3, _, err := cfg.Transport()
 			if err != nil {
 				t.Fatal(err)
 			}
 			if s3 != "http" {
-				t.Fatalf("transport_s3=%q, want http (observational enforcement)", s3)
+				t.Fatalf("transport_s3=%q, want http", s3)
 			}
 		})
 	}

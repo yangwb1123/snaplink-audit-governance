@@ -384,7 +384,7 @@ func TestRunCheckConfigProbesArchiveDestination(t *testing.T) {
 func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	external := runtimeconfig.SigningArchive{S3Endpoint: "localhost:19010", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
 	exit := runCheckConfig(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, external)
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
@@ -1187,7 +1187,7 @@ func TestCheckConfigTransportLine(t *testing.T) {
 	}{
 		{"no external legs", runtimeconfig.SigningArchive{}, "local", "local", false},
 		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true}, "tls", "local", true},
-		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}, "http", "local", true},
+		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "minio:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}, "http", "local", true},
 		{"vault tls", runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints"}, "local", "tls", false},
 		{"mixed s3 tls + vault tls", runtimeconfig.SigningArchive{
 			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true,

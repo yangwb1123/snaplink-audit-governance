@@ -57,7 +57,7 @@ func main() {
 	s3Bucket := flag.String("s3-bucket", os.Getenv("AUDIT_S3_BUCKET"), "S3 bucket for the compliance archive")
 	s3AccessKey := flag.String("s3-access-key", os.Getenv("AUDIT_S3_ACCESS_KEY"), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AUDIT_S3_SECRET_KEY"), "S3 secret key")
-	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint (AUDIT_S3_USE_SSL)")
+	s3UseSSL := flag.Bool("s3-use-ssl", strictBoolEnv(runtimeconfig.EnvS3UseSSL, false), "use TLS for the S3-compatible archive endpoint; plaintext is local-development-only (AUDIT_S3_USE_SSL)")
 	// archiveRetentionDays is the per-object COMPLIANCE retention duration in
 	// days applied by every S3 archive Put (F1 leg (i), mandatory for an S3
 	// archive: a zero value makes runtimeconfig.SigningArchive.Archive fail

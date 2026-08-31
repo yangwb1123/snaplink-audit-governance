@@ -116,15 +116,15 @@
   回显地址中的凭据（userinfo/query 会被剥离）。
 - **边界 B2（进程 → S3 归档）：** `AUDIT_S3_USE_SSL=true` 时 S3 走 TLS
   （`transport_s3=tls`）；`https://` scheme 端点必须与该开关一致，否则
-  失败关闭（绝不静默降级为明文）。**已记录的残余风险（决策，见
-  design-rev2 §1）：** scheme 缺失的非 loopback 端点 + `AUDIT_S3_USE_SSL`
-  默认 false 时允许明文 http（本机开发/验证栈 `localhost:19010`、
-  `deploy/` `minio:9000` 兼容），静态密钥与归档证据在明文链路上可被
-  MITM 读取——该不对称（与 Vault 侧分类禁止相反）是有意的兼容性权衡，
-  由 `check_config=ok` 的 `transport_s3=http` 与 CI 断言
-  `transport_s3=tls` 观察式强制；改变该姿势的硬化（默认 true 或新增
-  S3 loopback 开关）超出当前需求范围，被
-  `TestS3PlaintextNonLoopbackPermitted` 钉住。
+  失败关闭（绝不静默降级为明文）。`AUDIT_S3_USE_SSL=false` 的明文仅对
+  现有本机/开发主机（`localhost`、loopback IP、
+  `host.docker.internal`、`gateway.docker.internal`）及验证栈精确端点
+  `minio:9000` 放行（可带 `http://`，主机名大小写不敏感）；任意其他
+  非 loopback 主机或端口（例如 `s3.example.com:9000`、`minio:9001`）
+  在构造客户端前失败关闭，并提示设置 `AUDIT_S3_USE_SSL=true` 或
+  `-s3-use-ssl`。允许的明文由 `transport_s3=http` 观察，TLS 由
+  `transport_s3=tls` 观察；错误信息剥离 userinfo/query/fragment，避免
+  静态凭据泄漏。
 - 两个二进制（audit-api / audit-governance-worker）的 `check_config=ok`
   逐腿报告 `transport_s3=`/`transport_vault=`（tls/http/local），格式串
   字节一致，CI 可对两腿分别断言（REQ-TLS-6/F3）。

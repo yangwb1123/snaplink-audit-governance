@@ -54,8 +54,8 @@ type SigningArchive struct {
 	S3AccessKey     string
 	S3SecretKey     string
 	// S3UseSSL resolves into the minio Secure flag and the transport=tls
-	// label (REQ-TLS-1). Zero value preserves today's plaintext default for
-	// documented local-dev endpoints (localhost:19010, deploy/ minio:9000).
+	// label (REQ-TLS-1). Plaintext is restricted to the established local
+	// development hosts and the exact verify-stack endpoint minio:9000.
 	S3UseSSL bool
 	// ArchiveRetentionDays is the per-object COMPLIANCE retention duration in
 	// days applied by every S3 archive Put (shared by both binaries via
@@ -209,7 +209,18 @@ func (s SigningArchive) resolveS3Transport() (endpoint string, useSSL bool, tran
 	if s.S3UseSSL {
 		return parsed.Host, true, "tls", nil
 	}
+	if !loopbackHost(parsed.Hostname()) && !isS3DevelopmentAllowlistEndpoint(parsed.Host) {
+		return "", false, "", fmt.Errorf("s3 endpoint %q uses plaintext http on a non-loopback host: set %s=true or -s3-use-ssl to enable TLS; plaintext is allowed only for local development endpoints or minio:9000", display, EnvS3UseSSL)
+	}
 	return parsed.Host, false, "http", nil
+}
+
+// isS3DevelopmentAllowlistEndpoint is intentionally narrower than
+// loopbackHost: the verification compose stack uses exactly minio:9000.
+// Compare the complete host:port so minio:9001 and arbitrary remote hosts do
+// not become insecure-S3 escape hatches.
+func isS3DevelopmentAllowlistEndpoint(host string) bool {
+	return strings.EqualFold(host, "minio:9000")
 }
 
 // resolveVaultTransport validates the Vault addr against the

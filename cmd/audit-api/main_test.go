@@ -87,6 +87,42 @@ func TestRunCheckConfigS3HTTPSchemeFailsFast(t *testing.T) {
 	}
 }
 
+// TestRunCheckConfigS3RemotePlaintextFailsClosed is AC-1/FR-4: the API
+// preflight rejects remote plaintext before the success line and names both
+// the environment variable and CLI repair path. The approved verify-stack
+// exception remains observable as transport_s3=http.
+func TestRunCheckConfigS3RemotePlaintextFailsClosed(t *testing.T) {
+	for _, endpoint := range []string{"s3.example.com:9000", "http://s3.example.com:9000"} {
+		t.Run("reject/"+endpoint, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := log.New(&buf, "", 0)
+			external := runtimeconfig.SigningArchive{S3Endpoint: endpoint, S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
+			if exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", ""); exit != 1 {
+				t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
+			}
+			out := buf.String()
+			for _, want := range []string{runtimeconfig.EnvS3UseSSL, "-s3-use-ssl"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log must contain %q, got: %q", want, out)
+				}
+			}
+			if strings.Contains(out, "check_config=ok") {
+				t.Fatalf("check_config=ok must not be printed, got: %q", out)
+			}
+		})
+	}
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	allowed := runtimeconfig.SigningArchive{S3Endpoint: "http://MINIO:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
+	if exit := runCheckConfig(logger, validConfig(), allowed, validAuthenticator(), "", "", "", ""); exit != 0 {
+		t.Fatalf("allowlisted plaintext exit=%d, want 0; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "check_config=ok") || !strings.Contains(buf.String(), "transport_s3=http") {
+		t.Fatalf("allowlisted plaintext must report transport_s3=http, got: %q", buf.String())
+	}
+}
+
 // TestRunCheckConfigVaultFailFast covers REQ-TLS-4/5 through the API's
 // check-config path: plaintext non-loopback and schemeless Vault addrs fail
 // with exit 1 and actionable text; https passes with transport_vault=tls.
@@ -139,7 +175,7 @@ func TestCheckConfigTransportLine(t *testing.T) {
 	}{
 		{"no external legs", runtimeconfig.SigningArchive{}, "local", "local"},
 		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365}, "tls", "local"},
-		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false, ArchiveRetentionDays: 365}, "http", "local"},
+		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "minio:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false, ArchiveRetentionDays: 365}, "http", "local"},
 		{"vault tls", runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints"}, "local", "tls"},
 		{"mixed s3 tls + vault tls", runtimeconfig.SigningArchive{
 			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365,
@@ -191,7 +227,7 @@ func TestTransportErrorFailsCheckConfig(t *testing.T) {
 func TestRunCheckConfigRequiresArchiveRetentionDays(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	external := runtimeconfig.SigningArchive{S3Endpoint: "localhost:19010", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
 	exit := runCheckConfig(logger, validConfig(), external, validAuthenticator(), "", "", "", "")
 	if exit != 1 {
 		t.Fatalf("exit=%d, want 1; log: %q", exit, buf.String())
@@ -988,14 +1024,14 @@ func TestWireExternal(t *testing.T) {
 		s := svc(t)
 		var buf bytes.Buffer
 		logger := log.New(&buf, "", 0)
-		external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
-		if err := wireExternal(logger, s, external, "", "", "worm", "s3.example.com:9000"); err != nil {
+		external := runtimeconfig.SigningArchive{S3Endpoint: "minio:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
+		if err := wireExternal(logger, s, external, "", "", "worm", "minio:9000"); err != nil {
 			t.Fatal(err)
 		}
 		if _, ok := s.Config.Archive.(*archive.S3Store); !ok {
 			t.Fatalf("archive type=%T, want *archive.S3Store", s.Config.Archive)
 		}
-		if !strings.Contains(buf.String(), "archive=s3 bucket=worm endpoint=s3.example.com:9000") {
+		if !strings.Contains(buf.String(), "archive=s3 bucket=worm endpoint=minio:9000") {
 			t.Fatalf("log must name the archive provider, got: %q", buf.String())
 		}
 	})
@@ -1013,6 +1049,14 @@ func TestWireExternal(t *testing.T) {
 		err := wireExternal(log.New(io.Discard, "", 0), s, external, "", "", "", "")
 		if err == nil || !strings.Contains(err.Error(), "archive:") || !strings.Contains(err.Error(), runtimeconfig.EnvS3UseSSL) {
 			t.Fatalf("err=%v, want archive fail-fast naming AUDIT_S3_USE_SSL", err)
+		}
+	})
+	t.Run("remote plaintext fails before archive attach", func(t *testing.T) {
+		s := svc(t)
+		external := runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", ArchiveRetentionDays: 365}
+		err := wireExternal(log.New(io.Discard, "", 0), s, external, "", "", "worm", "s3.example.com:9000")
+		if err == nil || !strings.Contains(err.Error(), "archive:") || !strings.Contains(err.Error(), runtimeconfig.EnvS3UseSSL) {
+			t.Fatalf("err=%v, want remote plaintext archive rejection naming AUDIT_S3_USE_SSL", err)
 		}
 	})
 	t.Run("no external config leaves defaults", func(t *testing.T) {
