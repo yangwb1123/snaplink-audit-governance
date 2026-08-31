@@ -1,5 +1,25 @@
 # Release Notes
 
+## 2026-08-30 — Fail-safe asynchronous export terminal-state persistence
+
+**For operators (behavior change):** a transient failure of the terminal
+export `Store.Update` no longer silently discards the error and leaves the job
+durably `running`. `finishExport` and `failExportBlocked` now converge through
+a single guarded, bounded-retry terminal-write primitive
+(`persistTerminalExport`): the terminal state is committed only when the durable
+record is still `running` and not yet finished, retried up to
+`exportTerminalRetryLimit` (3) times, and observed via a redacted log line
+(`job_id`, `state`, `attempt`, `category`) without leaking payloads, paths, or
+credentials. A job that cannot be persisted after the retry budget is exhausted
+is deliberately left `running` so the existing `RecoverStuckExports` worker
+converges it to `failed`; already-terminal jobs are never overwritten or
+re-created (no late completion overwrites a worker-recovered `failed` job, and a
+missing key is never created from a terminal callback). The `GET
+/api/v1/exports/{jobID}` route, tenant scoping, response shape, and `"export
+failed"` redaction are unchanged; results are deterministic after persistence
+faults. `claimPendingExport` and `RecoverStuckExports` are untouched. No API,
+OpenAPI, or configuration changes are introduced.
+
 ## 2026-08-30 — Reject cross-tenant legacy records during PostgreSQL cutover
 
 `audit-pg-migrate` now validates every legacy event, receipt, stream, segment,
