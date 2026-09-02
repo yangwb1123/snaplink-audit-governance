@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-01 — Reject remote plaintext S3 archive transport
+
+S3 archive endpoints now fail closed before client construction when
+`AUDIT_S3_USE_SSL=false` unless the endpoint is an approved loopback/local
+host or exactly `minio:9000` for the verification stack. Enable TLS with
+`AUDIT_S3_USE_SSL=true` (or `-s3-use-ssl`) for remote deployments; use
+`-check-config` before restart. No data migration is required.
+
 ## 2026-08-31 — Require issuer and audience pins for asymmetric JWT trust
 
 **For operators (behavior change):** configurations using a JWKS URL or local

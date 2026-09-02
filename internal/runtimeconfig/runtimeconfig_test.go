@@ -771,3 +771,17 @@ func TestS3PlaintextPolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestTransportRejectsRemoteS3Plaintext ensures the shared observability
+// resolver fails closed too, rather than returning an HTTP label for a
+// configuration that Archive would reject.
+func TestTransportRejectsRemoteS3Plaintext(t *testing.T) {
+	cfg := fullS3(t, "s3.example.com:9000", false)
+	s3, vault, err := cfg.Transport()
+	if err == nil || !strings.Contains(err.Error(), EnvS3UseSSL) {
+		t.Fatalf("Transport() err=%v, want actionable %s error", err, EnvS3UseSSL)
+	}
+	if s3 != "" || vault != "" {
+		t.Fatalf("rejected transport labels=(%q,%q), want empty labels", s3, vault)
+	}
+}
