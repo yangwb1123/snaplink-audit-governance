@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/store"
 )
@@ -118,9 +119,93 @@ func TestDuplicateWaitForArchivedDoesNotCreateLedgerEntry(t *testing.T) {
 	}
 }
 
+func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		hot  bool
+	}{
+		{name: "legacy", hot: false},
+		{name: "hot-cold", hot: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var svc *Service
+			var st *store.Store
+			if tc.hot {
+				st, svc = hotColdService(t)
+			} else {
+				svc = testService(t, true)
+				st = svc.Store
+			}
+			archiveErr := errors.New("archive unavailable")
+			svc.Config.Archive = &ingestArchiveFailureStore{eventErr: archiveErr}
+			event := testEvent("archive-retry-"+tc.name, "archive-retry", time.Unix(1_700_000_010, 0).UTC())
+
+			failed, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusArchived)
+			if !errors.Is(err, archiveErr) {
+				t.Fatalf("ingest err=%v, want archive error", err)
+			}
+			if failed.Status != domain.StatusIndexed || !failed.ArchivedAt.IsZero() {
+				t.Fatalf("failed receipt=%+v, want indexed and not archived", failed)
+			}
+			stored, err := svc.GetReceipt("tenant-a", "", event.EventID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != domain.StatusIndexed || !stored.ArchivedAt.IsZero() {
+				t.Fatalf("stored receipt=%+v, want indexed and not archived", stored)
+			}
+			if stored.EventID != failed.EventID || stored.Sequence != failed.Sequence || stored.Hash != failed.Hash || stored.IdempotencyKey != failed.IdempotencyKey {
+				t.Fatalf("stored receipt identity changed: failed=%+v stored=%+v", failed, stored)
+			}
+
+			archiveDir := t.TempDir()
+			svc.Config.ArchiveDir = archiveDir
+			svc.Config.Archive = &archive.FileStore{Dir: archiveDir}
+			count, err := svc.ArchivePending(context.Background(), "tenant-a")
+			if err != nil || count != 1 {
+				t.Fatalf("ArchivePending count=%d err=%v, want 1,nil", count, err)
+			}
+			archivedReceipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if archivedReceipt.Status != domain.StatusArchived || archivedReceipt.IndexedAt.IsZero() || archivedReceipt.ArchivedAt.IsZero() {
+				t.Fatalf("archived receipt=%+v, want archived with timestamps", archivedReceipt)
+			}
+			if archivedReceipt.EventID != failed.EventID || archivedReceipt.Sequence != failed.Sequence || archivedReceipt.Hash != failed.Hash || archivedReceipt.IdempotencyKey != failed.IdempotencyKey {
+				t.Fatalf("archived receipt identity changed: failed=%+v archived=%+v", failed, archivedReceipt)
+			}
+			archivedEvent, err := svc.GetEvent("tenant-a", "auditor", event.EventID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if archivedEvent.EventID != event.EventID || archivedEvent.Sequence != failed.Sequence || archivedEvent.Hash != failed.Hash || archivedEvent.IdempotencyKey != event.IdempotencyKey {
+				t.Fatalf("archived event identity changed: event=%+v archived=%+v failed=%+v", event, archivedEvent, failed)
+			}
+
+			recordsAfterFirstRetry := ledgerRecordCount(t, st, tc.hot, event.EventID)
+			count, err = svc.ArchivePending(context.Background(), "tenant-a")
+			if err != nil || count != 0 {
+				t.Fatalf("second ArchivePending count=%d err=%v, want 0,nil", count, err)
+			}
+			if got := ledgerRecordCount(t, st, tc.hot, event.EventID); got != recordsAfterFirstRetry {
+				t.Fatalf("repeat ArchivePending changed receipt records: before=%d after=%d", recordsAfterFirstRetry, got)
+			}
+		})
+	}
+}
+
 func ledgerRecordCount(t *testing.T, st *store.Store, hot bool, eventID string) int {
 	t.Helper()
 	if !hot {
+		snapshot, err := st.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := snapshot.Receipts[store.EventKey("tenant-a", eventID)]; ok {
+			return 1
+		}
 		return 0
 	}
 	count := 0

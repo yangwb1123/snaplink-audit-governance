@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-09-02 — `wait_for=archived` now fails closed on archive write errors
+
+`POST /api/v1/events?wait_for=archived` now returns the existing redacted
+`500 internal_error` failure envelope instead of a `202` success receipt when
+the configured WORM archive cannot durably store the event or a newly sealed
+segment. The durable receipt still falls back to `indexed` with no
+`archived_at`, so `ArchivePending` can retry the same logical event later
+without creating a new event identity, sequence, hash-chain entry, or
+idempotency-key owner. `wait_for=accepted|ledgered|indexed`, successful
+archival, and archive-disabled behavior are unchanged.
+
 ## 2026-09-01 — Harden local FileStore root and intermediate path traversal
 
 **For operators (behavior change):** the local Linux `internal/archive.FileStore`
