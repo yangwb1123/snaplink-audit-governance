@@ -937,6 +937,41 @@ func TestFileStoreGetDoesNotObservePartialObject(t *testing.T) {
 	t.Fatal("Get never observed the completed object")
 }
 
+// TestFileStoreCrossInstancePutGetNeverObservePartialObject is F-4 evidence:
+// separate FileStore instances model independent processes and therefore do
+// not share FileStore.mu. The final pathname is visible only after the
+// complete object has been written and synced.
+func TestFileStoreCrossInstancePutGetNeverObservePartialObject(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	key := "events/demo/stream/object.json"
+	payload := bytes.Repeat([]byte("complete-object-"), 256*1024)
+	writer := &FileStore{Dir: dir}
+	reader := &FileStore{Dir: dir}
+	putDone := make(chan error, 1)
+	go func() {
+		putDone <- writer.Put(context.Background(), key, payload)
+	}()
+
+	for {
+		select {
+		case err := <-putDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := reader.Get(context.Background(), key)
+			if err != nil || !bytes.Equal(data, payload) {
+				t.Fatalf("post-Put read data=%d bytes err=%v, want complete object", len(data), err)
+			}
+			return
+		default:
+			data, err := reader.Get(context.Background(), key)
+			if err == nil && !bytes.Equal(data, payload) {
+				t.Fatalf("cross-instance reader observed partial data: %d bytes", len(data))
+			}
+		}
+	}
+}
+
 // TestFileStoreReadySyncsRootDentry is AC-3: Ready on a fresh archive root
 // syncs the root's own dentry inside its parent (leaf-to-root, parent last),
 // so Ready-then-first-Put followed by a power failure cannot lose the tree;

@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-09-01 — Harden local FileStore root and intermediate path traversal
+
+**For operators (behavior change):** the local Linux `internal/archive.FileStore`
+now resolves the configured archive root and every key component through
+non-following directory descriptors, so `Put`, `Get`, and `Ready` reject a
+symlinked or non-directory root/intermediate component instead of traversing
+through it. A missing root is still created, but only beneath the intended
+parent; existing idempotent `Put`, conflict detection, and archive permissions
+are unchanged.
+
+**For developers:** the hardened local archive path now stays anchored to the
+opened root inode across concurrent path replacement, publishes new objects
+atomically, and fails closed on unsupported non-Linux builds. Regression
+coverage now includes symlinked/non-directory roots and intermediates,
+concurrent root/intermediate replacement, post-publication replacement
+survival on injected sync failure, FIFO prompt rejection, and cross-instance
+no-partial-read behavior.
+
 ## 2026-09-01 — Ledgered Kafka events now always carry explicit `prev_hash`
 
 `audit.events.ledgered.v1` now requires and emits `prev_hash` on every
