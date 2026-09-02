@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -38,6 +39,69 @@ var envelopeStringFields = []string{
 var envelopeNonEmptyFields = []string{
 	"event_id", "source_system", "event_type", "schema_id", "action", "outcome",
 	"data_classification", "retention_class", "idempotency_key",
+}
+
+// EncodeEventForTopic canonicalizes an event as it will be written on the
+// selected public contract topic. Unsupported topics fail closed. The
+// ledgered topic always materializes prev_hash, even for sequence 1, so the
+// published JSON carries the complete server-assigned chain state documented
+// by AsyncAPI.
+func EncodeEventForTopic(topic string, event domain.Event) ([]byte, error) {
+	schema := eventSchemaForTopic(topic)
+	if schema == "" {
+		return nil, fmt.Errorf("unsupported event topic %q", topic)
+	}
+	return encodeEventForSchema(schema, event)
+}
+
+func encodeEventForSchema(schema EventSchema, event domain.Event) ([]byte, error) {
+	if schema != AcceptedEventSchema && schema != LedgeredEventSchema {
+		return nil, fmt.Errorf("unsupported event schema %q", schema)
+	}
+	encoded, err := domain.CanonicalJSON(event)
+	if err != nil {
+		return nil, err
+	}
+	if schema != LedgeredEventSchema {
+		return encoded, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil || fields == nil {
+		return nil, fmt.Errorf("canonical event must be a JSON object")
+	}
+	if _, ok := fields["prev_hash"]; ok {
+		return encoded, nil
+	}
+	fields["prev_hash"] = json.RawMessage(`""`)
+	return encodeJSONObject(fields)
+}
+
+func encodeJSONObject(fields map[string]json.RawMessage) ([]byte, error) {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var value bytes.Buffer
+	value.WriteByte('{')
+	for index, key := range keys {
+		if index > 0 {
+			value.WriteByte(',')
+		}
+		name, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		value.Write(name)
+		value.WriteByte(':')
+		raw := bytes.TrimSpace(fields[key])
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("field %q contains invalid JSON", key)
+		}
+		value.Write(raw)
+	}
+	value.WriteByte('}')
+	return value.Bytes(), nil
 }
 
 // ValidateEventJSON decodes one JSON object and validates the selected
@@ -323,7 +387,7 @@ func validateChangedFields(raw json.RawMessage) error {
 }
 
 func validateLedgerState(fields map[string]json.RawMessage, event domain.Event) error {
-	for _, name := range []string{"stream_id", "sequence", "hash"} {
+	for _, name := range []string{"stream_id", "sequence", "prev_hash", "hash"} {
 		if _, ok := fields[name]; !ok {
 			return fmt.Errorf("required ledger field %q is missing", name)
 		}
@@ -340,16 +404,14 @@ func validateLedgerState(fields map[string]json.RawMessage, event domain.Event) 
 	if event.Sequence < 1 {
 		return fmt.Errorf("sequence must be at least 1")
 	}
+	if err := validateString(fields["prev_hash"], "prev_hash", 0); err != nil {
+		return err
+	}
 	if err := validateString(fields["hash"], "hash", 0); err != nil {
 		return err
 	}
 	if strings.TrimSpace(event.Hash) == "" {
 		return fmt.Errorf("hash must be non-empty")
-	}
-	if prevHash, ok := fields["prev_hash"]; ok {
-		if err := validateString(prevHash, "prev_hash", 0); err != nil {
-			return err
-		}
 	}
 	if event.Sequence == 1 && event.PrevHash != "" {
 		return fmt.Errorf("prev_hash must be empty for sequence 1")

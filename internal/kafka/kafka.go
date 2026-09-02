@@ -122,14 +122,11 @@ func NewProducer(brokers []string, topic string) *Producer {
 // On success it returns (nil, nil): the write is the delivery proof, and no
 // audit receipt exists in this transport (outbox.DeliverFunc contract).
 func (p *Producer) Deliver(ctx context.Context, event domain.Event) (*domain.EventReceipt, error) {
-	encoded, err := domain.CanonicalJSON(event)
+	encoded, err := EncodeEventForTopic(p.topic, event)
 	if err != nil {
 		return nil, permanentDeliveryError("canonicalize event", err)
 	}
 	schema := eventSchemaForTopic(p.topic)
-	if schema == "" {
-		return nil, permanentDeliveryError("deliver event", fmt.Errorf("unsupported event topic %q", p.topic))
-	}
 	if _, err := ValidateEventJSON(schema, encoded); err != nil {
 		return nil, permanentDeliveryError("validate event", err)
 	}

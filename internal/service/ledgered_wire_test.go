@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -26,9 +27,9 @@ func TestIngestPublishesWireValidLedgeredEvents(t *testing.T) {
 	}
 
 	for index, event := range publisher.events {
-		value, err := domain.CanonicalJSON(event)
+		value, err := kafka.EncodeEventForTopic(kafka.TopicLedgered, event)
 		if err != nil {
-			t.Fatalf("event %d canonicalization: %v", index, err)
+			t.Fatalf("event %d wire encoding: %v", index, err)
 		}
 		wire, err := kafka.ValidateEventJSON(kafka.LedgeredEventSchema, value)
 		if err != nil {
@@ -36,6 +37,9 @@ func TestIngestPublishesWireValidLedgeredEvents(t *testing.T) {
 		}
 		if wire.EventID != event.EventID || wire.StreamID != event.StreamID || wire.Sequence != event.Sequence || wire.Hash != event.Hash || wire.PrevHash != event.PrevHash {
 			t.Fatalf("event %d wire chain=%+v, published=%+v", index, wire, event)
+		}
+		if event.Sequence == 1 && !bytes.Contains(value, []byte(`"prev_hash":""`)) {
+			t.Fatalf("event %d wire bytes=%s, want explicit empty prev_hash", index, value)
 		}
 	}
 	if publisher.events[0].Sequence != 1 || publisher.events[1].Sequence != 2 {

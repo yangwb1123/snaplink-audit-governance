@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-01 — Ledgered Kafka events now always carry explicit `prev_hash`
+
+`audit.events.ledgered.v1` now requires and emits `prev_hash` on every
+message: the first event in a stream carries `"prev_hash":""`, and later
+messages must carry a non-empty predecessor hash. AsyncAPI, Kafka producer
+validation, and ledgered-consumer validation are aligned on this stricter
+post-commit contract; accepted-topic payloads remain pre-ledger compatible.
+
 ## 2026-09-01 — Fail closed in `-consistency-key` on invalid S3 retention
 
 `audit-api -consistency-key`, `audit-governance-worker -consistency-key`, and

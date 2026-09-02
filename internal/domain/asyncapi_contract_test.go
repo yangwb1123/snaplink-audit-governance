@@ -130,10 +130,10 @@ func TestAsyncAPILedgeredPrevHashConditionality(t *testing.T) {
 	}
 	section := strings.SplitN(ledgered[1], "    IngestBatch:\n", 2)[0]
 	for _, fragment := range []string{
+		"required: [stream_id, sequence, prev_hash, hash]",
 		"const: 1",
 		"enum: ['']",
 		"minimum: 2",
-		"required: [prev_hash]",
 		"pattern: '\\S'",
 	} {
 		if !strings.Contains(section, fragment) {

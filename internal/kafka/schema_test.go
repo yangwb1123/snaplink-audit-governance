@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,30 +81,51 @@ func TestValidateEventJSONChannelSchemas(t *testing.T) {
 	ledgered.StreamID = "tenant-a:source:crm"
 	ledgered.Sequence = 1
 	ledgered.Hash = "hash-1"
-	ledgeredJSON := canonicalTestEvent(t, ledgered)
+	ledgeredJSON, err := encodeEventForSchema(LedgeredEventSchema, ledgered)
+	if err != nil {
+		t.Fatalf("encode first ledgered event: %v", err)
+	}
 	if _, err := ValidateEventJSON(LedgeredEventSchema, ledgeredJSON); err != nil {
 		t.Fatalf("valid first ledgered event rejected: %v", err)
 	}
+	if !bytes.Contains(ledgeredJSON, []byte(`"prev_hash":""`)) {
+		t.Fatalf("first ledgered event bytes=%s, want explicit empty prev_hash", ledgeredJSON)
+	}
 
-	ledgered.Sequence = 2
-	ledgered.PrevHash = "hash-1"
-	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, ledgered)); err != nil {
+	subsequent := ledgered
+	subsequent.Sequence = 2
+	subsequent.PrevHash = "hash-1"
+	subsequentJSON, err := encodeEventForSchema(LedgeredEventSchema, subsequent)
+	if err != nil {
+		t.Fatalf("encode subsequent ledgered event: %v", err)
+	}
+	if _, err := ValidateEventJSON(LedgeredEventSchema, subsequentJSON); err != nil {
 		t.Fatalf("valid subsequent ledgered event rejected: %v", err)
 	}
 
-	for _, field := range []string{"stream_id", "sequence", "hash"} {
-		t.Run("missing_"+field, func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value []byte
+		field string
+	}{
+		{name: "first_sequence_missing_stream_id", value: ledgeredJSON, field: "stream_id"},
+		{name: "first_sequence_missing_sequence", value: ledgeredJSON, field: "sequence"},
+		{name: "first_sequence_missing_prev_hash", value: ledgeredJSON, field: "prev_hash"},
+		{name: "first_sequence_missing_hash", value: ledgeredJSON, field: "hash"},
+		{name: "subsequent_missing_prev_hash", value: subsequentJSON, field: "prev_hash"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			value := map[string]any{}
-			if err := json.Unmarshal(ledgeredJSON, &value); err != nil {
+			if err := json.Unmarshal(tc.value, &value); err != nil {
 				t.Fatal(err)
 			}
-			delete(value, field)
+			delete(value, tc.field)
 			encoded, err := json.Marshal(value)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err := ValidateEventJSON(LedgeredEventSchema, encoded); err == nil {
-				t.Fatalf("missing %s accepted", field)
+				t.Fatalf("missing %s accepted", tc.field)
 			}
 		})
 	}
@@ -113,7 +135,11 @@ func TestValidateEventJSONChannelSchemas(t *testing.T) {
 			value := ledgered
 			value.Sequence = sequence
 			value.PrevHash = ""
-			if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, value)); err == nil {
+			encoded, err := encodeEventForSchema(LedgeredEventSchema, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateEventJSON(LedgeredEventSchema, encoded); err == nil {
 				t.Fatalf("sequence %d accepted", sequence)
 			}
 		})
@@ -121,7 +147,7 @@ func TestValidateEventJSONChannelSchemas(t *testing.T) {
 
 	for _, field := range []string{"stream_id", "hash"} {
 		t.Run("empty_"+field, func(t *testing.T) {
-			value := ledgered
+			value := subsequent
 			if field == "stream_id" {
 				value.StreamID = ""
 			} else {
@@ -133,27 +159,23 @@ func TestValidateEventJSONChannelSchemas(t *testing.T) {
 		})
 	}
 
-	value := ledgered
-	value.Sequence = 2
+	value := subsequent
 	value.PrevHash = ""
 	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, value)); err == nil {
 		t.Fatal("subsequent ledgered event with empty prev_hash accepted")
 	}
 
 	firstWithPrev := ledgered
-	firstWithPrev.Sequence = 1
 	firstWithPrev.PrevHash = "previous-hash"
 	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, firstWithPrev)); err == nil {
 		t.Fatal("first ledgered event with a predecessor hash accepted")
 	}
 	firstWithWhitespacePrev := ledgered
-	firstWithWhitespacePrev.Sequence = 1
 	firstWithWhitespacePrev.PrevHash = "  "
 	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, firstWithWhitespacePrev)); err == nil {
 		t.Fatal("first ledgered event with whitespace predecessor accepted")
 	}
-	secondWithWhitespacePrev := ledgered
-	secondWithWhitespacePrev.Sequence = 2
+	secondWithWhitespacePrev := subsequent
 	secondWithWhitespacePrev.PrevHash = " \t"
 	if _, err := ValidateEventJSON(LedgeredEventSchema, canonicalTestEvent(t, secondWithWhitespacePrev)); err == nil {
 		t.Fatal("subsequent ledgered event with whitespace predecessor accepted")
@@ -258,13 +280,19 @@ func TestProducerDeliverWritesCanonicalEventWithEventIDKey(t *testing.T) {
 			if string(message.Key) != event.EventID {
 				t.Fatalf("Kafka key=%q, want event_id %q", message.Key, event.EventID)
 			}
-			want := canonicalTestEvent(t, event)
-			if string(message.Value) != string(want) {
-				t.Fatalf("Kafka value=%s, want canonical %s", message.Value, want)
-			}
 			schema := AcceptedEventSchema
 			if topic == TopicLedgered {
 				schema = LedgeredEventSchema
+			}
+			want, err := encodeEventForSchema(schema, event)
+			if err != nil {
+				t.Fatalf("encode event for schema %s: %v", schema, err)
+			}
+			if string(message.Value) != string(want) {
+				t.Fatalf("Kafka value=%s, want canonical contract bytes %s", message.Value, want)
+			}
+			if topic == TopicLedgered && !bytes.Contains(message.Value, []byte(`"prev_hash":""`)) {
+				t.Fatalf("Kafka value=%s, want explicit empty prev_hash on ledgered topic", message.Value)
 			}
 			if _, err := ValidateEventJSON(schema, message.Value); err != nil {
 				t.Fatalf("written value fails %s validation: %v", schema, err)
