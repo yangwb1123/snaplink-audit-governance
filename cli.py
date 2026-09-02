@@ -375,7 +375,11 @@ def cmd_sdk_surface() -> int:
 
 
 def cmd_python_checks() -> int:
-    return run(sys.executable, "-m", "unittest", "discover", "-s", "checks", "-p", "test_*.py")
+    # Regression tests deliberately exercise failing-check output. Buffer
+    # successful tests so those expected negative cases do not look like a
+    # failing quality gate in CI logs; unittest still reports their output if
+    # the test itself fails.
+    return run(sys.executable, "-m", "unittest", "discover", "-b", "-s", "checks", "-p", "test_*.py")
 
 
 def check_module(name: str) -> int:

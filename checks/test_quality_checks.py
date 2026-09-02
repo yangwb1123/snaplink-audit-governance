@@ -23,6 +23,14 @@ class QualityChecksTest(unittest.TestCase):
     def test_default_secrets_are_single_source(self):
         self.assertEqual(default_secrets_single_source(), [])
 
+    def test_python_quality_checks_buffer_expected_negative_cases(self):
+        # Several checker tests intentionally run malformed trees and expect a
+        # FAIL line. Keep those lines out of a successful gate transcript so a
+        # log-only runner cannot mistake a passing unittest suite for a gate
+        # failure.
+        source = (Path(__file__).resolve().parents[1] / "cli.py").read_text(encoding="utf-8")
+        self.assertIn('"-m", "unittest", "discover", "-b"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

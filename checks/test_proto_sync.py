@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -441,7 +441,7 @@ class ProtoSyncTest(unittest.TestCase):
         module.urllib.request.urlopen = boom
         try:
             stream = io.StringIO()
-            with redirect_stdout(stream):
+            with redirect_stdout(stream), redirect_stderr(stream):
                 code = module.main([], root=root)
         finally:
             module.urllib.request.urlopen = original_urlopen
