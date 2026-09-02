@@ -150,7 +150,11 @@ FROM audit_state_snapshot WHERE id = 1`).Scan(&layout, &legacyLedger)
 }
 
 func (p *postgresBackend) Save(data *Snapshot) error {
-	encoded, err := json.Marshal(data)
+	copyData, err := cloneSnapshot(data)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(copyData)
 	if err != nil {
 		return err
 	}

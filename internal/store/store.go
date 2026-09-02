@@ -161,9 +161,9 @@ func (s *Snapshot) normalize() {
 // fsynced after the rename (M-12), so a crash immediately after Save cannot
 // revert or lose the committed snapshot.
 type Backend interface {
-	// Load returns the current snapshot for read-only access. The returned
-	// snapshot is owned by the backend and must not be retained. Load must
-	// not mutate backend state: concurrent readers share one backend.
+	// Load returns an independent caller-owned snapshot for read-only access.
+	// Load must not mutate backend state: concurrent readers share one
+	// backend.
 	Load() (*Snapshot, error)
 	// LoadForUpdate returns a private copy for a read-modify-write cycle so
 	// a failing closure can never corrupt the shared state; the copy is only
@@ -171,8 +171,8 @@ type Backend interface {
 	// baseline for the subsequent Save; callers must not retain the
 	// returned snapshot.
 	LoadForUpdate() (*Snapshot, error)
-	// Save atomically persists data. A nil return means the rename is
-	// durable (parent-directory chain fsynced after rename).
+	// Save atomically persists a copy of data. A nil return means the rename
+	// is durable (parent-directory chain fsynced after rename).
 	Save(data *Snapshot) error
 }
 
@@ -235,7 +235,11 @@ func (s *Store) Read(fn func(*Snapshot) error) error {
 	if err != nil {
 		return err
 	}
-	return fn(data)
+	copyData, err := cloneSnapshot(data)
+	if err != nil {
+		return err
+	}
+	return fn(copyData)
 }
 
 // snapshotRestorer is no longer needed: LoadForUpdate hands every Update
@@ -545,7 +549,7 @@ func (f *fileBackend) Close() error {
 func (f *fileBackend) Load() (*Snapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return f.data, nil
+	return cloneSnapshot(f.data)
 }
 
 func (f *fileBackend) LoadForUpdate() (*Snapshot, error) {
@@ -555,10 +559,14 @@ func (f *fileBackend) LoadForUpdate() (*Snapshot, error) {
 }
 
 func (f *fileBackend) Save(data *Snapshot) error {
+	copyData, err := cloneSnapshot(data)
+	if err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.path == "" {
-		f.data = data
+		f.data = copyData
 		return nil
 	}
 	parent := filepath.Dir(f.path)
@@ -573,7 +581,7 @@ func (f *fileBackend) Save(data *Snapshot) error {
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(data, "", "  ")
+	encoded, err := json.MarshalIndent(copyData, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -628,7 +636,7 @@ func (f *fileBackend) Save(data *Snapshot) error {
 		f.restoreSnapshot()
 		return fmt.Errorf("sync directory chain for %s: %w", f.path, err)
 	}
-	f.data = data
+	f.data = copyData
 	return nil
 }
 
@@ -680,13 +688,72 @@ func (f *fileBackend) restoreSnapshot() {
 	_ = fsutil.SyncDirChain(fsutil.DeepestExistingAncestor(filepath.Dir(f.path)), filepath.Dir(f.path), syncDir)
 }
 
+type snapshotJSONCopy struct {
+	LayoutVersion           int                               `json:"layout_version,omitempty"`
+	Tenants                 map[string]domain.Tenant          `json:"tenants"`
+	Sources                 map[string]domain.SourceSystem    `json:"sources"`
+	Schemas                 map[string]domain.EventSchema     `json:"schemas"`
+	Policies                map[string]domain.RetentionPolicy `json:"policies"`
+	Receipts                map[string]domain.EventReceipt    `json:"receipts"`
+	Streams                 map[string]StreamState            `json:"streams"`
+	Segments                map[string][]domain.Segment       `json:"segments"`
+	Checkpoints             map[string][]domain.Checkpoint    `json:"checkpoints"`
+	LegalHolds              map[string]domain.LegalHold       `json:"legal_holds"`
+	Exports                 map[string]domain.ExportJob       `json:"exports"`
+	RestoreRuns             map[string]domain.RestoreRun      `json:"restore_runs"`
+	AdminActions            []domain.AdminAction              `json:"admin_actions"`
+	AggregateCheckpoints    []domain.AggregateCheckpoint      `json:"aggregate_checkpoints"`
+	ArchiveConflictFailures map[string]int                    `json:"archive_conflict_failures,omitempty"`
+	DeadLetters             map[string]domain.DeadLetter      `json:"dead_letters,omitempty"`
+}
+
+func cloneEventMap(events map[string]domain.Event) (map[string]domain.Event, error) {
+	if events == nil {
+		return nil, nil
+	}
+	copyEvents := make(map[string]domain.Event, len(events))
+	for key, event := range events {
+		cloned, err := domain.CloneEvent(event)
+		if err != nil {
+			return nil, err
+		}
+		copyEvents[key] = cloned
+	}
+	return copyEvents, nil
+}
+
 func cloneSnapshot(data *Snapshot) (*Snapshot, error) {
-	encoded, err := json.Marshal(data)
+	encoded, err := json.Marshal(snapshotJSONCopy{
+		LayoutVersion:           data.LayoutVersion,
+		Tenants:                 data.Tenants,
+		Sources:                 data.Sources,
+		Schemas:                 data.Schemas,
+		Policies:                data.Policies,
+		Receipts:                data.Receipts,
+		Streams:                 data.Streams,
+		Segments:                data.Segments,
+		Checkpoints:             data.Checkpoints,
+		LegalHolds:              data.LegalHolds,
+		Exports:                 data.Exports,
+		RestoreRuns:             data.RestoreRuns,
+		AdminActions:            data.AdminActions,
+		AggregateCheckpoints:    data.AggregateCheckpoints,
+		ArchiveConflictFailures: data.ArchiveConflictFailures,
+		DeadLetters:             data.DeadLetters,
+	})
 	if err != nil {
 		return nil, err
 	}
 	copyData := NewSnapshot()
 	if err := decodeSnapshot(encoded, copyData); err != nil {
+		return nil, err
+	}
+	copyData.Events, err = cloneEventMap(data.Events)
+	if err != nil {
+		return nil, err
+	}
+	copyData.LedgeredOutbox, err = cloneEventMap(data.LedgeredOutbox)
+	if err != nil {
 		return nil, err
 	}
 	copyData.normalize()

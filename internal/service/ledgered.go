@@ -47,12 +47,17 @@ func (s *Service) publishLedgered(ctx context.Context, event domain.Event) {
 }
 
 func (s *Service) publishLedgeredNow(ctx context.Context, event domain.Event) bool {
+	published, err := domain.CloneEvent(event)
+	if err != nil {
+		s.logf("ledgered publish clone failed event_id=%s sequence=%d error=%v", event.EventID, event.Sequence, err)
+		return false
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, ledgeredPublishTimeout)
 	defer cancel()
-	if err := s.Config.LedgeredPublisher.Publish(publishCtx, event); err != nil {
+	if err := s.Config.LedgeredPublisher.Publish(publishCtx, published); err != nil {
 		s.logf("ledgered publish failed event_id=%s sequence=%d error=%v", event.EventID, event.Sequence, err)
 		return false
 	}

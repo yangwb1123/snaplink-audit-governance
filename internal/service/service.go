@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -461,6 +460,11 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	if waitFor != "" && waitFor != domain.StatusAccepted && waitFor != domain.StatusLedgered && waitFor != domain.StatusIndexed && waitFor != domain.StatusArchived {
 		return domain.EventReceipt{}, fmt.Errorf("%w: unsupported wait_for value", domain.ErrInvalid)
 	}
+	clonedEvent, err := domain.CloneEvent(event)
+	if err != nil {
+		return domain.EventReceipt{}, err
+	}
+	event = clonedEvent
 	if err := event.ValidateBasic(); err != nil {
 		return domain.EventReceipt{}, err
 	}
@@ -504,13 +508,6 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	event.TenantID = tenantID
 	event.ReceivedAt = s.Now()
 	event.ServerVersion = s.Config.ServerVersion
-	if event.Payload != nil {
-		copyPayload, cloneErr := clonePayload(event.Payload)
-		if cloneErr != nil {
-			return domain.EventReceipt{}, cloneErr
-		}
-		event.Payload = copyPayload
-	}
 	event.SourceDigest = ""
 	sourceDigest, err := domain.EventDigest(event)
 	if err != nil {
@@ -1121,15 +1118,15 @@ func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]do
 	if !ok {
 		return "", fmt.Errorf("schema %s v%d not found", event.SchemaID, event.SchemaVersion)
 	}
-	payload, err := clonePayload(event.Payload)
+	reconstructed, err := domain.CloneEvent(event)
 	if err != nil {
 		return "", err
 	}
 	for _, field := range schema.SearchableFields {
-		delete(payload, field+security.SearchDigestSuffix)
+		delete(reconstructed.Payload, field+security.SearchDigestSuffix)
 	}
 	for _, field := range schema.EncryptedFields {
-		encoded, ok := payload[field].(string)
+		encoded, ok := reconstructed.Payload[field].(string)
 		if !ok {
 			continue
 		}
@@ -1137,10 +1134,8 @@ func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]do
 		if err != nil {
 			return "", fmt.Errorf("cannot decrypt field %s: %w", field, err)
 		}
-		payload[field] = original
+		reconstructed.Payload[field] = original
 	}
-	reconstructed := event
-	reconstructed.Payload = payload
 	return domain.EventContentDigest(reconstructed)
 }
 
@@ -1409,22 +1404,6 @@ func rejectSensitive(value any) error {
 		return nil
 	}
 	return scan(value, "")
-}
-
-func clonePayload(payload map[string]any) (map[string]any, error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	var copyPayload map[string]any
-	// UseNumber: a float64 re-decode would collapse int64 values > 2^53
-	// before digest derivation, corrupting the canonical digest.
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.UseNumber()
-	if err := decoder.Decode(&copyPayload); err != nil {
-		return nil, err
-	}
-	return copyPayload, nil
 }
 
 func merkleRoot(hashes []string) string {

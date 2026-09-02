@@ -200,7 +200,11 @@ func splitLegacySnapshot(data *Snapshot) (*preparedSplit, error) {
 		return nil, err
 	}
 	registered := legacyRegisteredTenants(data)
-	prepared := &preparedSplit{control: controlSnapshot(data), tenant: map[string]*tenantState{}}
+	control, err := controlSnapshot(data)
+	if err != nil {
+		return nil, err
+	}
+	prepared := &preparedSplit{control: control, tenant: map[string]*tenantState{}}
 	for _, tenantID := range legacyTenantIDs(registered) {
 		state, err := splitLegacyTenantSnapshot(data, tenantID)
 		if err != nil {
@@ -218,7 +222,11 @@ func splitLegacyTenantSnapshot(data *Snapshot, tenantID string) (*tenantState, e
 		if keyBelongsToTenant(key, tenantID) {
 			receipt, hasReceipt := data.Receipts[key]
 			if !hasReceipt || receipt.Status != domain.StatusArchived {
-				hot.Events[key] = event
+				cloned, err := domain.CloneEvent(event)
+				if err != nil {
+					return nil, err
+				}
+				hot.Events[key] = cloned
 			}
 		}
 	}

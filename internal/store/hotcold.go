@@ -56,7 +56,10 @@ func newSplitStore(data *Snapshot, path string) (*splitStore, error) {
 	if !stateExists && data.LayoutVersion < hotColdLayoutVersion {
 		data.LayoutVersion = hotColdLayoutVersion
 	}
-	control := controlSnapshot(data)
+	control, err := controlSnapshot(data)
+	if err != nil {
+		return nil, err
+	}
 	s := &splitStore{path: path, root: filepath.Dir(path), control: control, tenant: map[string]*tenantState{}}
 	if path == "" {
 		s.root = ""
@@ -176,10 +179,10 @@ func countLedgerRecords(raw []byte) (int, error) {
 	return count, nil
 }
 
-func controlSnapshot(data *Snapshot) *Snapshot {
+func controlSnapshot(data *Snapshot) (*Snapshot, error) {
 	control, err := cloneSnapshot(data)
 	if err != nil {
-		control = NewSnapshot()
+		return nil, err
 	}
 	control.LayoutVersion = hotColdLayoutVersion
 	control.Events = map[string]domain.Event{}
@@ -187,7 +190,7 @@ func controlSnapshot(data *Snapshot) *Snapshot {
 	control.Streams = map[string]StreamState{}
 	control.Segments = map[string][]domain.Segment{}
 	control.Checkpoints = map[string][]domain.Checkpoint{}
-	return control
+	return control, nil
 }
 
 func emptyTenantHot(tenantID string) *Snapshot {
@@ -328,10 +331,14 @@ func (s *splitStore) materialize() (*Snapshot, error) {
 		return nil, err
 	}
 	for tenantID, state := range s.tenant {
-		for key, event := range state.hot.Events {
+		hot, err := cloneTenantHot(state.hot)
+		if err != nil {
+			return nil, err
+		}
+		for key, event := range hot.Events {
 			result.Events[key] = event
 		}
-		for key, stream := range state.hot.Streams {
+		for key, stream := range hot.Streams {
 			result.Streams[key] = stream
 		}
 		for key, receipt := range state.ledger.receipts {
@@ -410,7 +417,10 @@ type preparedSplit struct {
 }
 
 func splitSnapshot(data *Snapshot) (*preparedSplit, error) {
-	control := controlSnapshot(data)
+	control, err := controlSnapshot(data)
+	if err != nil {
+		return nil, err
+	}
 	ids := tenantIDsFromSnapshot(data)
 	prepared := &preparedSplit{control: control, tenant: map[string]*tenantState{}}
 	for _, tenantID := range ids {
@@ -469,7 +479,11 @@ func splitTenantSnapshot(data *Snapshot, tenantID string) (*tenantState, error) 
 		if event.TenantID == tenantID || keyBelongsToTenant(key, tenantID) {
 			receipt, hasReceipt := data.Receipts[key]
 			if !hasReceipt || receipt.Status != domain.StatusArchived {
-				hot.Events[key] = event
+				cloned, err := domain.CloneEvent(event)
+				if err != nil {
+					return nil, err
+				}
+				hot.Events[key] = cloned
 			}
 		}
 	}
@@ -515,7 +529,15 @@ func (s *splitStore) readTenant(tenantID string, fn func(*TenantView) error) err
 	if state == nil {
 		state = &tenantState{hot: emptyTenantHot(tenantID), ledger: NewTenantLedger(tenantID), version: 1}
 	}
-	view := &TenantView{Hot: cloneTenantHot(state.hot), Ledger: newTenantLedgerView(state.ledger), Global: cloneControl(s.control)}
+	hot, err := cloneTenantHot(state.hot)
+	if err != nil {
+		return err
+	}
+	global, err := cloneControl(s.control)
+	if err != nil {
+		return err
+	}
+	view := &TenantView{Hot: hot, Ledger: newTenantLedgerView(state.ledger), Global: global}
 	if err := fn(view); err != nil {
 		return err
 	}
@@ -524,9 +546,15 @@ func (s *splitStore) readTenant(tenantID string, fn func(*TenantView) error) err
 
 func (s *splitStore) updateTenant(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
 	state := s.tenantState(tenantID)
-	hot := cloneTenantHot(state.hot)
+	hot, err := cloneTenantHot(state.hot)
+	if err != nil {
+		return err
+	}
 	ledger := newTenantLedgerView(state.ledger)
-	global := cloneControl(s.control)
+	global, err := cloneControl(s.control)
+	if err != nil {
+		return err
+	}
 	view := &TenantView{Hot: hot, Ledger: ledger, Global: global}
 	if err := fn(view); err != nil {
 		ledger.clearPending()
@@ -536,9 +564,19 @@ func (s *splitStore) updateTenant(tenantID string, order CommitOrder, fn func(*T
 		ledger.clearPending()
 		return err
 	}
+	retainedHot, err := cloneTenantHot(view.Hot)
+	if err != nil {
+		ledger.clearPending()
+		return err
+	}
+	retainedGlobal, err := cloneControl(view.Global)
+	if err != nil {
+		ledger.clearPending()
+		return err
+	}
 	pending := ledger.pendingRecords()
-	globalChanged := !reflect.DeepEqual(global, s.control)
-	if err := s.commitTenant(tenantID, order, hot, ledger, pending, global, globalChanged); err != nil {
+	globalChanged := !reflect.DeepEqual(retainedGlobal, s.control)
+	if err := s.commitTenant(tenantID, order, retainedHot, ledger, pending, retainedGlobal, globalChanged); err != nil {
 		return err
 	}
 	return nil
@@ -650,30 +688,32 @@ func (s *splitStore) persistPrepared(prepared *preparedSplit) error {
 	return nil
 }
 
-func cloneControl(control *Snapshot) *Snapshot {
+func cloneControl(control *Snapshot) (*Snapshot, error) {
 	clone, err := cloneSnapshot(control)
 	if err != nil {
-		return NewSnapshot()
+		return nil, err
 	}
 	clone.Events = map[string]domain.Event{}
 	clone.Receipts = map[string]domain.EventReceipt{}
 	clone.Streams = map[string]StreamState{}
 	clone.Segments = map[string][]domain.Segment{}
 	clone.Checkpoints = map[string][]domain.Checkpoint{}
-	return clone
+	return clone, nil
 }
 
-func cloneTenantHot(hot *Snapshot) *Snapshot {
+func cloneTenantHot(hot *Snapshot) (*Snapshot, error) {
 	clone := emptyTenantHot("")
-	for key, event := range hot.Events {
-		clone.Events[key] = event
+	var err error
+	clone.Events, err = cloneEventMap(hot.Events)
+	if err != nil {
+		return nil, err
 	}
 	for key, stream := range hot.Streams {
 		stream.PendingHashes = append([]string(nil), stream.PendingHashes...)
 		stream.PendingEvents = append([]string(nil), stream.PendingEvents...)
 		clone.Streams[key] = stream
 	}
-	return clone
+	return clone, nil
 }
 
 func loadTenantState(root, tenantID string) (*tenantState, error) {
@@ -1022,7 +1062,11 @@ func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return fn(cloneControl(s.split.control))
+	control, err := cloneControl(s.split.control)
+	if err != nil {
+		return err
+	}
+	return fn(control)
 }
 
 // UpdateControl mutates only the global hot control document. It is used for
@@ -1045,35 +1089,47 @@ func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	control := cloneControl(s.split.control)
+	control, err := cloneControl(s.split.control)
+	if err != nil {
+		return err
+	}
 	if err := fn(control); err != nil {
 		return err
 	}
+	retained, err := cloneControl(control)
+	if err != nil {
+		return err
+	}
 	if s.split.path != "" {
-		if err := writeControlFile(s.split.path, control); err != nil {
+		if err := writeControlFile(s.split.path, retained); err != nil {
 			return err
 		}
 	}
-	s.split.control = control
+	s.split.control = retained
 	return nil
 }
 
 func (s *Store) readLegacyTenant(tenantID string, fn func(*TenantView) error) error {
 	return s.Read(func(data *Snapshot) error {
-		view := legacyTenantView(data, tenantID)
+		view, err := legacyTenantView(data, tenantID)
+		if err != nil {
+			return err
+		}
 		return fn(view)
 	})
 }
 
 func (s *Store) updateLegacyTenant(tenantID string, fn func(*TenantView) error) error {
 	return s.Update(func(data *Snapshot) error {
-		view := legacyTenantView(data, tenantID)
+		view, err := legacyTenantView(data, tenantID)
+		if err != nil {
+			return err
+		}
 		if err := fn(view); err != nil {
 			return err
 		}
 		view.Ledger.commitPending(view.Ledger.pendingRecords())
-		copyTenantView(data, tenantID, view)
-		return nil
+		return copyTenantView(data, tenantID, view)
 	})
 }
 
@@ -1094,20 +1150,33 @@ func (s *Store) scanLegacyLedger(tenantID string, fn func(LedgerRecord) error) e
 	})
 }
 
-func legacyTenantView(data *Snapshot, tenantID string) *TenantView {
+func legacyTenantView(data *Snapshot, tenantID string) (*TenantView, error) {
 	hot := emptyTenantHot(tenantID)
-	ledger, _ := newTenantLedgerFromSnapshot(data, tenantID)
+	ledger, err := newTenantLedgerFromSnapshot(data, tenantID)
+	if err != nil {
+		return nil, err
+	}
 	for key, event := range data.Events {
 		if keyBelongsToTenant(key, tenantID) || event.TenantID == tenantID {
-			hot.Events[key] = event
+			cloned, err := domain.CloneEvent(event)
+			if err != nil {
+				return nil, err
+			}
+			hot.Events[key] = cloned
 		}
 	}
 	for key, stream := range data.Streams {
 		if keyBelongsToTenant(key, tenantID) || stream.TenantID == tenantID {
+			stream.PendingHashes = append([]string(nil), stream.PendingHashes...)
+			stream.PendingEvents = append([]string(nil), stream.PendingEvents...)
 			hot.Streams[key] = stream
 		}
 	}
-	return &TenantView{Hot: hot, Ledger: ledger, Global: cloneControl(data)}
+	global, err := cloneControl(data)
+	if err != nil {
+		return nil, err
+	}
+	return &TenantView{Hot: hot, Ledger: ledger, Global: global}, nil
 }
 
 func newTenantLedgerFromSnapshot(data *Snapshot, tenantID string) (*TenantLedger, error) {
@@ -1118,7 +1187,17 @@ func newTenantLedgerFromSnapshot(data *Snapshot, tenantID string) (*TenantLedger
 	return state.ledger, nil
 }
 
-func copyTenantView(data *Snapshot, tenantID string, view *TenantView) {
+func copyTenantView(data *Snapshot, tenantID string, view *TenantView) error {
+	events, err := cloneEventMap(view.Hot.Events)
+	if err != nil {
+		return err
+	}
+	streams := make(map[string]StreamState, len(view.Hot.Streams))
+	for key, stream := range view.Hot.Streams {
+		stream.PendingHashes = append([]string(nil), stream.PendingHashes...)
+		stream.PendingEvents = append([]string(nil), stream.PendingEvents...)
+		streams[key] = stream
+	}
 	for key := range data.Events {
 		if keyBelongsToTenant(key, tenantID) {
 			delete(data.Events, key)
@@ -1129,10 +1208,10 @@ func copyTenantView(data *Snapshot, tenantID string, view *TenantView) {
 			delete(data.Streams, key)
 		}
 	}
-	for key, event := range view.Hot.Events {
+	for key, event := range events {
 		data.Events[key] = event
 	}
-	for key, stream := range view.Hot.Streams {
+	for key, stream := range streams {
 		data.Streams[key] = stream
 	}
 	for key, receipt := range view.Ledger.receipts {
@@ -1144,4 +1223,5 @@ func copyTenantView(data *Snapshot, tenantID string, view *TenantView) {
 	for key, checkpoints := range view.Ledger.checkpoints {
 		data.Checkpoints[key] = cloneCheckpoints(checkpoints)
 	}
+	return nil
 }

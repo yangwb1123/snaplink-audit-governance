@@ -154,9 +154,14 @@ func (s *Service) GetEventAcrossTenants(actor, eventID string) (domain.Event, er
 	var matches []domain.Event
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		for _, event := range data.Events {
-			if event.EventID == eventID {
-				matches = append(matches, event)
+			if event.EventID != eventID {
+				continue
 			}
+			cloned, err := domain.CloneEvent(event)
+			if err != nil {
+				return err
+			}
+			matches = append(matches, cloned)
 		}
 		for key, receipt := range data.Receipts {
 			if receipt.EventID != eventID || receipt.Status != domain.StatusArchived {
@@ -169,7 +174,11 @@ func (s *Service) GetEventAcrossTenants(actor, eventID string) (domain.Event, er
 			if readErr != nil {
 				return readErr
 			}
-			matches = append(matches, event)
+			cloned, err := domain.CloneEvent(event)
+			if err != nil {
+				return err
+			}
+			matches = append(matches, cloned)
 		}
 		return nil
 	})

@@ -72,13 +72,17 @@ func (s *Service) archivedEventContext(ctx context.Context, receipt domain.Event
 func (s *Service) eventFromSnapshot(ctx context.Context, data *store.Snapshot, tenantID, eventID string) (domain.Event, error) {
 	key := store.EventKey(tenantID, eventID)
 	if event, ok := data.Events[key]; ok {
-		return event, nil
+		return domain.CloneEvent(event)
 	}
 	receipt, ok := data.Receipts[key]
 	if !ok || receipt.Status != domain.StatusArchived {
 		return domain.Event{}, domain.ErrNotFound
 	}
-	return s.archivedEventContext(ctx, receipt)
+	event, err := s.archivedEventContext(ctx, receipt)
+	if err != nil {
+		return domain.Event{}, err
+	}
+	return domain.CloneEvent(event)
 }
 
 // eventsFromSnapshot returns hot events plus verified archived events whose
@@ -87,8 +91,15 @@ func (s *Service) eventFromSnapshot(ctx context.Context, data *store.Snapshot, t
 func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
 	events := make([]domain.Event, 0)
 	for _, event := range data.Events {
-		if (tenantID == "" || event.TenantID == tenantID) && predicate(event) {
-			events = append(events, event)
+		if tenantID != "" && event.TenantID != tenantID {
+			continue
+		}
+		cloned, err := domain.CloneEvent(event)
+		if err != nil {
+			return nil, err
+		}
+		if predicate(cloned) {
+			events = append(events, cloned)
 		}
 	}
 	keys := make([]string, 0, len(data.Receipts))
@@ -106,8 +117,12 @@ func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, 
 		if err != nil {
 			return nil, err
 		}
-		if predicate(event) {
-			events = append(events, event)
+		cloned, err := domain.CloneEvent(event)
+		if err != nil {
+			return nil, err
+		}
+		if predicate(cloned) {
+			events = append(events, cloned)
 		}
 	}
 	return events, nil

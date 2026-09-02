@@ -386,7 +386,11 @@ func (p *postgresSplitStore) loadControl() (*Snapshot, int64, error) {
 	data, version, err := p.backend.load()
 	if errors.Is(err, sql.ErrNoRows) {
 		data.LayoutVersion = hotColdLayoutVersion
-		return controlSnapshot(data), 0, nil
+		control, cloneErr := controlSnapshot(data)
+		if cloneErr != nil {
+			return nil, 0, cloneErr
+		}
+		return control, 0, nil
 	}
 	if err != nil {
 		return nil, 0, err
@@ -395,7 +399,11 @@ func (p *postgresSplitStore) loadControl() (*Snapshot, int64, error) {
 		return nil, 0, fmt.Errorf("postgres snapshot contains legacy ledger data; run the hot/cold cutover before enabling migration 006")
 	}
 	data.LayoutVersion = hotColdLayoutVersion
-	return controlSnapshot(data), version, nil
+	control, err := controlSnapshot(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	return control, version, nil
 }
 
 func hasLedgerData(data *Snapshot) bool {
@@ -419,7 +427,11 @@ func (p *postgresSplitStore) updateControl(fn func(*Snapshot) error) error {
 		if err := fn(control); err != nil {
 			return err
 		}
-		if err := p.saveControl(control, version); err != nil {
+		retained, err := cloneControl(control)
+		if err != nil {
+			return err
+		}
+		if err := p.saveControl(retained, version); err != nil {
 			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
 				time.Sleep(snapshotConflictBackoff(attempt))
 				continue
@@ -512,8 +524,16 @@ func (p *postgresSplitStore) readTenant(tenantID string, fn func(*TenantView) er
 	if err != nil {
 		return err
 	}
+	viewHot, err := cloneTenantHot(hot)
+	if err != nil {
+		return err
+	}
+	viewControl, err := cloneControl(control)
+	if err != nil {
+		return err
+	}
 	ledger := newTenantLedgerWithReader(tenantID, &postgresLedgerReader{db: p.backend.db, tenantID: tenantID})
-	view := &TenantView{Hot: hot, Ledger: ledger, Global: control}
+	view := &TenantView{Hot: viewHot, Ledger: ledger, Global: viewControl}
 	if err := fn(view); err != nil {
 		return err
 	}
@@ -552,17 +572,25 @@ func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder
 	if err := ledger.Err(); err != nil {
 		return err
 	}
+	retainedHot, err := cloneTenantHot(view.Hot)
+	if err != nil {
+		return err
+	}
+	retainedControl, err := cloneControl(view.Global)
+	if err != nil {
+		return err
+	}
 	pending := ledger.pendingRecords()
-	globalChanged := !reflect.DeepEqual(control, baselineControl)
+	globalChanged := !reflect.DeepEqual(retainedControl, baselineControl)
 	if order == ColdFirst {
 		if err := p.appendLedger(pending); err != nil {
 			return err
 		}
-		if err := p.saveTenantHot(tenantID, hot, version); err != nil {
+		if err := p.saveTenantHot(tenantID, retainedHot, version); err != nil {
 			return err
 		}
 	} else {
-		if err := p.saveTenantHot(tenantID, hot, version); err != nil {
+		if err := p.saveTenantHot(tenantID, retainedHot, version); err != nil {
 			return err
 		}
 		if err := p.appendLedger(pending); err != nil {
@@ -571,7 +599,7 @@ func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder
 	}
 	if globalChanged {
 		if err := p.updateControl(func(current *Snapshot) error {
-			mergeControlDelta(current, baselineControl, control)
+			mergeControlDelta(current, baselineControl, retainedControl)
 			return nil
 		}); err != nil {
 			return err
@@ -709,10 +737,14 @@ func (p *postgresSplitStore) materialize() (*Snapshot, error) {
 		if err != nil {
 			return nil, err
 		}
-		for key, event := range hot.Events {
+		copyHot, err := cloneTenantHot(hot)
+		if err != nil {
+			return nil, err
+		}
+		for key, event := range copyHot.Events {
 			result.Events[key] = event
 		}
-		for key, stream := range hot.Streams {
+		for key, stream := range copyHot.Streams {
 			result.Streams[key] = stream
 		}
 		records, err := (&postgresLedgerReader{db: p.backend.db, tenantID: tenantID}).records()
@@ -767,7 +799,11 @@ func (p *postgresSplitStore) updateChecked(fn func(*Snapshot) (bool, error)) err
 	}
 	if tenantDataEqual(before, working) {
 		return p.updateControl(func(control *Snapshot) error {
-			*control = *controlSnapshot(working)
+			copyControl, err := controlSnapshot(working)
+			if err != nil {
+				return err
+			}
+			*control = *copyControl
 			return nil
 		})
 	}
