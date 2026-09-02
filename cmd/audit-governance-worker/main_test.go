@@ -1037,7 +1037,8 @@ func TestRunConsistencyKey(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	cfg := runtimeconfig.SigningArchive{ArchiveDir: t.TempDir()}
-	if exit := runConsistencyKey(logger, service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}, cfg); exit != 0 {
+	base := service.Config{SigningSecret: "test-secret", EncryptionKey: "test-key", AllowDevSecrets: true}
+	if exit := runConsistencyKey(logger, base, cfg); exit != 0 {
 		t.Fatalf("exit=%d, want 0; log: %q", exit, buf.String())
 	}
 	out := buf.String()
@@ -1046,6 +1047,25 @@ func TestRunConsistencyKey(t *testing.T) {
 	}
 	if strings.Contains(out, "archive_ready=") || strings.Contains(out, "check_config=") {
 		t.Fatalf("pure consistency mode must not run preflight probes, got: %q", out)
+	}
+
+	buf.Reset()
+	invalidRetention := runtimeconfig.SigningArchive{S3Endpoint: "localhost:19010", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	if exit := runConsistencyKey(logger, base, invalidRetention); exit != 1 {
+		t.Fatalf("invalid retention exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), runtimeconfig.EnvArchiveRetentionDays) || strings.Contains(buf.String(), "consistency_key=") {
+		t.Fatalf("invalid retention must fail closed naming %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, buf.String())
+	}
+
+	buf.Reset()
+	overRetention := invalidRetention
+	overRetention.ArchiveRetentionDays = 36501
+	if exit := runConsistencyKey(logger, base, overRetention); exit != 1 {
+		t.Fatalf("over-limit retention exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), runtimeconfig.EnvArchiveRetentionDays) || strings.Contains(buf.String(), "consistency_key=") {
+		t.Fatalf("over-limit retention must fail closed naming %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, buf.String())
 	}
 }
 
@@ -1102,6 +1122,57 @@ func TestConsistencyKeySubprocessDoesNotProbe(t *testing.T) {
 		}
 		if strings.Contains(output, "archive_ready=") || strings.Contains(output, "check_config=") {
 			t.Fatalf("%s pure key output ran a preflight: %q", name, output)
+		}
+	}
+}
+
+func TestConsistencyKeySubprocessRejectsInvalidRetention(t *testing.T) {
+	workerBinary, err := buildWorkerBinary()
+	if err != nil {
+		t.Skipf("worker binary unavailable: %v", err)
+	}
+	apiBinary, err := buildAuditAPIBinary()
+	if err != nil {
+		t.Skipf("audit-api binary unavailable: %v", err)
+	}
+	env := func() []string {
+		result := make([]string, 0, len(os.Environ())+7)
+		for _, item := range os.Environ() {
+			if strings.HasPrefix(item, "AUDIT_") {
+				continue
+			}
+			result = append(result, item)
+		}
+		return append(result,
+			"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
+			"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
+			"AUDIT_S3_ENDPOINT=127.0.0.1:1",
+			"AUDIT_S3_BUCKET=worm",
+			"AUDIT_S3_ACCESS_KEY=access",
+			"AUDIT_S3_SECRET_KEY=secret",
+		)
+	}
+	run := func(binary string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "-consistency-key")
+		cmd.Env = env()
+		out, runErr := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("%s -consistency-key exceeded timeout", binary)
+		}
+		return string(out), runErr
+	}
+	for name, binary := range map[string]string{"worker": workerBinary, "api": apiBinary} {
+		output, runErr := run(binary)
+		if runErr == nil {
+			t.Fatalf("%s -consistency-key must fail closed on invalid retention, output: %q", name, output)
+		}
+		if !strings.Contains(output, runtimeconfig.EnvArchiveRetentionDays) {
+			t.Fatalf("%s output must name %s, got: %q", name, runtimeconfig.EnvArchiveRetentionDays, output)
+		}
+		if strings.Contains(output, "consistency_key=") {
+			t.Fatalf("%s output must not report a key on invalid retention, got: %q", name, output)
 		}
 	}
 }
@@ -1186,11 +1257,11 @@ func TestCheckConfigTransportLine(t *testing.T) {
 		swapStore bool
 	}{
 		{"no external legs", runtimeconfig.SigningArchive{}, "local", "local", false},
-		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true}, "tls", "local", true},
-		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "minio:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false}, "http", "local", true},
+		{"s3 tls", runtimeconfig.SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365}, "tls", "local", true},
+		{"s3 http", runtimeconfig.SigningArchive{S3Endpoint: "minio:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: false, ArchiveRetentionDays: 365}, "http", "local", true},
 		{"vault tls", runtimeconfig.SigningArchive{VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints"}, "local", "tls", false},
 		{"mixed s3 tls + vault tls", runtimeconfig.SigningArchive{
-			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true,
+			S3Endpoint: "https://s3.example.com", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s", S3UseSSL: true, ArchiveRetentionDays: 365,
 			VaultAddr: "https://vault.example.com:8200", VaultToken: "t", VaultTransitKey: "audit-checkpoints",
 		}, "tls", "tls", true},
 	}

@@ -99,6 +99,24 @@ func (s SigningArchive) Signer() (service.Signer, error) {
 	return security.NewVaultTransitSigner(s.VaultAddr, s.VaultToken, s.VaultTransitKey), nil
 }
 
+// validateS3Retention enforces the pure, client-free retention invariants
+// shared by Archive() and ConsistencyKey(). The dedicated consistency-key
+// path must fail closed on the same invalid per-object retention values that
+// startup and -check-config reject, otherwise the parity checker can go false
+// green even though any real S3 write would be non-compliant.
+func (s SigningArchive) validateS3Retention() error {
+	if s.S3Endpoint == "" {
+		return nil
+	}
+	if s.ArchiveRetentionDays == 0 {
+		return fmt.Errorf("s3 archive requires a positive retention duration: set %s (e.g. 365 for one year of COMPLIANCE retention on every archived object); without it every object would be deletable if the bucket default is absent or downgraded", EnvArchiveRetentionDays)
+	}
+	if s.ArchiveRetentionDays > maxArchiveRetentionDays {
+		return fmt.Errorf("s3 archive retention duration %d days exceeds the maximum of %d: set %s to at most 100 years", s.ArchiveRetentionDays, maxArchiveRetentionDays, EnvArchiveRetentionDays)
+	}
+	return nil
+}
+
 // Archive returns the configured compliance archive (S3 Object Lock when
 // all four S3 settings are present, local read-only directory otherwise).
 // A well-known default encryption key is rejected whenever any S3 setting
@@ -118,17 +136,8 @@ func (s SigningArchive) Archive() (archive.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// F1 leg (i) wiring: an S3 archive without a positive retention duration
-	// is a fail-closed configuration error (before any client construction).
-	// Without explicit per-object retention, an object written while the
-	// bucket default is absent/downgraded is deletable even though the
-	// receipt claims StatusArchived; with it, every Put is COMPLIANCE-retained
-	// for ArchiveRetentionDays regardless of bucket-default drift.
-	if s.ArchiveRetentionDays == 0 {
-		return nil, fmt.Errorf("s3 archive requires a positive retention duration: set %s (e.g. 365 for one year of COMPLIANCE retention on every archived object); without it every object would be deletable if the bucket default is absent or downgraded", EnvArchiveRetentionDays)
-	}
-	if s.ArchiveRetentionDays > maxArchiveRetentionDays {
-		return nil, fmt.Errorf("s3 archive retention duration %d days exceeds the maximum of %d: set %s to at most 100 years", s.ArchiveRetentionDays, maxArchiveRetentionDays, EnvArchiveRetentionDays)
+	if err := s.validateS3Retention(); err != nil {
+		return nil, err
 	}
 	retainFor := time.Duration(s.ArchiveRetentionDays) * 24 * time.Hour
 	return newS3Store(endpoint, s.S3AccessKey, s.S3SecretKey, s.S3Bucket, useSSL, retainFor)
@@ -143,10 +152,11 @@ func (s SigningArchive) Archive() (archive.Store, error) {
 // respective transport/archive gates, not encoded here.
 //
 // This method performs no I/O and does not construct an archive client. Its S3
-// partial-configuration check mirrors Archive's selection branch exactly so a
-// direct caller cannot silently turn an invalid S3 configuration into a file
-// identity. The full Archive validation remains the responsibility of the
-// normal startup and -check-config paths.
+// validation mirrors Archive's pure configuration checks (selection plus the
+// per-object retention invariant) so a direct caller cannot silently turn an
+// invalid S3 configuration into a successful parity signal. Readiness/network
+// checks remain the responsibility of the normal startup and -check-config
+// paths.
 func (s SigningArchive) ConsistencyKey() (string, error) {
 	signer, err := s.Signer()
 	if err != nil {
@@ -163,6 +173,9 @@ func (s SigningArchive) ConsistencyKey() (string, error) {
 	}
 	archiveID := "file:" + s.ArchiveDir
 	if s.S3Endpoint != "" {
+		if err := s.validateS3Retention(); err != nil {
+			return "", fmt.Errorf("consistency key: archive: %w", err)
+		}
 		archiveID = "s3:" + s.S3Bucket
 	}
 	return fmt.Sprintf("%s|%s", algorithm, archiveID), nil

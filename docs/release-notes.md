@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-01 — Fail closed in `-consistency-key` on invalid S3 retention
+
+`audit-api -consistency-key`, `audit-governance-worker -consistency-key`, and
+`python3 cli.py consistency-check` now fail when an S3 archive is configured
+with an invalid `AUDIT_ARCHIVE_RETENTION_DAYS` value. The pure consistency-key
+path still performs no archive readiness probe or network I/O for valid
+configurations, and successful key formats are unchanged.
+
 ## 2026-09-01 — Reject remote plaintext S3 archive transport
 
 S3 archive endpoints now fail closed before client construction when

@@ -1156,6 +1156,25 @@ func TestRunConsistencyKey(t *testing.T) {
 	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), "together") {
 		t.Fatalf("invalid configuration must report a fail-closed key error, got: %q", buf.String())
 	}
+
+	buf.Reset()
+	invalidRetention := runtimeconfig.SigningArchive{S3Endpoint: "localhost:19010", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	if exit := runConsistencyKey(logger, validConfig(), invalidRetention); exit != 1 {
+		t.Fatalf("invalid retention exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), runtimeconfig.EnvArchiveRetentionDays) || strings.Contains(buf.String(), "consistency_key=") {
+		t.Fatalf("invalid retention must fail closed naming %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, buf.String())
+	}
+
+	buf.Reset()
+	overRetention := invalidRetention
+	overRetention.ArchiveRetentionDays = 36501
+	if exit := runConsistencyKey(logger, validConfig(), overRetention); exit != 1 {
+		t.Fatalf("over-limit retention exit=%d, want 1; log: %q", exit, buf.String())
+	}
+	if !strings.Contains(buf.String(), "consistency_key:") || !strings.Contains(buf.String(), runtimeconfig.EnvArchiveRetentionDays) || strings.Contains(buf.String(), "consistency_key=") {
+		t.Fatalf("over-limit retention must fail closed naming %s, got: %q", runtimeconfig.EnvArchiveRetentionDays, buf.String())
+	}
 }
 
 // TestLoopbackListenAddr pins REQ-3.1's fail-closed loopback determination

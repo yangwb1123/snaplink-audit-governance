@@ -1,5 +1,8 @@
 import io
+import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -88,6 +91,43 @@ class ConsistencyKeyCheckTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("built binary not found", output.getvalue())
         mocked.assert_not_called()
+
+    def test_cli_consistency_check_rejects_invalid_retention(self):
+        """Exercise the real predeploy parity command, not only its mock seam."""
+        root = Path(__file__).resolve().parents[1]
+        targets = {
+            "audit-api": "./cmd/audit-api",
+            "audit-governance-worker": "./cmd/audit-governance-worker",
+        }
+        for name, package in targets.items():
+            result = subprocess.run(
+                ["go", "build", "-o", str(root / "bin" / name), package],
+                cwd=str(root), capture_output=True, text=True, check=False,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("AUDIT_")}
+        env.update({
+            "AUDIT_SIGNING_SECRET": "test-signing-secret-0123456789abcdefgh",
+            "AUDIT_ENCRYPTION_KEY": "test-encryption-key-0123456789abcdefg",
+            "AUDIT_S3_ENDPOINT": "127.0.0.1:1",
+            "AUDIT_S3_BUCKET": "worm",
+            "AUDIT_S3_ACCESS_KEY": "access",
+            "AUDIT_S3_SECRET_KEY": "secret",
+            "AUDIT_ARCHIVE_RETENTION_DAYS": "0",
+        })
+        result = subprocess.run(
+            [sys.executable, "cli.py", "consistency-check"],
+            cwd=str(root), env=env, capture_output=True, text=True,
+            check=False, timeout=15,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("FAIL: consistency_key check", output)
+        self.assertNotIn("PASS: consistency_key identical", output)
+        self.assertNotIn("consistency_key=", output)
 
 
 if __name__ == "__main__":

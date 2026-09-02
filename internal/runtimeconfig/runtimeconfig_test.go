@@ -153,6 +153,17 @@ func TestConsistencyKeyRejectsInvalidConfiguration(t *testing.T) {
 		t.Fatalf("partial S3 config key=%q err=%v, want no key and a together error", key, err)
 	}
 
+	zeroRetentionS3 := SigningArchive{S3Endpoint: "s3.example.com:9000", S3Bucket: "worm", S3AccessKey: "k", S3SecretKey: "s"}
+	if key, err := zeroRetentionS3.ConsistencyKey(); err == nil || key != "" || !strings.Contains(err.Error(), EnvArchiveRetentionDays) {
+		t.Fatalf("zero-retention S3 key=%q err=%v, want no key and an %s error", key, err, EnvArchiveRetentionDays)
+	}
+
+	overRetentionS3 := zeroRetentionS3
+	overRetentionS3.ArchiveRetentionDays = maxArchiveRetentionDays + 1
+	if key, err := overRetentionS3.ConsistencyKey(); err == nil || key != "" || !strings.Contains(err.Error(), EnvArchiveRetentionDays) {
+		t.Fatalf("over-cap S3 key=%q err=%v, want no key and an %s error", key, err, EnvArchiveRetentionDays)
+	}
+
 	partialVault := SigningArchive{VaultAddr: "https://vault.example.com:8200"}
 	if key, err := partialVault.ConsistencyKey(); err == nil || key != "" || !strings.Contains(err.Error(), "together") {
 		t.Fatalf("partial Vault config key=%q err=%v, want no key and a together error", key, err)
