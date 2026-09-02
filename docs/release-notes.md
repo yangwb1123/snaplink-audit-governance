@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-09-02 — Deep-copy mutable `Event` graphs at service and store boundaries
+
+`domain.Event` values are now defensively deep-copied at ingest, store
+copy-in/copy-out boundaries, service read paths, and before
+`LedgeredPublisher.Publish`. Mutating caller-owned events, returned read
+results, or publisher arguments can no longer alter persisted ledger content,
+outbox records, archive inputs, or later `VerifyIntegrity` results. Event
+hashes, canonical digests, archive objects, query ordering, and wire contracts
+are unchanged; unsupported or cyclic event graphs now fail closed with
+`domain.ErrEventClone` instead of falling back to shared mutable state.
+
 ## 2026-09-02 — `wait_for=archived` now fails closed on archive write errors
 
 `POST /api/v1/events?wait_for=archived` now returns the existing redacted
