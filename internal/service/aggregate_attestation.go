@@ -26,7 +26,7 @@ func aggregateCheckpointRefs(data *store.Snapshot, tenantID string) ([]domain.Ch
 		if !ok || owner != tenantID {
 			continue
 		}
-		checkpoint := checkpoints[len(checkpoints)-1]
+		checkpoint := latestCheckpoint(checkpoints)
 		if checkpoint.TenantID != tenantID || checkpoint.StreamID != streamID || checkpoint.ID == "" || checkpoint.MerkleRoot == "" {
 			return nil, fmt.Errorf("%w: malformed checkpoint for stream %s", domain.ErrInvalid, streamID)
 		}
@@ -37,6 +37,18 @@ func aggregateCheckpointRefs(data *store.Snapshot, tenantID string) ([]domain.Ch
 	}
 	sortCheckpointRefs(refs)
 	return refs, nil
+}
+
+func latestCheckpoint(checkpoints []domain.Checkpoint) domain.Checkpoint {
+	latest := checkpoints[0]
+	for _, checkpoint := range checkpoints[1:] {
+		if checkpoint.Sequence > latest.Sequence ||
+			(checkpoint.Sequence == latest.Sequence && checkpoint.CreatedAt.After(latest.CreatedAt)) ||
+			(checkpoint.Sequence == latest.Sequence && checkpoint.CreatedAt.Equal(latest.CreatedAt) && checkpoint.ID > latest.ID) {
+			latest = checkpoint
+		}
+	}
+	return latest
 }
 
 func sortCheckpointRefs(refs []domain.CheckpointRef) {

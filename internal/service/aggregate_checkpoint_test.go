@@ -601,6 +601,52 @@ func TestMalformedBoundAggregateWithoutReferencesIsInvalid(t *testing.T) {
 	}
 }
 
+func TestAggregateAttestationRetainsHistoricalCheckpoint(t *testing.T) {
+	svc := testService(t, false)
+	old := testCheckpoint("tenant-a", "stream-a", "root-old")
+	newer := old
+	newer.ID = "checkpoint-new"
+	newer.Sequence = old.Sequence + 1
+	newer.MerkleRoot = "root-new"
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Checkpoints[store.StreamKey("tenant-a", "stream-a")] = []domain.Checkpoint{old}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		key := store.StreamKey("tenant-a", "stream-a")
+		data.Checkpoints[key] = []domain.Checkpoint{old, newer}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.AggregateCheckpoints) != 2 {
+		t.Fatalf("aggregate records=%d, want 2", len(snapshot.AggregateCheckpoints))
+	}
+	if got := snapshot.AggregateCheckpoints[0].CheckpointRefs[0].CheckpointID; got != old.ID {
+		t.Fatalf("historical aggregate reference=%q, want %q", got, old.ID)
+	}
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "tester", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid {
+		t.Fatalf("historical checkpoint must remain verifiable: %+v", result.Errors)
+	}
+}
+
 // TestVerifyIntegrityBoundedByRetentionCap is AC-2: with a small configured
 // cap N, an over-cap bound history is trimmed to N on the next append
 // (oldest dropped, newest retained), VerifyIntegrity verifies only the

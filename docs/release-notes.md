@@ -1,5 +1,9 @@
 # Release Notes
 
+## 2026-09-05 — Bind aggregate checkpoints to tenant and checkpoint lineage
+
+Aggregate checkpoint attestations now use a versioned, canonical signature payload containing tenant, signer metadata, ordered stream roots, and exact checkpoint references. Integrity verification resolves those references from the same snapshot and reports tampering, cross-tenant relabeling, and legacy root-only records as invalid without changing the HTTP 200 integrity-result contract.
+
 ## 2026-09-02 — Deep-copy mutable `Event` graphs at service and store boundaries
 
 `domain.Event` values are now defensively deep-copied at ingest, store
