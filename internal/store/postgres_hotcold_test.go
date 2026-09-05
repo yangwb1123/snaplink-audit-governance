@@ -395,6 +395,161 @@ VALUES ('orphan-tenant', 'receipt', 'orphan-key', 1,
 	}
 }
 
+func TestZPostgresFreshMigrationConcurrentIsIdempotent(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_HOTCOLD_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	}
+	other, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	if err := other.Ping(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, connection := range []*sql.DB{db, other} {
+		group.Add(1)
+		go func(connection *sql.DB) {
+			defer group.Done()
+			<-start
+			results <- MigratePostgresSnapshot(connection)
+		}(connection)
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent fresh migration: %v", err)
+		}
+	}
+
+	var snapshots, backups, tenants, records int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot_v1_backup`).Scan(&backups); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || backups != 1 || tenants != 0 || records != 0 {
+		t.Fatalf("concurrent migration state snapshots=%d backups=%d tenants=%d records=%d, want 1/1/0/0", snapshots, backups, tenants, records)
+	}
+}
+
+func TestZPostgresMigrationAllowsPostCutoverRows(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("initial migration: %v", err)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := EventKey("tenant-a", "post-cutover-event")
+	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+		view.Hot.Events[key] = domain.Event{
+			EventID: "post-cutover-event", TenantID: "tenant-a",
+			StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "post-cutover-hash",
+		}
+		view.Ledger.SetReceipt(domain.EventReceipt{
+			EventID: "post-cutover-event", TenantID: "tenant-a", IdempotencyKey: "post-cutover-idem",
+			Status: domain.StatusIndexed, StreamID: "tenant-a:source:crm", Sequence: 1,
+			Hash: "post-cutover-hash",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("post-cutover write: %v", err)
+	}
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("idempotent migration with post-cutover rows: %v", err)
+	}
+	if err := st.Ready(context.Background()); err != nil {
+		t.Fatalf("readiness with post-cutover rows: %v", err)
+	}
+	var tenants, records int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	if tenants != 1 || records != 1 {
+		t.Fatalf("post-cutover rows tenants=%d records=%d, want 1/1", tenants, records)
+	}
+}
+
+func TestZPostgresMigrationRollsBackPostWriteFailure(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	legacy := NewSnapshot()
+	legacy.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	key := EventKey("tenant-a", "rollback-event")
+	legacy.Events[key] = domain.Event{EventID: "rollback-event", TenantID: "tenant-a", StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "rollback-hash"}
+	legacy.Receipts[key] = domain.EventReceipt{EventID: "rollback-event", TenantID: "tenant-a", Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "rollback-hash"}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	const functionName = "snaplink_test_fail_hotcold_ledger"
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP TRIGGER IF EXISTS snaplink_test_fail_hotcold_ledger ON audit_ledger`)
+		_, _ = db.Exec(`DROP FUNCTION IF EXISTS snaplink_test_fail_hotcold_ledger()`)
+	})
+	if _, err := db.Exec(`
+CREATE OR REPLACE FUNCTION snaplink_test_fail_hotcold_ledger() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'snaplink_test_fail_hotcold_ledger: rollback trigger';
+END;
+$$;
+CREATE TRIGGER snaplink_test_fail_hotcold_ledger
+AFTER INSERT ON audit_ledger
+FOR EACH ROW EXECUTE FUNCTION snaplink_test_fail_hotcold_ledger()`); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	var beforeVersion int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&before, &beforeVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), functionName) {
+		t.Fatalf("migration error=%v, want rollback trigger failure", err)
+	}
+	var after string
+	var afterVersion int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&after, &afterVersion); err != nil {
+		t.Fatal(err)
+	}
+	var tenants, records int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	var backup bool
+	if err := db.QueryRow(`SELECT to_regclass('audit_state_snapshot_v1_backup') IS NOT NULL`).Scan(&backup); err != nil {
+		t.Fatal(err)
+	}
+	if before != after || beforeVersion != afterVersion || tenants != 0 || records != 0 || backup {
+		t.Fatalf("failed migration was not atomic: source %s/%d -> %s/%d, targets=%d/%d, backup=%t", before, beforeVersion, after, afterVersion, tenants, records, backup)
+	}
+}
+
 func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	legacy := NewSnapshot()

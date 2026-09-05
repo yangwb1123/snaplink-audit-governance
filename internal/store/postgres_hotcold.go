@@ -261,16 +261,25 @@ func newPostgresSplitStore(backend *postgresBackend) *postgresSplitStore {
 	return &postgresSplitStore{backend: backend}
 }
 
+const postgresHotColdMigrationLockKey int64 = 6006
+
 // MigratePostgresSnapshot performs the v1 single-row to v2 hot/cold cutover
-// while holding the snapshot row lock. It is intentionally an explicit
-// operator action: production startup refuses to reinterpret a legacy row
-// when migration 006 tables are present but the cutover has not run.
+// while holding a transaction-scoped database lock and, when present, the
+// snapshot row lock. The database lock closes the no-row gap where two fresh
+// migrators cannot lock the absent snapshot row. It is intentionally an
+// explicit operator action: production startup refuses to reinterpret a
+// legacy row when migration 006 tables are present but the cutover has not
+// run.
 func MigratePostgresSnapshot(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	committed := false
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, postgresHotColdMigrationLockKey); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("acquire hot/cold migration lock: %w", err)
+	}
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()

@@ -7,6 +7,9 @@ be empty before creating the v2 marker and zero-data baseline. PostgreSQL
 readiness applies the same guard when no marker exists, so pre-existing tenant
 or ledger rows cannot be adopted or served without migration provenance. The
 existing marker, baseline, and target rows remain unchanged on rejection.
+Concurrent migration invocations are serialized with a transaction-scoped
+PostgreSQL advisory lock; a second fresh invocation rechecks the committed
+marker instead of racing an absent snapshot row.
 
 ## 2026-09-05 — Preserve lossless canonical event identity
 
