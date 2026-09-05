@@ -165,10 +165,10 @@ func (s *Service) checkExistingIngest(ctx context.Context, data *store.Snapshot,
 	}
 	existingDigest, digestErr := s.reconstructAndDerive(existing, data.Schemas)
 	if digestErr != nil {
-		existingDigest, digestErr = domain.EventDigest(existing)
-		if digestErr != nil {
-			return domain.EventReceipt{}, true, digestErr
-		}
+		// Stored SourceDigest is not a substitute for reconstructing the
+		// authenticated content. A missing schema, clone failure, or decrypt
+		// error must fail closed rather than produce a duplicate response.
+		return domain.EventReceipt{}, true, digestErr
 	}
 	receipt = data.Receipts[key]
 	if existingDigest == inputDigest {

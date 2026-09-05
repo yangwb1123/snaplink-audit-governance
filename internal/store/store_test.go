@@ -60,6 +60,99 @@ func TestFileBackendPersistAndReload(t *testing.T) {
 	}
 }
 
+func TestEventCanonicalIdentitySurvivesFileReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nilMap map[string]any
+	var nilSlice []any
+	event := domain.Event{EventID: "canonical-reload", TenantID: "tenant-a", OccurredAt: time.Unix(10, 0).UTC(), ChangedFields: map[string]domain.FieldChange{
+		"amount":      {Before: json.Number("9007199254740992.1"), After: json.Number("9007199254740992.2")},
+		"collections": {Before: map[string]any{}, After: []any{}},
+		"nulls":       {Before: nil, After: nil},
+	}, Payload: map[string]any{"nil_map": nilMap, "nil_slice": nilSlice, "empty_map": map[string]any{}, "empty_slice": []any{}, "amount": json.Number("9007199254740992.1")}}
+	if err := st.Update(func(data *Snapshot) error {
+		data.Events[EventKey(event.TenantID, event.EventID)] = event
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var beforeBytes []byte
+	var beforeDigest string
+	if err := st.Read(func(data *Snapshot) error {
+		stored := data.Events[EventKey(event.TenantID, event.EventID)]
+		beforeBytes, err = domain.CanonicalJSON(stored)
+		if err != nil {
+			return err
+		}
+		beforeDigest, err = domain.EventContentDigest(stored)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Read(func(data *Snapshot) error {
+		stored := data.Events[EventKey(event.TenantID, event.EventID)]
+		afterBytes, err := domain.CanonicalJSON(stored)
+		if err != nil {
+			return err
+		}
+		if string(afterBytes) != string(beforeBytes) {
+			t.Fatalf("canonical bytes changed across reload: %s != %s", afterBytes, beforeBytes)
+		}
+		afterDigest, err := domain.EventContentDigest(stored)
+		if err != nil {
+			return err
+		}
+		if afterDigest != beforeDigest {
+			t.Fatalf("content digest changed across reload: %s != %s", afterDigest, beforeDigest)
+		}
+		if got := stored.Payload["amount"]; got != json.Number("9007199254740992.1") {
+			t.Fatalf("precise number after reload = %#v, want exact json.Number", got)
+		}
+		changes := stored.ChangedFields
+		if got := changes["amount"].Before; got != json.Number("9007199254740992.1") {
+			t.Fatalf("changed-field precise number after reload = %#v", got)
+		}
+		if got := changes["amount"].After; got != json.Number("9007199254740992.2") {
+			t.Fatalf("changed-field precise number after reload = %#v", got)
+		}
+		if got, ok := changes["collections"].Before.(map[string]any); !ok || got == nil {
+			t.Fatalf("empty changed-field map lost its identity: %#v", changes["collections"].Before)
+		}
+		if got, ok := changes["collections"].After.([]any); !ok || got == nil {
+			t.Fatalf("empty changed-field slice lost its identity: %#v", changes["collections"].After)
+		}
+		if _, ok := changes["nulls"]; !ok {
+			t.Fatalf("changed-field entry itself was lost across reload")
+		}
+		if _, ok := stored.Payload["nil_map"]; !ok || stored.Payload["nil_map"] != nil {
+			t.Fatalf("typed-nil map must reload as JSON null: %#v", stored.Payload["nil_map"])
+		}
+		if _, ok := stored.Payload["nil_slice"]; !ok || stored.Payload["nil_slice"] != nil {
+			t.Fatalf("typed-nil slice must reload as JSON null: %#v", stored.Payload["nil_slice"])
+		}
+		if _, ok := stored.Payload["empty_map"].(map[string]any); !ok || stored.Payload["empty_map"] == nil {
+			t.Fatalf("empty map lost its collection identity: %#v", stored.Payload["empty_map"])
+		}
+		if _, ok := stored.Payload["empty_slice"].([]any); !ok || stored.Payload["empty_slice"] == nil {
+			t.Fatalf("empty slice lost its collection identity: %#v", stored.Payload["empty_slice"])
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLedgeredOutboxPersistsAndLegacySnapshotsNormalize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	first, err := Open(path)

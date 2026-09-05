@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
 	"reflect"
 	"sort"
 	"strconv"
@@ -76,6 +75,10 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 		// "1000000000000000" instead of "1e+15".
 		b.WriteString(strconv.FormatFloat(f, 'f', -1, v.Type().Bits()))
 	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.IsNil() {
+			b.WriteString("null")
+			return nil
+		}
 		b.WriteByte('[')
 		for i := 0; i < v.Len(); i++ {
 			if i > 0 {
@@ -89,6 +92,10 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 	case reflect.Map:
 		if v.Type().Key().Kind() != reflect.String {
 			return fmt.Errorf("canonical maps require string keys")
+		}
+		if v.IsNil() {
+			b.WriteString("null")
+			return nil
 		}
 		keys := v.MapKeys()
 		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
@@ -120,39 +127,152 @@ func writeCanonical(b *bytes.Buffer, v reflect.Value) error {
 	return nil
 }
 
-// writeNumber emits a json.Number. Integer literals are reproduced exactly
-// with arbitrary precision (big.Int, normalizing "-0" to "0"); fractional or
-// exponent forms are reduced to the shortest 'f'-format decimal of their
-// float64 value so that e.g. json.Number("1.5e3"), json.Number("1500.0"),
-// json.Number("1500"), int64(1500) and float64(1500) all emit "1500".
-// Non-finite or float64-overflowing literals are rejected.
+// maxCanonicalNumberDigits bounds the amount of output produced for one
+// decimal token. Canonicalization is used on untrusted ingest data, so an
+// exponent must not be allowed to allocate an unbounded number of zeroes.
+const (
+	// Keep ordinary arbitrary-precision integers useful while bounding one
+	// canonical output independently of the enclosing event limit.
+	maxCanonicalNumberDigits = 1 << 20
+	maxCanonicalExponent     = 4096
+)
+
+// writeNumber emits a json.Number using decimal arithmetic only. The input is
+// validated as a JSON number, then its coefficient and decimal scale are
+// normalized without passing through float64. Thus distinct precise decimals
+// remain distinct while equivalent exponent and fixed-point forms agree.
 func writeNumber(b *bytes.Buffer, n json.Number) error {
 	s := string(n)
-	if !strings.ContainsAny(s, ".eE") {
-		i, ok := new(big.Int).SetString(s, 10)
-		if !ok {
-			return fmt.Errorf("invalid number literal %q", s)
-		}
-		b.WriteString(i.String())
-		return nil
+	negative, integer, fraction, exponent, err := parseJSONNumber(s)
+	if err != nil {
+		return err
 	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
-		return fmt.Errorf("number %q is not representable as a finite float64", s)
+	// Validate the exponent before the zero fast path. Otherwise a malformed
+	// or unbounded zero exponent would be accepted as harmless zero and evade
+	// the same resource bound applied to non-zero numbers.
+	exp, err := parseDecimalExponent(exponent)
+	if err != nil {
+		return fmt.Errorf("number %q: %w", s, err)
 	}
-	if f == 0 {
+	if len(integer)+len(fraction) > maxCanonicalNumberDigits+1 {
+		return fmt.Errorf("number %q exceeds canonical magnitude limit", s)
+	}
+	allDigits := integer + fraction
+	trimmed := strings.TrimRight(allDigits, "0")
+	trailingZeroes := len(allDigits) - len(trimmed)
+	digits := strings.TrimLeft(trimmed, "0")
+	if digits == "" {
 		b.WriteString("0")
 		return nil
 	}
-	b.WriteString(strconv.FormatFloat(f, 'f', -1, 64))
+	scale := len(fraction) - exp - trailingZeroes
+	if scale <= 0 {
+		if len(digits)-scale > maxCanonicalNumberDigits {
+			return fmt.Errorf("number %q exceeds canonical magnitude limit", s)
+		}
+		if negative {
+			b.WriteByte('-')
+		}
+		b.WriteString(digits)
+		b.WriteString(strings.Repeat("0", -scale))
+		return nil
+	}
+	if scale > maxCanonicalNumberDigits || len(digits)+scale > maxCanonicalNumberDigits+1 {
+		return fmt.Errorf("number %q exceeds canonical magnitude limit", s)
+	}
+	if negative {
+		b.WriteByte('-')
+	}
+	if scale >= len(digits) {
+		b.WriteString("0.")
+		b.WriteString(strings.Repeat("0", scale-len(digits)))
+		b.WriteString(digits)
+		return nil
+	}
+	point := len(digits) - scale
+	b.WriteString(digits[:point])
+	b.WriteByte('.')
+	b.WriteString(digits[point:])
 	return nil
+}
+
+func parseJSONNumber(s string) (bool, string, string, string, error) {
+	if s == "" {
+		return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+	}
+	i := 0
+	negative := false
+	if s[i] == '-' {
+		negative = true
+		i++
+	}
+	start := i
+	if i >= len(s) {
+		return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+	}
+	if s[i] == '0' {
+		i++
+	} else if s[i] >= '1' && s[i] <= '9' {
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	} else {
+		return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+	}
+	integer := s[start:i]
+	fraction := ""
+	if i < len(s) && s[i] == '.' {
+		i++
+		fractionStart := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if fractionStart == i {
+			return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+		}
+		fraction = s[fractionStart:i]
+	}
+	exponent := ""
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		exponentStart := i
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		digitsStart := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if digitsStart == i {
+			return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+		}
+		exponent = s[exponentStart:i]
+	}
+	if i != len(s) {
+		return false, "", "", "", fmt.Errorf("invalid number literal %q", s)
+	}
+	return negative, integer, fraction, exponent, nil
+}
+
+func parseDecimalExponent(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || value > maxCanonicalExponent || value < -maxCanonicalExponent {
+		return 0, fmt.Errorf("exponent is outside the supported range")
+	}
+	return int(value), nil
 }
 
 // writeStruct emits a struct with the same byte shape encoding/json produces
 // after a Marshal/Unmarshal round-trip through map[string]any: keys sorted
 // byte-wise, fields omitted per the stdlib omitempty rules, and every nested
 // value emitted through writeCanonical (so nested time.Time normalizes to
-// RFC3339Nano UTC and numbers stay exact, including any-typed values).
+// RFC3339Nano UTC and numbers stay exact, including any-typed values). A
+// concrete nil or empty collection tagged omitempty is omitted; an interface
+// containing a collection is non-empty at the field level and emits null, {}
+// or [] according to its dynamic value.
 func writeStruct(b *bytes.Buffer, v reflect.Value) error {
 	type namedValue struct {
 		name  string
@@ -248,6 +368,10 @@ func writeString(b *bytes.Buffer, value string) error {
 // ignoring any stored SourceDigest field. It is the canonical content
 // derivation; EventDigest is a thin wrapper that short-circuits on a stored
 // SourceDigest (dedupe and chain hashing) and otherwise delegates here.
+// Processing fields are excluded by zeroing their values before projection.
+// ReceivedAt has no omitempty tag, and time.Time is not empty to the standard
+// JSON encoder, so its historical zero-time sentinel remains in the bytes;
+// only its caller-provided value is excluded. This preserves old digest bytes.
 func EventContentDigest(e Event) (string, error) {
 	copyEvent := e
 	copyEvent.SourceDigest = ""

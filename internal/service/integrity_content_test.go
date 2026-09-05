@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -166,6 +167,49 @@ func TestEventContentDigestMatchesIngestDigest(t *testing.T) {
 	}
 }
 
+// TestVerifyIntegrityAcceptsFrozenLegacyDigest verifies that a digest from
+// the pre-lossless canonicalizer remains readable without rewriting the event
+// or its chain hash, while a newly ingested event uses the current path.
+func TestVerifyIntegrityAcceptsFrozenLegacyDigest(t *testing.T) {
+	svc := largeSegmentService(t)
+	event := domain.Event{EventID: "precise", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(10, 0).UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "precise", Payload: map[string]any{"value": json.Number("9007199254740992.1")}}
+	const legacyDigest = "3915fa8f151316a7a8bfc46533c2f318dbe8476e7704f29114938c04955d59ee"
+	event.SourceDigest = legacyDigest
+	event.StreamID = "tenant-a:legacy-precise"
+	event.Sequence = 1
+	hash, err := svc.eventHash(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Hash = hash
+	key := store.EventKey(event.TenantID, event.EventID)
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Events[key] = event
+		data.Streams[store.StreamKey(event.TenantID, event.StreamID)] = store.StreamState{TenantID: event.TenantID, StreamID: event.StreamID, NextSequence: 2, HeadHash: hash}
+		data.Receipts[key] = domain.EventReceipt{EventID: event.EventID, TenantID: event.TenantID, Status: domain.StatusIndexed, AcceptedAt: event.OccurredAt, LedgeredAt: event.OccurredAt, StreamID: event.StreamID, Sequence: 1, Hash: hash}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("new-after-legacy", "op-new", time.Unix(11, 0).UTC()), domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid || len(result.Errors) != 0 || result.EventCount != 2 {
+		t.Fatalf("legacy and new ledger must verify: %+v", result)
+	}
+	stored, err := svc.GetEvent("tenant-a", "test", event.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SourceDigest != legacyDigest || stored.Hash != hash {
+		t.Fatalf("legacy event was rewritten: source_digest=%q hash=%q", stored.SourceDigest, stored.Hash)
+	}
+}
+
 // TestVerifyIntegrityAcceptsSensitiveEvents is the FR-3 acceptance test: an
 // honest event with encrypted/searchable fields verifies, and a naive
 // re-derivation on the stored post-protection payload must NOT match the
@@ -241,6 +285,47 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 // TestVerifyIntegrityReportsKeyMismatch is failure mode F1: after key
 // rotation, verification of sensitive events fails with a distinct
 // "cannot decrypt field" error instead of silently passing.
+func TestDedupeFailsClosedWhenReconstructionUnavailable(t *testing.T) {
+	svc := testService(t, false)
+	event := testEvent("dedupe-reconstruction", "op-dedupe", time.Unix(1_700_000_010, 0).UTC())
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open/split stores use checkExistingTenantIngest. Removing the exact
+	// schema must return the reconstruction error, not trust SourceDigest and
+	// report Duplicate=true.
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		key := store.EventKey("tenant-a", event.EventID)
+		stored := data.Events[key]
+		stored.SchemaVersion = 99
+		data.Events[key] = stored
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered)
+	if err == nil || receipt.Duplicate || !strings.Contains(err.Error(), "schema audit.event v99 not found") {
+		t.Fatalf("missing schema must fail closed without Duplicate: receipt=%+v err=%v", receipt, err)
+	}
+
+	// The legacy single-snapshot fallback has the same contract. Exercise it
+	// directly with a private snapshot so both dedupe implementations remain
+	// fail-closed even when the stored SourceDigest is present.
+	data, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.EventKey("tenant-a", event.EventID)
+	stored := data.Events[key]
+	stored.SchemaVersion = 100
+	data.Events[key] = stored
+	storedReceipt, found, err := svc.checkExistingIngest(testCtx, data, "tenant-a", event.EventID, stored.SourceDigest)
+	if !found || err == nil || storedReceipt.Duplicate || !strings.Contains(err.Error(), "schema audit.event v100 not found") {
+		t.Fatalf("fallback dedupe must fail closed without Duplicate: found=%v receipt=%+v err=%v", found, storedReceipt, err)
+	}
+}
+
 func TestVerifyIntegrityReportsKeyMismatch(t *testing.T) {
 	svc := sensitiveTestService(t)
 	event := testEvent("evt-key", "op-key", time.Unix(1_700_000_010, 0).UTC())

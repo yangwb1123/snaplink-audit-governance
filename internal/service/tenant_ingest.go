@@ -141,10 +141,10 @@ func (s *Service) checkExistingTenantIngest(ctx context.Context, view *store.Ten
 	}
 	digest, err := s.reconstructAndDerive(existing, view.Global.Schemas)
 	if err != nil {
-		digest, err = domain.EventDigest(existing)
-		if err != nil {
-			return domain.EventReceipt{}, true, err
-		}
+		// Stored SourceDigest is not a substitute for reconstructing the
+		// authenticated content. A missing schema, clone failure, or decrypt
+		// error must fail closed rather than produce a duplicate response.
+		return domain.EventReceipt{}, true, err
 	}
 	if digest == inputDigest {
 		// Duplicate is response metadata, not durable event state. Do not

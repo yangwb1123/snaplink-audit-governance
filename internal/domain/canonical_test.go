@@ -363,9 +363,176 @@ func TestCanonicalJSONRejectsNonFiniteAndOverflowNumbers(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONRejectsZeroWithOutOfRangeExponent(t *testing.T) {
+	for _, literal := range []json.Number{"0e999999", "-0e-999999"} {
+		if _, err := CanonicalJSON(map[string]any{"n": literal}); err == nil {
+			t.Fatalf("zero literal %q with out-of-range exponent must be rejected", literal)
+		}
+	}
+}
+
+func TestCanonicalJSONNormalizesValidZeroForms(t *testing.T) {
+	for _, literal := range []json.Number{"0", "-0", "0.0", "-0.000", "0e0", "-0e+0", "0e-4096"} {
+		got, err := CanonicalJSON(map[string]any{"n": literal})
+		if err != nil {
+			t.Fatalf("valid zero literal %q was rejected: %v", literal, err)
+		}
+		if string(got) != `{"n":0}` {
+			t.Fatalf("zero literal %q canonicalized to %s, want {\"n\":0}", literal, got)
+		}
+	}
+}
+
+func TestCanonicalJSONOmitemptyCollectionContract(t *testing.T) {
+	var nilMap map[string]any
+	var nilSlice []any
+	fixture := struct {
+		NilMap         map[string]any `json:"nil_map,omitempty"`
+		EmptyMap       map[string]any `json:"empty_map,omitempty"`
+		NilSlice       []any          `json:"nil_slice,omitempty"`
+		EmptySlice     []any          `json:"empty_slice,omitempty"`
+		NilInterface   any            `json:"nil_interface,omitempty"`
+		EmptyInterface any            `json:"empty_interface,omitempty"`
+	}{
+		NilMap: nilMap, EmptyMap: map[string]any{}, NilSlice: nilSlice,
+		EmptySlice: []any{}, NilInterface: nilMap, EmptyInterface: map[string]any{},
+	}
+	// Concrete collection fields follow encoding/json's omitempty rule and
+	// disappear. An interface holding a collection is non-empty as a field,
+	// so its dynamic nil/empty collection remains distinguishable.
+	if got := mustCanonical(t, fixture); got != `{"empty_interface":{},"nil_interface":null}` {
+		t.Fatalf("omitempty collection projection = %s", got)
+	}
+}
+
+func TestEventContentDigestPreservesHistoricalZeroTimeSentinel(t *testing.T) {
+	event := Event{EventID: "sentinel", TenantID: "tenant", OccurredAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
+	projected := event
+	projected.SourceDigest = ""
+	projected.ReceivedAt = time.Time{}
+	projected.ServerVersion = ""
+	projected.Hash = ""
+	projected.PrevHash = ""
+	projected.Sequence = 0
+	projected.StreamID = ""
+	projectedBytes, err := CanonicalJSON(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := `{"action":"","actor":{"id":""},"data_classification":"","event_id":"sentinel","event_type":"","idempotency_key":"","occurred_at":"2024-01-01T00:00:00Z","outcome":"","received_at":"0001-01-01T00:00:00Z","retention_class":"","schema_id":"","schema_version":0,"source_system":"","tenant_id":"tenant"}`
+	if string(projectedBytes) != wantBytes {
+		t.Fatalf("content projection bytes = %s, want %s", projectedBytes, wantBytes)
+	}
+	gotDigest, err := EventContentDigest(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDigest != HashBytes(projectedBytes) {
+		t.Fatalf("content digest does not use the compatibility projection: %s", gotDigest)
+	}
+}
+
 // TestCanonicalJSONNumberRepresentationEquality is the FR-2 property beyond
 // AC-2: numerically equal values arriving in different representations must
 // canonicalize to identical bytes, and -0 must equal 0.
+func TestCanonicalJSONPreciseDecimalsAreLossless(t *testing.T) {
+	first := json.Number("9007199254740992.1")
+	second := json.Number("9007199254740992.2")
+	firstBytes := mustCanonical(t, map[string]any{"nested": map[string]any{"n": first}, "changes": []any{first}})
+	secondBytes := mustCanonical(t, map[string]any{"nested": map[string]any{"n": second}, "changes": []any{second}})
+	if firstBytes == secondBytes {
+		t.Fatalf("precise decimals collapsed: %s", firstBytes)
+	}
+	if firstBytes != `{"changes":[9007199254740992.1],"nested":{"n":9007199254740992.1}}` || secondBytes != `{"changes":[9007199254740992.2],"nested":{"n":9007199254740992.2}}` {
+		t.Fatalf("unexpected exact decimal encoding: %s / %s", firstBytes, secondBytes)
+	}
+	makeEvent := func(value json.Number) Event {
+		return Event{EventID: "precise", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(10, 0).UTC(), Actor: Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "precise", Payload: map[string]any{"value": value}}
+	}
+	firstDigest, err := EventContentDigest(makeEvent(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := EventContentDigest(makeEvent(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatalf("precise decimal digests collapsed: %s", firstDigest)
+	}
+	legacyFirst, err := legacyEventContentDigest(makeEvent(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySecond, err := legacyEventContentDigest(makeEvent(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyFirst != legacySecond {
+		t.Fatalf("fixture must reproduce the historical float64 collision: %s / %s", legacyFirst, legacySecond)
+	}
+	t.Logf("historical precise-decimal fixture digest: %s", legacyFirst)
+}
+
+func TestCanonicalJSONTypedNilCollectionsUseJSONNull(t *testing.T) {
+	var nilMap map[string]any
+	var nilSlice []any
+	values := map[string]any{
+		"nil_map": nilMap, "nil_slice": nilSlice,
+		"empty_map": map[string]any{}, "empty_slice": []any{}, "nil": nil,
+		"nested": map[string]any{"map": nilMap, "slice": nilSlice},
+		"change": FieldChange{Before: nilMap, After: nilSlice},
+	}
+	got := mustCanonical(t, values)
+	want := `{"change":{"after":null,"before":null},"empty_map":{},"empty_slice":[],"nested":{"map":null,"slice":null},"nil":null,"nil_map":null,"nil_slice":null}`
+	if got != want {
+		t.Fatalf("typed-nil canonicalization = %s, want %s", got, want)
+	}
+	if mustCanonical(t, nilMap) != "null" || mustCanonical(t, nilSlice) != "null" {
+		t.Fatal("typed-nil root collections must canonicalize as null")
+	}
+	if mustCanonical(t, map[string]any{"v": nilMap}) == mustCanonical(t, map[string]any{"v": map[string]any{}}) {
+		t.Fatal("typed-nil and empty map must remain distinct")
+	}
+	if mustCanonical(t, map[string]any{"v": nilSlice}) == mustCanonical(t, map[string]any{"v": []any{}}) {
+		t.Fatal("typed-nil and empty slice must remain distinct")
+	}
+}
+
+func TestMatchEventContentDigestAcceptsFrozenLegacyFixture(t *testing.T) {
+	event := Event{EventID: "legacy-fixture", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(10, 0).UTC(), Actor: Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "legacy-fixture", Payload: map[string]any{"value": json.Number("9007199254740992.1")}}
+	current, err := EventContentDigest(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoding, err := MatchEventContentDigest(event, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoding != DigestEncodingLossless {
+		t.Fatalf("current fixture matched as %v, want DigestEncodingLossless", encoding)
+	}
+
+	legacy, err := legacyEventContentDigest(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoding, err = MatchEventContentDigest(event, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoding != DigestEncodingLegacy {
+		t.Fatalf("legacy fixture matched as %v, want DigestEncodingLegacy", encoding)
+	}
+	encoding, err = MatchEventContentDigest(event, "not-a-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoding != DigestEncodingNone {
+		t.Fatalf("unmatched digest matched as %v", encoding)
+	}
+}
+
 func TestCanonicalJSONNumberRepresentationEquality(t *testing.T) {
 	cases := []struct {
 		name string

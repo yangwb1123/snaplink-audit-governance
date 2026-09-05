@@ -509,7 +509,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	event.ReceivedAt = s.Now()
 	event.ServerVersion = s.Config.ServerVersion
 	event.SourceDigest = ""
-	sourceDigest, err := domain.EventDigest(event)
+	sourceDigest, err := domain.EventContentDigest(event)
 	if err != nil {
 		return domain.EventReceipt{}, err
 	}
@@ -1076,11 +1076,15 @@ func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]dom
 	if event.SourceDigest == "" {
 		return fmt.Errorf("stream %s sequence %d missing source_digest", event.StreamID, event.Sequence)
 	}
-	derived, err := s.reconstructAndDerive(event, schemas)
+	reconstructedDigestEvent, err := s.reconstructEventForDigest(event, schemas)
 	if err != nil {
 		return fmt.Errorf("stream %s sequence %d content digest check failed: %w", event.StreamID, event.Sequence, err)
 	}
-	if derived != event.SourceDigest {
+	encoding, err := domain.MatchEventContentDigest(reconstructedDigestEvent, event.SourceDigest)
+	if err != nil {
+		return fmt.Errorf("stream %s sequence %d content digest check failed: %w", event.StreamID, event.Sequence, err)
+	}
+	if encoding == domain.DigestEncodingNone {
 		if key, ok := firstReservedSearchDigestKey(event.Payload); ok {
 			// Neutral diagnostic for any content mismatch on an event whose
 			// stored payload carries a top-level reserved-namespace key. This
@@ -1108,19 +1112,26 @@ func (s *Service) verifyContentDigest(event domain.Event, schemas map[string]dom
 // The schema definition the event was ingested under is looked up
 // version-exactly.
 //
-// Number-encoding consistency note: reconstruction must canonicalize numbers
+// Number-encoding consistency note: reconstruction must preserve numbers
 // exactly like the ingest-time digest path. Both sides decode through
 // json.Number (clonePayload here and DecryptJSON), so int64 values > 2^53
-// keep their exact digits and VerifyIntegrity agrees with the stored digest
-// (pinned by TestVerifyIntegrityLargeIntSensitiveField).
+// keep their exact digits and VerifyIntegrity agrees with the stored digest.
 func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]domain.EventSchema) (string, error) {
+	reconstructed, err := s.reconstructEventForDigest(event, schemas)
+	if err != nil {
+		return "", err
+	}
+	return domain.EventContentDigest(reconstructed)
+}
+
+func (s *Service) reconstructEventForDigest(event domain.Event, schemas map[string]domain.EventSchema) (domain.Event, error) {
 	schema, ok := schemas[store.SchemaKey(event.TenantID, event.SchemaID, event.SchemaVersion)]
 	if !ok {
-		return "", fmt.Errorf("schema %s v%d not found", event.SchemaID, event.SchemaVersion)
+		return domain.Event{}, fmt.Errorf("schema %s v%d not found", event.SchemaID, event.SchemaVersion)
 	}
 	reconstructed, err := domain.CloneEvent(event)
 	if err != nil {
-		return "", err
+		return domain.Event{}, err
 	}
 	for _, field := range schema.SearchableFields {
 		delete(reconstructed.Payload, field+security.SearchDigestSuffix)
@@ -1132,11 +1143,11 @@ func (s *Service) reconstructAndDerive(event domain.Event, schemas map[string]do
 		}
 		original, err := security.DecryptJSON(encoded, s.Config.EncryptionKey, event.TenantID+"/"+field+"/"+event.EventID)
 		if err != nil {
-			return "", fmt.Errorf("cannot decrypt field %s: %w", field, err)
+			return domain.Event{}, fmt.Errorf("cannot decrypt field %s: %w", field, err)
 		}
 		reconstructed.Payload[field] = original
 	}
-	return domain.EventContentDigest(reconstructed)
+	return reconstructed, nil
 }
 
 func (s *Service) eventHash(event domain.Event) (string, error) {

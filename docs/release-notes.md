@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-05 — Preserve lossless canonical event identity
+
+Canonical JSON now retains precise decimal values, rejects out-of-range
+exponents even for zero, and keeps canonical content stable across snapshot
+reloads. Integrity dedupe fails closed when reconstruction is unavailable;
+legacy content digests remain verifiable while new ingest writes use the
+lossless content digest.
+
 ## 2026-09-05 — Bind aggregate checkpoints to tenant and checkpoint lineage
 
 Aggregate checkpoint attestations now use a versioned, canonical signature payload containing tenant, signer metadata, ordered stream roots, and exact checkpoint references. Integrity verification resolves those references from the same snapshot and reports tampering, cross-tenant relabeling, and legacy root-only records as invalid without changing the HTTP 200 integrity-result contract.
