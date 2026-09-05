@@ -94,6 +94,34 @@ func resetHotColdPostgres(t *testing.T, db *sql.DB) {
 	}
 }
 
+func requireHotColdInconsistency(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !errors.Is(err, ErrHotColdDataInconsistency) {
+		t.Fatalf("error=%v, want ErrHotColdDataInconsistency", err)
+	}
+}
+
+func postgresHotColdTargetState(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var tenants, records string
+	if err := db.QueryRow(`
+SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'tenant_id', tenant_id, 'snapshot', snapshot, 'version', version
+) ORDER BY tenant_id), '[]'::jsonb)::text
+FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`
+SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'id', id, 'tenant_id', tenant_id, 'record_type', record_type,
+    'key', key, 'version', version, 'record', record
+) ORDER BY id), '[]'::jsonb)::text
+FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	return tenants + "|" + records
+}
+
 type postgresHotColdSize struct {
 	control int64
 	hot     int64
@@ -164,9 +192,15 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	legacy := NewSnapshot()
 	legacy.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
-	key := EventKey("tenant-a", "migration-event")
-	legacy.Events[key] = domain.Event{EventID: "migration-event", TenantID: "tenant-a", StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "migration-hash"}
-	legacy.Receipts[key] = domain.EventReceipt{EventID: "migration-event", TenantID: "tenant-a", Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "migration-hash"}
+	legacy.Tenants["tenant-b"] = domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		key := EventKey(tenantID, "migration-event")
+		legacy.Events[key] = domain.Event{EventID: "migration-event", TenantID: tenantID, StreamID: tenantID + ":source:crm", Sequence: 1, Hash: tenantID + "-migration-hash"}
+		legacy.Receipts[key] = domain.EventReceipt{EventID: "migration-event", TenantID: tenantID, Status: domain.StatusArchived, StreamID: tenantID + ":source:crm", Sequence: 1, Hash: tenantID + "-migration-hash"}
+	}
+	streamKey := StreamKey("tenant-a", "crm")
+	legacy.Segments[streamKey] = []domain.Segment{{TenantID: "tenant-a", StreamID: "crm", FirstSequence: 1, LastSequence: 1, LastHash: "segment-hash", EventCount: 1}}
+	legacy.Checkpoints[streamKey] = []domain.Checkpoint{{ID: "checkpoint-a", TenantID: "tenant-a", StreamID: "crm", Sequence: 1, MerkleRoot: "checkpoint-root"}}
 	encoded, err := json.Marshal(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -194,8 +228,18 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot_v1_backup`).Scan(&backups); err != nil {
 		t.Fatal(err)
 	}
-	if tenants != 1 || records != 1 || backups != 1 {
-		t.Fatalf("migration counts tenants=%d records=%d backups=%d, want 1/1/1", tenants, records, backups)
+	if tenants != 2 || records != 4 || backups != 1 {
+		t.Fatalf("migration counts tenants=%d records=%d backups=%d, want 2/4/1", tenants, records, backups)
+	}
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("idempotent multi-family migration: %v", err)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ready(context.Background()); err != nil {
+		t.Fatalf("multi-family readiness: %v", err)
 	}
 }
 
@@ -350,12 +394,8 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE audit_state_snapshot_v1_backup`); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-		t.Fatalf("v2 marker without baseline migration error=%v, want inconsistency", err)
-	}
-	if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-		t.Fatalf("v2 marker without baseline readiness error=%v, want inconsistency", err)
-	}
+	requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
+	requireHotColdInconsistency(t, st.Ready(context.Background()))
 }
 
 func TestZPostgresFirstControlWriteEstablishesBaseline(t *testing.T) {
@@ -612,15 +652,15 @@ func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM audit_tenant; DELETE FROM audit_ledger`); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-		t.Fatalf("empty-target migration error=%v, want inconsistency", err)
-	}
+	targetsBeforeFailure := postgresHotColdTargetState(t, db)
+	requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
 	st, err := OpenPostgres(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-		t.Fatalf("empty-target readiness error=%v, want inconsistency", err)
+	requireHotColdInconsistency(t, st.Ready(context.Background()))
+	if got := postgresHotColdTargetState(t, db); got != targetsBeforeFailure {
+		t.Fatalf("empty-target validation changed targets: before=%s after=%s", targetsBeforeFailure, got)
 	}
 	var afterSnapshot, afterBackup string
 	var afterVersion, afterBackupVersion int64
@@ -672,15 +712,15 @@ func TestZPostgresMigrationRejectsPartialTargets(t *testing.T) {
 			if _, err := db.Exec(tc.mutate); err != nil {
 				t.Fatal(err)
 			}
-			if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-				t.Fatalf("migration error=%v, want inconsistency", err)
-			}
+			targetsBeforeFailure := postgresHotColdTargetState(t, db)
+			requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
 			st, err := OpenPostgres(db)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
-				t.Fatalf("readiness error=%v, want inconsistency", err)
+			requireHotColdInconsistency(t, st.Ready(context.Background()))
+			if got := postgresHotColdTargetState(t, db); got != targetsBeforeFailure {
+				t.Fatalf("partial-target validation changed targets: before=%s after=%s", targetsBeforeFailure, got)
 			}
 			var after string
 			var afterVersion int64
