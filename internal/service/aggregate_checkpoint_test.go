@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -336,16 +337,20 @@ func TestCreateAggregateCheckpointDedupAfterConcurrentWinner(t *testing.T) {
 	winner := store.NewSnapshot()
 	winner.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s1", "root-s1")}
 	signer := hmacSigner{secret: "test-secret"}
-	roots := []string{"root-s1"}
-	root := merkleRoot(roots)
-	signature, err := signer.Sign(testCtx, []byte(root))
+	cp := winner.Checkpoints[store.StreamKey("tenant-a", "s1")][0]
+	refs := []domain.CheckpointRef{{StreamID: cp.StreamID, CheckpointID: cp.ID, Sequence: cp.Sequence, MerkleRoot: cp.MerkleRoot}}
+	roots := aggregateRoots(refs)
+	candidate := domain.AggregateCheckpoint{
+		ID: "aggregate-winner", TenantID: "tenant-a", StreamCount: 1, Root: merkleRoot(roots),
+		Algorithm: signer.Algorithm(), CreatedAt: testTime, StreamRoots: roots,
+		AttestationVersion: aggregateAttestationVersion, CheckpointRefs: refs,
+	}
+	signature, err := signer.Sign(testCtx, aggregateAttestationPayload(candidate))
 	if err != nil {
 		t.Fatal(err)
 	}
-	winner.AggregateCheckpoints = []domain.AggregateCheckpoint{{
-		ID: "aggregate-winner", TenantID: "tenant-a", StreamCount: 1, Root: root,
-		Signature: signature, Algorithm: signer.Algorithm(), CreatedAt: testTime, StreamRoots: roots,
-	}}
+	candidate.Signature = signature
+	winner.AggregateCheckpoints = []domain.AggregateCheckpoint{candidate}
 
 	// The loser's first load: same checkpoint, no aggregate record yet.
 	first := store.NewSnapshot()
@@ -418,8 +423,186 @@ func ids(items []domain.AggregateCheckpoint) []string {
 	return out
 }
 
+func boundAggregateFixture(t *testing.T) (*Service, domain.AggregateCheckpoint) {
+	t.Helper()
+	svc := testService(t, false)
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.Checkpoints[store.StreamKey("tenant-a", "stream-a")] = []domain.Checkpoint{testCheckpoint("tenant-a", "stream-a", "root-a")}
+		data.Checkpoints[store.StreamKey("tenant-a", "stream-b")] = []domain.Checkpoint{testCheckpoint("tenant-a", "stream-b", "root-b")}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := svc.Store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, snapshot.AggregateCheckpoints[len(snapshot.AggregateCheckpoints)-1]
+}
+
+// TestAggregateAttestationBoundFields exercises the complete mutation matrix
+// at the service boundary. Every mutable aggregate field must either fail
+// lineage validation or invalidate the signed canonical payload.
+func TestAggregateAttestationBoundFields(t *testing.T) {
+	_, aggregate := boundAggregateFixture(t)
+	if aggregate.AttestationVersion != aggregateAttestationVersion || len(aggregate.CheckpointRefs) != 2 {
+		t.Fatalf("aggregate lacks bound lineage: %+v", aggregate)
+	}
+	if aggregate.StreamRoots[0] != aggregate.CheckpointRefs[0].MerkleRoot || aggregate.StreamRoots[1] != aggregate.CheckpointRefs[1].MerkleRoot {
+		t.Fatalf("roots and references are not aligned: %+v", aggregate)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*domain.AggregateCheckpoint)
+	}{
+		{"tenant", func(a *domain.AggregateCheckpoint) { a.TenantID = "tenant-b" }},
+		{"stream count", func(a *domain.AggregateCheckpoint) { a.StreamCount++ }},
+		{"algorithm", func(a *domain.AggregateCheckpoint) { a.Algorithm = "other" }},
+		{"root", func(a *domain.AggregateCheckpoint) { a.Root = "tampered-root" }},
+		{"stream root", func(a *domain.AggregateCheckpoint) { a.StreamRoots[0] = "tampered-root" }},
+		{"checkpoint id", func(a *domain.AggregateCheckpoint) { a.CheckpointRefs[0].CheckpointID = "other" }},
+		{"stream id", func(a *domain.AggregateCheckpoint) { a.CheckpointRefs[0].StreamID = "other" }},
+		{"sequence", func(a *domain.AggregateCheckpoint) { a.CheckpointRefs[0].Sequence++ }},
+		{"reference root", func(a *domain.AggregateCheckpoint) { a.CheckpointRefs[0].MerkleRoot = "tampered-root" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			svc, _ := boundAggregateFixture(t)
+			if err := svc.Store.Update(func(data *store.Snapshot) error {
+				mutation.mutate(&data.AggregateCheckpoints[0])
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "tester", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Valid || len(result.Errors) == 0 {
+				t.Fatalf("tampered aggregate passed: %+v", result)
+			}
+		})
+	}
+}
+
+func TestAggregateAttestationRejectsChangedCheckpoint(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*domain.Checkpoint)
+	}{
+		{"id", func(c *domain.Checkpoint) { c.ID = "changed" }},
+		{"tenant", func(c *domain.Checkpoint) { c.TenantID = "tenant-b" }},
+		{"stream", func(c *domain.Checkpoint) { c.StreamID = "changed" }},
+		{"sequence", func(c *domain.Checkpoint) { c.Sequence++ }},
+		{"root", func(c *domain.Checkpoint) { c.MerkleRoot = "changed" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			svc, aggregate := boundAggregateFixture(t)
+			key := store.StreamKey("tenant-a", aggregate.CheckpointRefs[0].StreamID)
+			if err := svc.Store.Update(func(data *store.Snapshot) error {
+				mutation.mutate(&data.Checkpoints[key][0])
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "tester", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Valid || len(result.Errors) == 0 {
+				t.Fatalf("changed checkpoint passed: %+v", result)
+			}
+		})
+	}
+}
+
+func TestAggregateAttestationRejectsCrossTenantRelabel(t *testing.T) {
+	svc, aggregate := boundAggregateFixture(t)
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		// Give the target tenant the same roots and checkpoint identities. A
+		// root-only verifier would accept the copied record after relabeling.
+		for _, ref := range aggregate.CheckpointRefs {
+			data.Checkpoints[store.StreamKey("tenant-b", ref.StreamID)] = []domain.Checkpoint{{
+				ID: ref.CheckpointID, TenantID: "tenant-b", StreamID: ref.StreamID,
+				Sequence: ref.Sequence, MerkleRoot: ref.MerkleRoot,
+			}}
+		}
+		copied := aggregate
+		copied.TenantID = "tenant-b"
+		data.AggregateCheckpoints = []domain.AggregateCheckpoint{copied}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-b", "tester", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid || !strings.Contains(strings.Join(result.Errors, " "), "root/signature") {
+		t.Fatalf("cross-tenant relabel passed or lacked signature diagnostic: %+v", result)
+	}
+}
+
+func TestLegacyAggregateIsInvalidCompatibilityEvidence(t *testing.T) {
+	svc := testService(t, false)
+	root := merkleRoot([]string{"legacy-root"})
+	signature, err := svc.Config.Signer.Sign(testCtx, []byte(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.AggregateCheckpoints = []domain.AggregateCheckpoint{{
+			ID: "legacy", TenantID: "tenant-a", StreamCount: 1, Root: root,
+			Signature: signature, Algorithm: svc.Config.Signer.Algorithm(),
+			StreamRoots: []string{"legacy-root"},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "tester", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid || !strings.Contains(strings.Join(result.Errors, " "), "legacy") {
+		t.Fatalf("legacy evidence was accepted without compatibility diagnostic: %+v", result)
+	}
+}
+
+func TestMalformedBoundAggregateWithoutReferencesIsInvalid(t *testing.T) {
+	svc := testService(t, false)
+	aggregate := domain.AggregateCheckpoint{
+		ID: "malformed-bound", TenantID: "tenant-a", StreamCount: 0,
+		Root: merkleRoot(nil), Algorithm: svc.Config.Signer.Algorithm(),
+		AttestationVersion: aggregateAttestationVersion,
+	}
+	signature, err := svc.Config.Signer.Sign(testCtx, aggregateAttestationPayload(aggregate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate.Signature = signature
+	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		data.AggregateCheckpoints = []domain.AggregateCheckpoint{aggregate}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "tester", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid || !strings.Contains(strings.Join(result.Errors, " "), "reference mismatch") {
+		t.Fatalf("malformed bound evidence was accepted without diagnostic: %+v", result)
+	}
+}
+
 // TestVerifyIntegrityBoundedByRetentionCap is AC-2: with a small configured
-// cap N, an over-cap legacy history is trimmed to N on the next append
+// cap N, an over-cap bound history is trimmed to N on the next append
 // (oldest dropped, newest retained), VerifyIntegrity verifies only the
 // retained records (counting signer bound), and a tampered retained record
 // still fails verification (evidence semantics preserved).
@@ -433,31 +616,34 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Legacy pre-population (NFR-4): 5+K=55 self-consistent aggregate records
-	// signed by the real signer, each over a distinct fabricated root. No
-	// events or segments are seeded, so every Verify call below is an
-	// aggregate verification.
+	// Pre-population (NFR-4): 5+K=55 self-consistent bound records. They
+	// all reference the retained live checkpoint, so VerifyIntegrity can
+	// prove each exact lineage record after trimming.
 	const legacy = 55
 	if err := svc.Store.Update(func(data *store.Snapshot) error {
+		checkpoint := data.Checkpoints[store.StreamKey("tenant-a", "s1")][0]
+		refs := []domain.CheckpointRef{{StreamID: checkpoint.StreamID, CheckpointID: checkpoint.ID, Sequence: checkpoint.Sequence, MerkleRoot: checkpoint.MerkleRoot}}
+		roots := aggregateRoots(refs)
 		for i := 0; i < legacy; i++ {
-			roots := []string{fmt.Sprintf("fabricated-root-%d", i)}
-			root := merkleRoot(roots)
-			signature, err := svc.Config.Signer.Sign(testCtx, []byte(root))
+			aggregate := domain.AggregateCheckpoint{
+				ID: fmt.Sprintf("aggregate-bound-%d", i), TenantID: "tenant-a", StreamCount: 1,
+				Root: merkleRoot(roots), Algorithm: svc.Config.Signer.Algorithm(),
+				CreatedAt: testTime, StreamRoots: roots, AttestationVersion: aggregateAttestationVersion,
+				CheckpointRefs: refs,
+			}
+			signature, err := svc.Config.Signer.Sign(testCtx, aggregateAttestationPayload(aggregate))
 			if err != nil {
 				return err
 			}
-			data.AggregateCheckpoints = append(data.AggregateCheckpoints, domain.AggregateCheckpoint{
-				ID: fmt.Sprintf("aggregate-legacy-%d", i), TenantID: "tenant-a", StreamCount: 1,
-				Root: root, Signature: signature, Algorithm: svc.Config.Signer.Algorithm(),
-				CreatedAt: testTime, StreamRoots: roots,
-			})
+			aggregate.Signature = signature
+			data.AggregateCheckpoints = append(data.AggregateCheckpoints, aggregate)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The next append changes the root (live checkpoint), so it appends and
-	// trims: 55 legacy + 1 new -> 5 retained, oldest dropped.
+	// The next pass deduplicates the unchanged bound content and trims:
+	// 55 records -> 5 retained, oldest dropped.
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}

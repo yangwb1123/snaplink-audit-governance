@@ -302,46 +302,30 @@ func (s *Service) CreateAggregateCheckpoint(ctx context.Context, tenantID string
 	}
 	now := s.Now()
 	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
-		roots := make([]string, 0, len(data.Checkpoints))
-		for key, checkpoints := range data.Checkpoints {
-			if len(checkpoints) == 0 {
-				continue
-			}
-			// Exact-component membership: a key belongs to the tenant only if
-			// it parses as exactly tenantID + separator + one more component.
-			// Prefix matching would absorb foreign keys for tenant IDs that
-			// embed the separator (StreamKey("a\x1fb","s") has prefix
-			// "a\x1f"); multi-separator keys are excluded from every tenant.
-			if tenant, _, ok := store.SplitTenantKey(key); !ok || tenant != tenantID {
-				continue
-			}
-			roots = append(roots, checkpoints[len(checkpoints)-1].MerkleRoot)
+		refs, err := aggregateCheckpointRefs(data, tenantID)
+		if err != nil {
+			return false, err
 		}
-		if len(roots) == 0 {
+		if len(refs) == 0 {
 			// Tenant has no stream checkpoints: no record, no Save (FR-2).
 			return false, nil
 		}
-		sort.Strings(roots)
-		root := merkleRoot(roots)
-		signature, err := s.Config.Signer.Sign(ctx, []byte(root))
+		roots := aggregateRoots(refs)
+		candidate := domain.AggregateCheckpoint{
+			ID: newID("aggregate"), TenantID: tenantID, StreamCount: len(refs),
+			Root: merkleRoot(roots), Algorithm: s.Config.Signer.Algorithm(),
+			CreatedAt: now, StreamRoots: roots, AttestationVersion: aggregateAttestationVersion,
+			CheckpointRefs: refs,
+		}
+		signature, err := s.Config.Signer.Sign(ctx, aggregateAttestationPayload(candidate))
 		if err != nil {
 			return false, fmt.Errorf("sign aggregate checkpoint: %w", err)
 		}
-		candidate := domain.AggregateCheckpoint{
-			ID: newID("aggregate"), TenantID: tenantID, StreamCount: len(roots),
-			Root: root, Signature: signature, Algorithm: s.Config.Signer.Algorithm(),
-			CreatedAt: now, StreamRoots: roots,
-		}
-		// FR-1 dedup identity: root AND signature vs the tenant's most recent
-		// record. CreatedAt/ID/Algorithm are not compared — a changed
-		// signature (key rotation, non-deterministic signer) appends a new
-		// record, which is the correct new evidence; identical root+signature
-		// means identical evidence content, so skipping is sound.
+		candidate.Signature = signature
+		// Compare the complete bound attestation. A root-only or differently
+		// lined record must not suppress new tenant-bound evidence.
 		if last := lastAggregateCheckpoint(data.AggregateCheckpoints, tenantID); last != nil &&
-			last.Root == candidate.Root && last.Signature == candidate.Signature {
-			// Trim-on-skip: legacy over-cap histories converge on the first
-			// pass even when the root never changes again (at most one Save
-			// per tenant ever; afterwards this path is write-free).
+			sameAggregateAttestation(*last, candidate) {
 			trimmed, changed := trimAggregateCheckpoints(data.AggregateCheckpoints, tenantID, s.retentionCap())
 			data.AggregateCheckpoints = trimmed
 			return changed, nil
@@ -394,6 +378,7 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	var events []domain.Event
 	var segments []domain.Segment
 	var aggregateCheckpoints []domain.AggregateCheckpoint
+	var checkpoints map[string][]domain.Checkpoint
 	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(func(data *store.Snapshot) error {
 		var resolveErr error
@@ -410,8 +395,13 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 			}
 			segments = append(segments, values...)
 		}
+		checkpoints = data.Checkpoints
 		for _, aggregate := range data.AggregateCheckpoints {
-			if aggregate.TenantID == tenantID {
+			// The aggregate slice has no separate map key. In addition to the
+			// claimed tenant, retain a bound record whose exact references still
+			// point into this tenant so a tampered TenantID cannot disappear
+			// silently from the verification result.
+			if aggregate.TenantID == tenantID || aggregateReferencesTenant(data.Checkpoints, tenantID, aggregate) {
 				aggregateCheckpoints = append(aggregateCheckpoints, aggregate)
 			}
 		}
@@ -425,21 +415,13 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	}
 	result.EventCount = len(events)
 	result.SegmentCount = len(segments)
-	// 聚合 checkpoint：重算租户各流最后段 root 的 Merkle，与签名记录比对。
+	// Aggregate attestations are checked against the exact checkpoint history
+	// captured above, never against roots reconstructed from another read.
 	for _, aggregate := range aggregateCheckpoints {
-		roots := append([]string(nil), aggregate.StreamRoots...)
-		sort.Strings(roots)
-		expected := merkleRoot(roots)
-		valid, verifyErr := s.Config.Signer.Verify(ctx, []byte(expected), aggregate.Signature)
-		if verifyErr != nil || expected != aggregate.Root || !valid {
+		valid, diagnostic := s.verifyAggregateCheckpoint(ctx, tenantID, aggregate, checkpoints)
+		if !valid {
 			result.Valid = false
-			if isInterrupted(verifyErr) {
-				// Cancelled/deadline-exceeded verification is not a mismatch:
-				// the audit trail must not record a false mismatch fact.
-				result.Errors = append(result.Errors, fmt.Sprintf("aggregate checkpoint %s verification interrupted", aggregate.ID))
-			} else {
-				result.Errors = append(result.Errors, fmt.Sprintf("aggregate checkpoint %s root/signature mismatch", aggregate.ID))
-			}
+			result.Errors = append(result.Errors, diagnostic)
 		}
 	}
 	// Events from different streams have independent sequence spaces.  They
