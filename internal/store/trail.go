@@ -326,7 +326,7 @@ const (
 	// per-replica soft cap the table briefly exceeds the bound; this is
 	// self-correcting (FM-7).
 	trailCompactQuery = `DELETE FROM admin_action_trail WHERE seq < (
-    SELECT seq FROM admin_action_trail ORDER BY seq DESC OFFSET $1 LIMIT 1)`
+    SELECT seq FROM admin_action_trail ORDER BY seq DESC OFFSET ($1 - 1) LIMIT 1)`
 	trailReadQuery = `SELECT id, tenant_id, actor, action, target_type, target_id, detail, created_at
     FROM admin_action_trail ORDER BY seq DESC`
 	trailCountQuery = `SELECT count(*) FROM admin_action_trail`
