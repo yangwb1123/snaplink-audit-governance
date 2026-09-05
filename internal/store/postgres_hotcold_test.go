@@ -683,6 +683,8 @@ func TestZPostgresMigrationRejectsPartialTargets(t *testing.T) {
 		{name: "missing tenant", mutate: `DELETE FROM audit_tenant WHERE tenant_id = 'tenant-b'`},
 		{name: "missing ledger", mutate: `DELETE FROM audit_ledger WHERE tenant_id = 'tenant-a'`},
 		{name: "mismatched ledger payload", mutate: `UPDATE audit_ledger SET record = jsonb_set(record, '{receipt,status}', '"indexed"'::jsonb) WHERE tenant_id = 'tenant-a'`},
+		{name: "unknown top-level payload field", mutate: `UPDATE audit_ledger SET record = jsonb_set(record, '{unexpected}', '"tampered"'::jsonb, true) WHERE tenant_id = 'tenant-a'`},
+		{name: "unknown nested payload field", mutate: `UPDATE audit_ledger SET record = jsonb_set(record, '{receipt,unexpected}', '"tampered"'::jsonb, true) WHERE tenant_id = 'tenant-a'`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,11 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 )
@@ -219,30 +221,53 @@ ORDER BY id`, expected.TenantID, expected.RecordType, expected.Key, expected.Ver
 	if len(payloads) != 1 {
 		return hotColdInconsistency("audit_ledger identity %s occurs %d times, expected exactly once", identity, len(payloads))
 	}
-	var actual LedgerRecord
-	actual, err = decodeLedgerRecord(payloads[0], expected.TenantID)
-	if err != nil {
+	if _, err := decodeLedgerRecord(payloads[0], expected.TenantID); err != nil {
 		return hotColdInconsistency("audit_ledger identity %s payload is invalid: %v", identity, err)
 	}
-	if err := jsonPayloadEqual(actual, expected); err != nil {
+	if err := jsonPayloadEqual(payloads[0], expected); err != nil {
 		return hotColdInconsistency("audit_ledger identity %s payload mismatch: %v", identity, err)
 	}
 	return nil
 }
 
-func jsonPayloadEqual(actual, expected LedgerRecord) error {
-	actualJSON, err := json.Marshal(actual)
-	if err != nil {
-		return err
-	}
+// jsonPayloadEqual compares the complete JSON documents rather than a
+// re-marshaled LedgerRecord. The latter loses unknown JSON object fields when
+// decoding into a struct and would accept tampering in a jsonb payload that
+// the application model does not know about yet.
+func jsonPayloadEqual(actualJSON []byte, expected LedgerRecord) error {
 	expectedJSON, err := json.Marshal(expected)
 	if err != nil {
 		return err
 	}
-	if string(actualJSON) != string(expectedJSON) {
+	actualValue, err := decodeJSONValue(actualJSON)
+	if err != nil {
+		return fmt.Errorf("actual JSON is invalid: %w", err)
+	}
+	expectedValue, err := decodeJSONValue(expectedJSON)
+	if err != nil {
+		return fmt.Errorf("expected JSON is invalid: %w", err)
+	}
+	if !reflect.DeepEqual(actualValue, expectedValue) {
 		return fmt.Errorf("expected %s, actual %s", string(expectedJSON), string(actualJSON))
 	}
 	return nil
+}
+
+func decodeJSONValue(encoded []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return value, nil
 }
 
 func postgresLedgerIdentity(record LedgerRecord) string {

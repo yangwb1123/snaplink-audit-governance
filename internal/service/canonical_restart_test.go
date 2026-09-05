@@ -138,7 +138,18 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := store.OpenPostgres(db)
+	// Store.Close closes the database handle owned by the backend. Reopen the
+	// pool as a real process restart would instead of reusing that closed
+	// handle.
+	reloadedDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer reloadedDB.Close()
+	if err := reloadedDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping reopened database: %v", err)
+	}
+	reopened, err := store.OpenPostgres(reloadedDB)
 	if err != nil {
 		t.Fatal(err)
 	}
