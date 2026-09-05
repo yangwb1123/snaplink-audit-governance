@@ -80,6 +80,9 @@ func applyHotColdMigrations(t *testing.T, db *sql.DB) {
 
 func resetHotColdPostgres(t *testing.T, db *sql.DB) {
 	t.Helper()
+	if _, err := db.Exec(`DROP TABLE IF EXISTS audit_state_snapshot_v1_backup`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`TRUNCATE audit_ledger, audit_tenant`); err != nil {
 		t.Fatal(err)
 	}
