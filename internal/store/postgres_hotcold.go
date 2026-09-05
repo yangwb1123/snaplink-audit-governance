@@ -436,8 +436,11 @@ func (p *postgresSplitStore) loadControl() (*Snapshot, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if data.LayoutVersion < hotColdLayoutVersion && hasLedgerData(data) {
-		return nil, 0, fmt.Errorf("postgres snapshot contains legacy ledger data; run the hot/cold cutover before enabling migration 006")
+	if data.LayoutVersion < hotColdLayoutVersion {
+		if hasLedgerData(data) {
+			return nil, 0, fmt.Errorf("postgres snapshot contains legacy ledger data; run the hot/cold cutover before enabling migration 006")
+		}
+		return nil, 0, fmt.Errorf("postgres snapshot is pre-cutover; run audit-pg-migrate before enabling migration 006")
 	}
 	data.LayoutVersion = hotColdLayoutVersion
 	control, err := controlSnapshot(data)
@@ -491,8 +494,63 @@ func (p *postgresSplitStore) saveControl(control *Snapshot, version int64) error
 		}
 	}
 	control.LayoutVersion = hotColdLayoutVersion
+	if version == 0 {
+		return p.saveInitialControl(control)
+	}
 	p.backend.lastVersion = version
 	return p.backend.Save(control)
+}
+
+// saveInitialControl establishes the zero-data baseline in the same
+// transaction as the first v2 control row. A complete migration-006 catalog
+// may exist before either row does; allowing the normal write path to create
+// only the marker would make the next readiness check unverifiable.
+func (p *postgresSplitStore) saveInitialControl(control *Snapshot) error {
+	tx, err := p.backend.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, postgresHotColdMigrationLockKey); err != nil {
+		return fmt.Errorf("acquire hot/cold migration lock: %w", err)
+	}
+	var encodedExisting []byte
+	var existingVersion int64
+	err = tx.QueryRow(`SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encodedExisting, &existingVersion)
+	if err == nil {
+		return ErrSnapshotConflict
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := verifyPostgresHotColdTargetsEmpty(context.Background(), tx); err != nil {
+		return err
+	}
+	copyControl, err := cloneSnapshot(control)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(copyControl)
+	if err != nil {
+		return err
+	}
+	if err := writePostgresHotColdZeroBaseline(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	p.backend.lastVersion = 1
+	return nil
 }
 
 func (p *postgresSplitStore) tenantIDs() ([]string, error) {

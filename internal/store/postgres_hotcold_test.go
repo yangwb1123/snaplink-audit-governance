@@ -355,6 +355,37 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	}
 }
 
+func TestZPostgresFirstControlWriteEstablishesBaseline(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateControl(func(data *Snapshot) error {
+		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+		return nil
+	}); err != nil {
+		t.Fatalf("first v2 control write: %v", err)
+	}
+	var layout string
+	if err := db.QueryRow(`SELECT snapshot->>'layout_version' FROM audit_state_snapshot WHERE id = 1`).Scan(&layout); err != nil {
+		t.Fatal(err)
+	}
+	if layout != "2" {
+		t.Fatalf("layout marker=%q, want 2", layout)
+	}
+	var baselineVersion int64
+	if err := db.QueryRow(`SELECT version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&baselineVersion); err != nil {
+		t.Fatal(err)
+	}
+	if baselineVersion != postgresHotColdZeroBaselineVersion {
+		t.Fatalf("first-write baseline version=%d, want %d", baselineVersion, postgresHotColdZeroBaselineVersion)
+	}
+	if err := st.Ready(context.Background()); err != nil {
+		t.Fatalf("readiness after first v2 control write: %v", err)
+	}
+}
+
 func TestZPostgresFreshMigrationRejectsPreexistingTargets(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	if _, err := db.Exec(`

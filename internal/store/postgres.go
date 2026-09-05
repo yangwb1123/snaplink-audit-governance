@@ -155,8 +155,8 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 			if err := verifyPostgresHotColdBaseline(ctx, p.db, baseline, false); err != nil {
 				return err
 			}
-		} else if hasLedgerData(&data) {
-			return fmt.Errorf("hot/cold migration pending: audit_state_snapshot still contains v1 ledger data; run audit-pg-migrate after applying 006_hot_cold_split.sql")
+		} else {
+			return fmt.Errorf("hot/cold migration pending: audit_state_snapshot is still pre-cutover; run audit-pg-migrate after applying 006_hot_cold_split.sql")
 		}
 	default:
 		return postgresHotColdCatalogError(catalogStatus)
