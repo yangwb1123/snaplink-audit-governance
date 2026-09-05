@@ -286,6 +286,12 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 	}
 	err = tx.QueryRow(`SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encoded, &version)
 	if errors.Is(err, sql.ErrNoRows) {
+		// A source-less database is a valid fresh initialization only when the
+		// expand tables are also empty. Never adopt rows that predate this
+		// marker as an unproven zero-data migration.
+		if err := verifyPostgresHotColdTargetsEmpty(context.Background(), tx); err != nil {
+			return err
+		}
 		// A v2 marker without a durable baseline is not verifiable. Establish
 		// the explicit zero-data baseline and marker together so a later
 		// idempotent call and readiness probe have an evidence trail.

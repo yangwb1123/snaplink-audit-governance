@@ -69,6 +69,9 @@ func newPostgresTestDB(t *testing.T) *sql.DB {
 )`); err != nil {
 		t.Fatalf("apply migration 005: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `TRUNCATE admin_action_trail RESTART IDENTITY`); err != nil {
+		t.Fatalf("reset admin action trail: %v", err)
+	}
 	return db
 }
 

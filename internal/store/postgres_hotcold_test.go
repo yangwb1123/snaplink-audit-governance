@@ -355,6 +355,46 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	}
 }
 
+func TestZPostgresFreshMigrationRejectsPreexistingTargets(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	if _, err := db.Exec(`
+INSERT INTO audit_tenant (tenant_id, snapshot, version)
+VALUES ('orphan-tenant', '{"tenant_id":"orphan-tenant","version":1,"events":{},"streams":{}}'::jsonb, 1);
+INSERT INTO audit_ledger (tenant_id, record_type, key, version, record)
+VALUES ('orphan-tenant', 'receipt', 'orphan-key', 1,
+        '{"tenant_id":"orphan-tenant","record_type":"receipt","key":"orphan-key","version":1}'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); !errors.Is(err, ErrHotColdDataInconsistency) {
+		t.Fatalf("fresh migration error=%v, want ErrHotColdDataInconsistency", err)
+	}
+
+	var snapshots, tenants, records int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_state_snapshot`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_tenant`).Scan(&tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_ledger`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	var backup bool
+	if err := db.QueryRow(`SELECT to_regclass('audit_state_snapshot_v1_backup') IS NOT NULL`).Scan(&backup); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 || tenants != 1 || records != 1 || backup {
+		t.Fatalf("orphan-target rejection mutated state: snapshots=%d tenants=%d records=%d backup=%t", snapshots, tenants, records, backup)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ready(context.Background()); !errors.Is(err, ErrHotColdDataInconsistency) {
+		t.Fatalf("ready on orphan targets error=%v, want ErrHotColdDataInconsistency", err)
+	}
+}
+
 func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	legacy := NewSnapshot()

@@ -74,6 +74,20 @@ func isPostgresHotColdZeroBaseline(source *Snapshot) bool {
 		len(source.DeadLetters) == 0
 }
 
+func verifyPostgresHotColdTargetsEmpty(ctx context.Context, queryer postgresHotColdQueryer) error {
+	var actualTenants, actualRecords int64
+	if err := queryer.QueryRowContext(ctx, `SELECT count(*) FROM audit_tenant`).Scan(&actualTenants); err != nil {
+		return hotColdInconsistency("audit_tenant count query failed while validating fresh migration: %v", err)
+	}
+	if err := queryer.QueryRowContext(ctx, `SELECT count(*) FROM audit_ledger`).Scan(&actualRecords); err != nil {
+		return hotColdInconsistency("audit_ledger count query failed while validating fresh migration: %v", err)
+	}
+	if actualTenants != 0 || actualRecords != 0 {
+		return hotColdInconsistency("fresh migration requires empty targets, actual audit_tenant=%d audit_ledger=%d", actualTenants, actualRecords)
+	}
+	return nil
+}
+
 func verifyPostgresHotColdBaseline(ctx context.Context, queryer postgresHotColdQueryer, baseline *preparedSplit, exactCounts bool) error {
 	expectedTenants := len(baseline.tenant)
 	var actualTenants int64

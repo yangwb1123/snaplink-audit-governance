@@ -132,7 +132,12 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 		err := p.db.QueryRowContext(ctx, `SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1`).Scan(&encoded, &version)
 		if errors.Is(err, sql.ErrNoRows) {
 			// A complete expand schema can still be installed before the first
-			// snapshot write. Preserve that existing bootstrap behavior.
+			// snapshot write, but only while its target tables are empty. Do not
+			// serve pre-existing target rows without a migration marker and
+			// durable baseline.
+			if err := verifyPostgresHotColdTargetsEmpty(ctx, p.db); err != nil {
+				return err
+			}
 			break
 		}
 		if err != nil {

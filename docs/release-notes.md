@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-05 — Reject unproven PostgreSQL hot/cold target rows
+
+A fresh `audit-pg-migrate` run now requires both migration-006 target tables to
+be empty before creating the v2 marker and zero-data baseline. PostgreSQL
+readiness applies the same guard when no marker exists, so pre-existing tenant
+or ledger rows cannot be adopted or served without migration provenance. The
+existing marker, baseline, and target rows remain unchanged on rejection.
+
 ## 2026-09-05 — Preserve lossless canonical event identity
 
 Canonical JSON now retains precise decimal values, rejects out-of-range
