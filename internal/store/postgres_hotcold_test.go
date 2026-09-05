@@ -327,12 +327,141 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	if layout != "2" {
 		t.Fatalf("layout marker=%q, want 2", layout)
 	}
+	var baselineVersion int64
+	if err := db.QueryRow(`SELECT version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&baselineVersion); err != nil {
+		t.Fatal(err)
+	}
+	if baselineVersion != postgresHotColdZeroBaselineVersion {
+		t.Fatalf("zero-data baseline version=%d, want %d", baselineVersion, postgresHotColdZeroBaselineVersion)
+	}
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("fresh idempotent migration: %v", err)
+	}
 	st, err := OpenPostgres(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Ready(context.Background()); err != nil {
 		t.Fatalf("fresh split store readiness: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE audit_state_snapshot_v1_backup`); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+		t.Fatalf("v2 marker without baseline migration error=%v, want inconsistency", err)
+	}
+	if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+		t.Fatalf("v2 marker without baseline readiness error=%v, want inconsistency", err)
+	}
+}
+
+func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	legacy := NewSnapshot()
+	legacy.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	key := EventKey("tenant-a", "empty-target-event")
+	legacy.Events[key] = domain.Event{EventID: "empty-target-event", TenantID: "tenant-a", StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "empty-target-hash"}
+	legacy.Receipts[key] = domain.EventReceipt{EventID: "empty-target-event", TenantID: "tenant-a", Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "empty-target-hash"}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatal(err)
+	}
+	var beforeSnapshot, beforeBackup string
+	var beforeVersion, beforeBackupVersion int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&beforeSnapshot, &beforeVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&beforeBackup, &beforeBackupVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM audit_tenant; DELETE FROM audit_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+		t.Fatalf("empty-target migration error=%v, want inconsistency", err)
+	}
+	st, err := OpenPostgres(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+		t.Fatalf("empty-target readiness error=%v, want inconsistency", err)
+	}
+	var afterSnapshot, afterBackup string
+	var afterVersion, afterBackupVersion int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&afterSnapshot, &afterVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&afterBackup, &afterBackupVersion); err != nil {
+		t.Fatal(err)
+	}
+	if beforeSnapshot != afterSnapshot || beforeVersion != afterVersion || beforeBackup != afterBackup || beforeBackupVersion != afterBackupVersion {
+		t.Fatalf("inconsistency changed durable baseline: source %s/%d -> %s/%d, backup %s/%d -> %s/%d", beforeSnapshot, beforeVersion, afterSnapshot, afterVersion, beforeBackup, beforeBackupVersion, afterBackup, afterBackupVersion)
+	}
+}
+
+func TestZPostgresMigrationRejectsPartialTargets(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate string
+	}{
+		{name: "missing tenant", mutate: `DELETE FROM audit_tenant WHERE tenant_id = 'tenant-b'`},
+		{name: "missing ledger", mutate: `DELETE FROM audit_ledger WHERE tenant_id = 'tenant-a'`},
+		{name: "mismatched ledger payload", mutate: `UPDATE audit_ledger SET record = jsonb_set(record, '{receipt,status}', '"indexed"'::jsonb) WHERE tenant_id = 'tenant-a'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newHotColdPostgresTestDB(t)
+			legacy := NewSnapshot()
+			for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+				legacy.Tenants[tenantID] = domain.Tenant{ID: tenantID, Name: tenantID, Active: true}
+				key := EventKey(tenantID, "partial-target-event")
+				legacy.Events[key] = domain.Event{EventID: "partial-target-event", TenantID: tenantID, StreamID: tenantID + ":source:crm", Sequence: 1, Hash: tenantID + "-hash"}
+				legacy.Receipts[key] = domain.EventReceipt{EventID: "partial-target-event", TenantID: tenantID, Status: domain.StatusArchived, StreamID: tenantID + ":source:crm", Sequence: 1, Hash: tenantID + "-hash"}
+			}
+			encoded, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+				t.Fatal(err)
+			}
+			if err := MigratePostgresSnapshot(db); err != nil {
+				t.Fatal(err)
+			}
+			var before string
+			var beforeVersion int64
+			if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&before, &beforeVersion); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(tc.mutate); err != nil {
+				t.Fatal(err)
+			}
+			if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+				t.Fatalf("migration error=%v, want inconsistency", err)
+			}
+			st, err := OpenPostgres(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "hot/cold data inconsistency") {
+				t.Fatalf("readiness error=%v, want inconsistency", err)
+			}
+			var after string
+			var afterVersion int64
+			if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&after, &afterVersion); err != nil {
+				t.Fatal(err)
+			}
+			if before != after || beforeVersion != afterVersion {
+				t.Fatalf("failed validation changed marker: %s/%d -> %s/%d", before, beforeVersion, after, afterVersion)
+			}
+		})
 	}
 }
 

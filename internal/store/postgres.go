@@ -112,12 +112,12 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 	}
 	switch catalogStatus {
 	case postgresHotColdCatalogStatusAbsent:
-		var layout string
-		err := p.db.QueryRowContext(ctx, `SELECT COALESCE(snapshot->>'layout_version', '0') FROM audit_state_snapshot WHERE id = 1`).Scan(&layout)
+		var layout int
+		err := p.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(snapshot->>'layout_version', '')::integer, 0) FROM audit_state_snapshot WHERE id = 1`).Scan(&layout)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("hot/cold layout marker: %w", err)
 		}
-		if layout == fmt.Sprint(hotColdLayoutVersion) {
+		if layout >= hotColdLayoutVersion {
 			return fmt.Errorf("hot/cold layout marker is present but migration 006 tables are missing: apply 006_hot_cold_split.sql")
 		}
 	case postgresHotColdCatalogStatusIncomplete, postgresHotColdCatalogStatusIncompatible:
@@ -125,22 +125,32 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 	case postgresHotColdCatalogStatusComplete:
 		// Applying 006 is an expand step; an existing v1 row must not be
 		// served through the split store until the explicit cutover has moved
-		// its ledger data. Keep this check in readiness so operators see the
-		// migration action before requests start failing at the data path.
-		var layout string
-		var legacyLedger bool
-		err := p.db.QueryRowContext(ctx, `
-SELECT COALESCE(snapshot->>'layout_version', '0'),
-       COALESCE(snapshot->'events', '{}'::jsonb) <> '{}'::jsonb OR
-       COALESCE(snapshot->'receipts', '{}'::jsonb) <> '{}'::jsonb OR
-       COALESCE(snapshot->'streams', '{}'::jsonb) <> '{}'::jsonb OR
-       COALESCE(snapshot->'segments', '{}'::jsonb) <> '{}'::jsonb OR
-       COALESCE(snapshot->'checkpoints', '{}'::jsonb) <> '{}'::jsonb
-FROM audit_state_snapshot WHERE id = 1`).Scan(&layout, &legacyLedger)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// its ledger data. Once marked v2, readiness uses the same durable
+		// baseline and target verification as the migration command.
+		var encoded []byte
+		var version int64
+		err := p.db.QueryRowContext(ctx, `SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1`).Scan(&encoded, &version)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A complete expand schema can still be installed before the first
+			// snapshot write. Preserve that existing bootstrap behavior.
+			break
+		}
+		if err != nil {
 			return fmt.Errorf("hot/cold layout marker: %w", err)
 		}
-		if layout != fmt.Sprint(hotColdLayoutVersion) && legacyLedger {
+		var data Snapshot
+		if err := decodeSnapshot(encoded, &data); err != nil {
+			return fmt.Errorf("hot/cold layout marker: %w", err)
+		}
+		if data.LayoutVersion >= hotColdLayoutVersion {
+			baseline, err := loadPostgresHotColdBaseline(ctx, p.db)
+			if err != nil {
+				return err
+			}
+			if err := verifyPostgresHotColdBaseline(ctx, p.db, baseline, false); err != nil {
+				return err
+			}
+		} else if hasLedgerData(&data) {
 			return fmt.Errorf("hot/cold migration pending: audit_state_snapshot still contains v1 ledger data; run audit-pg-migrate after applying 006_hot_cold_split.sql")
 		}
 	default:

@@ -286,6 +286,12 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 	}
 	err = tx.QueryRow(`SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encoded, &version)
 	if errors.Is(err, sql.ErrNoRows) {
+		// A v2 marker without a durable baseline is not verifiable. Establish
+		// the explicit zero-data baseline and marker together so a later
+		// idempotent call and readiness probe have an evidence trail.
+		if err := writePostgresHotColdZeroBaseline(tx); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, `{"layout_version":2}`); err != nil {
 			return err
 		}
@@ -303,6 +309,15 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 		return err
 	}
 	if data.LayoutVersion >= hotColdLayoutVersion {
+		baseline, err := loadPostgresHotColdBaseline(context.Background(), tx)
+		if err != nil {
+			return err
+		}
+		if err := verifyPostgresHotColdBaseline(context.Background(), tx, baseline, false); err != nil {
+			return err
+		}
+		// This is deliberately read-only. Do not rewrite the marker, target,
+		// or backup while making an idempotent call.
 		if err := tx.Commit(); err != nil {
 			return err
 		}
@@ -317,13 +332,13 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 		return err
 	}
 	if tenantCount != 0 || ledgerCount != 0 {
-		return fmt.Errorf("hot/cold target tables are partially populated; restore the cutover backup before retrying")
+		return hotColdInconsistency("pre-cutover targets expected audit_tenant=0 and audit_ledger=0, actual audit_tenant=%d audit_ledger=%d", tenantCount, ledgerCount)
 	}
 	prepared, err := splitLegacySnapshot(&data)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS audit_state_snapshot_v1_backup (id INTEGER PRIMARY KEY, snapshot JSONB NOT NULL, version BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`); err != nil {
+	if err := createPostgresHotColdBaselineTable(tx); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM audit_state_snapshot_v1_backup WHERE id = 1`); err != nil {
@@ -350,12 +365,23 @@ func MigratePostgresSnapshot(db *sql.DB) error {
 			}
 		}
 	}
+	if err := verifyPostgresHotColdBaseline(context.Background(), tx, prepared, true); err != nil {
+		return err
+	}
 	encodedControl, err := json.Marshal(prepared.control)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE audit_state_snapshot SET snapshot = $1::jsonb, version = version + 1, updated_at = now() WHERE id = 1 AND version = $2`, string(encodedControl), version); err != nil {
+	result, err := tx.Exec(`UPDATE audit_state_snapshot SET snapshot = $1::jsonb, version = version + 1, updated_at = now() WHERE id = 1 AND version = $2`, string(encodedControl), version)
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrSnapshotConflict
 	}
 	if err := tx.Commit(); err != nil {
 		return err
