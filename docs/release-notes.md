@@ -1,5 +1,14 @@
 # Release Notes
 
+## 2026-09-05 — Bound archive object writes by caller cancellation and deadline
+
+Worker archive passes and API ingest archive commits now thread their caller
+context through each archive Put. Every object write gets a fresh 5-second
+`archivePutTimeout`; an earlier caller deadline or SIGTERM cancellation still
+wins. This bounds black-holed S3 writes without changing receipt, retry,
+WORM, or batch-commit semantics. No data or configuration migration is
+required.
+
 ## 2026-09-05 — Reject unproven PostgreSQL hot/cold target rows
 
 A fresh `audit-pg-migrate` run now requires both migration-006 target tables to

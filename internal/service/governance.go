@@ -545,14 +545,14 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 	})
 }
 
-// archivePutTimeout bounds one fire-and-forget export write. runExport has no
+// exportPutTimeout bounds one fire-and-forget export write. runExport has no
 // pass context (it outlives the request that created it), so a black-holed
 // endpoint must not be able to keep the goroutine (and its finishExport
 // write) alive for minutes per object. Mirrors vaultCallBudget's
 // detached-cancellation bound. Package-level var (not const) as a test seam:
 // export-timeout tests shrink the ceiling instead of waiting on the real 30s
 // bound (newArchiveStore precedent).
-var archivePutTimeout = 30 * time.Second
+var exportPutTimeout = 30 * time.Second
 
 // exportTerminalRetryLimit bounds the terminal-persistence attempts in
 // finishExport/failExportBlocked. Var (not const) as a test seam: failure
@@ -564,7 +564,9 @@ var archivePutTimeout = 30 * time.Second
 var exportTerminalRetryLimit = 3
 
 // ArchivePending retries local WORM-compatible archive writes for events that
-// were ledgered/indexed before the archive destination became available.
+// were ledgered/indexed before the archive destination became available. Each
+// object Put is bounded by archivePutTimeout in service.go, while the caller
+// context can cancel it sooner.
 // It is intentionally idempotent: a byte-identical existing object is treated
 // as already archived, while a mismatched or unverifiable object at the key
 // surfaces as an error instead of being silently accepted.
@@ -1166,7 +1168,7 @@ func (s *Service) runExport(jobID string) {
 	// object. Mirrors vaultCallBudget's detached-cancellation bound. Failure
 	// semantics are unchanged: a timed-out Put fails the job, and a re-request
 	// is a fresh CreateExport.
-	putCtx, cancel := context.WithTimeout(context.Background(), archivePutTimeout)
+	putCtx, cancel := context.WithTimeout(context.Background(), exportPutTimeout)
 	defer cancel()
 	if err := s.Config.Archive.Put(putCtx, key, sealed); err != nil {
 		s.finishExport(jobID, "failed", "", "", 0, err.Error())

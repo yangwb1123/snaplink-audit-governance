@@ -23,8 +23,11 @@ import (
 
 // archiveReadyTimeout bounds every archive readiness probe (startup,
 // -check-config and each evaluate pass) so a hung or black-holed S3 endpoint
-// can never block startup or a pass indefinitely. Single named constant for
-// all probe sites (REQ-7), mirroring openStore's 10 s ping precedent.
+// can never block startup or a pass indefinitely. The service's
+// archivePutTimeout applies the same 5 s bound to each archive write; the
+// probe and write bounds together cover the full archive path. Single named
+// constant for all probe sites (REQ-7), mirroring openStore's 10 s ping
+// precedent.
 const archiveReadyTimeout = 5 * time.Second
 
 // archivePassTimeout bounds one complete governance pass (all tenants, all
@@ -143,9 +146,11 @@ func main() {
 		logger.Fatalf("archive ready: %v", err)
 	}
 	// REQ-3: the pass context is cancelled by SIGINT/SIGTERM so in-flight
-	// Vault sign calls abort promptly instead of blocking on the client
-	// timeout. stop() must be released (async F4: signal.NotifyContext's
-	// internal registration would otherwise leak for the process lifetime).
+	// Vault sign calls and archive Puts abort promptly instead of blocking on
+	// client/transport timeouts. archiveEvent/archiveSegment add the service's
+	// per-object archivePutTimeout for black-holed destinations. stop() must be
+	// released (async F4: signal.NotifyContext's internal registration would
+	// otherwise leak for the process lifetime).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	evaluate := func() { runEvaluatePass(ctx, logger, svc) }

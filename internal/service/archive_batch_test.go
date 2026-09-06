@@ -553,7 +553,7 @@ func (e *exportBlockingArchive) Ready(context.Context) error { return nil }
 
 // TestRunExportPutTimeoutFailsJobAndHeals is REQ-3 acceptance (QA review
 // F-1): runExport's fire-and-forget Put carries its own per-write bound
-// (archivePutTimeout, var seam shrunk here). A store whose Put blocks past
+// (exportPutTimeout, var seam shrunk here). A store whose Put blocks past
 // the bound fails the job with context deadline exceeded, ObjectPath empty
 // (no object path recorded); a healed re-request — a fresh CreateExport —
 // completes normally.
@@ -568,9 +568,9 @@ func TestRunExportPutTimeoutFailsJobAndHeals(t *testing.T) {
 	}
 	archiveStub := &exportBlockingArchive{}
 	svc.Config.Archive = archiveStub
-	original := archivePutTimeout
-	archivePutTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { archivePutTimeout = original })
+	original := exportPutTimeout
+	exportPutTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { exportPutTimeout = original })
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
 
 	job, err := svc.CreateExport("tenant-a", "compliance-1", query)

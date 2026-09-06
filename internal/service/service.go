@@ -1176,6 +1176,12 @@ func (s *Service) sealSegment(ctx context.Context, stream store.StreamState, now
 	return segment, checkpoint, nil
 }
 
+// archivePutTimeout bounds every archive object write (worker passes and API
+// ingest commits) so a hung or black-holed S3 endpoint cannot block a pass or
+// an ingest commit indefinitely. Each object receives a fresh deadline, and
+// an earlier caller deadline, such as a signal-cancelled pass, still wins.
+const archivePutTimeout = 5 * time.Second
+
 func (s *Service) archiveEvent(ctx context.Context, event domain.Event) error {
 	data, err := domain.CanonicalJSON(event)
 	if err != nil {
@@ -1187,8 +1193,10 @@ func (s *Service) archiveEvent(ctx context.Context, event domain.Event) error {
 	// filesystem mutation or network call (FM-1); ArchivePending dead-letters
 	// that class instead of aborting the pass. The ctx threads the worker pass
 	// deadline (and the ingest boundary's WithoutCancel ctx) into the S3 round
-	// trips, so a black-holed endpoint cannot stall a pass indefinitely.
-	return s.Config.Archive.Put(ctx, key, data)
+	// trips, while this per-object deadline bounds each round trip.
+	putCtx, cancel := context.WithTimeout(ctx, archivePutTimeout)
+	defer cancel()
+	return s.Config.Archive.Put(putCtx, key, data)
 }
 
 func (s *Service) archiveSegment(ctx context.Context, segment domain.Segment) error {
@@ -1197,7 +1205,9 @@ func (s *Service) archiveSegment(ctx context.Context, segment domain.Segment) er
 		return err
 	}
 	key := fmt.Sprintf("segments/%s/%s/%020d-%020d.manifest.json", safeName(segment.TenantID), safeName(segment.StreamID), segment.FirstSequence, segment.LastSequence)
-	return s.Config.Archive.Put(ctx, key, data)
+	putCtx, cancel := context.WithTimeout(ctx, archivePutTimeout)
+	defer cancel()
+	return s.Config.Archive.Put(putCtx, key, data)
 }
 
 func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {

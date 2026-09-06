@@ -263,11 +263,15 @@ func (f *flakyArchive) Ready(context.Context) error { return f.readyErr }
 type blockingArchive struct {
 	started     chan struct{}
 	once        sync.Once
+	key         string
 	observedErr error
 }
 
-func (b *blockingArchive) Put(ctx context.Context, _ string, _ []byte) error {
-	b.once.Do(func() { b.started <- struct{}{} })
+func (b *blockingArchive) Put(ctx context.Context, key string, _ []byte) error {
+	b.once.Do(func() {
+		b.key = key
+		b.started <- struct{}{}
+	})
 	<-ctx.Done()
 	b.observedErr = ctx.Err()
 	return ctx.Err()
