@@ -67,9 +67,7 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	}
 	// Pre-flight count cap: a batch beyond MaxBatchEvents is rejected before
 	// any fromProto call or Service.Ingest, so the violation can never
-	// partially commit. Per-envelope failures inside the loop keep the
-	// existing partial-commit semantics (valid prefix ledgered, wire receipts
-	// dropped).
+	// partially commit.
 	if len(request.GetEvents()) > MaxBatchEvents {
 		return nil, status.Error(codes.InvalidArgument,
 			fmt.Sprintf("batch exceeds %d events, max %d", len(request.GetEvents()), MaxBatchEvents))
@@ -77,18 +75,106 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	response := &auditv1.WriteBatchResponse{}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	commitCtx := context.WithoutCancel(ctx)
-	for _, item := range request.GetEvents() {
+	for index, item := range request.GetEvents() {
+		outcome := &auditv1.WriteBatchOutcome{InputIndex: int32(index), EventId: batchEventID(item)}
 		event, convertErr := fromProto(item)
 		if convertErr != nil {
-			return nil, s.statusError(convertErr)
+			response.Outcomes = appendRejectedOutcome(response.Outcomes, outcome, s.statusError(convertErr))
+			response.Outcomes = appendUnattemptedOutcomes(response.Outcomes, request.GetEvents(), index+1)
+			return response, nil
 		}
 		receipt, ingestErr := s.Service.Ingest(commitCtx, claims.TenantID, principal, event, request.GetWaitFor())
 		if ingestErr != nil {
-			return response, s.statusError(ingestErr)
+			// Ingest may report a post-commit wait/archive failure. A populated
+			// durable, non-conflict receipt is evidence that the event committed
+			// and must not be exposed as a rejection; the suffix remains
+			// unattempted.
+			if hasDurableReceipt(receipt) {
+				response = appendCommittedOutcome(response, outcome, receipt)
+				response.Outcomes = appendUnattemptedOutcomes(response.Outcomes, request.GetEvents(), index+1)
+				return response, nil
+			}
+			response.Outcomes = appendRejectedOutcome(response.Outcomes, outcome, s.statusError(ingestErr))
+			response.Outcomes = appendUnattemptedOutcomes(response.Outcomes, request.GetEvents(), index+1)
+			return response, nil
 		}
-		response.Receipts = append(response.Receipts, toProtoReceipt(receipt))
+		response = appendCommittedOutcome(response, outcome, receipt)
 	}
 	return response, nil
+}
+
+func hasDurableReceipt(receipt domain.EventReceipt) bool {
+	return receipt.EventID != "" && receipt.Status != "" && !receipt.Conflict
+}
+
+func appendCommittedOutcome(response *auditv1.WriteBatchResponse, outcome *auditv1.WriteBatchOutcome, receipt domain.EventReceipt) *auditv1.WriteBatchResponse {
+	protoReceipt := toProtoReceipt(receipt)
+	response.Receipts = append(response.Receipts, protoReceipt)
+	outcome.Status = auditv1.WriteBatchOutcome_COMMITTED
+	outcome.Receipt = protoReceipt
+	response.Outcomes = append(response.Outcomes, outcome)
+	return response
+}
+
+func batchEventID(event *auditv1.EventEnvelope) string {
+	if event == nil {
+		return ""
+	}
+	return event.GetEventId()
+}
+
+func appendRejectedOutcome(outcomes []*auditv1.WriteBatchOutcome, outcome *auditv1.WriteBatchOutcome, err error) []*auditv1.WriteBatchOutcome {
+	outcome.Status = auditv1.WriteBatchOutcome_REJECTED
+	outcome.RejectionCode = rejectionCode(err)
+	return append(outcomes, outcome)
+}
+
+func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*auditv1.EventEnvelope, start int) []*auditv1.WriteBatchOutcome {
+	for index := start; index < len(events); index++ {
+		outcomes = append(outcomes, &auditv1.WriteBatchOutcome{
+			InputIndex: int32(index), EventId: batchEventID(events[index]),
+			Status: auditv1.WriteBatchOutcome_NOT_ATTEMPTED,
+		})
+	}
+	return outcomes
+}
+
+func rejectionCode(err error) string {
+	code := status.Code(err)
+	switch code {
+	case codes.InvalidArgument:
+		return "invalid_argument"
+	case codes.AlreadyExists:
+		return "already_exists"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
+	case codes.FailedPrecondition:
+		return "failed_precondition"
+	case codes.Internal:
+		return "internal"
+	case codes.Unauthenticated:
+		return "unauthenticated"
+	case codes.PermissionDenied:
+		return "permission_denied"
+	case codes.NotFound:
+		return "not_found"
+	case codes.Aborted:
+		return "aborted"
+	case codes.Canceled:
+		return "canceled"
+	case codes.DeadlineExceeded:
+		return "deadline_exceeded"
+	case codes.OutOfRange:
+		return "out_of_range"
+	case codes.Unimplemented:
+		return "unimplemented"
+	case codes.Unavailable:
+		return "unavailable"
+	case codes.DataLoss:
+		return "data_loss"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {

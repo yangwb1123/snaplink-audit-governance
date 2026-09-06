@@ -22,6 +22,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type WriteBatchOutcome_Status int32
+
+const (
+	WriteBatchOutcome_STATUS_UNSPECIFIED WriteBatchOutcome_Status = 0
+	WriteBatchOutcome_COMMITTED          WriteBatchOutcome_Status = 1
+	WriteBatchOutcome_REJECTED           WriteBatchOutcome_Status = 2
+	WriteBatchOutcome_NOT_ATTEMPTED      WriteBatchOutcome_Status = 3
+)
+
+// Enum value maps for WriteBatchOutcome_Status.
+var (
+	WriteBatchOutcome_Status_name = map[int32]string{
+		0: "STATUS_UNSPECIFIED",
+		1: "COMMITTED",
+		2: "REJECTED",
+		3: "NOT_ATTEMPTED",
+	}
+	WriteBatchOutcome_Status_value = map[string]int32{
+		"STATUS_UNSPECIFIED": 0,
+		"COMMITTED":          1,
+		"REJECTED":           2,
+		"NOT_ATTEMPTED":      3,
+	}
+)
+
+func (x WriteBatchOutcome_Status) Enum() *WriteBatchOutcome_Status {
+	p := new(WriteBatchOutcome_Status)
+	*p = x
+	return p
+}
+
+func (x WriteBatchOutcome_Status) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WriteBatchOutcome_Status) Descriptor() protoreflect.EnumDescriptor {
+	return file_audit_proto_enumTypes[0].Descriptor()
+}
+
+func (WriteBatchOutcome_Status) Type() protoreflect.EnumType {
+	return &file_audit_proto_enumTypes[0]
+}
+
+func (x WriteBatchOutcome_Status) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WriteBatchOutcome_Status.Descriptor instead.
+func (WriteBatchOutcome_Status) EnumDescriptor() ([]byte, []int) {
+	return file_audit_proto_rawDescGZIP(), []int{7, 0}
+}
+
 type Actor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -673,16 +725,102 @@ func (x *WriteBatchRequest) GetWaitFor() string {
 	return ""
 }
 
+type WriteBatchOutcome struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Zero-based position in WriteBatchRequest.events.
+	InputIndex int32 `protobuf:"varint,1,opt,name=input_index,json=inputIndex,proto3" json:"input_index,omitempty"`
+	// Copied from the submitted envelope when available.
+	EventId string                   `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	Status  WriteBatchOutcome_Status `protobuf:"varint,3,opt,name=status,proto3,enum=snaplink.audit.v1.WriteBatchOutcome_Status" json:"status,omitempty"`
+	// Present for COMMITTED outcomes, including duplicate commits.
+	Receipt *WriteResponse `protobuf:"bytes,4,opt,name=receipt,proto3" json:"receipt,omitempty"`
+	// Stable machine-readable rejection code for REJECTED outcomes.
+	// Empty for COMMITTED and NOT_ATTEMPTED outcomes.
+	RejectionCode string `protobuf:"bytes,5,opt,name=rejection_code,json=rejectionCode,proto3" json:"rejection_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteBatchOutcome) Reset() {
+	*x = WriteBatchOutcome{}
+	mi := &file_audit_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteBatchOutcome) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteBatchOutcome) ProtoMessage() {}
+
+func (x *WriteBatchOutcome) ProtoReflect() protoreflect.Message {
+	mi := &file_audit_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteBatchOutcome.ProtoReflect.Descriptor instead.
+func (*WriteBatchOutcome) Descriptor() ([]byte, []int) {
+	return file_audit_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *WriteBatchOutcome) GetInputIndex() int32 {
+	if x != nil {
+		return x.InputIndex
+	}
+	return 0
+}
+
+func (x *WriteBatchOutcome) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *WriteBatchOutcome) GetStatus() WriteBatchOutcome_Status {
+	if x != nil {
+		return x.Status
+	}
+	return WriteBatchOutcome_STATUS_UNSPECIFIED
+}
+
+func (x *WriteBatchOutcome) GetReceipt() *WriteResponse {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
+}
+
+func (x *WriteBatchOutcome) GetRejectionCode() string {
+	if x != nil {
+		return x.RejectionCode
+	}
+	return ""
+}
+
 type WriteBatchResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Receipts      []*WriteResponse       `protobuf:"bytes,1,rep,name=receipts,proto3" json:"receipts,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Backward-compatible receipt list. It contains receipts for committed
+	// outcomes in input order.
+	Receipts []*WriteResponse `protobuf:"bytes,1,rep,name=receipts,proto3" json:"receipts,omitempty"`
+	// Authoritative per-input result list. One outcome exists for every
+	// submitted event.
+	Outcomes      []*WriteBatchOutcome `protobuf:"bytes,2,rep,name=outcomes,proto3" json:"outcomes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WriteBatchResponse) Reset() {
 	*x = WriteBatchResponse{}
-	mi := &file_audit_proto_msgTypes[7]
+	mi := &file_audit_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +832,7 @@ func (x *WriteBatchResponse) String() string {
 func (*WriteBatchResponse) ProtoMessage() {}
 
 func (x *WriteBatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_audit_proto_msgTypes[7]
+	mi := &file_audit_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,12 +845,19 @@ func (x *WriteBatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteBatchResponse.ProtoReflect.Descriptor instead.
 func (*WriteBatchResponse) Descriptor() ([]byte, []int) {
-	return file_audit_proto_rawDescGZIP(), []int{7}
+	return file_audit_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WriteBatchResponse) GetReceipts() []*WriteResponse {
 	if x != nil {
 		return x.Receipts
+	}
+	return nil
+}
+
+func (x *WriteBatchResponse) GetOutcomes() []*WriteBatchOutcome {
+	if x != nil {
+		return x.Outcomes
 	}
 	return nil
 }
@@ -785,9 +930,22 @@ const file_audit_proto_rawDesc = "" +
 	"\tduplicate\x18\a \x01(\bR\tduplicate\"h\n" +
 	"\x11WriteBatchRequest\x128\n" +
 	"\x06events\x18\x01 \x03(\v2 .snaplink.audit.v1.EventEnvelopeR\x06events\x12\x19\n" +
-	"\bwait_for\x18\x02 \x01(\tR\awaitFor\"R\n" +
+	"\bwait_for\x18\x02 \x01(\tR\awaitFor\"\xc9\x02\n" +
+	"\x11WriteBatchOutcome\x12\x1f\n" +
+	"\vinput_index\x18\x01 \x01(\x05R\n" +
+	"inputIndex\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12C\n" +
+	"\x06status\x18\x03 \x01(\x0e2+.snaplink.audit.v1.WriteBatchOutcome.StatusR\x06status\x12:\n" +
+	"\areceipt\x18\x04 \x01(\v2 .snaplink.audit.v1.WriteResponseR\areceipt\x12%\n" +
+	"\x0erejection_code\x18\x05 \x01(\tR\rrejectionCode\"P\n" +
+	"\x06Status\x12\x16\n" +
+	"\x12STATUS_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tCOMMITTED\x10\x01\x12\f\n" +
+	"\bREJECTED\x10\x02\x12\x11\n" +
+	"\rNOT_ATTEMPTED\x10\x03\"\x94\x01\n" +
 	"\x12WriteBatchResponse\x12<\n" +
-	"\breceipts\x18\x01 \x03(\v2 .snaplink.audit.v1.WriteResponseR\breceipts2\x85\x02\n" +
+	"\breceipts\x18\x01 \x03(\v2 .snaplink.audit.v1.WriteResponseR\breceipts\x12@\n" +
+	"\boutcomes\x18\x02 \x03(\v2$.snaplink.audit.v1.WriteBatchOutcomeR\boutcomes2\x85\x02\n" +
 	"\x06Ingest\x12J\n" +
 	"\x05Write\x12\x1f.snaplink.audit.v1.WriteRequest\x1a .snaplink.audit.v1.WriteResponse\x12Y\n" +
 	"\n" +
@@ -806,37 +964,43 @@ func file_audit_proto_rawDescGZIP() []byte {
 	return file_audit_proto_rawDescData
 }
 
-var file_audit_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_audit_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_audit_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_audit_proto_goTypes = []any{
-	(*Actor)(nil),                 // 0: snaplink.audit.v1.Actor
-	(*Target)(nil),                // 1: snaplink.audit.v1.Target
-	(*FieldChange)(nil),           // 2: snaplink.audit.v1.FieldChange
-	(*EventEnvelope)(nil),         // 3: snaplink.audit.v1.EventEnvelope
-	(*WriteRequest)(nil),          // 4: snaplink.audit.v1.WriteRequest
-	(*WriteResponse)(nil),         // 5: snaplink.audit.v1.WriteResponse
-	(*WriteBatchRequest)(nil),     // 6: snaplink.audit.v1.WriteBatchRequest
-	(*WriteBatchResponse)(nil),    // 7: snaplink.audit.v1.WriteBatchResponse
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(WriteBatchOutcome_Status)(0), // 0: snaplink.audit.v1.WriteBatchOutcome.Status
+	(*Actor)(nil),                 // 1: snaplink.audit.v1.Actor
+	(*Target)(nil),                // 2: snaplink.audit.v1.Target
+	(*FieldChange)(nil),           // 3: snaplink.audit.v1.FieldChange
+	(*EventEnvelope)(nil),         // 4: snaplink.audit.v1.EventEnvelope
+	(*WriteRequest)(nil),          // 5: snaplink.audit.v1.WriteRequest
+	(*WriteResponse)(nil),         // 6: snaplink.audit.v1.WriteResponse
+	(*WriteBatchRequest)(nil),     // 7: snaplink.audit.v1.WriteBatchRequest
+	(*WriteBatchOutcome)(nil),     // 8: snaplink.audit.v1.WriteBatchOutcome
+	(*WriteBatchResponse)(nil),    // 9: snaplink.audit.v1.WriteBatchResponse
+	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
 }
 var file_audit_proto_depIdxs = []int32{
-	8,  // 0: snaplink.audit.v1.EventEnvelope.occurred_at:type_name -> google.protobuf.Timestamp
-	0,  // 1: snaplink.audit.v1.EventEnvelope.actor:type_name -> snaplink.audit.v1.Actor
-	1,  // 2: snaplink.audit.v1.EventEnvelope.targets:type_name -> snaplink.audit.v1.Target
-	2,  // 3: snaplink.audit.v1.EventEnvelope.changed_fields:type_name -> snaplink.audit.v1.FieldChange
-	3,  // 4: snaplink.audit.v1.WriteRequest.event:type_name -> snaplink.audit.v1.EventEnvelope
-	3,  // 5: snaplink.audit.v1.WriteBatchRequest.events:type_name -> snaplink.audit.v1.EventEnvelope
-	5,  // 6: snaplink.audit.v1.WriteBatchResponse.receipts:type_name -> snaplink.audit.v1.WriteResponse
-	4,  // 7: snaplink.audit.v1.Ingest.Write:input_type -> snaplink.audit.v1.WriteRequest
-	6,  // 8: snaplink.audit.v1.Ingest.WriteBatch:input_type -> snaplink.audit.v1.WriteBatchRequest
-	4,  // 9: snaplink.audit.v1.Ingest.WriteStream:input_type -> snaplink.audit.v1.WriteRequest
-	5,  // 10: snaplink.audit.v1.Ingest.Write:output_type -> snaplink.audit.v1.WriteResponse
-	7,  // 11: snaplink.audit.v1.Ingest.WriteBatch:output_type -> snaplink.audit.v1.WriteBatchResponse
-	5,  // 12: snaplink.audit.v1.Ingest.WriteStream:output_type -> snaplink.audit.v1.WriteResponse
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	10, // 0: snaplink.audit.v1.EventEnvelope.occurred_at:type_name -> google.protobuf.Timestamp
+	1,  // 1: snaplink.audit.v1.EventEnvelope.actor:type_name -> snaplink.audit.v1.Actor
+	2,  // 2: snaplink.audit.v1.EventEnvelope.targets:type_name -> snaplink.audit.v1.Target
+	3,  // 3: snaplink.audit.v1.EventEnvelope.changed_fields:type_name -> snaplink.audit.v1.FieldChange
+	4,  // 4: snaplink.audit.v1.WriteRequest.event:type_name -> snaplink.audit.v1.EventEnvelope
+	4,  // 5: snaplink.audit.v1.WriteBatchRequest.events:type_name -> snaplink.audit.v1.EventEnvelope
+	0,  // 6: snaplink.audit.v1.WriteBatchOutcome.status:type_name -> snaplink.audit.v1.WriteBatchOutcome.Status
+	6,  // 7: snaplink.audit.v1.WriteBatchOutcome.receipt:type_name -> snaplink.audit.v1.WriteResponse
+	6,  // 8: snaplink.audit.v1.WriteBatchResponse.receipts:type_name -> snaplink.audit.v1.WriteResponse
+	8,  // 9: snaplink.audit.v1.WriteBatchResponse.outcomes:type_name -> snaplink.audit.v1.WriteBatchOutcome
+	5,  // 10: snaplink.audit.v1.Ingest.Write:input_type -> snaplink.audit.v1.WriteRequest
+	7,  // 11: snaplink.audit.v1.Ingest.WriteBatch:input_type -> snaplink.audit.v1.WriteBatchRequest
+	5,  // 12: snaplink.audit.v1.Ingest.WriteStream:input_type -> snaplink.audit.v1.WriteRequest
+	6,  // 13: snaplink.audit.v1.Ingest.Write:output_type -> snaplink.audit.v1.WriteResponse
+	9,  // 14: snaplink.audit.v1.Ingest.WriteBatch:output_type -> snaplink.audit.v1.WriteBatchResponse
+	6,  // 15: snaplink.audit.v1.Ingest.WriteStream:output_type -> snaplink.audit.v1.WriteResponse
+	13, // [13:16] is the sub-list for method output_type
+	10, // [10:13] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_audit_proto_init() }
@@ -849,13 +1013,14 @@ func file_audit_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_audit_proto_rawDesc), len(file_audit_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   8,
+			NumEnums:      1,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_audit_proto_goTypes,
 		DependencyIndexes: file_audit_proto_depIdxs,
+		EnumInfos:         file_audit_proto_enumTypes,
 		MessageInfos:      file_audit_proto_msgTypes,
 	}.Build()
 	File_audit_proto = out.File

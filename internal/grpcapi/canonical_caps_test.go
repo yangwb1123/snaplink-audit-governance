@@ -43,11 +43,12 @@ func TestGRPCCanonicalJSONCapsAcrossRPCs(t *testing.T) {
 			event := testProtoEvent("grpc-canonical-batch-"+tc.name, "crm")
 			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", BeforeJson: canonicalOverWireJSON(tc.value)}}
 			response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{event}})
-			if status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+			if err != nil || len(response.GetOutcomes()) != 1 {
+				t.Fatalf("WriteBatch response=%v err=%v, want one outcome", response, err)
 			}
-			if response != nil && len(response.GetReceipts()) != 0 {
-				t.Fatalf("WriteBatch receipts=%d, want 0", len(response.GetReceipts()))
+			outcome := response.GetOutcomes()[0]
+			if outcome.GetStatus() != auditv1.WriteBatchOutcome_REJECTED || outcome.GetRejectionCode() != "invalid_argument" {
+				t.Fatalf("WriteBatch outcome=%v, want invalid_argument rejection", outcome)
 			}
 			assertNoFramedKeys(t, st, event.GetEventId())
 		})
@@ -112,8 +113,12 @@ func TestGRPCCanonicalJSONAfterCapsAcrossRPCs(t *testing.T) {
 			event := testProtoEvent("grpc-canonical-after-batch-"+tc.name, "crm")
 			event.ChangedFields = []*auditv1.FieldChange{{Field: "value", AfterJson: canonicalOverWireJSON(tc.value)}}
 			response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{event}})
-			if status.Code(err) != codes.InvalidArgument || (response != nil && len(response.GetReceipts()) != 0) {
-				t.Fatalf("WriteBatch response=%v err=%v, want InvalidArgument with no receipts", response, err)
+			if err != nil || len(response.GetOutcomes()) != 1 {
+				t.Fatalf("WriteBatch response=%v err=%v, want one outcome", response, err)
+			}
+			outcome := response.GetOutcomes()[0]
+			if outcome.GetStatus() != auditv1.WriteBatchOutcome_REJECTED || outcome.GetRejectionCode() != "invalid_argument" {
+				t.Fatalf("WriteBatch outcome=%v, want invalid_argument rejection", outcome)
 			}
 			assertNoFramedKeys(t, st, event.GetEventId())
 		})

@@ -83,8 +83,38 @@ message WriteBatchRequest {
   string wait_for = 2;
 }
 
+message WriteBatchOutcome {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    COMMITTED = 1;
+    REJECTED = 2;
+    NOT_ATTEMPTED = 3;
+  }
+
+  // Zero-based position in WriteBatchRequest.events.
+  int32 input_index = 1;
+
+  // Copied from the submitted envelope when available.
+  string event_id = 2;
+
+  Status status = 3;
+
+  // Present for COMMITTED outcomes, including duplicate commits.
+  WriteResponse receipt = 4;
+
+  // Stable machine-readable rejection code for REJECTED outcomes.
+  // Empty for COMMITTED and NOT_ATTEMPTED outcomes.
+  string rejection_code = 5;
+}
+
 message WriteBatchResponse {
+  // Backward-compatible receipt list. It contains receipts for committed
+  // outcomes in input order.
   repeated WriteResponse receipts = 1;
+
+  // Authoritative per-input result list. One outcome exists for every
+  // submitted event.
+  repeated WriteBatchOutcome outcomes = 2;
 }
 
 service Ingest {

@@ -222,11 +222,11 @@ func TestGRPCRejectsDuplicateChangedFields(t *testing.T) {
 	batchDuplicate.ChangedFields = []*auditv1.FieldChange{{Field: "x"}, {Field: "x"}}
 	later := testProtoEvent("grpc-duplicate-later", "crm")
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{prefix, batchDuplicate, later}})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	if err != nil || len(response.GetReceipts()) != 1 || len(response.GetOutcomes()) != 3 {
+		t.Fatalf("WriteBatch response=%v err=%v, want prefix receipt and three outcomes", response, err)
 	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch receipts=%d, want none on error", len(response.GetReceipts()))
+	if response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED || response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" || response.GetOutcomes()[2].GetStatus() != auditv1.WriteBatchOutcome_NOT_ATTEMPTED {
+		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 
 	stream, err := client.WriteStream(ctx)
@@ -267,9 +267,11 @@ func TestGRPCRejectsUnknownSupportedFields(t *testing.T) {
 	batch.Actor.ProtoReflect().SetUnknown(unknown)
 	batch = roundTripEnvelope(t, batch)
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{batch}})
-	assertUnknownGRPCError(t, err, unknown)
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch receipts=%d, want none", len(response.GetReceipts()))
+	if err != nil || len(response.GetReceipts()) != 0 || len(response.GetOutcomes()) != 1 {
+		t.Fatalf("WriteBatch response=%v err=%v, want one rejected outcome", response, err)
+	}
+	if outcome := response.GetOutcomes()[0]; outcome.GetStatus() != auditv1.WriteBatchOutcome_REJECTED || outcome.GetRejectionCode() != "invalid_argument" {
+		t.Fatalf("batch outcome=%v, want invalid_argument rejection", outcome)
 	}
 
 	streamEvent := testProtoEvent("grpc-unknown-stream", "crm")

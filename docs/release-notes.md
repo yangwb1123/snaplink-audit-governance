@@ -1,5 +1,15 @@
 # Release Notes
 
+## 2026-09-06 — Make gRPC WriteBatch partial commits observable
+
+`WriteBatch` now returns ordered per-input outcomes for committed, rejected, and
+not-attempted members while retaining the existing committed `receipts` list.
+Member failures expose stable rejection codes; whole-request validation and
+transport failures remain RPC errors. Durable commits remain committed outcomes
+even when a requested archive/wait step fails, and internal diagnostics stay
+redacted. Frontend behavior, duplicate authorization metadata, detached-context
+admission, and unrelated security directions are out of scope.
+
 ## 2026-09-05 — Keep ambiguous tenant replay pending
 
 DLQ replay no longer lets an untrusted `tenant_id` claim choose among multiple

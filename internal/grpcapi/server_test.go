@@ -21,6 +21,7 @@ import (
 	"time"
 
 	auditv1 "github.com/snaplink/audit-governance/api/proto"
+	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/httpapi"
@@ -159,8 +160,8 @@ func TestGRPCWriteNilActor(t *testing.T) {
 	assertNoFramedKeys(t, st, event.GetEventId())
 }
 
-// TestGRPCWriteBatchNilActor preserves the existing batch contract: a
-// conversion failure returns no wire receipts, a successfully ingested
+// TestGRPCWriteBatchNilActor verifies member-level observability: a
+// conversion failure returns a rejected outcome, a successfully ingested
 // prefix remains committed, and the invalid member plus the suffix are not
 // persisted.
 func TestGRPCWriteBatchNilActor(t *testing.T) {
@@ -170,14 +171,14 @@ func TestGRPCWriteBatchNilActor(t *testing.T) {
 	nilActor.Actor = nil
 	validC := testProtoEvent("grpc-nil-actor-batch-suffix", "crm")
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{validA, nilActor, validC}})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	if err != nil || len(response.GetOutcomes()) != 3 || len(response.GetReceipts()) != 1 {
+		t.Fatalf("WriteBatch response=%v err=%v, want three outcomes and one receipt", response, err)
 	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch receipts=%d, want none on error", len(response.GetReceipts()))
-	}
-	if !strings.Contains(status.Convert(err).Message(), "actor is required") {
-		t.Fatalf("WriteBatch message=%q, want actor-required detail", status.Convert(err).Message())
+	if response.GetOutcomes()[0].GetStatus() != auditv1.WriteBatchOutcome_COMMITTED ||
+		response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED ||
+		response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" ||
+		response.GetOutcomes()[2].GetStatus() != auditv1.WriteBatchOutcome_NOT_ATTEMPTED {
+		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 	assertNoFramedKeys(t, st, nilActor.GetEventId(), validC.GetEventId())
 	if err := st.Read(func(data *store.Snapshot) error {
@@ -241,8 +242,13 @@ func assertGRPCSourceBinding(t *testing.T, client auditv1.IngestClient, ctx cont
 	if status.Convert(writeErr).Message() != status.Convert(unknownErr).Message() {
 		t.Fatalf("source enumeration leak: existing=%v unknown=%v", writeErr, unknownErr)
 	}
-	_, batchErr := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{spoof}})
-	assertPermissionDenied(t, batchErr)
+	batchResponse, batchErr := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{spoof}})
+	if batchErr != nil || len(batchResponse.GetOutcomes()) != 1 {
+		t.Fatalf("batch response=%v err=%v, want one member outcome", batchResponse, batchErr)
+	}
+	if outcome := batchResponse.GetOutcomes()[0]; outcome.GetStatus() != auditv1.WriteBatchOutcome_REJECTED || outcome.GetRejectionCode() != "permission_denied" {
+		t.Fatalf("batch outcome=%v, want permission_denied rejection", outcome)
+	}
 	stream, err := client.WriteStream(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -438,9 +444,12 @@ func TestStatusErrorLogsDetailServerSide(t *testing.T) {
 // grpcHarnessOptions tunes newGRPCHarnessOpts for tests that need a custom
 // server logger, transport-level server options, or a ledgered publisher.
 type grpcHarnessOptions struct {
-	logger     *log.Logger               // nil => Server.Logger stays nil (nil-guard exercised)
-	serverOpts []grpc.ServerOption       // e.g. grpc.MaxRecvMsgSize for the production-cap harness
-	publisher  service.LedgeredPublisher // when set, Service.Ingest writes LedgeredOutbox rows
+	logger       *log.Logger               // nil => Server.Logger stays nil (nil-guard exercised)
+	serverOpts   []grpc.ServerOption       // e.g. grpc.MaxRecvMsgSize for the production-cap harness
+	publisher    service.LedgeredPublisher // when set, Service.Ingest writes LedgeredOutbox rows
+	archiveStore archive.Store             // when set, injects the ingest archive seam
+	signer       service.Signer            // when set, injects the segment-signing seam
+	segmentSize  int                       // when positive, overrides the service default
 }
 
 // newGRPCHarness builds the bufconn-based ingest harness used by the
@@ -459,7 +468,17 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := service.New(st, service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true, LedgeredPublisher: opts.publisher})
+	config := service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true, LedgeredPublisher: opts.publisher}
+	if opts.archiveStore != nil {
+		config.Archive = opts.archiveStore
+	}
+	if opts.signer != nil {
+		config.Signer = opts.signer
+	}
+	if opts.segmentSize > 0 {
+		config.SegmentSize = opts.segmentSize
+	}
+	svc, err := service.New(st, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,11 +604,11 @@ func TestGRPCRejectedConversionDoesNotMutatePersistence(t *testing.T) {
 	batchInvalid.ChangedFields = []*auditv1.FieldChange{{Field: "y"}, {Field: "y"}}
 	later := testProtoEvent("batch-later-not-persisted", "crm")
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{prefix, batchInvalid, later}})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	if err != nil || len(response.GetReceipts()) != 1 || len(response.GetOutcomes()) != 3 {
+		t.Fatalf("WriteBatch response=%v err=%v, want prefix receipt and three outcomes", response, err)
 	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch receipts=%d, want none on error", len(response.GetReceipts()))
+	if response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED || response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" || response.GetOutcomes()[2].GetStatus() != auditv1.WriteBatchOutcome_NOT_ATTEMPTED {
+		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 
 	// Stream: the valid first message commits; the duplicate terminates the
@@ -653,9 +672,9 @@ func TestGRPCRejectedConversionDoesNotMutatePersistence(t *testing.T) {
 
 // TestGRPCRejectsKeyFramingEventInvalidArgument is F-1: the gRPC ingest
 // surface (Write, WriteBatch, WriteStream) funnels through Service.Ingest →
-// ValidateBasic, so key-framing violations map to codes.InvalidArgument and
-// nothing reaches the snapshot; WriteBatch keeps its partial-receipt
-// contract over gRPC.
+// ValidateBasic, so key-framing violations map to an invalid_argument member
+// outcome and nothing reaches the snapshot; WriteBatch keeps its ordered
+// partial-commit contract over gRPC.
 func TestGRPCRejectsKeyFramingEventInvalidArgument(t *testing.T) {
 	st, client, ctx := newGRPCHarness(t)
 	bad := testProtoEvent("grpc-bad-1", "crm")
@@ -675,20 +694,20 @@ func TestGRPCRejectsKeyFramingEventInvalidArgument(t *testing.T) {
 	}
 
 	// WriteBatch partial-acceptance contract: the valid prefix is committed
-	// to the ledger before the invalid tail aborts the batch. Unlike HTTP
-	// (which returns {receipts, error} in the body), gRPC error responses
-	// carry no message, so the prefix receipt is not delivered on the wire —
-	// the ledger side is identical: valid prefix in, invalid tail out.
+	// to the ledger before the invalid tail stops the batch, and both the
+	// prefix receipt and ordered member outcomes are delivered on the wire.
 	valid := testProtoEvent("grpc-bad-valid-1", "crm")
 	valid.EventId = "grpc-ok-1"
 	invalid := testProtoEvent("grpc-bad-2", "crm")
 	invalid.SourceSystem = "x\x1fy"
 	response, batchErr := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{valid, invalid}})
-	if status.Code(batchErr) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(batchErr))
+	if batchErr != nil || len(response.GetReceipts()) != 1 || len(response.GetOutcomes()) != 2 {
+		t.Fatalf("WriteBatch response=%v err=%v, want prefix receipt and two outcomes", response, batchErr)
 	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch wire receipts=%d, want 0 (gRPC error responses carry no message)", len(response.GetReceipts()))
+	if response.GetOutcomes()[0].GetStatus() != auditv1.WriteBatchOutcome_COMMITTED ||
+		response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED ||
+		response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" {
+		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 
 	// WriteStream: prefix receipt is delivered, the invalid event terminates
@@ -857,11 +876,11 @@ func TestGRPCRejectsTrailingJSONPayload(t *testing.T) {
 	batch := testProtoEvent("grpc-trail-batch", "crm")
 	batch.PayloadJson = []byte(`{"a":1} extra`)
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{batch}})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	if err != nil || len(response.GetReceipts()) != 0 || len(response.GetOutcomes()) != 1 {
+		t.Fatalf("WriteBatch response=%v err=%v, want one rejected outcome", response, err)
 	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("WriteBatch wire receipts=%d, want 0", len(response.GetReceipts()))
+	if outcome := response.GetOutcomes()[0]; outcome.GetStatus() != auditv1.WriteBatchOutcome_REJECTED || outcome.GetRejectionCode() != "invalid_argument" {
+		t.Fatalf("batch outcome=%v, want invalid_argument rejection", outcome)
 	}
 
 	stream, err := client.WriteStream(ctx)
@@ -1165,8 +1184,8 @@ func TestGRPCRejectsOverCapBatch(t *testing.T) {
 		over = append(over, testProtoEvent(fmt.Sprintf("grpc-over-batch-%d", i), "crm"))
 	}
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: over})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument (err=%v)", status.Code(err), err)
+	if status.Code(err) != codes.InvalidArgument || response != nil {
+		t.Fatalf("WriteBatch response=%v code=%v, want InvalidArgument and nil response (err=%v)", response, status.Code(err), err)
 	}
 	if !strings.Contains(status.Convert(err).Message(), fmt.Sprintf("max %d", MaxBatchEvents)) {
 		t.Fatalf("rejection message=%q, want cap detail", status.Convert(err).Message())
@@ -1194,8 +1213,11 @@ func TestGRPCRejectsOverCapBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("boundary WriteBatch failed: %v", err)
 	}
-	if len(response.GetReceipts()) != MaxBatchEvents {
-		t.Fatalf("boundary receipts=%d, want %d", len(response.GetReceipts()), MaxBatchEvents)
+	if len(response.GetReceipts()) != MaxBatchEvents || len(response.GetOutcomes()) != MaxBatchEvents {
+		t.Fatalf("boundary receipts=%d outcomes=%d, want %d each", len(response.GetReceipts()), len(response.GetOutcomes()), MaxBatchEvents)
+	}
+	for i, outcome := range response.GetOutcomes() {
+		assertBatchOutcome(t, outcome, i, fmt.Sprintf("grpc-max-batch-%d", i), auditv1.WriteBatchOutcome_COMMITTED, "", true)
 	}
 	if err := st.Read(func(data *store.Snapshot) error {
 		for i := 0; i < MaxBatchEvents; i++ {
@@ -1394,11 +1416,9 @@ func TestGRPCTransportRejectsOverMaxRecv(t *testing.T) {
 }
 
 // TestGRPCBatchOverCapMemberPartialCommit pins D6: a per-envelope cap
-// violation inside WriteBatch keeps the existing loop semantics — the valid
-// prefix is ledgered, the batch aborts with InvalidArgument, and wire
-// receipts are dropped (mirrors the pinned key-framing partial-commit
-// contract, but for ErrEnvelopeTooLarge). Only the count cap is pre-flight
-// atomic.
+// violation inside WriteBatch produces an invalid_argument member outcome;
+// the valid prefix is ledgered and the suffix is not attempted. Only the
+// count cap is pre-flight atomic.
 func TestGRPCBatchOverCapMemberPartialCommit(t *testing.T) {
 	st, client, ctx := newGRPCHarness(t)
 	validA := testProtoEvent("grpc-partial-a", "crm")
@@ -1406,14 +1426,11 @@ func TestGRPCBatchOverCapMemberPartialCommit(t *testing.T) {
 	over.Reason = strings.Repeat("r", MaxEnvelopeFieldBytes+1)
 	validB := testProtoEvent("grpc-partial-b", "crm")
 	response, err := client.WriteBatch(ctx, &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{validA, over, validB}})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteBatch code=%v, want InvalidArgument", status.Code(err))
+	if err != nil || len(response.GetReceipts()) != 1 || len(response.GetOutcomes()) != 3 {
+		t.Fatalf("WriteBatch response=%v err=%v, want prefix receipt and three outcomes", response, err)
 	}
-	if !strings.Contains(status.Convert(err).Message(), fmt.Sprintf("%d bytes, max %d", MaxEnvelopeFieldBytes+1, MaxEnvelopeFieldBytes)) {
-		t.Fatalf("rejection message=%q, want per-field size detail", status.Convert(err).Message())
-	}
-	if len(response.GetReceipts()) != 0 {
-		t.Fatalf("wire receipts=%d, want 0 (gRPC error responses carry no message)", len(response.GetReceipts()))
+	if response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED || response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" || response.GetOutcomes()[2].GetStatus() != auditv1.WriteBatchOutcome_NOT_ATTEMPTED {
+		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 	if err := st.Read(func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-partial-a")]; !exists {
