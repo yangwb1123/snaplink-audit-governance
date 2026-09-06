@@ -1,5 +1,14 @@
 # Release Notes
 
+## 2026-09-06 — Bound gRPC WriteStream over-cap skips
+
+A single authenticated `WriteStream` may now skip and log at most 100
+application-level over-cap envelopes. The 101st such envelope terminates the
+stream with `ResourceExhausted`, preventing unbounded log/CPU amplification.
+Skipped envelopes still consume no tenant quota and create no ledger, receipt,
+or outbox state; budgets are local to each stream. Unary writes and non-size
+stream validation behavior are unchanged.
+
 ## 2026-09-06 — Reject ambiguous authorization credentials
 
 HTTP and gRPC authentication now require exactly one authorization value. Missing

@@ -50,8 +50,8 @@ func TestGRPCWriteStreamSkipBudgetBoundaryRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	overIDs := make([]string, 0, MaxStreamSkips)
-	for index := 0; index < MaxStreamSkips-1; index++ {
+	overIDs := make([]string, 0, MaxStreamSkips+1)
+	for index := 0; index < MaxStreamSkips; index++ {
 		eventID := "grpc-stream-boundary-over-" + string(rune('a'+index%26)) + "-" + strings.Repeat("x", index)
 		overIDs = append(overIDs, eventID)
 		if err := stream.Send(&auditv1.WriteRequest{Event: overCapStreamEvent(eventID)}); err != nil {
@@ -62,23 +62,92 @@ func TestGRPCWriteStreamSkipBudgetBoundaryRecovers(t *testing.T) {
 	if err := stream.Send(&auditv1.WriteRequest{Event: valid}); err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.CloseSend(); err != nil {
-		t.Fatal(err)
-	}
 	receipt, err := stream.Recv()
 	if err != nil || receipt.GetEventId() != valid.GetEventId() {
-		t.Fatalf("receipt after %d skips=%v err=%v, want valid receipt", MaxStreamSkips-1, receipt, err)
+		t.Fatalf("receipt after %d skips=%v err=%v, want valid receipt", MaxStreamSkips, receipt, err)
 	}
-	if _, err := stream.Recv(); err != io.EOF {
-		t.Fatalf("stream close err=%v, want io.EOF", err)
+
+	terminalID := "grpc-stream-boundary-terminal"
+	sendErr := stream.Send(&auditv1.WriteRequest{Event: overCapStreamEvent(terminalID)})
+	if sendErr != nil && status.Code(sendErr) != codes.ResourceExhausted {
+		t.Fatalf("101st skip send err=%v, want nil or ResourceExhausted", sendErr)
 	}
-	if got := strings.Count(logged.String(), "rejecting over-cap message"); got != MaxStreamSkips-1 {
-		t.Fatalf("over-cap log count=%d, want %d", got, MaxStreamSkips-1)
+	if _, err := stream.Recv(); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("101st skip code=%v, want ResourceExhausted", status.Code(err))
+	}
+	overIDs = append(overIDs, terminalID)
+	if got := strings.Count(logged.String(), "rejecting over-cap message"); got != MaxStreamSkips {
+		t.Fatalf("over-cap log count=%d, want %d", got, MaxStreamSkips)
 	}
 	assertNoFramedKeys(t, st, overIDs...)
 	if err := st.Read(func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
 			t.Fatal("valid event after skips was not persisted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGRPCWriteStreamSkipBudgetIsPerStream proves that two streams for the
+// same tenant do not share a budget. This is stronger than a cross-tenant
+// check for this local counter: exhausting one tenant's stream must not
+// affect another stream even when both streams use the same tenant.
+func TestGRPCWriteStreamSkipBudgetIsPerStream(t *testing.T) {
+	var logged strings.Builder
+	st, client, ctx := newGRPCHarnessOpts(t, grpcHarnessOptions{logger: log.New(&logged, "", 0)})
+	first, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.WriteStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstIDs := make([]string, 0, MaxStreamSkips+1)
+	for index := 0; index < MaxStreamSkips; index++ {
+		eventID := "grpc-stream-isolation-first-" + string(rune('a'+index%26))
+		firstIDs = append(firstIDs, eventID)
+		if err := first.Send(&auditv1.WriteRequest{Event: overCapStreamEvent(eventID)}); err != nil {
+			t.Fatalf("first stream skip %d: %v", index, err)
+		}
+	}
+	secondOverID := "grpc-stream-isolation-second-over"
+	valid := testProtoEvent("grpc-stream-isolation-second-valid", "crm")
+	if err := second.Send(&auditv1.WriteRequest{Event: overCapStreamEvent(secondOverID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Send(&auditv1.WriteRequest{Event: valid}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := second.Recv()
+	if err != nil || receipt.GetEventId() != valid.GetEventId() {
+		t.Fatalf("independent stream receipt=%v err=%v, want valid receipt", receipt, err)
+	}
+	if _, err := second.Recv(); err != io.EOF {
+		t.Fatalf("independent stream close err=%v, want io.EOF", err)
+	}
+
+	terminalID := "grpc-stream-isolation-first-terminal"
+	sendErr := first.Send(&auditv1.WriteRequest{Event: overCapStreamEvent(terminalID)})
+	if sendErr != nil && status.Code(sendErr) != codes.ResourceExhausted {
+		t.Fatalf("first stream 101st skip send err=%v, want nil or ResourceExhausted", sendErr)
+	}
+	if _, err := first.Recv(); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("first stream terminal code=%v, want ResourceExhausted", status.Code(err))
+	}
+	firstIDs = append(firstIDs, terminalID)
+	if got := strings.Count(logged.String(), "rejecting over-cap message"); got != MaxStreamSkips+1 {
+		t.Fatalf("over-cap log count=%d, want %d", got, MaxStreamSkips+1)
+	}
+	assertNoFramedKeys(t, st, append(firstIDs, secondOverID)...)
+	if err := st.Read(func(data *store.Snapshot) error {
+		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
+			t.Fatal("valid event on independent stream was not persisted")
 		}
 		return nil
 	}); err != nil {
