@@ -124,8 +124,11 @@ if ! printf '%s\n' "$RECORD" | grep -q 'permanent_error'; then
   rm -f "$DLQ_OUT"
   exit 1
 fi
-if ! printf '%s\n' "$RECORD" | grep -q 'lacks ledger-assigned chain state'; then
-  log "FAIL: DLQ record for $EVENT_ID lacks the self-describing error message:"
+# The projection guard's current stable diagnostic identifies the first
+# required ledger field; keep the assertion semantic rather than pinning an
+# obsolete wrapper phrase.
+if ! printf '%s\n' "$RECORD" | grep -q 'required ledger field.*stream_id.*is missing'; then
+  log "FAIL: DLQ record for $EVENT_ID lacks the self-describing ledger-field error message:"
   printf '%s\n' "$RECORD"
   rm -f "$DLQ_OUT"
   exit 1
