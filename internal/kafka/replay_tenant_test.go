@@ -310,15 +310,18 @@ func TestTenantReplayKeepsSameEventRecordsIndependent(t *testing.T) {
 		}
 	})
 
-	t.Run("both canonical tenants resolve and survive reload", func(t *testing.T) {
+	t.Run("ambiguous canonical tenants stay pending despite matching claims", func(t *testing.T) {
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		state, err := LoadReplayState(statePath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
-			tenantFailureMessage("evt", "tenant-a", ErrorCodeAttemptsExhausted, 0),
-			tenantFailureMessage("evt", "tenant-b", ErrorCodeAttemptsExhausted, 1),
+			// Even though each untrusted claim appears to match one accepted
+			// record, there is no trusted provenance binding either Failure to
+			// either canonical tenant.
+			tenantFailureMessage("evt", "tenant-b", ErrorCodeAttemptsExhausted, 0),
+			tenantFailureMessage("evt", "tenant-a", ErrorCodeAttemptsExhausted, 1),
 		}}
 		delivered := map[string]int{}
 		replayer := runTenantReplayer(broker, []kafka.Message{
@@ -333,21 +336,21 @@ func TestTenantReplayKeepsSameEventRecordsIndependent(t *testing.T) {
 			return nil
 		})
 		defer replayer.Close()
-		if count, err := replayer.RunOnce(context.Background()); err != nil || count != 2 {
-			t.Fatalf("round result count=%d err=%v, want 2/nil", count, err)
+		if count, err := replayer.RunOnce(context.Background()); err != nil || count != 0 {
+			t.Fatalf("round result count=%d err=%v, want 0/nil", count, err)
 		}
-		if delivered["tenant-a"] != 1 || delivered["tenant-b"] != 1 || broker.committed != 2 {
-			t.Fatalf("delivered=%v committed=%d, want one per tenant and offset 2", delivered, broker.committed)
+		if len(delivered) != 0 || broker.committed != 0 {
+			t.Fatalf("delivered=%v committed=%d, want no delivery or commit for ambiguous tenants", delivered, broker.committed)
+		}
+		if state.Marked("tenant-a", "evt") || state.Marked("tenant-b", "evt") {
+			t.Fatal("untrusted claims must not create scoped marks for ambiguous canonical tenants")
 		}
 		reloaded, err := LoadReplayState(statePath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reloaded.Marked("tenant-a", "evt") || !reloaded.Marked("tenant-b", "evt") {
-			t.Fatalf("reloaded marks a=%v b=%v, want both exact tenant/event marks", reloaded.Marked("tenant-a", "evt"), reloaded.Marked("tenant-b", "evt"))
-		}
-		if reloaded.Marked("tenant-c", "evt") {
-			t.Fatal("a same-ID mark must not authorize an unrelated tenant")
+		if reloaded.Marked("tenant-a", "evt") || reloaded.Marked("tenant-b", "evt") {
+			t.Fatal("ambiguous tenant records must remain unresolved after reload")
 		}
 	})
 }
@@ -416,13 +419,13 @@ func TestTenantReplayMixedErrorCodesRemainRecordScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	broker := &brokerDLQ{topic: TopicDLQ, messages: []kafka.Message{
-		tenantFailureMessage("evt", "tenant-a", ErrorCodePermanentError, 0),
-		tenantFailureMessage("evt", "tenant-b", ErrorCodeAttemptsExhausted, 1),
+		tenantFailureMessage("evt-a", "tenant-a", ErrorCodePermanentError, 0),
+		tenantFailureMessage("evt-b", "tenant-b", ErrorCodeAttemptsExhausted, 1),
 	}}
 	attempts := map[string]int{}
 	replayer := runTenantReplayer(broker, []kafka.Message{
-		tenantAcceptedMessage("evt", "tenant-a", 0),
-		tenantAcceptedMessage("evt", "tenant-b", 1),
+		tenantAcceptedMessage("evt-a", "tenant-a", 0),
+		tenantAcceptedMessage("evt-b", "tenant-b", 1),
 	}, state, func(_ context.Context, _, value []byte) error {
 		event, err := EventFromCanonical(value)
 		if err != nil {
@@ -441,8 +444,8 @@ func TestTenantReplayMixedErrorCodesRemainRecordScoped(t *testing.T) {
 	if attempts["tenant-a"] != 1 || attempts["tenant-b"] != 1 {
 		t.Fatalf("attempts=%v, want one attempt per physical record", attempts)
 	}
-	if !state.Marked("tenant-a", "evt") || state.Marked("tenant-b", "evt") {
-		t.Fatalf("marks a=%v b=%v, want only permanent record closed", state.Marked("tenant-a", "evt"), state.Marked("tenant-b", "evt"))
+	if !state.Marked("tenant-a", "evt-a") || state.Marked("tenant-b", "evt-b") {
+		t.Fatalf("marks a=%v b=%v, want only permanent record closed", state.Marked("tenant-a", "evt-a"), state.Marked("tenant-b", "evt-b"))
 	}
 	if replayer.Metrics().Permanent != 1 || broker.committed != 1 || len(broker.commits) != 1 {
 		t.Fatalf("metrics=%+v committed=%d commits=%d, want one closure and only offset 0 committed", replayer.Metrics(), broker.committed, len(broker.commits))

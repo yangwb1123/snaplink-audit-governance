@@ -1,5 +1,12 @@
 # Release Notes
 
+## 2026-09-05 — Keep ambiguous tenant replay pending
+
+DLQ replay no longer lets an untrusted `tenant_id` claim choose among multiple
+canonical accepted-topic tenants sharing an `event_id`. Such records remain
+pending until trusted provenance exists; unique canonical tenant matches retain
+legacy compatibility. No replay-state or payload migration is required.
+
 ## 2026-09-05 — Make DLQ publication failures observable and topology-safe
 
 Kafka consumer composition roots now reject blank consumer groups, empty stock

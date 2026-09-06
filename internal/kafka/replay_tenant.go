@@ -150,38 +150,19 @@ func addTenantCandidate(candidates map[string][]tenantAcceptedCandidate, eventID
 }
 
 // tenantCandidateForRecord associates one physical DLQ record with a
-// canonical accepted candidate. A claim can select a matching candidate, but
-// never creates one. With one DLQ record, a unique canonical candidate also
-// preserves the legacy optional-claim behavior: a misleading claim is
-// ignored rather than becoming authorization. Once that canonical identity
-// already has a durable mark, however, a mismatching claim is an incompatible
-// sibling signal and must remain pending across rounds and restarts. With
-// duplicate records, a mismatching claim is also left pending when another
-// record has a compatible claim; this prevents that record from inheriting
-// its sibling's association.
+// canonical accepted candidate. The optional DLQ tenant claim is never a
+// source of authorization: when accepted records prove that an event_id has
+// more than one canonical tenant, every physical DLQ record stays pending.
+// Only a unique canonical tenant can be selected. A mismatching claim is
+// ignored for a lone record, preserving compatibility with older Failure
+// records, but duplicate records still cannot inherit a sibling's durable
+// mark through a contradictory claim.
 func tenantCandidateForRecord(record dlqRecord, wanted wantedSet, candidates map[string][]tenantAcceptedCandidate, state *ReplayState) (tenantAcceptedCandidate, bool) {
 	items := candidates[record.eventID]
-	if len(items) == 0 {
-		return tenantAcceptedCandidate{}, false
-	}
-	if record.claimedTenantID != "" {
-		for _, candidate := range items {
-			if candidate.tenantID == record.claimedTenantID {
-				// A claim may disambiguate only in the context of multiple
-				// physical records. A lone record must not turn an untrusted
-				// claim into authorization, and remains pending if canonical
-				// candidates are ambiguous.
-				if len(items) == 1 || len(wanted.byEventID[record.eventID]) > 1 {
-					return candidate, true
-				}
-				return tenantAcceptedCandidate{}, false
-			}
-		}
-	}
 	if len(items) != 1 {
 		return tenantAcceptedCandidate{}, false
 	}
-	if record.claimedTenantID == "" {
+	if record.claimedTenantID == "" || record.claimedTenantID == items[0].tenantID {
 		return items[0], true
 	}
 	// A single physical record retains backward-compatible behavior for the
