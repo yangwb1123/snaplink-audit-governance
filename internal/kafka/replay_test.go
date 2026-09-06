@@ -1405,9 +1405,10 @@ func TestReplayPermanentCodeOneShotClosesOnPermanentRejection(t *testing.T) {
 }
 
 // AC-1b (REQ-PERM-1 sub-case): a permanent_error record whose one-shot
-// attempt fails TRANSIENTLY (DeliveryError{Permanent:false}, or a raw
-// transport error) is still closed as permanent — the poison-pill closure
-// that today retries every round forever (E6). Identical assertions to
+// attempt fails with a known non-uncertain transient (DeliveryError{Permanent:false},
+// or a raw transport error) is still closed as permanent — the poison-pill
+// closure that today retries every round forever (E6). Timeout/cancellation
+// is covered separately because its destination outcome is unknown. Identical assertions to
 // AC-1a, with the transient reason carried by the closure log line.
 func TestReplayPermanentCodeOneShotClosesOnTransientFailure(t *testing.T) {
 	for name, tc := range map[string]struct {
