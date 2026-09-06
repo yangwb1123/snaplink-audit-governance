@@ -215,7 +215,7 @@ func (s failingBatchSigner) Verify(context.Context, []byte, string) (bool, error
 func (s failingBatchSigner) Algorithm() string { return "test-failing-signer" }
 
 func TestGRPCAmbiguousAuthorizationRejectedBeforeIngest(t *testing.T) {
-	st, client, validContext := newGRPCHarness(t)
+	st, client, validContext := newGRPCHarnessOpts(t, grpcHarnessOptions{publisher: &failingLedgeredPublisher{}})
 	cases := []struct {
 		name   string
 		values []string
@@ -260,6 +260,14 @@ func TestGRPCAmbiguousAuthorizationRejectedBeforeIngest(t *testing.T) {
 	if events, receipts := snapshotCounts(t, st); events != 1 || receipts != 1 {
 		t.Fatalf("single credential counts: events=%d receipts=%d, want one each", events, receipts)
 	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if len(data.LedgeredOutbox) != 1 {
+			t.Fatalf("single credential outbox=%d, want one", len(data.LedgeredOutbox))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func grpcAuthContext(values ...string) context.Context {
@@ -277,6 +285,14 @@ func assertGRPCStoreEmpty(t *testing.T, st *store.Store) {
 	t.Helper()
 	if events, receipts := snapshotCounts(t, st); events != 0 || receipts != 0 {
 		t.Fatalf("ambiguous credentials changed persistence: events=%d receipts=%d", events, receipts)
+	}
+	if err := st.Read(func(data *store.Snapshot) error {
+		if len(data.LedgeredOutbox) != 0 {
+			t.Fatalf("ambiguous credentials changed ledgered outbox: %d", len(data.LedgeredOutbox))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
