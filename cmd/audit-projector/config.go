@@ -77,7 +77,7 @@ func resolveProjectorConfig(args []string, getenv func(string) string) (projecto
 	dsn := flags.String("clickhouse-dsn", envOrWith(getenv, "AUDIT_CLICKHOUSE_DSN", "clickhouse://audit:audit-local-only@localhost:19000/audit"), "ClickHouse native DSN")
 	backoff := flags.Duration("backoff", durationEnvWith(getenv, "AUDIT_KAFKA_BACKOFF", 2*time.Second), "retry backoff on projection failure")
 	maxAttempts := flags.Int("max-attempts", intEnvWith(getenv, "AUDIT_KAFKA_MAX_ATTEMPTS", 8), "max projection attempts per message before dead-lettering")
-	dlqTopic := flags.String("dlq-topic", envOrWith(getenv, "AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic; empty disables the DLQ publisher")
+	dlqTopic := flags.String("dlq-topic", envOrWith(getenv, "AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic; required for durable failure evidence")
 	if err := flags.Parse(args); err != nil {
 		return projectorConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -122,6 +122,9 @@ func validateProjectorTopology(cfg projectorConfig) error {
 func validateProjectorConfig(cfg projectorConfig) error {
 	if err := validateProjectorTopology(cfg); err != nil {
 		return err
+	}
+	if strings.TrimSpace(cfg.dlqTopic) == "" {
+		return errors.New("invalid projector configuration: DLQ topic is required; refusing unsafe no-publisher mode")
 	}
 	if cfg.brokers == "" {
 		return errors.New("brokers are required: pass -brokers or set AUDIT_KAFKA_BROKERS")

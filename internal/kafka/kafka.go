@@ -76,8 +76,10 @@ type Failure struct {
 }
 
 // FailurePublisher writes dead-letter Failure records to the DLQ topic.
-// *Producer implements it; the consumer degrades to commit + log when no
-// publisher is attached or publishing fails.
+// *Producer implements it. When a publisher is attached, publication is a
+// commit barrier: a publish error is returned and the source message remains
+// uncommitted for Kafka redelivery. A consumer without a publisher retains the
+// legacy commit + log fallback for explicitly controlled compatibility modes.
 type FailurePublisher interface {
 	PublishFailure(ctx context.Context, failure Failure) error
 }
@@ -233,9 +235,10 @@ const defaultMaxAttempts = 8
 // set) and deterministic domain rejections (domain.ErrOccurredAtOutOfRange,
 // projection.ErrNotLedgered) are dead-lettered immediately. Unparsable
 // messages are committed and logged as dead-letter evidence. Dead-lettering
-// publishes a Failure record
-// to the DLQ topic (when one is attached) and always commits, so partition
-// progress is never blocked by a slow or unavailable DLQ.
+// publishes a Failure record to the DLQ topic (when one is attached) before
+// committing. A publication error stops Run and leaves the fetched message
+// uncommitted, so a restarted reader can redeliver it. A consumer without a
+// publisher retains the legacy commit + log fallback.
 type Consumer struct {
 	reader      messageReader
 	ingest      IngestFunc
@@ -286,8 +289,9 @@ func WithMaxAttempts(maxAttempts int) ConsumerOption {
 	}
 }
 
-// WithDLQ attaches the dead-letter publisher. Without one (or when
-// publishing fails) dead-lettering degrades to commit + log.
+// WithDLQ attaches the dead-letter publisher. With a publisher attached,
+// publication must succeed before the source message is committed. Without
+// one, dead-lettering uses the legacy commit + log compatibility fallback.
 func WithDLQ(publisher FailurePublisher) ConsumerOption {
 	return func(c *Consumer) {
 		c.dlq = publisher
@@ -401,10 +405,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 // deadLetterUnparsable routes a message that could not be decoded into an
 // event (or violated the single-value contract) through the unparsable
-// dead-letter path: dead-letter evidence is recorded, the Failure is
-// published to the DLQ when a publisher is attached and an event_id is
-// recoverable, and the message is always committed so the partition
-// advances. The message is never retried and never reaches ingest.
+// dead-letter path. With a publisher and a recoverable event_id, the Failure
+// must be published before the source message is committed. A publication
+// error is returned without committing; the message is never retried in the
+// current session and never reaches ingest. The no-publisher/no-ID cases keep
+// their legacy commit + log behavior.
 func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Message, cause error) error {
 	// 不可解析的消息没有重试价值：先记录死信证据（DLQ 有挂载时），
 	// 再提交；绝不静默丢弃。event_id 优先取 payload 探针，key 仅作
@@ -421,10 +426,10 @@ func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Messa
 		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=no-event-id-recoverable (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset)
 	} else if c.dlq != nil {
 		if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
-			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
-		} else {
-			c.dlqPublished.Add(1)
+			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
+			return publishErr
 		}
+		c.dlqPublished.Add(1)
 	}
 	c.logf("dead-letter topic=%s partition=%d offset=%d event_id=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, cause)
 	return c.reader.CommitMessages(ctx, message)
@@ -522,23 +527,23 @@ func (c *Consumer) consume(ctx context.Context, message kafka.Message, event dom
 }
 
 // deadLetter publishes the Failure to the DLQ (when one is attached), then
-// commits the message so the partition advances. A publish failure degrades
-// to commit + log: the DLQ must never block ledger progress. A blank payload
+// commits the message so the partition advances. A publish failure is returned
+// before commit, preserving the source message for redelivery. A blank payload
 // event_id never yields a Failure record: the payload was parsed and is
 // authoritative, and an empty-ID record cannot be routed by replay — commit
 // + durable log instead (the key is an untrusted producer hint).
 func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event domain.Event, code string, cause error) error {
+	c.deadLettered.Add(1)
 	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error(), TenantID: event.TenantID}
 	if failure.EventID == "" {
 		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=empty-event-id code=%s (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, code)
 	} else if c.dlq != nil {
 		if err := c.dlq.PublishFailure(ctx, failure); err != nil {
-			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (degrading to commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
-		} else {
-			c.dlqPublished.Add(1)
+			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
+			return err
 		}
+		c.dlqPublished.Add(1)
 	}
-	c.deadLettered.Add(1)
 	c.logf("dead-lettered topic=%s partition=%d offset=%d event_id=%s code=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, cause)
 	return c.reader.CommitMessages(ctx, message)
 }

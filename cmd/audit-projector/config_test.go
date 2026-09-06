@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"reflect"
 	"strings"
@@ -246,6 +247,9 @@ func TestProjectorAlwaysUsesLedgeredSchema(t *testing.T) {
 				openStore: func(string) (projectorStore, error) {
 					return &projectorTestStore{events: &[]string{}}, nil
 				},
+				newProducer: func([]string, string) failureProducer {
+					return &projectorTestProducer{events: &[]string{}}
+				},
 				newConsumer: func(_ []string, topic, _ string, _ kafka.IngestFunc, _ time.Duration, _ *log.Logger, options ...kafka.ConsumerOption) projectorConsumer {
 					probe := kafka.NewConsumer([]string{"broker"}, topic, "probe", nil, time.Millisecond, nil)
 					defer probe.Close()
@@ -262,7 +266,7 @@ func TestProjectorAlwaysUsesLedgeredSchema(t *testing.T) {
 			}
 			cfg := projectorConfig{
 				brokers: "broker", sourceTopic: sourceTopic, group: "group",
-				backoff: time.Millisecond, maxAttempts: 1,
+				backoff: time.Millisecond, maxAttempts: 1, dlqTopic: "dlq",
 			}
 			if err := runProjector(context.Background(), cfg, log.New(&bytes.Buffer{}, "", 0), factories); err != nil {
 				t.Fatalf("runProjector() error = %v", err)
@@ -281,7 +285,6 @@ func TestRunProjectorStartupOrderAndDLQLifecycle(t *testing.T) {
 		wantPrefix []string
 	}{
 		{name: "enabled", dlqTopic: "dlq", wantPrefix: []string{"open store", "ensure schema", "new producer", "new consumer", "run consumer"}},
-		{name: "disabled", dlqTopic: "", wantPrefix: []string{"open store", "ensure schema", "new consumer", "run consumer"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			events := []string{}
@@ -294,13 +297,17 @@ func TestRunProjectorStartupOrderAndDLQLifecycle(t *testing.T) {
 					events = append(events, "new producer")
 					return &projectorTestProducer{events: &events}
 				},
-				newConsumer: func(_ []string, _ string, _ string, _ kafka.IngestFunc, _ time.Duration, _ *log.Logger, options ...kafka.ConsumerOption) projectorConsumer {
-					wantOptions := 2
-					if test.dlqTopic != "" {
-						wantOptions = 3
+				newConsumer: func(_ []string, topic, _ string, _ kafka.IngestFunc, _ time.Duration, _ *log.Logger, options ...kafka.ConsumerOption) projectorConsumer {
+					if len(options) != 3 {
+						t.Errorf("consumer options = %d, want 3 with a required DLQ", len(options))
 					}
-					if len(options) != wantOptions {
-						t.Errorf("consumer options = %d, want %d", len(options), wantOptions)
+					probe := kafka.NewConsumer([]string{"broker"}, topic, "probe", nil, time.Millisecond, nil)
+					defer probe.Close()
+					for _, option := range options {
+						option(probe)
+					}
+					if reflect.ValueOf(probe).Elem().FieldByName("dlq").IsNil() {
+						t.Error("enabled projector consumer has no DLQ publisher")
 					}
 					events = append(events, "new consumer")
 					return &projectorTestConsumer{events: &events}
@@ -328,12 +335,40 @@ func TestRunProjectorStartupOrderAndDLQLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunProjectorRejectsDisabledDLQBeforeFactories(t *testing.T) {
+	called := false
+	factories := projectorFactories{
+		openStore: func(string) (projectorStore, error) {
+			called = true
+			return nil, errors.New("store must not open")
+		},
+		newProducer: func([]string, string) failureProducer {
+			called = true
+			return nil
+		},
+		newConsumer: func([]string, string, string, kafka.IngestFunc, time.Duration, *log.Logger, ...kafka.ConsumerOption) projectorConsumer {
+			called = true
+			return nil
+		},
+	}
+	cfg := projectorConfig{brokers: "broker", sourceTopic: "source", group: "group", backoff: time.Second, maxAttempts: 1}
+	if err := runProjector(context.Background(), cfg, log.New(io.Discard, "", 0), factories); err == nil || !strings.Contains(err.Error(), "DLQ topic is required") {
+		t.Fatalf("runProjector() error=%v, want required-DLQ startup rejection", err)
+	}
+	if called {
+		t.Fatal("disabled DLQ must be rejected before opening external resources")
+	}
+}
+
 func TestRunProjectorLogsSafeResolvedConfiguration(t *testing.T) {
 	var output bytes.Buffer
 	events := []string{}
 	factories := projectorFactories{
 		openStore: func(string) (projectorStore, error) {
 			return &projectorTestStore{events: &events}, nil
+		},
+		newProducer: func([]string, string) failureProducer {
+			return &projectorTestProducer{events: &events}
 		},
 		newConsumer: func([]string, string, string, kafka.IngestFunc, time.Duration, *log.Logger, ...kafka.ConsumerOption) projectorConsumer {
 			return &projectorTestConsumer{events: &events}
@@ -342,7 +377,7 @@ func TestRunProjectorLogsSafeResolvedConfiguration(t *testing.T) {
 	cfg := projectorConfig{
 		brokers: "broker", sourceTopic: "source\nforged", group: "group\tvalue",
 		clickhouseDSN: "clickhouse://user:super-secret@host/audit",
-		backoff:       time.Second, maxAttempts: 1,
+		backoff:       time.Second, maxAttempts: 1, dlqTopic: "dlq",
 	}
 	if err := runProjector(context.Background(), cfg, log.New(&output, "", 0), factories); err != nil {
 		t.Fatalf("runProjector() error = %v", err)

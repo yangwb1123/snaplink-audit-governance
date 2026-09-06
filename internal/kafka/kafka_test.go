@@ -306,6 +306,51 @@ func TestConsumerDeadLettersUnparsableMessage(t *testing.T) {
 	}
 }
 
+// AC-3 / AC-4 / REQ-6: an unparsable message with a recoverable payload ID
+// follows the same publish-before-commit barrier, and the payload ID wins over
+// a stale Kafka key on the retry.
+func TestConsumerUnparsableDLQFailurePreservesPayloadIDAndRedelivery(t *testing.T) {
+	reader := &fakeReader{
+		messages: []kafka.Message{{
+			Key: []byte("stale"), Value: []byte(`{"event_id":"real","schema_version":"bad"}`),
+			Partition: 0, Offset: 1,
+		}},
+		publishFunc: func(Failure) error { return errors.New("dlq broker unavailable") },
+	}
+	ingested := 0
+	consumer := newConsumerWithReader(reader, func(_ context.Context, _ domain.Event) error {
+		ingested++
+		return nil
+	}, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err := consumer.Run(ctx)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "dlq broker unavailable") {
+		t.Fatalf("Run error=%v, want publication failure", err)
+	}
+	if ingested != 0 || len(reader.commits) != 0 || reader.committedOffset != 0 {
+		t.Fatalf("ingested=%d commits=%d committedOffset=%d, want 0/0/0", ingested, len(reader.commits), reader.committedOffset)
+	}
+
+	reader.publishFunc = nil
+	reader.fetchIndex = 0
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Millisecond)
+	err = consumer.Run(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("recovery Run error=%v, want context shutdown after commit", err)
+	}
+	if len(reader.published) != 1 || reader.published[0].EventID != "real" {
+		t.Fatalf("published=%v, want one unparsable Failure with payload event_id real", reader.published)
+	}
+	if reader.published[0].ErrorCode != ErrorCodeUnparsable {
+		t.Fatalf("error_code=%q, want %q", reader.published[0].ErrorCode, ErrorCodeUnparsable)
+	}
+	if len(reader.commits) != 1 || reader.committedOffset != 1 {
+		t.Fatalf("commits=%d committedOffset=%d, want 1/1", len(reader.commits), reader.committedOffset)
+	}
+}
+
 // T1b (AC-3): a domain.ErrOccurredAtOutOfRange-wrapped projection failure is
 // classified permanent and dead-lettered on the first attempt with
 // error_code=permanent_error and the partition advances — zero retries/backoff
@@ -654,9 +699,10 @@ func TestFailurePayloadMatchesAsyncAPISchema(t *testing.T) {
 	}
 }
 
-// T5: a DLQ publish failure degrades to commit + log; partition progress is
-// never blocked on the DLQ.
-func TestConsumerDegradesToCommitWhenDLQPublishFails(t *testing.T) {
+// AC-1 / REQ-1+3: a DLQ publish failure is returned before commit and stops
+// the fetch loop. In particular, evt-2 must not be processed as a consequence
+// of the unresolved evt-1.
+func TestConsumerDoesNotCommitWhenDLQPublishFails(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)},
 		publishFunc: func(Failure) error {
@@ -664,21 +710,79 @@ func TestConsumerDegradesToCommitWhenDLQPublishFails(t *testing.T) {
 		},
 	}
 	ingested := 0
-	runConsumer(t, reader, func(_ context.Context, event domain.Event) error {
+	consumer := newConsumerWithReader(reader, func(_ context.Context, event domain.Event) error {
 		ingested++
 		if event.EventID == "evt-1" {
 			return &outbox.DeliveryError{Permanent: true, Err: errors.New("audit api returned 400 Bad Request")}
 		}
 		return nil
-	}, WithDLQ(reader))
-	if reader.publishCalls != 1 {
-		t.Fatalf("publishCalls=%d, want 1 (publish attempted once)", reader.publishCalls)
+	}, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := consumer.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "dlq broker unavailable") {
+		t.Fatalf("Run error=%v, want the DLQ publication error", err)
 	}
-	if len(reader.published) != 0 {
-		t.Fatalf("published=%d, want 0 (publish failed)", len(reader.published))
+	if ingested != 1 {
+		t.Fatalf("ingested=%d, want 1 (later messages must wait for resolution)", ingested)
 	}
-	if reader.committedOffset != 2 {
-		t.Fatalf("committedOffset=%d, want 2 (DLQ failure must not block partition progress)", reader.committedOffset)
+	if reader.publishCalls != 1 || len(reader.published) != 0 {
+		t.Fatalf("publishCalls=%d published=%d, want 1 failed attempt and no successful record", reader.publishCalls, len(reader.published))
+	}
+	if len(reader.commits) != 0 || reader.committedOffset != 0 {
+		t.Fatalf("commits=%d committedOffset=%d, want 0/0 after failed publication", len(reader.commits), reader.committedOffset)
+	}
+}
+
+// AC-2 / REQ-4+5: a new reader session re-fetches the uncommitted poison
+// message, publishes exactly one successful Failure, and commits it before
+// processing the next message.
+func TestConsumerRestartRecoversAfterDLQPublishFailure(t *testing.T) {
+	attempts := 0
+	reader := &fakeReader{
+		messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)},
+		publishFunc: func(Failure) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("dlq broker unavailable")
+			}
+			return nil
+		},
+	}
+	ingested := 0
+	ingest := func(_ context.Context, event domain.Event) error {
+		ingested++
+		if event.EventID == "evt-1" {
+			return &outbox.DeliveryError{Permanent: true, Err: errors.New("audit api returned 400 Bad Request")}
+		}
+		return nil
+	}
+	consumer := newConsumerWithReader(reader, ingest, time.Millisecond, WithDLQ(reader))
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), time.Second)
+	err := consumer.Run(firstCtx)
+	firstCancel()
+	if err == nil || !strings.Contains(err.Error(), "dlq broker unavailable") {
+		t.Fatalf("first Run error=%v, want publication failure", err)
+	}
+	if reader.committedOffset != 0 || len(reader.published) != 0 {
+		t.Fatalf("after failed run committedOffset=%d published=%d, want 0/0", reader.committedOffset, len(reader.published))
+	}
+
+	reader.fetchIndex = 0 // a new Kafka reader session starts at the last commit
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	err = consumer.Run(secondCtx)
+	secondCancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Run error=%v, want normal context shutdown after resolution", err)
+	}
+	if ingested != 3 {
+		t.Fatalf("ingested=%d, want 3 (evt-1 retried, then evt-2 processed)", ingested)
+	}
+	if attempts != 2 || len(reader.published) != 1 {
+		t.Fatalf("publish attempts=%d successful records=%d, want 2/1", attempts, len(reader.published))
+	}
+	if len(reader.commits) != 2 || reader.committedOffset != 2 {
+		t.Fatalf("commits=%d committedOffset=%d, want 2/2", len(reader.commits), reader.committedOffset)
 	}
 }
 
@@ -755,8 +859,9 @@ func TestConsumerRetriesFailedMessageInPlaceWithoutRefetch(t *testing.T) {
 	}
 }
 
-// T8: with no publisher attached (audit-projector style), dead-lettering
-// degrades to commit + log and the partition still advances.
+// T8: the generic Consumer retains an explicitly selected compatibility mode:
+// with no publisher attached, dead-lettering degrades to commit + log and the
+// partition still advances. Production projector startup rejects this mode.
 func TestConsumerDeadLettersWithoutPublisherCommitsAndLogs(t *testing.T) {
 	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
 	ingested := 0
