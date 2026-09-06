@@ -9,6 +9,36 @@ import (
 	"github.com/snaplink/audit-governance/internal/kafka"
 )
 
+func TestValidateReplayTopology(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		accepted string
+		dlq      string
+		group    string
+		wantErr  string
+	}{
+		{name: "valid", accepted: kafka.TopicAccepted, dlq: kafka.TopicDLQ, group: "audit-replay"},
+		{name: "blank group", accepted: kafka.TopicAccepted, dlq: kafka.TopicDLQ, group: " \t", wantErr: "consumer group"},
+		{name: "blank accepted topic", accepted: " ", dlq: kafka.TopicDLQ, group: "audit-replay", wantErr: "accepted topic"},
+		{name: "blank DLQ topic", accepted: kafka.TopicAccepted, dlq: "", group: "audit-replay", wantErr: "DLQ topic"},
+		{name: "self loop", accepted: "same", dlq: "same", group: "audit-replay", wantErr: "source topic"},
+		{name: "stock topic collision", accepted: "custom-source", dlq: kafka.TopicLedgered, group: "audit-replay", wantErr: "DLQ topic"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := kafka.ValidateReplayTopology(test.accepted, test.dlq, test.group)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateReplayTopology() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("ValidateReplayTopology() error = %v, want diagnostic containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 // T7 (AC-2/AC-D2): metricsText renders the split resolution counters in the
 // pinned order — the five original lines keep their names and positions
 // (with replayed narrowed to successful re-publishes), the renamed

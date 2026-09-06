@@ -38,6 +38,9 @@ func main() {
 	replayAuthBlocked := flag.Bool("replay-auth-blocked", false, "re-publish DLQ records with error_code=unauthorized (set only after the ingest token is fixed)")
 	metricsListen := flag.String("metrics-listen", os.Getenv("AUDIT_DLQ_REPLAY_METRICS"), "optional metrics listen address (e.g. :9091)")
 	flag.Parse()
+	if err := kafka.ValidateReplayTopology(*acceptedTopic, *dlqTopic, *group); err != nil {
+		log.Fatalf("replay topology: %v", err)
+	}
 	if *brokers == "" {
 		log.Fatalf("brokers are required: pass -brokers or set AUDIT_KAFKA_BROKERS")
 	}

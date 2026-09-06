@@ -31,14 +31,16 @@ func TestValidateTopicTopology(t *testing.T) {
 		{name: "self loop", source: "same", dlq: "same", valid: false},
 		{name: "default source self loop", source: "", dlq: TopicAccepted, valid: false},
 		{name: "whitespace around collision", source: " same ", dlq: "same", valid: false},
+		{name: "accepted DLQ collides with stock topic", source: "custom-source", dlq: TopicAccepted, valid: false},
+		{name: "ledgered DLQ collides with stock topic", source: TopicAccepted, dlq: TopicLedgered, valid: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidateTopicTopology(test.source, test.dlq)
 			if test.valid && err != nil {
 				t.Fatalf("ValidateTopicTopology() error = %v, want nil", err)
 			}
-			if !test.valid && (err == nil || !strings.Contains(err.Error(), "source topic")) {
-				t.Fatalf("ValidateTopicTopology() error = %v, want source-topic diagnostic", err)
+			if !test.valid && (err == nil || (!strings.Contains(err.Error(), "source topic") && !strings.Contains(err.Error(), "DLQ topic"))) {
+				t.Fatalf("ValidateTopicTopology() error = %v, want topology diagnostic", err)
 			}
 		})
 	}
