@@ -100,6 +100,58 @@ func TestConsumerRejectsMissingBrokers(t *testing.T) {
 	}
 }
 
+func TestConsumerRejectsUnsafeDLQTopologyBeforeConnections(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		diagnostic string
+	}{
+		{
+			name:       "source and DLQ collide",
+			args:       []string{"-topic", "same", "-dlq-topic", "same"},
+			diagnostic: "source topic",
+		},
+		{
+			name:       "blank consumer group",
+			args:       []string{"-group", " \t"},
+			diagnostic: "consumer group",
+		},
+		{
+			name:       "empty DLQ",
+			args:       []string{"-dlq-topic", ""},
+			diagnostic: "DLQ topic is required",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"-brokers", "127.0.0.1:1"}, test.args...)
+			output, exit := runBinary(t, args...)
+			if exit != 1 {
+				t.Fatalf("exit=%d, want startup rejection; output:\n%s", exit, output)
+			}
+			if !strings.Contains(output, test.diagnostic) {
+				t.Fatalf("output=%q, want diagnostic containing %q", output, test.diagnostic)
+			}
+			lower := strings.ToLower(output)
+			if strings.Contains(lower, "api-url") || strings.Contains(lower, "kafka") {
+				t.Fatalf("invalid topology reached a downstream setup path: %q", output)
+			}
+		})
+	}
+}
+
+func TestConsumerTopologyValidationUsesLibraryRules(t *testing.T) {
+	if err := validateConsumerTopology("", kafka.TopicDLQ, "group"); err != nil {
+		t.Fatalf("default source topology rejected: %v", err)
+	}
+	if err := validateConsumerTopology(kafka.TopicAccepted, kafka.TopicAccepted, "group"); err == nil {
+		t.Fatal("source/DLQ collision must be rejected")
+	}
+	if err := validateConsumerTopology(kafka.TopicAccepted, kafka.TopicDLQ, " \t"); err == nil {
+		t.Fatal("blank group must be rejected")
+	}
+}
+
 func TestConsumerRejectsNonPositiveMaxAttemptsFlag(t *testing.T) {
 	output, exit := runBinary(t, "-brokers", "localhost:9092", "-max-attempts", "0")
 	if exit != 1 {
@@ -244,8 +296,8 @@ func TestConsumerInsecureAPIURLOptInWarns(t *testing.T) {
 }
 
 // AC-7.2.3: metricsText renders the consumer counters in the pinned order
-// with the new audit_consumer_unauthorized_total line (golden — a reorder
-// or a name change fails this test). The new disjoint third class
+// with the unauthorized and DLQ publication outcome lines (golden — a
+// reorder or a name change fails this test). The new disjoint third class
 // (audit_consumer_foreign_tenant_skipped_total) is appended last: a skip is
 // committed but is neither ingested nor dead-lettered, so its counter sits
 // outside both families.
@@ -255,16 +307,18 @@ func TestConsumerMetricsTextGolden(t *testing.T) {
 		DeadLettered:         2,
 		Unauthorized:         3,
 		DLQPublished:         4,
-		MessagesCommitted:    5,
-		ForeignTenantSkipped: 6,
+		DLQPublishFailures:   5,
+		MessagesCommitted:    6,
+		ForeignTenantSkipped: 7,
 	}
 	want := "" +
 		"audit_consumer_ingest_failures_total 1\n" +
 		"audit_consumer_dead_lettered_total 2\n" +
 		"audit_consumer_unauthorized_total 3\n" +
 		"audit_consumer_dlq_published_total 4\n" +
-		"audit_consumer_messages_committed_total 5\n" +
-		"audit_consumer_foreign_tenant_skipped_total 6\n"
+		"audit_consumer_dlq_publish_failures_total 5\n" +
+		"audit_consumer_messages_committed_total 6\n" +
+		"audit_consumer_foreign_tenant_skipped_total 7\n"
 	if got := metricsText(metrics); got != want {
 		t.Fatalf("metricsText mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}

@@ -11,6 +11,16 @@ groups:
           summary: Audit events are being dead-lettered
           description: "{{ $value }} DLQ records published in the last 5 minutes by audit-kafka-consumer. Investigate error_code in audit.events.dlq.v1 and replay after fixing the cause."
 
+      # 发布失败告警：barrier 保持 source offset 未提交，直到 DLQ 恢复；这不是
+      # 可接受的 commit+log 降级，必须恢复 producer ACL/broker 后重启或继续消费。
+      - alert: AuditDLQPublishFailures
+        expr: increase(audit_consumer_dlq_publish_failures_total[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Audit DLQ publication is failing
+          description: "{{ $value }} DLQ publication failures in the last 15 minutes. The consumer should hold the source offset uncommitted; restore DLQ broker/ACL health and verify redelivery before resuming."
+
       # 重放积压告警：DLQ 重放消费者发现未重放事件（重放失败或未调度）。
       - alert: AuditDLQBacklog
         expr: audit_dlq_pending > 0

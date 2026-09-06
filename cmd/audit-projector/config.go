@@ -105,16 +105,11 @@ func effectiveSourceTopic(topic string) string {
 }
 
 func validateProjectorTopology(cfg projectorConfig) error {
-	if cfg.dlqTopic != "" && cfg.sourceTopic == cfg.dlqTopic {
-		return fmt.Errorf(
-			"invalid projector topology: source topic %q equals enabled DLQ topic %q",
-			cfg.sourceTopic, cfg.dlqTopic,
-		)
+	if err := kafka.ValidateTopicTopology(cfg.sourceTopic, cfg.dlqTopic); err != nil {
+		return fmt.Errorf("invalid projector topology: %w", err)
 	}
-	if strings.TrimSpace(cfg.group) == "" {
-		return errors.New(
-			"invalid projector topology: consumer group must contain non-whitespace characters",
-		)
+	if err := kafka.ValidateConsumerGroup(cfg.group); err != nil {
+		return fmt.Errorf("invalid projector topology: %w", err)
 	}
 	return nil
 }

@@ -18,14 +18,15 @@ import (
 )
 
 type fakeReader struct {
-	messages        []kafka.Message
-	commits         []kafka.Message
-	committedOffset int64
-	fetchIndex      int
-	publishCalls    int
-	published       []Failure
-	publishFunc     func(Failure) error
-	commitFunc      func(...kafka.Message) error
+	messages           []kafka.Message
+	commits            []kafka.Message
+	committedOffset    int64
+	fetchIndex         int
+	publishCalls       int
+	published          []Failure
+	publishFunc        func(Failure) error
+	publishContextFunc func(context.Context, Failure) error
+	commitFunc         func(...kafka.Message) error
 }
 
 // FetchMessage 模拟真实 kafka-go reader 的语义（reader.go:846）：fetch 位置
@@ -63,9 +64,13 @@ func (f *fakeReader) Config() kafka.ReaderConfig { return kafka.ReaderConfig{Top
 func (f *fakeReader) Close() error               { return nil }
 
 // PublishFailure lets tests attach the fake as the consumer's DLQ publisher.
-func (f *fakeReader) PublishFailure(_ context.Context, failure Failure) error {
+func (f *fakeReader) PublishFailure(ctx context.Context, failure Failure) error {
 	f.publishCalls++
-	if f.publishFunc != nil {
+	if f.publishContextFunc != nil {
+		if err := f.publishContextFunc(ctx, failure); err != nil {
+			return err
+		}
+	} else if f.publishFunc != nil {
 		if err := f.publishFunc(failure); err != nil {
 			return err
 		}
@@ -737,6 +742,292 @@ func TestConsumerDoesNotCommitWhenDLQPublishFails(t *testing.T) {
 // AC-2 / REQ-4+5: a new reader session re-fetches the uncommitted poison
 // message, publishes exactly one successful Failure, and commits it before
 // processing the next message.
+func TestConsumerDLQPublishFailureDoesNotCommitAfterAttemptCap(t *testing.T) {
+	cases := []struct {
+		name       string
+		ingestErr  error
+		expectCode string
+	}{
+		{
+			name:       "attempts exhausted",
+			ingestErr:  errors.New("api unavailable"),
+			expectCode: ErrorCodeAttemptsExhausted,
+		},
+		{
+			name: "unauthorized",
+			ingestErr: &outbox.DeliveryError{
+				StatusCode: http.StatusUnauthorized,
+				Err:        errors.New("token rejected"),
+			},
+			expectCode: ErrorCodeUnauthorized,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1)}}
+			var attempted Failure
+			reader.publishFunc = func(failure Failure) error {
+				attempted = failure
+				return errors.New("dlq broker unavailable")
+			}
+			ingested := 0
+			consumer := newConsumerWithReader(reader, func(_ context.Context, _ domain.Event) error {
+				ingested++
+				return test.ingestErr
+			}, time.Millisecond, WithDLQ(reader), WithMaxAttempts(2))
+			ctx, cancel := context.WithCancel(context.Background())
+			err := consumer.Run(ctx)
+			cancel()
+			if err == nil || !strings.Contains(err.Error(), "dlq broker unavailable") {
+				t.Fatalf("Run error=%v, want publication failure", err)
+			}
+			if ingested != 2 {
+				t.Fatalf("ingested=%d, want attempt cap 2", ingested)
+			}
+			if attempted.EventID != "evt-1" || attempted.ErrorCode != test.expectCode {
+				t.Fatalf("attempted failure=%+v, want event_id=evt-1 code=%s", attempted, test.expectCode)
+			}
+			if len(reader.commits) != 0 || reader.committedOffset != 0 {
+				t.Fatalf("commits=%d committedOffset=%d, want 0/0", len(reader.commits), reader.committedOffset)
+			}
+			metrics := consumer.Metrics()
+			if metrics.DLQPublishFailures != 1 || metrics.DLQPublished != 0 || metrics.DeadLettered != 1 {
+				t.Fatalf("metrics=%+v, want one failed and no successful DLQ publication", metrics)
+			}
+			if test.expectCode == ErrorCodeUnauthorized && metrics.Unauthorized != 1 {
+				t.Fatalf("Unauthorized=%d, want 1", metrics.Unauthorized)
+			}
+		})
+	}
+}
+
+// A producer may accept the record and lose the response before returning an
+// error. The source offset must still remain pending; at-least-once recovery
+// then permits a duplicate DLQ record on the next reader session.
+func TestConsumerUncertainDLQPublishLeavesMessageForRedelivery(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	reader.publishFunc = func(failure Failure) error {
+		reader.published = append(reader.published, failure)
+		return context.DeadlineExceeded
+	}
+	ingested := 0
+	ingest := func(_ context.Context, event domain.Event) error {
+		ingested++
+		if event.EventID == "evt-1" {
+			return &outbox.DeliveryError{Permanent: true, Err: errors.New("bad event")}
+		}
+		return nil
+	}
+	first := newConsumerWithReader(reader, ingest, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithCancel(context.Background())
+	err := first.Run(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Run error=%v, want uncertain publication error", err)
+	}
+	if len(reader.published) != 1 || len(reader.commits) != 0 || reader.committedOffset != 0 {
+		t.Fatalf("after uncertain publish published=%d commits=%d offset=%d, want 1/0/0", len(reader.published), len(reader.commits), reader.committedOffset)
+	}
+
+	reader.publishFunc = nil
+	reader.fetchIndex = 0
+	committedSecond := make(chan struct{})
+	reader.commitFunc = func(messages ...kafka.Message) error {
+		for _, message := range messages {
+			if message.Offset == 2 {
+				close(committedSecond)
+			}
+		}
+		return nil
+	}
+	second := newConsumerWithReader(reader, ingest, time.Millisecond, WithDLQ(reader))
+	runErr := make(chan error, 1)
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() { runErr <- second.Run(ctx) }()
+	select {
+	case <-committedSecond:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("restart did not commit the recovered message and following message")
+	}
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Run error=%v, want context cancellation after resolution", err)
+	}
+	if ingested != 3 {
+		t.Fatalf("ingested=%d, want 3 (evt-1 twice and evt-2 once)", ingested)
+	}
+	if len(reader.published) != 2 || reader.published[0].EventID != reader.published[1].EventID {
+		t.Fatalf("published=%v, want two at-least-once DLQ attempts for evt-1", reader.published)
+	}
+	if len(reader.commits) != 2 || reader.committedOffset != 2 {
+		t.Fatalf("commits=%d committedOffset=%d, want 2/2 after successful restart", len(reader.commits), reader.committedOffset)
+	}
+	if metrics := second.Metrics(); metrics.DLQPublished != 1 || metrics.DLQPublishFailures != 0 {
+		t.Fatalf("second metrics=%+v, want one successful publication", metrics)
+	}
+}
+
+// A successful DLQ write followed by an uncertain source commit has the same
+// at-least-once shape: restart may publish the Failure again, but no later
+// message is resolved during the failed session.
+func TestConsumerCommitFailureAfterDLQPublishPreservesRedelivery(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	commitFailed := true
+	reader.commitFunc = func(...kafka.Message) error {
+		if commitFailed {
+			return errors.New("commit unavailable")
+		}
+		return nil
+	}
+	ingested := 0
+	ingest := func(_ context.Context, event domain.Event) error {
+		ingested++
+		if event.EventID == "evt-1" {
+			return &outbox.DeliveryError{Permanent: true, Err: errors.New("bad event")}
+		}
+		return nil
+	}
+	first := newConsumerWithReader(reader, ingest, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithCancel(context.Background())
+	err := first.Run(ctx)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "commit unavailable") {
+		t.Fatalf("first Run error=%v, want commit failure", err)
+	}
+	if len(reader.published) != 1 || len(reader.commits) != 0 || reader.fetchIndex != 1 {
+		t.Fatalf("after commit failure published=%d commits=%d fetchIndex=%d, want 1/0/1", len(reader.published), len(reader.commits), reader.fetchIndex)
+	}
+
+	commitFailed = false
+	reader.fetchIndex = 0
+	committedSecond := make(chan struct{})
+	reader.commitFunc = func(messages ...kafka.Message) error {
+		for _, message := range messages {
+			if message.Offset == 2 {
+				close(committedSecond)
+			}
+		}
+		return nil
+	}
+	second := newConsumerWithReader(reader, ingest, time.Millisecond, WithDLQ(reader))
+	runErr := make(chan error, 1)
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() { runErr <- second.Run(ctx) }()
+	select {
+	case <-committedSecond:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("restart did not commit the recovered message and following message")
+	}
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Run error=%v, want context cancellation after resolution", err)
+	}
+	if ingested != 3 || len(reader.published) != 2 {
+		t.Fatalf("ingested=%d published=%d, want 3/2 for at-least-once commit recovery", ingested, len(reader.published))
+	}
+	if len(reader.commits) != 2 || reader.committedOffset != 2 {
+		t.Fatalf("commits=%d committedOffset=%d, want 2/2", len(reader.commits), reader.committedOffset)
+	}
+}
+
+func TestConsumerHoldsPartitionWhileDLQPublishPending(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	publishStarted := make(chan struct{})
+	releasePublish := make(chan struct{})
+	reader.publishFunc = func(Failure) error {
+		close(publishStarted)
+		<-releasePublish
+		return nil
+	}
+	secondCommitted := make(chan struct{})
+	reader.commitFunc = func(messages ...kafka.Message) error {
+		for _, message := range messages {
+			if message.Offset == 2 {
+				close(secondCommitted)
+			}
+		}
+		return nil
+	}
+	order := []string{}
+	consumer := newConsumerWithReader(reader, func(_ context.Context, event domain.Event) error {
+		order = append(order, event.EventID)
+		if event.EventID == "evt-1" {
+			return &outbox.DeliveryError{Permanent: true, Err: errors.New("bad event")}
+		}
+		return nil
+	}, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- consumer.Run(ctx) }()
+	select {
+	case <-publishStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("DLQ publication did not start")
+	}
+	if reader.fetchIndex != 1 || len(order) != 1 || len(reader.commits) != 0 {
+		cancel()
+		t.Fatalf("while publication blocked fetchIndex=%d order=%v commits=%d, want 1/[evt-1]/0", reader.fetchIndex, order, len(reader.commits))
+	}
+	select {
+	case <-secondCommitted:
+		cancel()
+		t.Fatal("later message committed before the failed message's DLQ publication was released")
+	default:
+	}
+	close(releasePublish)
+	select {
+	case <-secondCommitted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("later message was not processed after DLQ publication and commit")
+	}
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v, want context cancellation after ordered resolution", err)
+	}
+	if len(order) != 2 || order[0] != "evt-1" || order[1] != "evt-2" {
+		t.Fatalf("ingest order=%v, want [evt-1 evt-2]", order)
+	}
+	if len(reader.commits) != 2 || reader.committedOffset != 2 {
+		t.Fatalf("commits=%d committedOffset=%d, want 2/2", len(reader.commits), reader.committedOffset)
+	}
+}
+
+func TestConsumerDLQPublicationHonorsCancellation(t *testing.T) {
+	reader := &fakeReader{messages: []kafka.Message{validMessage("evt-1", 1), validMessage("evt-2", 2)}}
+	publishStarted := make(chan struct{})
+	reader.publishContextFunc = func(ctx context.Context, _ Failure) error {
+		close(publishStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	consumer := newConsumerWithReader(reader, func(_ context.Context, _ domain.Event) error {
+		return &outbox.DeliveryError{Permanent: true, Err: errors.New("bad event")}
+	}, time.Millisecond, WithDLQ(reader))
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- consumer.Run(ctx) }()
+	select {
+	case <-publishStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("DLQ publication did not start")
+	}
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v, want context cancellation from publisher", err)
+	}
+	if reader.fetchIndex != 1 || len(reader.commits) != 0 || reader.committedOffset != 0 {
+		t.Fatalf("after cancellation fetchIndex=%d commits=%d committedOffset=%d, want 1/0/0", reader.fetchIndex, len(reader.commits), reader.committedOffset)
+	}
+	if metrics := consumer.Metrics(); metrics.DLQPublishFailures != 1 || metrics.DLQPublished != 0 {
+		t.Fatalf("metrics=%+v, want one failed and no successful DLQ publication", metrics)
+	}
+}
+
 func TestConsumerRestartRecoversAfterDLQPublishFailure(t *testing.T) {
 	attempts := 0
 	reader := &fakeReader{

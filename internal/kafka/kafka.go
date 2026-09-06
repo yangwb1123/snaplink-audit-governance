@@ -254,6 +254,7 @@ type Consumer struct {
 	deadLettered         atomic.Uint64
 	unauthorized         atomic.Uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
 	dlqPublished         atomic.Uint64
+	dlqPublishFailures   atomic.Uint64 // publish attempts that failed before the source commit
 	messagesCommitted    atomic.Uint64
 	foreignTenantSkipped atomic.Uint64 // disjoint third class: skipped+committed, never ingested/dead-lettered
 }
@@ -275,6 +276,7 @@ type ConsumerMetrics struct {
 	DeadLettered         uint64
 	Unauthorized         uint64 // dead-lettered with error_code=unauthorized (401-class cap exhaustion)
 	DLQPublished         uint64
+	DLQPublishFailures   uint64 // publish attempts that failed before the source commit
 	MessagesCommitted    uint64
 	ForeignTenantSkipped uint64 // skipped+committed, disjoint from ingest/commit and dead-letter
 }
@@ -424,12 +426,9 @@ func (c *Consumer) deadLetterUnparsable(ctx context.Context, message kafka.Messa
 	}
 	if failure.EventID == "" {
 		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=no-event-id-recoverable (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset)
-	} else if c.dlq != nil {
-		if publishErr := c.dlq.PublishFailure(ctx, failure); publishErr != nil {
-			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
-			return publishErr
-		}
-		c.dlqPublished.Add(1)
+	} else if publishErr := c.publishFailure(ctx, failure); publishErr != nil {
+		c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, ErrorCodeUnparsable, publishErr)
+		return publishErr
 	}
 	c.logf("dead-letter topic=%s partition=%d offset=%d event_id=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, failure.EventID, cause)
 	return c.reader.CommitMessages(ctx, message)
@@ -537,15 +536,24 @@ func (c *Consumer) deadLetter(ctx context.Context, message kafka.Message, event 
 	failure := Failure{EventID: event.EventID, ErrorCode: code, ErrorMessage: cause.Error(), TenantID: event.TenantID}
 	if failure.EventID == "" {
 		c.logf("dlq publish skipped topic=%s partition=%d offset=%d reason=empty-event-id code=%s (commit+log)", c.reader.Config().Topic, message.Partition, message.Offset, code)
-	} else if c.dlq != nil {
-		if err := c.dlq.PublishFailure(ctx, failure); err != nil {
-			c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
-			return err
-		}
-		c.dlqPublished.Add(1)
+	} else if err := c.publishFailure(ctx, failure); err != nil {
+		c.logf("dlq publish failed topic=%s partition=%d offset=%d event_id=%s code=%s error=%v (message remains uncommitted)", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, err)
+		return err
 	}
 	c.logf("dead-lettered topic=%s partition=%d offset=%d event_id=%s code=%s error=%v", c.reader.Config().Topic, message.Partition, message.Offset, event.EventID, code, cause)
 	return c.reader.CommitMessages(ctx, message)
+}
+
+func (c *Consumer) publishFailure(ctx context.Context, failure Failure) error {
+	if c.dlq == nil {
+		return nil
+	}
+	if err := c.dlq.PublishFailure(ctx, failure); err != nil {
+		c.dlqPublishFailures.Add(1)
+		return err
+	}
+	c.dlqPublished.Add(1)
+	return nil
 }
 
 func (c *Consumer) Close() error { return c.reader.Close() }
@@ -557,6 +565,7 @@ func (c *Consumer) Metrics() ConsumerMetrics {
 		DeadLettered:         c.deadLettered.Load(),
 		Unauthorized:         c.unauthorized.Load(),
 		DLQPublished:         c.dlqPublished.Load(),
+		DLQPublishFailures:   c.dlqPublishFailures.Load(),
 		MessagesCommitted:    c.messagesCommitted.Load(),
 		ForeignTenantSkipped: c.foreignTenantSkipped.Load(),
 	}

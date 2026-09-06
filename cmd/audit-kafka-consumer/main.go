@@ -27,10 +27,13 @@ func main() {
 	backoff := flag.Duration("backoff", durationEnv("AUDIT_KAFKA_BACKOFF", 2*time.Second), "retry backoff on ingest failure")
 	timeout := flag.Duration("timeout", durationEnv("AUDIT_KAFKA_TIMEOUT", 30*time.Second), "per-message ingest timeout")
 	maxAttempts := flag.Int("max-attempts", intEnv("AUDIT_KAFKA_MAX_ATTEMPTS", 8), "max ingest attempts per message before dead-lettering")
-	dlqTopic := flag.String("dlq-topic", envOr("AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic")
+	dlqTopic := flag.String("dlq-topic", envOr("AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic; required for durable failure evidence")
 	metricsListen := flag.String("metrics-listen", os.Getenv("AUDIT_KAFKA_METRICS"), "optional metrics listen address (e.g. :9092)")
 	tenant := flag.String("tenant", os.Getenv("AUDIT_KAFKA_TENANT"), "tenant scope: skip and commit messages whose event.TenantID differs (unset = no filtering)")
 	flag.Parse()
+	if err := validateConsumerTopology(*topic, *dlqTopic, *group); err != nil {
+		log.Fatalf("consumer topology: %v", err)
+	}
 	if *brokers == "" {
 		log.Fatalf("brokers are required: pass -brokers or set AUDIT_KAFKA_BROKERS")
 	}
@@ -98,6 +101,19 @@ func main() {
 	logger.Printf("shutting down")
 }
 
+func validateConsumerTopology(sourceTopic, dlqTopic, groupID string) error {
+	if err := kafka.ValidateConsumerGroup(groupID); err != nil {
+		return err
+	}
+	if err := kafka.ValidateTopicTopology(sourceTopic, dlqTopic); err != nil {
+		return err
+	}
+	if strings.TrimSpace(dlqTopic) == "" {
+		return fmt.Errorf("DLQ topic is required; refusing unsafe no-publisher mode")
+	}
+	return nil
+}
+
 func envOr(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -161,7 +177,8 @@ func serveMetrics(address string, consumer *kafka.Consumer, logger *log.Logger) 
 
 // metricsText renders the consumer counters in the Prometheus text format.
 // The line order is pinned (golden-tested): audit_consumer_unauthorized_total
-// sits after dead_lettered (it is a subset of dead-lettered events), and
+// sits after dead_lettered (it is a subset of dead-lettered events), the DLQ
+// publication outcome counters follow it, and
 // audit_consumer_foreign_tenant_skipped_total is the disjoint third class —
 // a skipped foreign-tenant message is committed but is neither ingested nor
 // dead-lettered, so its counter sits outside both families, last. No metric
@@ -174,8 +191,10 @@ func metricsText(m kafka.ConsumerMetrics) string {
 			"audit_consumer_dead_lettered_total %d\n"+
 			"audit_consumer_unauthorized_total %d\n"+
 			"audit_consumer_dlq_published_total %d\n"+
+			"audit_consumer_dlq_publish_failures_total %d\n"+
 			"audit_consumer_messages_committed_total %d\n"+
 			"audit_consumer_foreign_tenant_skipped_total %d\n",
 		m.IngestFailures, m.DeadLettered, m.Unauthorized,
-		m.DLQPublished, m.MessagesCommitted, m.ForeignTenantSkipped)
+		m.DLQPublished, m.DLQPublishFailures, m.MessagesCommitted,
+		m.ForeignTenantSkipped)
 }

@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-05 — Make DLQ publication failures observable and topology-safe
+
+Kafka consumer composition roots now reject blank consumer groups, empty stock
+DLQ topics, and source/DLQ self-loops before opening external resources. The
+consumer exports a separate `audit_consumer_dlq_publish_failures_total`
+counter, while retaining the publish-before-commit barrier and at-least-once
+redelivery semantics. No payload or topic migration is required.
+
 ## 2026-09-05 — Bound archive object writes by caller cancellation and deadline
 
 Worker archive passes and API ingest archive commits now thread their caller

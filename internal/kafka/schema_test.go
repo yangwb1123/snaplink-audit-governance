@@ -16,9 +16,11 @@ import (
 
 type recordingProducerWriter struct {
 	messages []kafka.Message
+	contexts []context.Context
 }
 
-func (w *recordingProducerWriter) WriteMessages(_ context.Context, messages ...kafka.Message) error {
+func (w *recordingProducerWriter) WriteMessages(ctx context.Context, messages ...kafka.Message) error {
+	w.contexts = append(w.contexts, ctx)
 	for _, message := range messages {
 		message.Key = append([]byte(nil), message.Key...)
 		message.Value = append([]byte(nil), message.Value...)
@@ -256,6 +258,41 @@ func TestProducerDeliverValidatesTopicSchemaBeforeWrite(t *testing.T) {
 				t.Fatalf("writer messages=%d, want zero on rejected event", len(writer.messages))
 			}
 		})
+	}
+}
+
+func TestProducerPublishFailureWritesDLQContract(t *testing.T) {
+	writer := &recordingProducerWriter{}
+	producer := &Producer{writer: writer, topic: TopicDLQ}
+	ctx := context.WithValue(context.Background(), struct{}{}, "publish-context")
+	failure := Failure{
+		EventID:      "evt-failure",
+		ErrorCode:    ErrorCodeAttemptsExhausted,
+		ErrorMessage: "temporary API outage",
+		TenantID:     "tenant-a",
+	}
+	if err := producer.PublishFailure(ctx, failure); err != nil {
+		t.Fatalf("PublishFailure() error = %v", err)
+	}
+	if producer.topic != TopicDLQ {
+		t.Fatalf("producer topic=%q, want %q", producer.topic, TopicDLQ)
+	}
+	if len(writer.messages) != 1 || len(writer.contexts) != 1 {
+		t.Fatalf("writer messages=%d contexts=%d, want 1/1", len(writer.messages), len(writer.contexts))
+	}
+	message := writer.messages[0]
+	if string(message.Key) != failure.EventID {
+		t.Fatalf("DLQ Kafka key=%q, want event_id %q", message.Key, failure.EventID)
+	}
+	want, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatalf("marshal expected failure: %v", err)
+	}
+	if string(message.Value) != string(want) {
+		t.Fatalf("DLQ Kafka value=%s, want %s", message.Value, want)
+	}
+	if writer.contexts[0] != ctx {
+		t.Fatal("PublishFailure did not pass the caller context to the writer")
 	}
 }
 
