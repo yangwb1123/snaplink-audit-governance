@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-09-06 — Reject ambiguous authorization credentials
+
+HTTP and gRPC authentication now require exactly one authorization value. Missing
+credentials retain the existing unauthenticated response, while duplicate
+identical or conflicting credentials are rejected before token validation,
+tenant resolution, and event persistence. No API, persistence, or configuration
+migration is required.
+
 ## 2026-09-06 — Make gRPC WriteBatch partial commits observable
 
 `WriteBatch` now returns ordered per-input outcomes for committed, rejected, and

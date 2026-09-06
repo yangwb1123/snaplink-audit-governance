@@ -11,6 +11,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -212,6 +213,72 @@ func (s failingBatchSigner) Verify(context.Context, []byte, string) (bool, error
 	return false, s.err
 }
 func (s failingBatchSigner) Algorithm() string { return "test-failing-signer" }
+
+func TestGRPCAmbiguousAuthorizationRejectedBeforeIngest(t *testing.T) {
+	st, client, validContext := newGRPCHarness(t)
+	cases := []struct {
+		name   string
+		values []string
+	}{
+		{name: "none", values: nil},
+		{name: "identical-valid", values: []string{"Bearer dev:tenant-a:service:crm", "Bearer dev:tenant-a:service:crm"}},
+		{name: "valid-and-invalid", values: []string{"Bearer dev:tenant-a:service:crm", "Bearer invalid"}},
+		{name: "different-tenants", values: []string{"Bearer dev:tenant-a:service:crm", "Bearer dev:tenant-b:service:crm"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/Write", func(t *testing.T) {
+			_, err := client.Write(grpcAuthContext(tc.values...), &auditv1.WriteRequest{Event: testProtoEvent("grpc-auth-"+tc.name+"-write", "crm")})
+			if status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("Write code=%v, want Unauthenticated", status.Code(err))
+			}
+		})
+		t.Run(tc.name+"/WriteBatch", func(t *testing.T) {
+			response, err := client.WriteBatch(grpcAuthContext(tc.values...), &auditv1.WriteBatchRequest{Events: []*auditv1.EventEnvelope{testProtoEvent("grpc-auth-"+tc.name+"-batch", "crm")}})
+			if status.Code(err) != codes.Unauthenticated || response != nil {
+				t.Fatalf("WriteBatch response=%v code=%v, want Unauthenticated and nil response", response, status.Code(err))
+			}
+		})
+		t.Run(tc.name+"/WriteStream", func(t *testing.T) {
+			stream, err := client.WriteStream(grpcAuthContext(tc.values...))
+			if err != nil {
+				if status.Code(err) != codes.Unauthenticated {
+					t.Fatalf("WriteStream open code=%v, want Unauthenticated", status.Code(err))
+				}
+				return
+			}
+			if _, recvErr := stream.Recv(); status.Code(recvErr) != codes.Unauthenticated {
+				t.Fatalf("WriteStream receive code=%v, want Unauthenticated", status.Code(recvErr))
+			}
+		})
+		assertGRPCStoreEmpty(t, st)
+	}
+
+	response, err := client.Write(validContext, &auditv1.WriteRequest{Event: testProtoEvent("grpc-auth-single-valid", "crm")})
+	if err != nil || response.GetEventId() != "grpc-auth-single-valid" {
+		t.Fatalf("single credential response=%v err=%v, want successful receipt", response, err)
+	}
+	if events, receipts := snapshotCounts(t, st); events != 1 || receipts != 1 {
+		t.Fatalf("single credential counts: events=%d receipts=%d, want one each", events, receipts)
+	}
+}
+
+func grpcAuthContext(values ...string) context.Context {
+	if len(values) == 0 {
+		return context.Background()
+	}
+	pairs := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		pairs = append(pairs, "authorization", value)
+	}
+	return metadata.NewOutgoingContext(context.Background(), metadata.Pairs(pairs...))
+}
+
+func assertGRPCStoreEmpty(t *testing.T, st *store.Store) {
+	t.Helper()
+	if events, receipts := snapshotCounts(t, st); events != 0 || receipts != 0 {
+		t.Fatalf("ambiguous credentials changed persistence: events=%d receipts=%d", events, receipts)
+	}
+}
 
 func snapshotCounts(t *testing.T, st *store.Store) (int, int) {
 	t.Helper()

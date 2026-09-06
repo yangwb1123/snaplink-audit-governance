@@ -53,7 +53,14 @@ type Authenticator struct {
 }
 
 func (a Authenticator) Authenticate(r *http.Request) (Claims, error) {
-	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		// Do not select a value from an ambiguous credential set. The same
+		// generic error covers absent and repeated headers without disclosing
+		// either credential or any token-derived identity.
+		return Claims{}, fmt.Errorf("authorization header is required")
+	}
+	header := strings.TrimSpace(values[0])
 	if !strings.HasPrefix(header, "Bearer ") {
 		return Claims{}, fmt.Errorf("authorization header is required")
 	}

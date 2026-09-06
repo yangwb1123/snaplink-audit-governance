@@ -31,6 +31,29 @@ func TestDevTokenClaims(t *testing.T) {
 	}
 }
 
+func TestAuthenticateRejectsAmbiguousAuthorizationHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+	}{
+		{name: "identical", values: []string{"Bearer dev:tenant-a:tenant-admin", "Bearer dev:tenant-a:tenant-admin"}},
+		{name: "valid-and-invalid", values: []string{"Bearer dev:tenant-a:tenant-admin", "Bearer invalid"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest("GET", "/", nil)
+			for _, value := range tc.values {
+				request.Header.Add("Authorization", value)
+			}
+			if _, err := (Authenticator{AllowDev: true}).Authenticate(request); err == nil {
+				t.Fatal("ambiguous authorization was accepted")
+			} else if strings.Contains(err.Error(), "tenant-a") || strings.Contains(err.Error(), "Bearer") {
+				t.Fatalf("credential detail leaked: %v", err)
+			}
+		})
+	}
+}
+
 func TestDevTokenCanNameSourceClient(t *testing.T) {
 	claims, err := (Authenticator{AllowDev: true}).AuthenticateToken("dev:tenant-a:service:snaplink-commerce")
 	if err != nil {

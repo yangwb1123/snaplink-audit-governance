@@ -221,7 +221,9 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 
 func (s *Server) authenticate(ctx context.Context, permission string) (auth.Claims, error) {
 	values := metadata.ValueFromIncomingContext(ctx, "authorization")
-	if len(values) == 0 {
+	if len(values) != 1 {
+		// Never choose a credential by position. This generic error also keeps
+		// absent and repeated metadata indistinguishable to the caller.
 		return auth.Claims{}, status.Error(codes.Unauthenticated, "authorization metadata is required")
 	}
 	token := strings.TrimSpace(values[0])
