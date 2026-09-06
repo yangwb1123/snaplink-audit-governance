@@ -183,6 +183,7 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 		return err
 	}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
+	skips := 0
 	for {
 		request, receiveErr := stream.Recv()
 		if receiveErr != nil {
@@ -197,6 +198,10 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 		event, convertErr := fromProto(request.GetEvent())
 		if convertErr != nil {
 			if errors.Is(convertErr, ErrEnvelopeTooLarge) {
+				if skips >= MaxStreamSkips {
+					return status.Error(codes.ResourceExhausted, "stream over-cap skip limit exceeded")
+				}
+				skips++
 				if s.Logger != nil {
 					// Size rejections are the only skip-and-continue class; the
 					// log line carries a truncated event_id prefix (never the

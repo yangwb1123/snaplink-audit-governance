@@ -21,6 +21,9 @@ const (
 	MaxTargetsPerEvent    = domain.MaxTargetsPerEvent
 	MaxChangedFields      = domain.MaxChangedFields
 	MaxBatchEvents        = domain.MaxBatchEvents
+	// MaxStreamSkips bounds application-level over-cap messages that one
+	// authenticated stream may skip before it is terminated.
+	MaxStreamSkips = 100
 )
 
 // ErrEnvelopeTooLarge wraps domain.ErrInvalid: an envelope (or batch)
