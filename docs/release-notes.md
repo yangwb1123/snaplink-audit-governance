@@ -7,6 +7,10 @@ canonical accepted-topic tenants sharing an `event_id`. Such records remain
 pending until trusted provenance exists; unique canonical tenant matches retain
 legacy compatibility. No replay-state or payload migration is required.
 
+Replay tests now also pin commit-after-mark recovery and timeout-uncertain
+republish behavior: failed commits retry without a second publish, while an
+accepted-but-timed-out publish remains pending and may be retried at-least-once.
+
 ## 2026-09-05 — Make DLQ publication failures observable and topology-safe
 
 Kafka consumer composition roots now reject blank consumer groups, empty stock

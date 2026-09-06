@@ -53,6 +53,9 @@ type fakeReplayReader struct {
 	// commitErr, when non-nil, makes CommitMessages fail without advancing
 	// the fake reader's commit log (commit-failure redelivery proof).
 	commitErr error
+	// commitLog shares successful commits across fresh reader sessions so
+	// restart tests can assert the broker-visible commit history.
+	commitLog *[]kafka.Message
 }
 
 func (f *fakeReplayReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
@@ -83,6 +86,9 @@ func (f *fakeReplayReader) CommitMessages(_ context.Context, msgs ...kafka.Messa
 		return f.commitErr
 	}
 	f.commits = append(f.commits, msgs...)
+	if f.commitLog != nil {
+		*f.commitLog = append(*f.commitLog, msgs...)
+	}
 	return nil
 }
 
@@ -1159,6 +1165,111 @@ func TestReplayTransientRepublishFailureRetriesNextRound(t *testing.T) {
 	}
 	if broker.committed != 2 {
 		t.Fatalf("DLQ committed offset=%d after converged round, want 2", broker.committed)
+	}
+}
+
+// A durable replay mark is written before commitResolved. If the source
+// offset commit fails, the next reader session must commit the already-marked
+// record without invoking RepublishFunc again.
+func TestReplayCommitFailureAfterDurableMarkRetriesCommitWithoutRepublish(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	dlqMessages := []kafka.Message{dlqMessageAt("evt-commit", 0)}
+	acceptedMessages := []kafka.Message{acceptedMessage("evt-commit")}
+	state, err := LoadReplayState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitErr := errors.New("source commit unavailable")
+	var commits []kafka.Message
+	newDLQ := func() messageReader {
+		return &fakeReplayReader{
+			topic:     TopicDLQ,
+			messages:  dlqMessages,
+			commitErr: commitErr,
+			commitLog: &commits,
+		}
+	}
+	newAccepted := func() messageReader {
+		return &fakeReplayReader{topic: TopicAccepted, messages: acceptedMessages}
+	}
+	attempts := 0
+	replayer := newReplayerWithFactories(newDLQ, newAccepted, state, func(context.Context, []byte, []byte) error {
+		attempts++
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 5 * time.Millisecond
+
+	count, err := replayer.RunOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "source commit unavailable") {
+		t.Fatalf("first RunOnce error=%v, want source commit failure", err)
+	}
+	if count != 1 || attempts != 1 || !state.Replayed["evt-commit"] {
+		t.Fatalf("first round count=%d attempts=%d marked=%v, want 1/1/true", count, attempts, state.Replayed["evt-commit"])
+	}
+	if len(commits) != 0 {
+		t.Fatalf("failed source commit was recorded: %v", commits)
+	}
+
+	commitErr = nil
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("second RunOnce error=%v, want successful retry", err)
+	}
+	if count != 0 || attempts != 1 {
+		t.Fatalf("second round count=%d attempts=%d, want 0/1 (durable mark suppresses duplicate replay)", count, attempts)
+	}
+	if len(commits) != 1 || commits[0].Offset != 0 {
+		t.Fatalf("successful retry commits=%v, want the already-marked offset 0 once", commits)
+	}
+}
+
+// If a republisher accepts a record but returns a timeout, replay cannot know
+// whether the destination committed it. The source DLQ record therefore stays
+// pending and is retried next round; a duplicate is allowed, but a lost event
+// or premature state mark is not.
+func TestReplayTimeoutUncertaintyRetriesWithoutPrematureMark(t *testing.T) {
+	state, err := LoadReplayState("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlqMessages := []kafka.Message{dlqMessageAt("evt-timeout", 0)}
+	acceptedMessages := []kafka.Message{acceptedMessage("evt-timeout")}
+	var commits []kafka.Message
+	newDLQ := func() messageReader {
+		return &fakeReplayReader{topic: TopicDLQ, messages: dlqMessages, commitLog: &commits}
+	}
+	newAccepted := func() messageReader {
+		return &fakeReplayReader{topic: TopicAccepted, messages: acceptedMessages}
+	}
+	attempts := 0
+	var delivered [][]byte
+	replayer := newReplayerWithFactories(newDLQ, newAccepted, state, func(_ context.Context, key, value []byte) error {
+		attempts++
+		delivered = append(delivered, append(append([]byte(nil), key...), value...))
+		if attempts == 1 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}, log.New(io.Discard, "", 0))
+	replayer.drainTimeout = 5 * time.Millisecond
+
+	count, err := replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("first RunOnce error=%v, want pending timeout uncertainty", err)
+	}
+	if count != 0 || attempts != 1 || state.Replayed["evt-timeout"] || len(commits) != 0 {
+		t.Fatalf("first round count=%d attempts=%d marked=%v commits=%v, want 0/1/false/0", count, attempts, state.Replayed["evt-timeout"], commits)
+	}
+
+	count, err = replayer.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("second RunOnce error=%v, want recovery", err)
+	}
+	if count != 1 || attempts != 2 || !state.Replayed["evt-timeout"] {
+		t.Fatalf("second round count=%d attempts=%d marked=%v, want 1/2/true", count, attempts, state.Replayed["evt-timeout"])
+	}
+	if len(delivered) != 2 || len(commits) != 1 || commits[0].Offset != 0 {
+		t.Fatalf("delivered=%d commits=%v, want two at-least-once attempts and one final commit", len(delivered), commits)
 	}
 }
 
