@@ -243,6 +243,53 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	}
 }
 
+func TestZPostgresMigrationIdempotencePreservesEvidence(t *testing.T) {
+	db := newHotColdPostgresTestDB(t)
+	legacy := NewSnapshot()
+	legacy.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
+	key := EventKey("tenant-a", "idempotence-event")
+	legacy.Events[key] = domain.Event{EventID: "idempotence-event", TenantID: "tenant-a", StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "idempotence-hash"}
+	legacy.Receipts[key] = domain.EventReceipt{EventID: "idempotence-event", TenantID: "tenant-a", Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "idempotence-hash"}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("initial migration: %v", err)
+	}
+
+	var markerBefore, backupBefore string
+	var markerVersionBefore, backupVersionBefore int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&markerBefore, &markerVersionBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&backupBefore, &backupVersionBefore); err != nil {
+		t.Fatal(err)
+	}
+	targetsBefore := postgresHotColdTargetState(t, db)
+
+	if err := MigratePostgresSnapshot(db); err != nil {
+		t.Fatalf("idempotent migration: %v", err)
+	}
+	var markerAfter, backupAfter string
+	var markerVersionAfter, backupVersionAfter int64
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&markerAfter, &markerVersionAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot_v1_backup WHERE id = 1`).Scan(&backupAfter, &backupVersionAfter); err != nil {
+		t.Fatal(err)
+	}
+	if markerBefore != markerAfter || markerVersionBefore != markerVersionAfter || backupBefore != backupAfter || backupVersionBefore != backupVersionAfter {
+		t.Fatalf("idempotent migration rewrote evidence: marker %s/%d -> %s/%d, backup %s/%d -> %s/%d", markerBefore, markerVersionBefore, markerAfter, markerVersionAfter, backupBefore, backupVersionBefore, backupAfter, backupVersionAfter)
+	}
+	if targetsBefore != postgresHotColdTargetState(t, db) {
+		t.Fatal("idempotent migration rewrote target rows")
+	}
+}
+
 func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
 	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
