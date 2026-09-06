@@ -683,8 +683,8 @@ type Replayer struct {
 	// permanent counts permanent closures — durable first resolutions where
 	// a record is closed WITHOUT replay, under two policies: (1) the one-shot
 	// closure of an error_code=permanent_error record whose single republish
-	// attempt failed for any reason (transient or permanent; REQ-PERM-1),
-	// and (2) the legacy live-rejection closure of any other record whose
+	// attempt failed for a known non-uncertain reason (transient or permanent;
+	// timeout/cancellation remains pending), and (2) the legacy live-rejection closure of any other record whose
 	// republish was rejected with DeliveryError.Permanent. Both converge
 	// the round and are alertable via republishFail, but never a replay
 	// (REQ-PERM-2).
@@ -844,8 +844,9 @@ func authBlockedCount(collected []dlqRecord) int {
 // republish failure of a non-permanent-code record increments none of them
 // (the record stays pending for the next round). Permanent counts closures
 // under two policies: (1) the one-shot — a wanted error_code=permanent_error
-// record whose single republish attempt failed for ANY reason (REQ-PERM-1);
-// (2) the legacy live rejection — a non-permanent-code record whose
+// record whose single republish attempt failed for a known non-uncertain
+// reason (REQ-PERM-1); timeout/cancellation remains pending; (2) the legacy
+// live rejection — a non-permanent-code record whose
 // republish was rejected with DeliveryError.Permanent. Both are durable
 // closures, never a replay. AttemptsExhausted is observational
 // (collection-time, per round) and explicitly excluded from the resolution

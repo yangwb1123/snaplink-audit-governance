@@ -575,8 +575,11 @@ func TestTenantUnresolvableDrainedCommitsOffset(t *testing.T) {
 	if broker.committed != 1 || len(broker.commits) != 1 || broker.commits[0].Offset != 0 {
 		t.Fatalf("round1 committed=%d commits=%v, want offset 0 committed exactly once", broker.committed, broker.commits)
 	}
-	if !state.Marked("tenant-a", "evt-x") {
-		t.Fatal("tenant-a/evt-x must be durably marked unresolvable")
+	if !state.marked("evt-x") {
+		t.Fatal("evt-x must have an unscoped durable loss mark for idempotency")
+	}
+	if state.Marked("tenant-a", "evt-x") {
+		t.Fatal("the untrusted tenant claim must not become a scoped mark")
 	}
 	logged := logs.String()
 	if !strings.Contains(logged, "unresolvable") ||
@@ -631,6 +634,9 @@ func TestResolveTenantCandidatesExpiredOriginal(t *testing.T) {
 	}
 	if replayer.replayed.Load() != 0 {
 		t.Fatalf("r.replayed=%d, want 0 (R7: durable counter untouched)", replayer.replayed.Load())
+	}
+	if state.Marked("tenant-a", "evt-x") {
+		t.Fatal("an untrusted DLQ tenant claim must not create a scoped replay mark")
 	}
 }
 

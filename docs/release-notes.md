@@ -5,11 +5,15 @@
 DLQ replay no longer lets an untrusted `tenant_id` claim choose among multiple
 canonical accepted-topic tenants sharing an `event_id`. Such records remain
 pending until trusted provenance exists; unique canonical tenant matches retain
-legacy compatibility. No replay-state or payload migration is required.
+legacy compatibility. Unresolvable-loss idempotency marks are also unscoped, so
+a later canonical tenant can still be replayed. No replay-state or payload
+migration is required.
 
 Replay tests now also pin commit-after-mark recovery and timeout-uncertain
 republish behavior: failed commits retry without a second publish, while an
 accepted-but-timed-out publish remains pending and may be retried at-least-once.
+This uncertainty rule also overrides the permanent-error one-shot closure;
+only a definitive non-timeout rejection may close that path.
 
 ## 2026-09-05 — Make DLQ publication failures observable and topology-safe
 

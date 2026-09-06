@@ -290,26 +290,21 @@ func (r *Replayer) resolveTenantCandidates(ctx context.Context, wanted wantedSet
 	return replayed, resolved, nil
 }
 
-// tenantUnresolvableAlreadyMarked reports whether this record's durable
-// unresolvable drop was already recorded in a prior round/restart, so the
-// unresolvable counter is not inflated across re-deliveries (FM-7).
+// tenantUnresolvableAlreadyMarked reports whether this event's durable
+// unscoped loss mark was already recorded in a prior round/restart, so the
+// unresolvable counter is not inflated across re-deliveries (FM-7). The DLQ
+// tenant claim is untrusted and is deliberately not part of this probe.
 func (r *Replayer) tenantUnresolvableAlreadyMarked(record dlqRecord) bool {
-	if record.claimedTenantID != "" {
-		return r.state.Marked(record.claimedTenantID, record.eventID)
-	}
-	return r.state.marked(record.eventID) // unscoped idempotency probe only
+	return r.state.marked(record.eventID)
 }
 
-// markTenantUnresolvable durably records the loss. With a trusted tenant claim
-// we write a scoped (tenant,event) mark; with no tenant identity available
-// (optional Failure.tenant_id) we fall back to an unscoped mark used purely
-// for round/restart idempotency — Marked() only honors unscoped marks under an
-// explicit legacyTenantScope, so it never suppresses another tenant's
-// resolution (REQ-tenant-safety).
+// markTenantUnresolvable durably records a loss using only an unscoped
+// idempotency mark. Failure.TenantID is an untrusted envelope claim and must
+// never enter scoped replay state: if the accepted original appears later,
+// the canonical tenant must remain eligible for a real replay. Marked() only
+// honors this unscoped mark under an explicit legacyTenantScope, so it cannot
+// suppress tenant-aware resolution by default (REQ-tenant-safety).
 func (r *Replayer) markTenantUnresolvable(record dlqRecord) error {
-	if record.claimedTenantID != "" {
-		return r.state.MarkTenant(record.claimedTenantID, record.eventID)
-	}
 	return r.state.Mark(record.eventID)
 }
 
@@ -319,6 +314,13 @@ func (r *Replayer) markTenantUnresolvable(record dlqRecord) error {
 func (r *Replayer) closeTenantDeliveryFailure(id dlqRecordID, candidate tenantAcceptedCandidate, wanted wantedSet, err error, resolved map[dlqRecordID]bool) (bool, error) {
 	var deliveryErr *outbox.DeliveryError
 	oneShot := wanted.oneShot[id]
+	// A timeout or cancellation leaves the destination outcome unknown. Even
+	// the one-shot permanent_error policy must not turn that uncertainty into
+	// a durable loss; the DLQ record remains pending for the next round.
+	if isUncertainRepublish(err) {
+		r.logger.Printf("republish outcome uncertain tenant=%s event_id=%s error=%s; will retry next round", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64), sanitizeLogField(fmt.Sprintf("%v", err), 200))
+		return false, nil
+	}
 	liveRejected := !oneShot && errors.As(err, &deliveryErr) && deliveryErr.Permanent
 	if !oneShot && !liveRejected {
 		r.logger.Printf("republish failed tenant=%s event_id=%s error=%v; will retry next round", sanitizeLogField(candidate.tenantID, 64), sanitizeLogField(candidate.eventID, 64), err)
@@ -354,6 +356,10 @@ func (r *Replayer) logTenantMismatch(tenantID, eventID string, err error) {
 func isTenantScopeFailure(err error) bool {
 	var deliveryErr *outbox.DeliveryError
 	return errors.As(err, &deliveryErr) && (deliveryErr.TenantMismatch || deliveryErr.TenantScopeBlocked)
+}
+
+func isUncertainRepublish(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // decodeCanonicalReplayEvent requires one complete JSON value and both
