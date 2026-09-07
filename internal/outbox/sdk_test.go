@@ -31,12 +31,28 @@ func (fakeResult) RowsAffected() (int64, error) { return 1, nil }
 
 func TestInsertUsesCallerTransaction(t *testing.T) {
 	fake := &fakeExecer{}
-	event := domain.Event{EventID: "outbox-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "outbox-idem-1", Payload: map[string]any{"value": 1}}
+	event := domain.Event{EventID: "outbox-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Date(2026, 8, 4, 12, 0, 0, 123456789, time.FixedZone("UTC+02", 2*60*60)), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "outbox-idem-1", Payload: map[string]any{"value": 1}}
 	if err := Insert(context.Background(), fake, event); err != nil {
 		t.Fatal(err)
 	}
 	if fake.query == "" || len(fake.args) != 5 || fake.args[0] != "outbox-1" || fake.args[1] != "tenant-a" {
 		t.Fatalf("unexpected SQL call: %q %#v", fake.query, fake.args)
+	}
+	wantOccurredAt := event.OccurredAt.UTC().Truncate(time.Microsecond)
+	gotOccurredAt, ok := fake.args[4].(time.Time)
+	if !ok || !gotOccurredAt.Equal(wantOccurredAt) || gotOccurredAt.Nanosecond()%1000 != 0 {
+		t.Fatalf("SQL occurred_at=%#v, want PostgreSQL-precise %v", fake.args[4], wantOccurredAt)
+	}
+	encoded, ok := fake.args[3].(string)
+	if !ok {
+		t.Fatalf("payload argument=%T, want string", fake.args[3])
+	}
+	var stored domain.Event
+	if err := json.Unmarshal([]byte(encoded), &stored); err != nil {
+		t.Fatalf("stored payload: %v", err)
+	}
+	if !stored.OccurredAt.Equal(wantOccurredAt) || stored.OccurredAt.Nanosecond()%1000 != 0 {
+		t.Fatalf("payload occurred_at=%v, want PostgreSQL-precise %v", stored.OccurredAt, wantOccurredAt)
 	}
 }
 
@@ -382,7 +398,11 @@ func (fakeExecerOnly) ExecContext(_ context.Context, _ string, _ ...any) (sql.Re
 }
 
 func outboxEvent(eventID, idemKey string) domain.Event {
-	return domain.Event{EventID: eventID, TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: idemKey, Payload: map[string]any{"value": 1}}
+	// audit_outbox.occurred_at is PostgreSQL timestamptz (microsecond
+	// precision); keep fixtures on the representable boundary so size and
+	// duplicate-classification tests do not depend on driver normalization.
+	occurredAt := time.Now().UTC().Truncate(time.Microsecond)
+	return domain.Event{EventID: eventID, TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: occurredAt, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: idemKey, Payload: map[string]any{"value": 1}}
 }
 
 // zoneVariant returns the same logical event with the same instant encoded

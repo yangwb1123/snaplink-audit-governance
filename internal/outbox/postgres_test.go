@@ -38,12 +38,14 @@ func TestPostgresStoreIntegration(t *testing.T) {
 		t.Fatalf("reset outbox: %v", err)
 	}
 
-	payload, err := json.Marshal(domain.Event{EventID: "pg-relay-1", TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "pg-relay-idem"})
+	occurredAt := time.Date(2026, 8, 4, 12, 0, 0, 123000000, time.UTC)
+	firstEvent := domain.Event{EventID: "pg-relay-1", TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: occurredAt, Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "pg-relay-idem"}
+	payload, err := json.Marshal(firstEvent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
-VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, now(), 'pending', 0, now() - interval '1 minute')`, string(payload)); err != nil {
+VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, $2, 'pending', 0, now() - interval '1 minute')`, string(payload), occurredAt); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -88,8 +90,15 @@ VALUES ('pg-relay-1', 'demo', 'pg-relay-idem', $1, now(), 'pending', 0, now() - 
 	}
 
 	// 失败重试路径：重新插入一条，失败后 attempts 递增且仍 pending。
+	secondEvent := firstEvent
+	secondEvent.EventID = "pg-relay-2"
+	secondEvent.IdempotencyKey = "pg-relay-idem-2"
+	secondPayload, err := json.Marshal(secondEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
-VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, now(), 'pending', 0, now() - interval '1 minute')`, string(payload)); err != nil {
+VALUES ('pg-relay-2', 'demo', 'pg-relay-idem-2', $1, $2, 'pending', 0, now() - interval '1 minute')`, string(secondPayload), occurredAt); err != nil {
 		t.Fatalf("insert second: %v", err)
 	}
 	records, corrupt, err = store.ListPending(ctx, 10)
@@ -325,8 +334,9 @@ func TestPostgresStoreCorruptPayloadWedgeBreak(t *testing.T) {
 VALUES ('corrupt-1', 'demo', 'corrupt-idem-1', '[]'::jsonb, now(), 'pending', 0, now() - interval '1 minute')`); err != nil {
 		t.Fatalf("insert corrupt: %v", err)
 	}
+	validOccurredAt := time.Date(2026, 8, 4, 12, 0, 0, 456000000, time.UTC)
 	validPayload := func(id int) []byte {
-		payload, err := json.Marshal(domain.Event{EventID: fmt.Sprintf("corrupt-valid-%d", id), TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Now().UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("corrupt-valid-idem-%d", id)})
+		payload, err := json.Marshal(domain.Event{EventID: fmt.Sprintf("corrupt-valid-%d", id), TenantID: "demo", SourceSystem: "demo", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: validOccurredAt, Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("corrupt-valid-idem-%d", id)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +344,7 @@ VALUES ('corrupt-1', 'demo', 'corrupt-idem-1', '[]'::jsonb, now(), 'pending', 0,
 	}
 	for id := 1; id <= 2; id++ {
 		if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
-VALUES ($1, 'demo', $2, $3, now(), 'pending', 0, now() - interval '1 minute')`, fmt.Sprintf("corrupt-valid-%d", id), fmt.Sprintf("corrupt-valid-idem-%d", id), string(validPayload(id))); err != nil {
+VALUES ($1, 'demo', $2, $3, $4, 'pending', 0, now() - interval '1 minute')`, fmt.Sprintf("corrupt-valid-%d", id), fmt.Sprintf("corrupt-valid-idem-%d", id), string(validPayload(id)), validOccurredAt); err != nil {
 			t.Fatalf("insert valid %d: %v", id, err)
 		}
 	}
@@ -403,6 +413,273 @@ VALUES ($1, 'demo', $2, $3, now(), 'pending', 0, now() - interval '1 minute')`, 
 	}
 }
 
+// postgresIdentityEvent is a complete event fixture for direct SQL and SDK
+// integration checks. Its timestamp is supplied by the caller so the value
+// survives PostgreSQL timestamptz microsecond precision exactly.
+func postgresIdentityEvent(eventID, tenantID, idempotencyKey string, occurredAt time.Time) domain.Event {
+	return domain.Event{
+		EventID:            eventID,
+		TenantID:           tenantID,
+		SourceSystem:       "demo",
+		EventType:          "audit.event",
+		SchemaID:           "audit.event",
+		SchemaVersion:      1,
+		OccurredAt:         occurredAt,
+		Actor:              domain.Actor{ID: "u1"},
+		Action:             "update",
+		Outcome:            "success",
+		DataClassification: "internal",
+		RetentionClass:     "standard",
+		IdempotencyKey:     idempotencyKey,
+		Payload:            map[string]any{"value": 1},
+	}
+}
+
+// TestPostgresOutboxIdentityBinding covers each duplicated identity field with
+// direct SQL corruption, a matching row in the same batch, and a valid SDK
+// insert in a caller-owned transaction. Skipped unless
+// AUDIT_TEST_POSTGRES_DSN points at a disposable database.
+func TestPostgresOutboxIdentityBinding(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_POSTGRES_DSN to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	reset := func() {
+		if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+			t.Fatalf("reset outbox: %v", err)
+		}
+	}
+	insertRow := func(row, payload domain.Event) int64 {
+		t.Helper()
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", payload.EventID, err)
+		}
+		var id int64
+		err = db.QueryRowContext(ctx, `INSERT INTO audit_outbox
+(event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
+VALUES ($1, $2, $3, $4, $5, 'pending', 0, now() - interval '1 minute')
+RETURNING id`, row.EventID, row.TenantID, row.IdempotencyKey, string(encoded), row.OccurredAt).Scan(&id)
+		if err != nil {
+			t.Fatalf("insert %s: %v", row.EventID, err)
+		}
+		return id
+	}
+
+	reset()
+	occurredAt := time.Date(2026, 8, 4, 12, 0, 0, 123000000, time.UTC)
+	matching := postgresIdentityEvent("identity-match", "tenant-match", "idem-match", occurredAt)
+	matchingID := insertRow(matching, matching)
+	cases := []struct {
+		field string
+	}{
+		{field: "event_id"},
+		{field: "tenant_id"},
+		{field: "idempotency_key"},
+		{field: "occurred_at"},
+	}
+	wantDiagnostics := map[int64]string{}
+	for _, tc := range cases {
+		payload := postgresIdentityEvent("payload-"+tc.field, "tenant-"+tc.field, "idem-"+tc.field, occurredAt)
+		row := payload
+		rowValue := "row-" + tc.field
+		switch tc.field {
+		case "event_id":
+			row.EventID = rowValue
+		case "tenant_id":
+			row.TenantID = rowValue
+		case "idempotency_key":
+			row.IdempotencyKey = rowValue
+		case "occurred_at":
+			row.OccurredAt = occurredAt.Add(time.Second)
+		}
+		id := insertRow(row, payload)
+		rowText, payloadText := stringValue(rowValue, true), stringValue(payload.EventID, true)
+		if tc.field == "tenant_id" {
+			rowText, payloadText = stringValue(row.TenantID, true), stringValue(payload.TenantID, true)
+		}
+		if tc.field == "idempotency_key" {
+			rowText, payloadText = stringValue(row.IdempotencyKey, true), stringValue(payload.IdempotencyKey, true)
+		}
+		if tc.field == "occurred_at" {
+			rowText, payloadText = timeValue(row.OccurredAt, true), timeValue(payload.OccurredAt, true)
+		}
+		wantDiagnostics[id] = fmt.Sprintf("%s row=%s payload=%s", tc.field, rowText, payloadText)
+	}
+
+	store := NewPostgresStore(db)
+	records, corrupt, err := store.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != matchingID {
+		t.Fatalf("ListPending records=%+v, want matching row %d only", records, matchingID)
+	}
+	if len(corrupt) != len(cases) {
+		t.Fatalf("ListPending corrupt=%d, want %d", len(corrupt), len(cases))
+	}
+	for _, report := range corrupt {
+		want, ok := wantDiagnostics[report.ID]
+		if !ok {
+			t.Fatalf("unexpected corruption report: %+v", report)
+		}
+		if report.Err == nil || !strings.Contains(report.Err.Error(), "outbox identity mismatch id=") || !strings.Contains(report.Err.Error(), want) {
+			t.Fatalf("report id=%d err=%v, want diagnostic containing %q", report.ID, report.Err, want)
+		}
+	}
+
+	var delivered []domain.Event
+	relay := fixedRelay(store, func(_ context.Context, event domain.Event) (*domain.EventReceipt, error) {
+		delivered = append(delivered, event)
+		return nil, nil
+	})
+	handled, err := relay.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if handled != len(cases)+1 || len(delivered) != 1 || delivered[0].EventID != matching.EventID {
+		t.Fatalf("RunOnce handled=%d delivered=%+v, want %d/one matching event", handled, delivered, len(cases)+1)
+	}
+	for id, diagnostic := range wantDiagnostics {
+		var status, lastError string
+		var attempts int
+		var nextAttemptAt time.Time
+		if err := db.QueryRowContext(ctx, `SELECT status, attempts, next_attempt_at, last_error FROM audit_outbox WHERE id=$1`, id).Scan(&status, &attempts, &nextAttemptAt, &lastError); err != nil {
+			t.Fatalf("read quarantined id=%d: %v", id, err)
+		}
+		if status != StatusFailed || attempts != 1 || !nextAttemptAt.Equal(relay.Now()) {
+			t.Fatalf("id=%d status=%s attempts=%d next_attempt_at=%v, want failed/1/%v", id, status, attempts, nextAttemptAt, relay.Now())
+		}
+		if lastError != diagnostic && !strings.Contains(lastError, diagnostic) {
+			t.Fatalf("id=%d last_error=%q, want %q", id, lastError, diagnostic)
+		}
+	}
+	var matchingStatus string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM audit_outbox WHERE id=$1`, matchingID).Scan(&matchingStatus); err != nil {
+		t.Fatal(err)
+	}
+	if matchingStatus != StatusDelivered {
+		t.Fatalf("matching row status=%s, want delivered", matchingStatus)
+	}
+	again, corruptAgain, err := store.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("second ListPending: %v", err)
+	}
+	if len(again) != 0 || len(corruptAgain) != 0 {
+		t.Fatalf("after quarantine ListPending records=%d corrupt=%d, want 0/0", len(again), len(corruptAgain))
+	}
+
+	reset()
+	// The SDK writes row metadata and JSON in the same caller transaction.
+	// A non-UTC representation proves comparison is by instant, not location.
+	zone := time.FixedZone("UTC+02", 2*60*60)
+	valid := postgresIdentityEvent("sdk-identity-valid", "tenant-sdk", "idem-sdk", time.Date(2026, 8, 4, 14, 0, 0, 123000000, zone))
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin SDK transaction: %v", err)
+	}
+	if err := Insert(ctx, tx, valid); err != nil {
+		tx.Rollback()
+		t.Fatalf("SDK Insert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit SDK transaction: %v", err)
+	}
+	delivered = nil
+	handled, err = relay.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("SDK RunOnce: %v", err)
+	}
+	if handled != 1 || len(delivered) != 1 {
+		t.Fatalf("SDK RunOnce handled=%d delivered=%d, want 1/1", handled, len(delivered))
+	}
+	got := delivered[0]
+	if got.EventID != valid.EventID || got.TenantID != valid.TenantID || got.IdempotencyKey != valid.IdempotencyKey || !got.OccurredAt.Equal(valid.OccurredAt) {
+		t.Fatalf("SDK delivered identity=%q/%q/%q/%v, want %q/%q/%q/%v", got.EventID, got.TenantID, got.IdempotencyKey, got.OccurredAt, valid.EventID, valid.TenantID, valid.IdempotencyKey, valid.OccurredAt)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT status FROM audit_outbox WHERE event_id=$1`, valid.EventID).Scan(&matchingStatus); err != nil {
+		t.Fatal(err)
+	}
+	if matchingStatus != StatusDelivered {
+		t.Fatalf("SDK row status=%s, want delivered", matchingStatus)
+	}
+}
+
+// TestPostgresInfiniteOccurredAtIsQuarantined ensures PostgreSQL's special
+// infinity timestamp values are treated as corrupt identity metadata rather
+// than as a row-scan error that wedges the whole poll. Skipped unless
+// AUDIT_TEST_POSTGRES_DSN points at a disposable database.
+func TestPostgresInfiniteOccurredAtIsQuarantined(t *testing.T) {
+	dsn := os.Getenv("AUDIT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set AUDIT_TEST_POSTGRES_DSN to run PostgreSQL integration tests")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM audit_outbox`); err != nil {
+		t.Fatalf("reset outbox: %v", err)
+	}
+	occurredAt := time.Date(2026, 8, 4, 12, 0, 0, 123000000, time.UTC)
+	event := postgresIdentityEvent("infinite-occurred", "tenant-infinite", "idem-infinite", occurredAt)
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox
+(event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
+VALUES ($1, $2, $3, $4, 'infinity', 'pending', 0, now() - interval '1 minute')`, event.EventID, event.TenantID, event.IdempotencyKey, string(payload)); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	store := NewPostgresStore(db)
+	records, corrupt, err := store.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(records) != 0 || len(corrupt) != 1 {
+		t.Fatalf("ListPending records=%d corrupt=%d, want 0/1", len(records), len(corrupt))
+	}
+	if got := corrupt[0].Err.Error(); !strings.Contains(got, `occurred_at row="infinity"`) {
+		t.Fatalf("diagnostic=%q, want infinity timestamp", got)
+	}
+
+	deliveries := 0
+	relay := fixedRelay(store, func(_ context.Context, _ domain.Event) (*domain.EventReceipt, error) {
+		deliveries++
+		return nil, nil
+	})
+	if handled, err := relay.RunOnce(ctx); err != nil || handled != 1 {
+		t.Fatalf("RunOnce handled=%d err=%v, want 1/nil", handled, err)
+	}
+	if deliveries != 0 {
+		t.Fatalf("deliveries=%d, want 0 for infinite timestamp", deliveries)
+	}
+	var status, lastError string
+	var attempts int
+	if err := db.QueryRowContext(ctx, `SELECT status, attempts, last_error FROM audit_outbox WHERE event_id=$1`, event.EventID).Scan(&status, &attempts, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusFailed || attempts != 1 || !strings.Contains(lastError, `occurred_at row="infinity"`) {
+		t.Fatalf("row status=%s attempts=%d last_error=%q, want failed/1/infinity diagnostic", status, attempts, lastError)
+	}
+}
+
 // TestPostgresRelayVerifiesReceiptAgainstRealAPI is the AC-3 C Postgres
 // variant: a real audit_outbox row is delivered by a real PostgresStore
 // relay against the in-process audit API, and the DB row must end up with
@@ -427,13 +704,13 @@ func TestPostgresRelayVerifiesReceiptAgainstRealAPI(t *testing.T) {
 	}
 
 	apiURL := newRealAuditAPI(t)
-	event := domain.Event{EventID: "pg-relay-receipt-1", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "pg-relay-receipt-idem", Payload: map[string]any{"value": 1}}
+	event := domain.Event{EventID: "pg-relay-receipt-1", TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: time.Unix(1_700_000_010, 0).UTC(), Actor: domain.Actor{ID: "u1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: "pg-relay-receipt-idem", Payload: map[string]any{"value": 1}}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at, status, attempts, next_attempt_at)
-VALUES ('pg-relay-receipt-1', 'tenant-a', 'pg-relay-receipt-idem', $1, now(), 'pending', 0, now() - interval '1 minute')`, string(payload)); err != nil {
+VALUES ('pg-relay-receipt-1', 'tenant-a', 'pg-relay-receipt-idem', $1, $2, 'pending', 0, now() - interval '1 minute')`, string(payload), event.OccurredAt); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 

@@ -28,10 +28,10 @@ ORDER BY next_attempt_at, id
 LIMIT $1`
 
 // ListPending returns due pending records ordered by retry time, plus a
-// report of scanned rows whose payloads failed to decode into domain.Event.
-// Decode failures never abort the batch: the corrupt row is excluded from
-// records and reported (status stays pending; quarantine is the relay's
-// job, REQ-1). Query-level and row-scan errors still abort.
+// report of scanned rows whose payloads failed to decode or whose duplicated
+// identity does not match the decoded payload. Corrupt rows never enter
+// records; the relay owns their quarantine. Query-level and row-scan errors
+// still abort.
 func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, []CorruptRecord, error) {
 	rows, err := p.db.QueryContext(ctx, listPendingQuery, limit)
 	if err != nil {
@@ -43,14 +43,33 @@ func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, [
 	for rows.Next() {
 		var record Record
 		var payload []byte
+		var rowEventID, rowTenantID, rowIdempotencyKey sql.NullString
+		// Scan timestamptz as a driver value rather than directly into
+		// sql.NullTime. pgx exposes PostgreSQL infinity values as strings;
+		// treating one as an invalid identity lets this row be quarantined
+		// instead of aborting the entire poll.
+		var rowOccurredAt any
 		var lastError sql.NullString
-		if err := rows.Scan(&record.ID, &record.Event.EventID, &record.Event.TenantID,
-			&record.Event.IdempotencyKey, &payload, &record.Event.OccurredAt,
+		if err := rows.Scan(&record.ID, &rowEventID, &rowTenantID,
+			&rowIdempotencyKey, &payload, &rowOccurredAt,
 			&record.Status, &record.Attempts, &record.NextAttemptAt, &lastError,
 			&record.CreatedAt); err != nil {
 			return nil, nil, fmt.Errorf("scan outbox record: %w", err)
 		}
 		record.LastError = lastError.String
+		occurredAt, occurredValid, occurredRaw, occurredRawValid := scanRowOccurredAt(rowOccurredAt)
+		row := rowIdentity{
+			EventID:            rowEventID.String,
+			EventIDValid:       rowEventID.Valid,
+			TenantID:           rowTenantID.String,
+			TenantIDValid:      rowTenantID.Valid,
+			IdempotencyKey:     rowIdempotencyKey.String,
+			IdemKeyValid:       rowIdempotencyKey.Valid,
+			OccurredAt:         occurredAt,
+			OccurredValid:      occurredValid,
+			OccurredAtRaw:      occurredRaw,
+			OccurredAtRawValid: occurredRawValid,
+		}
 		// decodeEvent (sdk.go) preserves number literals via UseNumber so
 		// the re-ingested digest matches the original ingest digest; the
 		// decode path is shared with the sdk read-back, never duplicated.
@@ -63,6 +82,16 @@ func (p *PostgresStore) ListPending(ctx context.Context, limit int) ([]Record, [
 			})
 			continue
 		}
+		if err := identityMismatch(record.ID, row, event); err != nil {
+			corrupt = append(corrupt, CorruptRecord{
+				ID:       record.ID,
+				Attempts: record.Attempts,
+				Err:      err,
+			})
+			continue
+		}
+		// The decoded payload, rather than the duplicated SQL columns, is
+		// the event passed to delivery once the identity check succeeds.
 		record.Event = event
 		records = append(records, record)
 	}

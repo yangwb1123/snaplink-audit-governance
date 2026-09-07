@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-09-07 — Bind outbox row identity to its decoded payload
+
+The outbox relay now compares `event_id`, `tenant_id`, `idempotency_key`, and
+`occurred_at` between each pending row's duplicated columns and its decoded
+JSON payload before delivery. A mismatch (including empty or non-finite
+PostgreSQL timestamp metadata) is excluded from delivery and quarantined by
+physical row ID with a durable field-level diagnostic; matching rows and
+optimistic concurrent polling behavior are unchanged. The SDK normalizes
+`occurred_at` to PostgreSQL `timestamptz` microsecond precision in both copies,
+so ordinary nanosecond-bearing `time.Time` values do not self-corrupt on readback.
+No schema or wire migration is required.
+
 ## 2026-09-06 — Enforce canonical ledger ownership and immutable identity
 
 Cold-ledger mutators now reject cross-tenant or non-canonical receipt, segment,

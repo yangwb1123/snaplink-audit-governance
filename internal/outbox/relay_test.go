@@ -45,7 +45,8 @@ func newFakeStore(records ...Record) *fakeStore {
 }
 
 // withCorrupt marks a pending row so ListPending reports it as corrupt
-// (undecodable payload) instead of returning it as a deliverable record.
+// (for example, an undecodable payload or identity mismatch) instead of
+// returning it as a deliverable record.
 func (f *fakeStore) withCorrupt(id int64, err error) *fakeStore {
 	f.mu.Lock()
 	defer f.mu.Unlock()

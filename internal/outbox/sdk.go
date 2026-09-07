@@ -81,15 +81,32 @@ func Insert(ctx context.Context, tx Execer, event domain.Event) error {
 	if err := event.ValidateBasic(); err != nil {
 		return err
 	}
+	// FR-1/FR-3 (FM-1): reject before any SQL — matches the ingest cap
+	// (service.go:975, itself defaulting to domain.MaxEventBytes at 123-124).
+	// Measure the caller's original full event encoding before storage
+	// canonicalization, so precision normalization cannot turn a one-byte
+	// over-limit event into an accepted one.
 	encoded, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
-	// FR-1/FR-3 (FM-1): reject before any SQL — matches the ingest cap
-	// (service.go:975, itself defaulting to domain.MaxEventBytes at 123-124).
-	// The measure is the full event encoding (what the relay actually POSTs),
-	// so the outbox bound is at-least-as-strict as the payload-only ingest cap
-	// (NFR-3); the exported constant keeps the two caps from drifting.
+	// The measure is the full event encoding (what the relay is asked to
+	// deliver), so the outbox bound is at-least-as-strict as the payload-only
+	// ingest cap (NFR-3); the exported constant keeps the two caps from
+	// drifting.
+	if len(encoded) > domain.MaxEventBytes {
+		return fmt.Errorf("%w: payload exceeds %d bytes", domain.ErrInvalid, domain.MaxEventBytes)
+	}
+	// PostgreSQL timestamptz stores microseconds. Normalize the duplicated
+	// column and the persisted payload to that same precision; otherwise an
+	// event produced by time.Now (which commonly has nanoseconds) would be
+	// quarantined as soon as the relay compared the two copies.
+	storedEvent := event
+	storedEvent.OccurredAt = normalizePostgresTimestamp(event.OccurredAt)
+	encoded, err = json.Marshal(storedEvent)
+	if err != nil {
+		return err
+	}
 	if len(encoded) > domain.MaxEventBytes {
 		return fmt.Errorf("%w: payload exceeds %d bytes", domain.ErrInvalid, domain.MaxEventBytes)
 	}
@@ -98,7 +115,7 @@ VALUES ($1, $2, $3, $4, $5, 'pending', 0, now())
 ON CONFLICT DO NOTHING`
 	// The payload parameter is text, not []byte: pgx maps []byte to bytea,
 	// which has no cast to jsonb and would fail on a real PostgreSQL.
-	result, err := tx.ExecContext(ctx, query, event.EventID, event.TenantID, event.IdempotencyKey, string(encoded), event.OccurredAt.UTC())
+	result, err := tx.ExecContext(ctx, query, storedEvent.EventID, storedEvent.TenantID, storedEvent.IdempotencyKey, string(encoded), storedEvent.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("insert audit outbox: %w", err)
 	}
@@ -109,7 +126,15 @@ ON CONFLICT DO NOTHING`
 	if affected > 0 {
 		return nil
 	}
-	return classifyZeroRows(ctx, tx, event, encoded)
+	return classifyZeroRows(ctx, tx, storedEvent, encoded)
+}
+
+// normalizePostgresTimestamp mirrors pgx's timestamptz encoding: finite
+// timestamps are sent as whole microseconds, with sub-microsecond precision
+// truncated. Keeping this normalization in the JSON payload as well as the
+// SQL column makes an SDK-written row self-consistent when it is read back.
+func normalizePostgresTimestamp(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 const (
