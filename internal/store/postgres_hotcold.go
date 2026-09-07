@@ -238,7 +238,9 @@ WHERE audit_tenant.version = $3`
 
 const postgresLedgerAppendQuery = `INSERT INTO audit_ledger (tenant_id, record_type, key, version, record, written_at)
 VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-ON CONFLICT (tenant_id, record_type, key, version) DO NOTHING`
+ON CONFLICT (tenant_id, record_type, key, version) DO UPDATE
+SET record = audit_ledger.record
+WHERE audit_ledger.record = EXCLUDED.record`
 
 // postgresSplitStore is selected only when migration 006's complete compatible
 // target contract is present. The legacy postgresBackend remains the fallback
@@ -796,8 +798,33 @@ func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
 		if err != nil {
 			return err
 		}
-		if _, err := p.backend.db.Exec(postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt); err != nil {
+		result, err := p.backend.db.Exec(postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt)
+		if err != nil {
 			return fmt.Errorf("append tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 0 {
+			continue
+		}
+		var sqlTenant, sqlType, sqlKey string
+		var sqlVersion int
+		var existingEncoded []byte
+		err = p.backend.db.QueryRow(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4`, record.TenantID, record.RecordType, record.Key, record.Version).Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &existingEncoded)
+		if err != nil {
+			return fmt.Errorf("inspect existing tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
+		}
+		existing, err := decodeLedgerRecord(existingEncoded, record.TenantID)
+		if err != nil {
+			return err
+		}
+		if err := validatePostgresLedgerIdentity(existing, sqlTenant, LedgerRecordType(sqlType), sqlKey, sqlVersion); err != nil {
+			return err
+		}
+		if !immutableLedgerRecordEqual(existing, record) {
+			return ledgerConflict(record)
 		}
 	}
 	return nil
@@ -961,10 +988,11 @@ func (r *postgresLedgerReader) idempotency(key string) (domain.EventReceipt, int
 }
 
 func (r *postgresLedgerReader) oneReceipt(filter, key string) (domain.EventReceipt, int, bool, error) {
-	query := `SELECT version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = 'receipt' ` + filter + ` ORDER BY version DESC LIMIT 1`
+	query := `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = 'receipt' ` + filter + ` ORDER BY version DESC LIMIT 1`
+	var sqlTenant, sqlType, sqlKey string
 	var version int
 	var encoded []byte
-	err := r.db.QueryRow(query, r.tenantID, key).Scan(&version, &encoded)
+	err := r.db.QueryRow(query, r.tenantID, key).Scan(&sqlTenant, &sqlType, &sqlKey, &version, &encoded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.EventReceipt{}, 0, false, nil
 	}
@@ -972,8 +1000,14 @@ func (r *postgresLedgerReader) oneReceipt(filter, key string) (domain.EventRecei
 		return domain.EventReceipt{}, 0, false, err
 	}
 	record, err := decodeLedgerRecord(encoded, r.tenantID)
-	if err != nil || record.Receipt == nil {
-		return domain.EventReceipt{}, 0, false, errOrLedgerPayload(err, record)
+	if err != nil {
+		return domain.EventReceipt{}, 0, false, err
+	}
+	if err := validatePostgresLedgerIdentity(record, sqlTenant, LedgerRecordType(sqlType), sqlKey, version); err != nil {
+		return domain.EventReceipt{}, 0, false, err
+	}
+	if record.Receipt == nil {
+		return domain.EventReceipt{}, 0, false, errOrLedgerPayload(nil, record)
 	}
 	return *record.Receipt, version, true, nil
 }
@@ -1014,19 +1048,24 @@ func (r *postgresLedgerReader) checkpoints(streamKey string) ([]domain.Checkpoin
 }
 
 func (r *postgresLedgerReader) recordsByType(kind LedgerRecordType) ([]LedgerRecord, error) {
-	rows, err := r.db.Query(`SELECT record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 ORDER BY version, key`, r.tenantID, kind)
+	rows, err := r.db.Query(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 ORDER BY version, key`, r.tenantID, kind)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var records []LedgerRecord
 	for rows.Next() {
+		var sqlTenant, sqlType, sqlKey string
+		var sqlVersion int
 		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
+		if err := rows.Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &encoded); err != nil {
 			return nil, err
 		}
 		record, err := decodeLedgerRecord(encoded, r.tenantID)
 		if err != nil {
+			return nil, err
+		}
+		if err := validatePostgresLedgerIdentity(record, sqlTenant, LedgerRecordType(sqlType), sqlKey, sqlVersion); err != nil {
 			return nil, err
 		}
 		records = append(records, record)
@@ -1035,24 +1074,36 @@ func (r *postgresLedgerReader) recordsByType(kind LedgerRecordType) ([]LedgerRec
 }
 
 func (r *postgresLedgerReader) records() ([]LedgerRecord, error) {
-	rows, err := r.db.Query(`SELECT record FROM audit_ledger WHERE tenant_id = $1 ORDER BY id`, r.tenantID)
+	rows, err := r.db.Query(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 ORDER BY id`, r.tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var records []LedgerRecord
 	for rows.Next() {
+		var sqlTenant, sqlType, sqlKey string
+		var sqlVersion int
 		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
+		if err := rows.Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &encoded); err != nil {
 			return nil, err
 		}
 		record, err := decodeLedgerRecord(encoded, r.tenantID)
 		if err != nil {
 			return nil, err
 		}
+		if err := validatePostgresLedgerIdentity(record, sqlTenant, LedgerRecordType(sqlType), sqlKey, sqlVersion); err != nil {
+			return nil, err
+		}
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func validatePostgresLedgerIdentity(record LedgerRecord, sqlTenant string, sqlType LedgerRecordType, sqlKey string, sqlVersion int) error {
+	if record.TenantID != sqlTenant || record.RecordType != LedgerRecordType(sqlType) || record.Key != sqlKey || record.Version != sqlVersion {
+		return fmt.Errorf("postgres ledger identity mismatch: sql=(%q,%q,%q,%d) payload=(%q,%q,%q,%d)", sqlTenant, sqlType, sqlKey, sqlVersion, record.TenantID, record.RecordType, record.Key, record.Version)
+	}
+	return nil
 }
 
 func decodeLedgerRecord(encoded []byte, tenantID string) (LedgerRecord, error) {

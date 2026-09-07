@@ -286,37 +286,39 @@ func appendLegacyLedgerRecord(records *[]LedgerRecord, sourceKey string, record 
 // validateLegacyLedgerRecord extends the structural validator for records
 // generated during legacy cutover with source-key and payload ownership checks.
 func validateLegacyLedgerRecord(sourceKey string, record LedgerRecord) error {
-	if err := validateLedgerRecord(record); err != nil {
-		return err
-	}
+	// Preserve the migration-specific ownership diagnostics before applying the
+	// stricter canonical validator. This keeps malformed legacy snapshots
+	// actionable while still enforcing the same final record contract.
 	switch record.RecordType {
 	case LedgerReceipt:
 		if err := validateLegacyRecordSource("receipts", sourceKey, record.TenantID); err != nil {
 			return err
 		}
-		if record.Receipt.TenantID != record.TenantID {
+		if record.Receipt != nil && record.Receipt.TenantID != record.TenantID {
 			return legacyOwnershipFailure("receipts", sourceKey, "tenant mismatch", 0, false)
 		}
 	case LedgerSegment:
 		if err := validateLegacyRecordSource("segments", sourceKey, record.TenantID); err != nil {
 			return err
 		}
-		if record.Segment.TenantID != record.TenantID {
+		if record.Segment != nil && record.Segment.TenantID != record.TenantID {
 			return legacyOwnershipFailure("segments", sourceKey, "tenant mismatch", 0, false)
 		}
-		prefix, _, found := strings.Cut(record.Key, KeySeparator)
-		if !found || prefix != record.TenantID || record.Key != segmentLedgerKey(*record.Segment) {
-			return legacyOwnershipFailure("segments", sourceKey, "tenant mismatch", 0, false)
+		if record.Segment != nil {
+			prefix, _, found := strings.Cut(record.Key, KeySeparator)
+			if !found || prefix != record.TenantID || record.Key != segmentLedgerKey(*record.Segment) {
+				return legacyOwnershipFailure("segments", sourceKey, "tenant mismatch", 0, false)
+			}
 		}
 	case LedgerCheckpoint:
 		if err := validateLegacyRecordSource("checkpoints", sourceKey, record.TenantID); err != nil {
 			return err
 		}
-		if record.Checkpoint.TenantID != record.TenantID || record.Key != record.Checkpoint.ID {
+		if record.Checkpoint != nil && (record.Checkpoint.TenantID != record.TenantID || record.Key != record.Checkpoint.ID) {
 			return legacyOwnershipFailure("checkpoints", sourceKey, "tenant mismatch", 0, false)
 		}
 	}
-	return nil
+	return validateLedgerRecord(record)
 }
 
 func validateLegacyRecordSource(family, sourceKey, tenantID string) error {

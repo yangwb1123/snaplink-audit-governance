@@ -196,7 +196,7 @@ func expectedPostgresLedgerRecords(baseline *preparedSplit) []LedgerRecord {
 func verifyPostgresLedgerRecord(ctx context.Context, queryer postgresHotColdQueryer, expected LedgerRecord) error {
 	identity := postgresLedgerIdentity(expected)
 	rows, err := queryer.QueryContext(ctx, `
-SELECT record
+SELECT tenant_id, record_type, key, version, record
 FROM audit_ledger
 WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4
 ORDER BY id`, expected.TenantID, expected.RecordType, expected.Key, expected.Version)
@@ -204,13 +204,20 @@ ORDER BY id`, expected.TenantID, expected.RecordType, expected.Key, expected.Ver
 		return hotColdInconsistency("audit_ledger identity %s query failed: %v", identity, err)
 	}
 	defer rows.Close()
-	var payloads [][]byte
+	type postgresLedgerPayload struct {
+		tenantID   string
+		recordType string
+		key        string
+		version    int
+		encoded    []byte
+	}
+	var payloads []postgresLedgerPayload
 	for rows.Next() {
-		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
+		var payload postgresLedgerPayload
+		if err := rows.Scan(&payload.tenantID, &payload.recordType, &payload.key, &payload.version, &payload.encoded); err != nil {
 			return hotColdInconsistency("audit_ledger identity %s scan failed: %v", identity, err)
 		}
-		payloads = append(payloads, encoded)
+		payloads = append(payloads, payload)
 	}
 	if err := rows.Err(); err != nil {
 		return hotColdInconsistency("audit_ledger identity %s iteration failed: %v", identity, err)
@@ -221,10 +228,14 @@ ORDER BY id`, expected.TenantID, expected.RecordType, expected.Key, expected.Ver
 	if len(payloads) != 1 {
 		return hotColdInconsistency("audit_ledger identity %s occurs %d times, expected exactly once", identity, len(payloads))
 	}
-	if _, err := decodeLedgerRecord(payloads[0], expected.TenantID); err != nil {
+	record, err := decodeLedgerRecord(payloads[0].encoded, expected.TenantID)
+	if err != nil {
 		return hotColdInconsistency("audit_ledger identity %s payload is invalid: %v", identity, err)
 	}
-	if err := jsonPayloadEqual(payloads[0], expected); err != nil {
+	if err := validatePostgresLedgerIdentity(record, payloads[0].tenantID, LedgerRecordType(payloads[0].recordType), payloads[0].key, payloads[0].version); err != nil {
+		return hotColdInconsistency("audit_ledger identity %s SQL/payload mismatch: %v", identity, err)
+	}
+	if err := jsonPayloadEqual(payloads[0].encoded, expected); err != nil {
 		return hotColdInconsistency("audit_ledger identity %s payload mismatch: %v", identity, err)
 	}
 	return nil

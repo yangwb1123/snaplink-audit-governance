@@ -65,7 +65,9 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 		receipt.StreamID = event.StreamID
 		receipt.Sequence = event.Sequence
 		receipt.Hash = event.Hash
-		view.Ledger.SetReceipt(receipt)
+		if err := view.Ledger.SetReceipt(receipt); err != nil {
+			return err
+		}
 		if len(stream.PendingHashes) < s.Config.SegmentSize {
 			return nil
 		}
@@ -74,8 +76,12 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 			return sealErr
 		}
 		sealed = append(sealed, segment)
-		view.Ledger.AppendSegment(segment)
-		view.Ledger.AppendCheckpoint(checkpoint)
+		if err := view.Ledger.AppendSegment(segment); err != nil {
+			return err
+		}
+		if err := view.Ledger.AppendCheckpoint(checkpoint); err != nil {
+			return err
+		}
 		stream.PendingHashes = nil
 		stream.PendingEvents = nil
 		stream.PendingPrevHash = ""
@@ -155,7 +161,9 @@ func (s *Service) checkExistingTenantIngest(ctx context.Context, view *store.Ten
 	stored.Conflict = true
 	stored.ErrorCode = "event_id_content_conflict"
 	stored.ErrorMessage = "event_id already exists with different canonical content"
-	view.Ledger.SetReceipt(stored)
+	if setErr := view.Ledger.SetReceipt(stored); setErr != nil {
+		return stored, true, setErr
+	}
 	return stored, true, fmt.Errorf("%w: event_id content differs", domain.ErrConflict)
 }
 
@@ -190,7 +198,9 @@ func (s *Service) transitionTenantReceipt(tenantID, eventID, status string, evic
 			receipt.ArchivedAt = now
 			delete(view.Hot.Events, key)
 		}
-		view.Ledger.SetReceipt(receipt)
+		if err := view.Ledger.SetReceipt(receipt); err != nil {
+			return err
+		}
 		result = receipt
 		return nil
 	})

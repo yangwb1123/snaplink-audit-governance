@@ -27,8 +27,12 @@ func (s *Service) sealPendingTenant(ctx context.Context, tenantID string) error 
 			if err != nil {
 				return err
 			}
-			view.Ledger.AppendSegment(segment)
-			view.Ledger.AppendCheckpoint(checkpoint)
+			if err := view.Ledger.AppendSegment(segment); err != nil {
+				return err
+			}
+			if err := view.Ledger.AppendCheckpoint(checkpoint); err != nil {
+				return err
+			}
 			stream.PendingHashes = nil
 			stream.PendingEvents = nil
 			stream.PendingPrevHash = ""
@@ -133,7 +137,9 @@ func (s *Service) archivePendingTenant(ctx context.Context, tenantID string) (in
 			receipt.Status = domain.StatusArchived
 			receipt.IndexedAt = now
 			receipt.ArchivedAt = now
-			view.Ledger.SetReceipt(receipt)
+			if err := view.Ledger.SetReceipt(receipt); err != nil {
+				return err
+			}
 			delete(view.Hot.Events, key)
 		}
 		for key, dead := range batch.deadLetters {
@@ -141,7 +147,9 @@ func (s *Service) archivePendingTenant(ctx context.Context, tenantID string) (in
 			if receipt, ok := view.Ledger.Receipt(key); ok {
 				receipt.ErrorCode = "archive_dead_letter"
 				receipt.ErrorMessage = dead.ErrorMessage
-				view.Ledger.SetReceipt(receipt)
+				if err := view.Ledger.SetReceipt(receipt); err != nil {
+					return err
+				}
 			}
 		}
 		view.Global.ArchiveConflictFailures[tenantID] = 0

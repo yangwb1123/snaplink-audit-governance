@@ -643,13 +643,12 @@ func (s *splitStore) appendLedger(tenantID string, committed *TenantLedger, pend
 	if len(pending) == 0 {
 		return nil
 	}
-	for _, record := range pending {
-		if err := validateLedgerRecord(record); err != nil {
-			return err
-		}
+	toAppend, err := committed.recordsToAppend(pending)
+	if err != nil {
+		return err
 	}
-	if s.path != "" {
-		if err := appendLedgerFile(s.root, tenantID, pending); err != nil {
+	if s.path != "" && len(toAppend) > 0 {
+		if err := appendLedgerFile(s.root, tenantID, toAppend); err != nil {
 			return err
 		}
 	}

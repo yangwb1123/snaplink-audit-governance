@@ -1,5 +1,14 @@
 # Release Notes
 
+## 2026-09-06 — Enforce canonical ledger ownership and immutable identity
+
+Cold-ledger mutators now reject cross-tenant or non-canonical receipt, segment,
+and checkpoint identities before buffering. File and PostgreSQL reads validate
+payload ownership, record type, key, version, and SQL-column identity; malformed
+records fail closed. Exact immutable duplicates remain idempotent, while
+conflicting payloads return `ErrLedgerRecordConflict`. No schema or wire
+migration is required; existing malformed records require operator repair.
+
 ## 2026-09-06 — Bound gRPC WriteStream over-cap skips
 
 A single authenticated `WriteStream` may now skip and log at most 100
