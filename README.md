@@ -109,7 +109,7 @@ python3 cli.py help
 
 ## Web 管理端
 
-仓库内的 [`web`](web/README.md) 是基于 Iris UI React 的审计治理管理端，通过
+仓库内的 [`web`](web/README.md) 是基于 Iris UI Svelte 5 的审计治理管理端，通过
 Snaplink Hosted Login 完成 OIDC Authorization Code + PKCE 登录，并对接本服务的
 事件查询、操作时间线、合规证据、Legal Hold、恢复审批和治理目录接口。
 

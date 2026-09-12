@@ -366,9 +366,28 @@ select {
   background: var(--iris-surface);
 }
 
+.card-heading {
+  margin: 0 0 var(--iris-space-sm, 8px);
+  font-size: 16px;
+}
+
+.card-heading-padded {
+  padding: var(--iris-space-md, 16px) var(--iris-space-md, 16px) 0;
+}
+
 .card-copy {
   margin-top: 0;
   line-height: 1.5;
+}
+
+.native-control {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--iris-space-sm, 8px);
+  border: 1px solid var(--iris-border);
+  border-radius: var(--iris-radius-md, 6px);
+  color: var(--iris-foreground);
+  background: var(--iris-background);
 }
 
 .table-footer {

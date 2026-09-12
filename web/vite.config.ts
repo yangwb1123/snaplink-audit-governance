@@ -1,8 +1,13 @@
-import react from '@vitejs/plugin-react'
+import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [svelte()],
+  resolve: {
+    // Svelte 5 exposes a browser-aware export condition. Without it Vite can
+    // select the SSR entry during development and render a blank application.
+    conditions: ['browser'],
+  },
   server: {
     host: '127.0.0.1',
     port: 5178,
@@ -21,14 +26,12 @@ export default defineConfig({
     },
   },
   build: {
-    // IrisTable intentionally ships its enterprise interaction surface as one chunk.
     chunkSizeWarningLimit: 650,
     rollupOptions: {
       output: {
         manualChunks: {
-          'react-vendor': ['react', 'react-dom/client'],
           'oidc-vendor': ['jose'],
-          'iris-vendor': ['@iris-ui-kit/react'],
+          'iris-vendor': ['@iris-ui-kit/svelte'],
         },
       },
     },

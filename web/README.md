@@ -1,6 +1,6 @@
 # Audit Governance Web
 
-本目录是 `snaplink-audit-governance` 的 Iris UI React 管理端。它直接调用本仓库
+本目录是 `snaplink-audit-governance` 的 Iris UI Svelte 5 管理端。它直接调用本仓库
 `/api/v1/*` 接口，并通过 Snaplink Hosted Login 使用 OIDC Authorization Code +
 PKCE S256 登录。管理端覆盖跨服务高级事件检索（operation/correlation/trace/aggregate）、
 完整时间窗口的结果/事件类型/来源 Facets 态势、操作回放、聚合对象版本历史、来源 Client 精确
@@ -53,7 +53,7 @@ AUDIT_API_PROXY=http://localhost:19089 make web-dev
 - resource / access-token audience：`audit-governance`
 
 前端通过 discovery 的 `jwks_uri` 校验 ID token 和 access token 的签名、issuer、
-audience 与有效期，并校验 state 和 nonce。令牌仅保存在 React 内存中；
+audience 与有效期，并校验 state 和 nonce。令牌仅保存在 Svelte 应用内存中；
 sessionStorage 只保存一次性的 state、nonce 和 PKCE verifier。Audit API 仍是最终授权方。
 
 ## 检查与构建
@@ -69,7 +69,7 @@ docker build -f web/Dockerfile -t snaplink-audit-governance-web:local web
 - `AUDIT_API_UPSTREAM=http://audit-api:8089`
 - `SNAPLINK_API_UPSTREAM=http://snaplink:8082`
 
-可通过同名环境变量覆盖。应用使用固定版本的 `@iris-ui-kit/react` 及其基础包，
+可通过同名环境变量覆盖。应用使用固定版本的 `@iris-ui-kit/svelte`、Svelte 5 及其基础包，
 页面源码保持在本仓库内，构建不依赖 `/home` 下的绝对路径。
 
 ## 完整联调栈

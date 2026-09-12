@@ -216,6 +216,7 @@ restore_event_payload="$(RESTORE_OPERATION="$restore_operation" RUN_SUFFIX="$run
 import datetime, json, os
 print(json.dumps({
     "event_id": "web-restore-event-" + os.environ["RUN_SUFFIX"],
+    "tenant_id": "demo",
     "operation_id": os.environ["RESTORE_OPERATION"],
     "source_system": "demo",
     "event_type": "audit.event",
