@@ -1,0 +1,11 @@
+{
+  "schema_version": "forge.device-identity-proof/ed25519/v1",
+  "evaluation_mode": "pure_cryptographic_binding_only",
+  "notice": "This fixture checks Ed25519 proof encoding, public-key digest, domain-separated binding bytes, and signature validity only. It consumes no challenge, issues no credential, persists no enrollment, records no approval, accepts no heartbeat, grants no inventory authority, and grants no execution authority.",
+  "owner_declaration": {"issuer":"https://id.example","subject":"user-1","tenant_id":"tenant-1"},
+  "device": {"device_id":"device-a","owner":{"issuer":"https://id.example","subject":"user-1","tenant_id":"tenant-1"},"key_id":"key-a","public_key_sha256":"34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e","approval_state":"approved","credential_state":"active"},
+  "challenge": {"challenge_id":"challenge-a","challenge_sha256":"62587872dc0933dd7103ae63ea9dd5990830c45f3614ec472dd6bfafbd2cfa7c","issued_at_ms":100,"expires_at_ms":1000,"consumed":false},
+  "proof": {"device_id":"device-a","key_id":"key-a","public_key_base64url":"iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w","owner":{"issuer":"https://id.example","subject":"user-1","tenant_id":"tenant-1"},"challenge_id":"challenge-a","challenge_sha256":"62587872dc0933dd7103ae63ea9dd5990830c45f3614ec472dd6bfafbd2cfa7c","issued_at_ms":200,"expires_at_ms":900,"signature_base64url":"eBXFL8xE4S-BHtVjoWxbKoTnFoR1qr-Jvn0ufI6OXul7xbpzPPUhXKT5mCp3DlP3NbcwNVPELloI_zhhQ64tBg"},
+  "expected": {"accepted":true,"reason":"bound_approved","identity_bound":true,"approval_required":false},
+  "authority": {"identity_verified":false,"challenge_consumed":false,"enrollment_persisted":false,"owner_approval_recorded":false,"credential_issued":false,"inventory_authoritative":false,"execution_authorized":false}
+}

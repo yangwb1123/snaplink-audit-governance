@@ -1,0 +1,503 @@
+{
+  "api_version": "forgeos.device-resource-summary-contract/v1",
+  "inventory_contract_fixture": "forge-device-inventory-observation-v1",
+  "placement_contract_fixture": "forge-session-placement-observation-v1",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "inventory": {
+    "schema_version": "forge.device-inventory-observation/v1",
+    "evaluation_mode": "offline_static_only",
+    "evaluated_at_ms": 200000,
+    "owner_declaration": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "owner_declaration_unverified": true,
+    "inventory_declarations_unverified": true,
+    "notice": "Every owner, instance, state, timestamp, resource, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only observation selects no target and grants no execution authority.",
+    "devices": [
+      {
+        "instance_id": "runner-a",
+        "device": {
+          "device_id": "candidate-a",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": true,
+            "memory_bytes": 4096,
+            "runtime": "cuda"
+          },
+          "data_residency_zones": [
+            "us-east",
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-b",
+        "device": {
+          "device_id": "candidate-b",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 2,
+          "available_memory_bytes": 4096,
+          "available_storage_bytes": 2048,
+          "runtimes": [
+            "python"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "eu-west"
+          ],
+          "trust_zone": "low",
+          "sandbox_levels": [
+            "process"
+          ],
+          "concurrency_limit": 1,
+          "active_concurrency": 1
+        }
+      },
+      {
+        "instance_id": "runner-c",
+        "device": {
+          "device_id": "candidate-c",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "pending",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-d",
+        "device": {
+          "device_id": "candidate-d",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "revoked",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-e",
+        "device": {
+          "device_id": "candidate-e",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "cordoned",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-f",
+        "device": {
+          "device_id": "candidate-f",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "offline",
+          "snapshot_observed_at_ms": 150000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-g",
+        "device": {
+          "device_id": "candidate-g",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 200001,
+          "lease_expires_at_ms": 260001,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-h",
+        "device": {
+          "device_id": "candidate-h",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 109999,
+          "lease_expires_at_ms": 169999,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      },
+      {
+        "instance_id": "runner-i",
+        "device": {
+          "device_id": "candidate-i",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 110000,
+          "lease_expires_at_ms": 210000,
+          "os": "linux",
+          "architecture": "x86_64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 16384,
+          "available_storage_bytes": 8192,
+          "runtimes": [
+            "oci"
+          ],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": [
+            "us-west"
+          ],
+          "trust_zone": "high",
+          "sandbox_levels": [
+            "container"
+          ],
+          "concurrency_limit": 4,
+          "active_concurrency": 2
+        }
+      }
+    ],
+    "execution_authorized": false,
+    "reservation_created": false,
+    "dispatch_performed": false
+  },
+  "placement_observation": {
+    "schema_version": "forge.session-placement-observation/v1",
+    "evaluation_mode": "offline_static_only",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "conversation_id": "conversation-001",
+    "run_id": "run-001",
+    "evaluated_at_ms": 200000,
+    "owner_declaration_unverified": true,
+    "device_attributes_unverified": true,
+    "decisions": [
+      {
+        "device_id": "candidate-a",
+        "instance_id": "runner-a",
+        "matches_requirements": true,
+        "exclusion_reasons": []
+      },
+      {
+        "device_id": "candidate-b",
+        "instance_id": "runner-b",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "cpu_cores_insufficient",
+          "data_residency_zone_mismatch",
+          "memory_insufficient",
+          "runtime_missing",
+          "sandbox_floor_unmet",
+          "storage_insufficient",
+          "trust_zone_below_minimum"
+        ]
+      },
+      {
+        "device_id": "candidate-c",
+        "instance_id": "runner-c",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "approval_pending"
+        ]
+      },
+      {
+        "device_id": "candidate-d",
+        "instance_id": "runner-d",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "device_revoked"
+        ]
+      },
+      {
+        "device_id": "candidate-e",
+        "instance_id": "runner-e",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "device_cordoned"
+        ]
+      },
+      {
+        "device_id": "candidate-f",
+        "instance_id": "runner-f",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "declared_offline"
+        ]
+      },
+      {
+        "device_id": "candidate-g",
+        "instance_id": "runner-g",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "snapshot_declared_from_future"
+        ]
+      },
+      {
+        "device_id": "candidate-h",
+        "instance_id": "runner-h",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "declared_lease_expired",
+          "snapshot_stale"
+        ]
+      },
+      {
+        "device_id": "candidate-i",
+        "instance_id": "runner-i",
+        "matches_requirements": true,
+        "exclusion_reasons": []
+      }
+    ],
+    "selected_device_id": null,
+    "selected_instance_id": null,
+    "authority": {
+      "identity_verified": false,
+      "heartbeat_persisted": false,
+      "inventory_authoritative": false,
+      "reservation_created": false,
+      "execution_authorized": false,
+      "dispatch_performed": false
+    }
+  },
+  "expected": {
+    "schema_version": "forge.device-resource-summary/v1",
+    "evaluation_mode": "offline_static_only",
+    "conversation_id": "conversation-001",
+    "run_id": "run-001",
+    "evaluated_at_ms": 200000,
+    "owner_declaration_unverified": true,
+    "inventory_declarations_unverified": true,
+    "placement_declaration_unverified": true,
+    "notice": "Every owner, instance, resource, placement, and eligibility value is an unverified caller declaration. This read-only summary aggregates declarations, selects no target, and grants no execution authority.",
+    "device_count": 9,
+    "runner_instance_count": 9,
+    "available_cpu_cores": 66,
+    "available_memory_bytes": 135168,
+    "available_storage_bytes": 67584,
+    "available_gpu_count": 1,
+    "available_gpu_memory_bytes": 4096,
+    "eligible_device_count": 2,
+    "eligible_instance_count": 2,
+    "selected_device_id": null,
+    "selected_instance_id": null,
+    "authority": {
+      "identity_verified": false,
+      "heartbeat_persisted": false,
+      "inventory_authoritative": false,
+      "reservation_created": false,
+      "execution_authorized": false,
+      "dispatch_performed": false
+    }
+  }
+}

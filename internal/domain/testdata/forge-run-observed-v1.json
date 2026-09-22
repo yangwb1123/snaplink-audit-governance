@@ -1,0 +1,22 @@
+{
+  "api_version": "forge.run.observed.v1",
+  "owner_ref": "21444e9222fa722f4b05e8a353e2e840594863c941bba4c2222b3c22bb198ba5",
+  "conversation_id": "conversation-001",
+  "run_id": "run-001",
+  "prompt_id": "prompt-001",
+  "created_at_ms": 200,
+  "latest_sequence": 5,
+  "status": "nonterminal",
+  "metadata_observed": true,
+  "content_included": false,
+  "authority": {
+    "identity_verified": false,
+    "owner_authorized": false,
+    "run_authoritative": false,
+    "persistence_attested": false,
+    "content_provenance_verified": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  }
+}

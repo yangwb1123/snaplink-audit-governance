@@ -1,0 +1,172 @@
+{
+  "schema_version": "forge.device-inventory-placement-batch-evaluation/v1",
+  "evaluation_mode": "pure_persisted_inventory_placement_dry_run",
+  "source_fixture": "forge-device-inventory-placement-input-v1.json",
+  "evaluation_owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "evaluated_at_ms": 200500,
+  "requirements": {
+    "os": "linux",
+    "architecture": "amd64",
+    "min_cpu_cores": 4,
+    "min_memory_bytes": 4096,
+    "min_storage_bytes": 1024,
+    "runtime": "oci",
+    "gpu": {
+      "required": false,
+      "min_memory_bytes": 0,
+      "runtime": ""
+    },
+    "data_residency_zones": ["us-west"],
+    "minimum_trust_zone": "standard",
+    "sandbox_floor": "container",
+    "concurrency_slots": 1
+  },
+  "cases": [
+    {
+      "name": "online",
+      "source_case": "online",
+      "device_id": "device-a",
+      "instance_id": "runner-a",
+      "expected": {
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "sandbox_floor_unmet",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    },
+    {
+      "name": "pending",
+      "source_case": "pending",
+      "device_id": "device-b",
+      "instance_id": "runner-b",
+      "expected": {
+        "revision": 7,
+        "device_id": "device-b",
+        "instance_id": "runner-b",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "approval_pending",
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "sandbox_floor_unmet",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    },
+    {
+      "name": "expired",
+      "source_case": "expired",
+      "device_id": "device-c",
+      "instance_id": "runner-c",
+      "expected": {
+        "revision": 7,
+        "device_id": "device-c",
+        "instance_id": "runner-c",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "declared_lease_expired",
+          "sandbox_floor_unmet",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    },
+    {
+      "name": "stale",
+      "source_case": "stale",
+      "device_id": "device-d",
+      "instance_id": "runner-d",
+      "expected": {
+        "revision": 7,
+        "device_id": "device-d",
+        "instance_id": "runner-d",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "sandbox_floor_unmet",
+          "snapshot_stale",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    },
+    {
+      "name": "offline",
+      "source_case": "offline",
+      "device_id": "device-e",
+      "instance_id": "runner-e",
+      "expected": {
+        "revision": 7,
+        "device_id": "device-e",
+        "instance_id": "runner-e",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "declared_offline",
+          "sandbox_floor_unmet",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    },
+    {
+      "name": "future",
+      "source_case": "online",
+      "device_id": "device-f",
+      "instance_id": "runner-f",
+      "snapshot_observed_at_ms": 200501,
+      "capability_lease_expires_at_ms": 260501,
+      "expected": {
+        "revision": 7,
+        "device_id": "device-f",
+        "instance_id": "runner-f",
+        "matches_requirements": false,
+        "exclusion_reasons": [
+          "concurrency_capacity_insufficient",
+          "data_residency_zone_mismatch",
+          "sandbox_floor_unmet",
+          "snapshot_declared_from_future",
+          "trust_zone_unconfirmed"
+        ]
+      }
+    }
+  ],
+  "empty_inputs_allowed": true,
+  "selected_device_id": null,
+  "selected_instance_id": null,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "placement_selected": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "error_cases": [
+    { "name": "owner_mismatch", "error": "owner_mismatch" },
+    {
+      "name": "duplicate_device",
+      "error": "invalid_persisted_inventory_placement_input"
+    },
+    {
+      "name": "duplicate_instance",
+      "error": "invalid_persisted_inventory_placement_input"
+    },
+    {
+      "name": "invalid_evaluated_at",
+      "error": "invalid_persisted_inventory_placement_input"
+    }
+  ]
+}

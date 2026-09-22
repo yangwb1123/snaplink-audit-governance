@@ -1,0 +1,227 @@
+{
+  "schema_version": "forge.execution-reconciliation-observation/v1",
+  "evaluation_mode": "pure_execution_reconciliation_observation",
+  "authority": {
+    "identity_verified": false,
+    "run_authoritative": false,
+    "attempt_persisted": false,
+    "lease_issued": false,
+    "terminal_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "cases": [
+    {
+      "name": "active_running_awaits_terminal",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "running",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 200,
+        "terminal": null
+      },
+      "expected": {
+        "accepted": true,
+        "next_observation": "await_terminal",
+        "lease_active": true,
+        "terminal_observed": false,
+        "terminal_disposition": "none",
+        "terminal_state_aligned": true,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "name": "expired_running_requires_reconciliation",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "running",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 10100,
+        "terminal": null
+      },
+      "expected": {
+        "accepted": true,
+        "next_observation": "lease_expired_without_terminal",
+        "lease_active": false,
+        "terminal_observed": false,
+        "terminal_disposition": "none",
+        "terminal_state_aligned": true,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "name": "completed_terminal_matches_attempt",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "completed",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 300,
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "observed_at_ms": 200
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "next_observation": "terminal_completed",
+        "lease_active": true,
+        "terminal_observed": true,
+        "terminal_disposition": "completed",
+        "terminal_state_aligned": true,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "name": "uncertain_terminal_requires_manual_review",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "uncertain",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 400,
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "uncertain", "reason": "transport ended after effect boundary"},
+          "observed_at_ms": 300
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "next_observation": "terminal_uncertain",
+        "lease_active": true,
+        "terminal_observed": true,
+        "terminal_disposition": "uncertain",
+        "terminal_state_aligned": true,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "name": "terminal_receipt_state_conflict_is_visible",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "failed",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 300,
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "observed_at_ms": 200
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "next_observation": "terminal_state_conflict",
+        "lease_active": true,
+        "terminal_observed": true,
+        "terminal_disposition": "completed",
+        "terminal_state_aligned": false,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "name": "foreign_terminal_proof_rejected",
+      "input": {
+        "owner": {"issuer": "https://id.example.test", "subject": "user-1", "tenant_id": "tenant-1"},
+        "conversation_id": "conversation-1",
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "command_id": "command-1",
+        "target_id": "runner-1",
+        "run_status": "nonterminal",
+        "attempt_state": "running",
+        "lease": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "observed_at_ms": 300,
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "foreign-attempt", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "failed", "reason": "runner rejected command"},
+          "observed_at_ms": 200
+        }
+      },
+      "expected": {"accepted": false}
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "schema_version": "forge.device-approval-rotation/v1",
+  "evaluation_mode": "pure_owner_device_lifecycle",
+  "notice": "This fixture is a pure owner/device lifecycle replacement plan. It authenticates no caller, writes no state, issues no credential, and grants no inventory or execution authority.",
+  "initial": {
+    "device_id": "device-1",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "approval_state": "pending",
+    "key_id": "key-1",
+    "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "key_generation": 1
+  },
+  "authority": {
+    "owner_authenticated": false,
+    "persisted": false,
+    "credential_issued": false,
+    "inventory_authoritative": false,
+    "execution_authorized": false
+  },
+  "cases": [
+    {
+      "name": "approve_pending",
+      "action": "approve",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "",
+      "next_public_key_sha256": "",
+      "expected_state": {
+        "device_id": "device-1",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "approval_state": "approved",
+        "key_id": "key-1",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "key_generation": 1
+      }
+    },
+    {
+      "name": "revoke_pending",
+      "action": "revoke",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "",
+      "next_public_key_sha256": "",
+      "expected_state": {
+        "device_id": "device-1",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "approval_state": "revoked",
+        "key_id": "key-1",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "key_generation": 1
+      }
+    },
+    {
+      "name": "rotate_pending",
+      "action": "rotate_key",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "key-2",
+      "next_public_key_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_state": {
+        "device_id": "device-1",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "approval_state": "pending",
+        "key_id": "key-2",
+        "public_key_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "key_generation": 2
+      }
+    },
+    {
+      "name": "owner_drift",
+      "action": "approve",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "other-user",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "",
+      "next_public_key_sha256": "",
+      "expected_error": "owner_mismatch"
+    },
+    {
+      "name": "device_drift",
+      "action": "approve",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-2",
+      "next_key_id": "",
+      "next_public_key_sha256": "",
+      "expected_error": "device_mismatch"
+    },
+    {
+      "name": "unknown_action",
+      "action": "reset",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "",
+      "next_public_key_sha256": "",
+      "expected_error": "unknown_action"
+    },
+    {
+      "name": "invalid_rotation_key",
+      "action": "rotate_key",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "device_id": "device-1",
+      "next_key_id": "key-2",
+      "next_public_key_sha256": "not-a-digest",
+      "expected_error": "invalid_rotation_key"
+    }
+  ]
+}

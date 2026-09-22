@@ -1,0 +1,165 @@
+{
+  "schema_version": "forge.device-enrollment-heartbeat-lifecycle-persistence/v1",
+  "evaluation_mode": "pure_joined_value_replacement",
+  "notice": "This fixture describes a complete value image for a future lifecycle transaction. It performs no storage I/O, clock read, cryptographic verification, challenge consumption, credential issuance, route registration, reservation, scheduling, dispatch, Runner operation, execution, or Audit write.",
+  "authority": {
+    "identity_verified": false,
+    "challenge_consumed": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "device": {
+    "device_id": "device-a",
+    "approval_state": "approved",
+    "credential_state": "active",
+    "cordon_state": "clear",
+    "reservation_state": "none"
+  },
+  "capabilities": {
+    "os": "linux",
+    "architecture": "amd64",
+    "cpu_cores": 8,
+    "available_cpu_cores": 7,
+    "memory_bytes": 17179869184,
+    "available_memory_bytes": 8589934592,
+    "storage_bytes": 107374182400,
+    "available_storage_bytes": 53687091200,
+    "gpus": [
+      {
+        "id": "gpu-a",
+        "vendor": "NVIDIA",
+        "memory_bytes": 8589934592,
+        "available_memory_bytes": 4294967296
+      }
+    ],
+    "runtimes": ["oci", "python"]
+  },
+  "images": [
+    {
+      "name": "initial",
+      "revision": 1,
+      "heartbeat": {
+        "revision": 1,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 1,
+        "heartbeat_sequence": 1,
+        "server_observed_at_ms": 110000,
+        "capability_lease_expires_at_ms": 170000,
+        "liveness": "online"
+      },
+      "inventory": {
+        "revision": 1,
+        "device_id": "device-a",
+        "runner_device_id": "device-a",
+        "runner_instance_id": "runner-a",
+        "runner_generation": 1,
+        "runner_heartbeat_sequence": 1,
+        "runner_server_observed_at_ms": 110000,
+        "runner_capability_lease_expires_at_ms": 170000,
+        "runner_liveness": "online",
+        "reserved": false
+      },
+      "expected": {
+        "accepted": true,
+        "revision": 1,
+        "heartbeat_revision": 1,
+        "inventory_revision": 1
+      }
+    },
+    {
+      "name": "next",
+      "revision": 2,
+      "heartbeat": {
+        "revision": 2,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 1,
+        "heartbeat_sequence": 2,
+        "server_observed_at_ms": 111000,
+        "capability_lease_expires_at_ms": 171000,
+        "liveness": "online"
+      },
+      "inventory": {
+        "revision": 2,
+        "device_id": "device-a",
+        "runner_device_id": "device-a",
+        "runner_instance_id": "runner-a",
+        "runner_generation": 1,
+        "runner_heartbeat_sequence": 2,
+        "runner_server_observed_at_ms": 111000,
+        "runner_capability_lease_expires_at_ms": 171000,
+        "runner_liveness": "online",
+        "reserved": false
+      },
+      "expected": {
+        "accepted": true,
+        "revision": 2,
+        "heartbeat_revision": 2,
+        "inventory_revision": 2
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "outer_revision_split",
+      "outer_revision": 2,
+      "heartbeat_revision": 1,
+      "inventory_revision": 1,
+      "expected": {"accepted": false, "error": "invalid_persisted_state"}
+    },
+    {
+      "name": "heartbeat_revision_split",
+      "outer_revision": 1,
+      "heartbeat_revision": 2,
+      "inventory_revision": 1,
+      "expected": {"accepted": false, "error": "invalid_persisted_state"}
+    },
+    {
+      "name": "inventory_revision_split",
+      "outer_revision": 1,
+      "heartbeat_revision": 1,
+      "inventory_revision": 2,
+      "expected": {"accepted": false, "error": "invalid_persisted_state"}
+    },
+    {
+      "name": "runner_device_split",
+      "outer_revision": 1,
+      "heartbeat_revision": 1,
+      "inventory_revision": 1,
+      "runner_device_id": "device-b",
+      "expected": {"accepted": false, "error": "runner_device_mismatch"}
+    },
+    {
+      "name": "runner_generation_split",
+      "outer_revision": 1,
+      "heartbeat_revision": 1,
+      "inventory_revision": 1,
+      "runner_generation": 2,
+      "expected": {"accepted": false, "error": "invalid_persisted_state"}
+    },
+    {
+      "name": "owner_split",
+      "outer_revision": 1,
+      "heartbeat_revision": 1,
+      "inventory_revision": 1,
+      "owner_subject": "other-user",
+      "expected": {"accepted": false, "error": "owner_mismatch"}
+    },
+    {
+      "name": "revision_zero",
+      "outer_revision": 0,
+      "heartbeat_revision": 0,
+      "inventory_revision": 0,
+      "expected": {"accepted": false, "error": "invalid_persisted_state"}
+    }
+  ]
+}

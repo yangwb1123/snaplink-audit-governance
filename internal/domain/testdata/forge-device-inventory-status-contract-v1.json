@@ -1,0 +1,196 @@
+{
+  "schema_version": "forge.device-inventory-status-contract/v1",
+  "evaluation_mode": "pure_projection_only",
+  "stale_after_ms": 90000,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "cases": [
+    {
+      "name": "approved_online_is_declared_eligible",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "online",
+        "fresh": true,
+        "declared_eligible": true
+      }
+    },
+    {
+      "name": "pending_approval",
+      "input": {
+        "approval_state": "pending",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "pending",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "revoked_wins_over_other_states",
+      "input": {
+        "approval_state": "revoked",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "reserved",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "revoked",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "cordoned_wins_over_liveness",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "cordoned",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "cordoned",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "offline_wins_over_freshness",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "offline",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "offline",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "old_snapshot_is_stale",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 100000,
+        "lease_expires_at_ms": 300000,
+        "evaluated_at_ms": 200001
+      },
+      "expected": {
+        "status": "stale",
+        "fresh": false,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "expired_lease_is_stale",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 200000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "stale",
+        "fresh": false,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "reserved_is_not_declared_eligible",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "reserved",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "status": "reserved",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "future_snapshot_rejected",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 200001,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "error": "snapshot_from_future"
+      }
+    },
+    {
+      "name": "invalid_lease_window_rejected",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 199999,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "error": "lease_before_snapshot"
+      }
+    },
+    {
+      "name": "unknown_liveness_rejected",
+      "input": {
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "unknown",
+        "reservation_state": "none",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "evaluated_at_ms": 200000
+      },
+      "expected": {
+        "error": "unknown_liveness"
+      }
+    }
+  ]
+}

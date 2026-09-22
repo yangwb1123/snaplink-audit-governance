@@ -1,0 +1,58 @@
+{
+  "schema_version": "forge.device-inventory-placement-evaluation/v2",
+  "evaluation_mode": "offline_static_only",
+  "source_schema_version": "forge.device-inventory-observation/v2",
+  "evaluation_owner": {
+    "issuer": "https://id.example",
+    "subject": "user-a",
+    "tenant_id": "tenant-a"
+  },
+  "evaluated_at_ms": 1800000000000,
+  "notice": "Every owner, state, timestamp, resource, GPU, reservation, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only comparison selects no target and grants no execution authority.",
+  "decisions": [
+    {
+      "revision": 1,
+      "generation": 1,
+      "heartbeat_sequence": 1,
+      "device_id": "device-a",
+      "instance_id": "runner-a",
+      "reservation_state": "none",
+      "gpu_count": 0,
+      "available_gpu_memory_bytes": 0,
+      "matches_requirements": true,
+      "exclusion_reasons": [],
+      "owner_declaration_unverified": true,
+      "device_attributes_unverified": true
+    },
+    {
+      "revision": 2,
+      "generation": 2,
+      "heartbeat_sequence": 4,
+      "device_id": "device-b",
+      "instance_id": "runner-b",
+      "reservation_state": "reserved",
+      "gpu_count": 2,
+      "available_gpu_memory_bytes": 17179869184,
+      "matches_requirements": false,
+      "exclusion_reasons": [
+        "concurrency_capacity_insufficient",
+        "device_reserved",
+        "gpu_memory_insufficient"
+      ],
+      "owner_declaration_unverified": true,
+      "device_attributes_unverified": true
+    }
+  ],
+  "eligible_candidate_count": 1,
+  "selected_device_id": null,
+  "selected_instance_id": null,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "placement_selected": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  }
+}

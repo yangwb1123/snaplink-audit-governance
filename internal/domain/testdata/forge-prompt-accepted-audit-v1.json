@@ -1,0 +1,25 @@
+{
+  "event_id": "5f63d52bca464fffb2260d3dda80581d86046b2da508c73fa2bad15b51dda2c8",
+  "tenant_id": "tenant-a",
+  "source_system": "forge-runtime",
+  "event_type": "forge.prompt.accepted.v1",
+  "schema_id": "forge.prompt.accepted.v1",
+  "schema_version": 1,
+  "occurred_at": "2026-09-13T12:00:00Z",
+  "operation_id": "prompt-19",
+  "actor": {
+    "id": "65ae5e986917eb203184d8cc86ae2751a696377ac8aba7ae379210604ac6db86",
+    "type": "user"
+  },
+  "aggregate_type": "forge_conversation",
+  "aggregate_id": "conversation-7",
+  "aggregate_version": 4,
+  "action": "append_prompt",
+  "outcome": "accepted",
+  "payload": {
+    "content_included": false
+  },
+  "data_classification": "internal",
+  "retention_class": "standard",
+  "idempotency_key": "5f63d52bca464fffb2260d3dda80581d86046b2da508c73fa2bad15b51dda2c8"
+}

@@ -1,0 +1,99 @@
+{
+  "schema_version": "forge.runner-local-execution-preview/v1",
+  "evaluation_mode": "injected_local_runner_preview_only",
+  "runner_execution_intent": {
+    "schema_version": "forge.runner-execution-intent/v1",
+    "evaluation_mode": "pure_runner_binding_only",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "conversation_id": "conversation-001",
+    "prompt_id": "prompt-001",
+    "run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "command_id": "command-001",
+    "target_id": "runner-1",
+    "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a",
+    "idempotency_key": "run-001:attempt-001:command-001",
+    "prompt_run_binding_valid": true,
+    "runner_command_binding_valid": true,
+    "preview_only": true,
+    "selected_target_id": null,
+    "authority": {
+      "device_identity_verified": false,
+      "command_persisted": false,
+      "reservation_created": false,
+      "execution_authorized": false,
+      "dispatch_performed": false,
+      "audit_published": false
+    }
+  },
+  "session_runner_receipt": {
+    "schema_version": "forge.session-runner-receipt-observation/v1",
+    "evaluation_mode": "pure_session_runner_receipt_binding_only",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "conversation_id": "conversation-001",
+    "prompt_id": "prompt-001",
+    "run_id": "run-001",
+    "receipt_observation": {
+      "schema_version": "forge.runner-command-terminal-receipt/v1",
+      "evaluation_mode": "pure_runner_command_receipt_only",
+      "command_id": "command-001",
+      "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a",
+      "attempt_id": "attempt-001",
+      "target_id": "runner-1",
+      "disposition_kind": "completed",
+      "observed_at_ms": 300,
+      "receipt_valid": true,
+      "preview_only": true,
+      "uncertain": false,
+      "reconciliation_required": false,
+      "manual_review_required": false,
+      "automatic_retry": false,
+      "follow_up": "none",
+      "authority": {
+        "device_identity_verified": false,
+        "command_persisted": false,
+        "reservation_created": false,
+        "execution_authorized": false,
+        "dispatch_performed": false,
+        "audit_published": false
+      }
+    },
+    "prompt_run_binding_valid": true,
+    "receipt_binding_valid": true,
+    "preview_only": true,
+    "selected_target_id": null,
+    "authority": {
+      "identity_verified": false,
+      "receipt_persisted": false,
+      "execution_authorized": false,
+      "dispatch_performed": false,
+      "audit_published": false
+    }
+  },
+  "command_id": "command-001",
+  "attempt_id": "attempt-001",
+  "target_id": "runner-1",
+  "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a",
+  "disposition_kind": "completed",
+  "observed_at_ms": 300,
+  "output_bytes": 8,
+  "exit_code": 0,
+  "executor_invoked": true,
+  "preview_only": true,
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

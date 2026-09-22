@@ -1,0 +1,100 @@
+{
+  "schema_version": "forge.execution-lease-checkpoint/v1",
+  "evaluation_mode": "pure_execution_lease_checkpoint_only",
+  "authority": {
+    "lease_issued": false,
+    "terminal_persisted": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "cases": [
+    {
+      "name": "empty_state",
+      "checkpoint": {
+        "schema_version": "forge.execution-lease-checkpoint/v1",
+        "evaluation_mode": "pure_execution_lease_checkpoint_only",
+        "grant": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "terminal": null
+      },
+      "expected": {"accepted": true, "terminal": false}
+    },
+    {
+      "name": "completed_receipt_survives_restart",
+      "checkpoint": {
+        "schema_version": "forge.execution-lease-checkpoint/v1",
+        "evaluation_mode": "pure_execution_lease_checkpoint_only",
+        "grant": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "observed_at_ms": 200
+        }
+      },
+      "expected": {"accepted": true, "terminal": true, "uncertain": false}
+    },
+    {
+      "name": "uncertain_receipt_remains_terminal",
+      "checkpoint": {
+        "schema_version": "forge.execution-lease-checkpoint/v1",
+        "evaluation_mode": "pure_execution_lease_checkpoint_only",
+        "grant": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "uncertain", "reason": "transport ended after effect boundary"},
+          "observed_at_ms": 300
+        }
+      },
+      "expected": {"accepted": true, "terminal": true, "uncertain": true}
+    },
+    {
+      "name": "foreign_proof_rejected",
+      "checkpoint": {
+        "schema_version": "forge.execution-lease-checkpoint/v1",
+        "evaluation_mode": "pure_execution_lease_checkpoint_only",
+        "grant": {
+          "v": 1,
+          "attempt_id": "attempt-1",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-1",
+          "issued_at_ms": 100,
+          "expires_at_ms": 10100
+        },
+        "terminal": {
+          "v": 1,
+          "proof": {"attempt_id": "foreign-attempt", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+          "disposition": {"kind": "failed", "reason": "runner rejected command"},
+          "observed_at_ms": 200
+        }
+      },
+      "expected": {"accepted": false, "error": "invalid_checkpoint"}
+    }
+  ]
+}

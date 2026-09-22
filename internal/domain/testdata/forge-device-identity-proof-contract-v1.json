@@ -1,0 +1,376 @@
+{
+  "schema_version": "forge.device-identity-proof-contract/v1",
+  "evaluation_mode": "pure_binding_only",
+  "notice": "This fixture checks exact device-owner-key and one-time challenge binding only. The proof digest is a test-vector label; no cryptographic verifier, credential issuer, persistence, network, approval write, inventory authority, or execution authority is present.",
+  "owner_declaration": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "device": {
+    "device_id": "device-a",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "key_id": "key-a",
+    "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "approval_state": "approved",
+    "credential_state": "active"
+  },
+  "challenge": {
+    "challenge_id": "challenge-a",
+    "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "issued_at_ms": 100000,
+    "expires_at_ms": 160000,
+    "consumed": false
+  },
+  "authority": {
+    "identity_verified": false,
+    "challenge_consumed": false,
+    "enrollment_persisted": false,
+    "owner_approval_recorded": false,
+    "credential_issued": false,
+    "inventory_authoritative": false,
+    "execution_authorized": false
+  },
+  "cases": [
+    {
+      "name": "approved_exact_binding",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": true,
+        "reason": "bound_approved",
+        "identity_bound": true,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "pending_requires_owner_approval",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "pending",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": true,
+        "reason": "bound_pending_approval",
+        "identity_bound": true,
+        "approval_required": true
+      }
+    },
+    {
+      "name": "wrong_owner_subject",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-foreign",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "owner_mismatch",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "wrong_tenant",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-foreign"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "owner_mismatch",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "foreign_device",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-foreign",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "device_mismatch",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "key_rotation_is_not_silent_rebind",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-rotated",
+        "public_key_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "key_mismatch",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "challenge_digest_mismatch",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "challenge_mismatch",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "challenge_replay",
+      "now_ms": 120000,
+      "challenge_consumed": true,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "challenge_replayed",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "challenge_expired",
+      "now_ms": 160000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "challenge_expired",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "proof_expired",
+      "now_ms": 150000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "active",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "proof_expired",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "revoked_credential",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "revoked",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "credential_revoked",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "expired_credential",
+      "now_ms": 120000,
+      "challenge_consumed": false,
+      "device_approval_state": "approved",
+      "device_credential_state": "expired",
+      "proof": {
+        "device_id": "device-a",
+        "key_id": "key-a",
+        "public_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "challenge_id": "challenge-a",
+        "challenge_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "proof_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issued_at_ms": 120000,
+        "expires_at_ms": 150000
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "credential_expired",
+        "identity_bound": false,
+        "approval_required": false
+      }
+    }
+  ]
+}

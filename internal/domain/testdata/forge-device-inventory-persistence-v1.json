@@ -1,0 +1,209 @@
+{
+  "schema_version": "forge.device-inventory-persistence/v1",
+  "evaluation_mode": "pure_persisted_inventory_cas_projection",
+  "stale_after_ms": 90000,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "state": {
+    "revision": 3,
+    "device": {
+      "device_id": "device-a",
+      "owner": {
+        "issuer": "issuer",
+        "subject": "user",
+        "tenant_id": "tenant"
+      },
+      "approval_state": "approved",
+      "cordon_state": "clear",
+      "reservation_state": "none"
+    },
+    "runner": {
+      "device_id": "device-a",
+      "instance_id": "runner-a",
+      "generation": 1,
+      "heartbeat_sequence": 1,
+      "server_observed_at_ms": 1000,
+      "capability_lease_expires_at_ms": 5000,
+      "liveness": "online",
+      "capabilities": {
+        "os": "linux",
+        "architecture": "amd64",
+        "cpu_cores": 8,
+        "available_cpu_cores": 7,
+        "memory_bytes": 17179869184,
+        "available_memory_bytes": 8589934592,
+        "storage_bytes": 107374182400,
+        "available_storage_bytes": 53687091200,
+        "gpus": [],
+        "runtimes": ["go", "rust"]
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "project_online",
+      "operation": "project",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "online",
+        "fresh": true,
+        "declared_eligible": true
+      }
+    },
+    {
+      "name": "commit_replacement",
+      "operation": "commit",
+      "expected_revision": 3,
+      "replacement": {
+        "heartbeat_sequence": 2,
+        "server_observed_at_ms": 2000,
+        "capability_lease_expires_at_ms": 6000
+      },
+      "expected": {
+        "accepted": true,
+        "revision": 4,
+        "heartbeat_sequence": 2,
+        "server_observed_at_ms": 2000,
+        "capability_lease_expires_at_ms": 6000
+      }
+    },
+    {
+      "name": "revision_conflict",
+      "operation": "commit",
+      "expected_revision": 2,
+      "expected": {
+        "accepted": false,
+        "error": "revision_conflict"
+      }
+    },
+    {
+      "name": "runner_device_mismatch",
+      "operation": "restore",
+      "runner_device_id": "device-b",
+      "expected": {
+        "accepted": false,
+        "error": "runner_device_mismatch"
+      }
+    },
+    {
+      "name": "owner_mismatch",
+      "operation": "project",
+      "evaluation_owner": "foreign",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": false,
+        "error": "owner_mismatch"
+      }
+    },
+    {
+      "name": "invalid_evaluation_owner",
+      "operation": "project",
+      "evaluation_owner": "invalid",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": false,
+        "error": "invalid_evaluation_owner"
+      }
+    },
+    {
+      "name": "stale_projection",
+      "operation": "project",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 100001,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "stale",
+        "fresh": false,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "pending_projection",
+      "operation": "project",
+      "device_approval_state": "pending",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "pending",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "cordoned_projection",
+      "operation": "project",
+      "device_cordon_state": "cordoned",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "cordoned",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "offline_projection",
+      "operation": "project",
+      "runner_liveness": "offline",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "offline",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "revoked_projection",
+      "operation": "project",
+      "device_approval_state": "revoked",
+      "evaluation_owner": "same",
+      "evaluated_at_ms": 1500,
+      "expected": {
+        "accepted": true,
+        "revision": 3,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "status": "revoked",
+        "fresh": true,
+        "declared_eligible": false
+      }
+    },
+    {
+      "name": "revision_overflow",
+      "operation": "commit",
+      "state_revision": 18446744073709551615,
+      "expected_revision": 18446744073709551615,
+      "expected": {
+        "accepted": false,
+        "error": "revision_overflow"
+      }
+    }
+  ]
+}

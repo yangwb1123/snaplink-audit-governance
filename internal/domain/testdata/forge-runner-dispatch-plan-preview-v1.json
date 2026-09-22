@@ -1,0 +1,57 @@
+{
+  "schema_version": "forge.runner-dispatch-plan-preview/v1",
+  "evaluation_mode": "pure_dispatch_plan_preview_only",
+  "owner_declaration": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-001",
+  "run_id": "run-001",
+  "attempt_id": "attempt-001",
+  "attempt_state": "accepted",
+  "attempt_state_admissible": true,
+  "command_id": "command-001",
+  "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a",
+  "intent_target_id": "runner-1",
+  "lease_epoch": 1,
+  "lease_active": true,
+  "evaluated_at_ms": 200500,
+  "candidate_count": 2,
+  "declarative_ready_count": 1,
+  "candidates": [
+    {
+      "target_id": "runner-1",
+      "attributes_unverified": true,
+      "matches_requirements": true,
+      "lease_target_match": true,
+      "lease_active": true,
+      "attempt_state_admissible": true,
+      "declarative_ready": true,
+      "reasons": []
+    },
+    {
+      "target_id": "runner-2",
+      "attributes_unverified": true,
+      "matches_requirements": true,
+      "lease_target_match": false,
+      "lease_active": true,
+      "attempt_state_admissible": true,
+      "declarative_ready": false,
+      "reasons": ["lease_target_mismatch"]
+    }
+  ],
+  "selected_target_id": null,
+  "preview_only": true,
+  "reservation_created": false,
+  "execution_authorized": false,
+  "dispatch_performed": false,
+  "authority": {
+    "device_identity_verified": false,
+    "attempt_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

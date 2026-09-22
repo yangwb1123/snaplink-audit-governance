@@ -1,0 +1,149 @@
+{
+  "schema_version": "forge.runner-lease-fencing/v1",
+  "evaluation_mode": "pure_lease_fencing_only",
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "grant": {
+    "v": 1,
+    "attempt_id": "attempt-1",
+    "target_id": "runner-1",
+    "epoch": 1,
+    "fencing_token": "fence-1",
+    "issued_at_ms": 100,
+    "expires_at_ms": 10100
+  },
+  "cases": [
+    {
+      "name": "active_at_issue",
+      "operation": "active",
+      "observed_at_ms": 100,
+      "expected": {"active": true}
+    },
+    {
+      "name": "inactive_at_expiry",
+      "operation": "active",
+      "observed_at_ms": 10100,
+      "expected": {"active": false}
+    },
+    {
+      "name": "renew_valid",
+      "operation": "renew",
+      "observed_at_ms": 1000,
+      "fencing_token": "fence-2",
+      "ttl_ms": 10000,
+      "expected": {
+        "accepted": true,
+        "epoch": 2,
+        "issued_at_ms": 1000,
+        "expires_at_ms": 11000
+      }
+    },
+    {
+      "name": "renew_token_reused",
+      "operation": "renew",
+      "observed_at_ms": 200,
+      "fencing_token": "fence-1",
+      "ttl_ms": 10000,
+      "expected": {"accepted": false, "error": "fencing_token_reused"}
+    },
+    {
+      "name": "renew_clock_rollback",
+      "operation": "renew",
+      "observed_at_ms": 99,
+      "fencing_token": "fence-2",
+      "ttl_ms": 10000,
+      "expected": {"accepted": false, "error": "time_went_backwards"}
+    },
+    {
+      "name": "renew_expired",
+      "operation": "renew",
+      "observed_at_ms": 10100,
+      "fencing_token": "fence-2",
+      "ttl_ms": 10000,
+      "expected": {"accepted": false, "error": "lease_expired"}
+    },
+    {
+      "name": "proof_attempt_mismatch",
+      "operation": "proof",
+      "proof": {"attempt_id": "foreign-attempt", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": false, "error": "attempt_mismatch"}
+    },
+    {
+      "name": "proof_target_mismatch",
+      "operation": "proof",
+      "proof": {"attempt_id": "attempt-1", "target_id": "foreign-target", "epoch": 1, "fencing_token": "fence-1"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": false, "error": "target_mismatch"}
+    },
+    {
+      "name": "proof_epoch_mismatch",
+      "operation": "proof",
+      "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 2, "fencing_token": "fence-1"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": false, "error": "epoch_mismatch"}
+    },
+    {
+      "name": "proof_token_mismatch",
+      "operation": "proof",
+      "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "foreign-token"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": false, "error": "fencing_token_mismatch"}
+    },
+    {
+      "name": "proof_expired",
+      "operation": "proof",
+      "proof": {"attempt_id": "attempt-1", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-1"},
+      "observed_at_ms": 10100,
+      "expected": {"accepted": false, "error": "lease_expired"}
+    },
+    {
+      "name": "terminal_completed",
+      "operation": "terminal",
+      "disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": true, "replayed": false, "uncertain": false}
+    },
+    {
+      "name": "terminal_uncertain",
+      "operation": "terminal",
+      "disposition": {"kind": "uncertain", "reason": "transport ended after effect boundary"},
+      "observed_at_ms": 200,
+      "expected": {"accepted": true, "replayed": false, "uncertain": true, "automatic_retry": false}
+    },
+    {
+      "name": "terminal_replay",
+      "operation": "terminal_replay",
+      "disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "seed_disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "observed_at_ms": 20000,
+      "seed_observed_at_ms": 200,
+      "expected": {"accepted": true, "replayed": true}
+    },
+    {
+      "name": "terminal_conflict",
+      "operation": "terminal_conflict",
+      "disposition": {"kind": "failed", "reason": "late"},
+      "seed_disposition": {"kind": "completed", "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "observed_at_ms": 20000,
+      "seed_observed_at_ms": 200,
+      "expected": {"accepted": false, "error": "terminal_already_recorded"}
+    },
+    {
+      "name": "uncertain_is_terminal",
+      "operation": "renew_after_terminal",
+      "seed_disposition": {"kind": "uncertain", "reason": "transport ended after effect boundary"},
+      "seed_observed_at_ms": 200,
+      "observed_at_ms": 201,
+      "fencing_token": "fence-2",
+      "ttl_ms": 10000,
+      "expected": {"accepted": false, "error": "terminal_already_recorded"}
+    }
+  ]
+}

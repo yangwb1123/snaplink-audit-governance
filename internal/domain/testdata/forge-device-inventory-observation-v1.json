@@ -1,0 +1,82 @@
+{
+  "schema_version": "forge.device-inventory-observation/v1",
+  "evaluation_mode": "offline_static_only",
+  "evaluated_at_ms": 200000,
+  "owner_declaration": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "owner_declaration_unverified": true,
+  "inventory_declarations_unverified": true,
+  "notice": "Every owner, instance, state, timestamp, resource, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only observation selects no target and grants no execution authority.",
+  "devices": [
+    {
+      "instance_id": "runner-a",
+      "device": {
+        "device_id": "device-a",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "os": "linux",
+        "architecture": "amd64",
+        "available_cpu_cores": 8,
+        "available_memory_bytes": 16384,
+        "available_storage_bytes": 8192,
+        "runtimes": ["oci"],
+        "gpu": {
+          "present": false,
+          "memory_bytes": 0,
+          "runtime": ""
+        },
+        "data_residency_zones": ["us-west"],
+        "trust_zone": "standard",
+        "sandbox_levels": ["container", "microvm"],
+        "concurrency_limit": 4,
+        "active_concurrency": 1
+      }
+    },
+    {
+      "instance_id": "runner-b",
+      "device": {
+        "device_id": "device-b",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "approval_state": "pending",
+        "cordon_state": "clear",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 150000,
+        "lease_expires_at_ms": 210000,
+        "os": "linux",
+        "architecture": "amd64",
+        "available_cpu_cores": 8,
+        "available_memory_bytes": 16384,
+        "available_storage_bytes": 8192,
+        "runtimes": ["oci"],
+        "gpu": {
+          "present": false,
+          "memory_bytes": 0,
+          "runtime": ""
+        },
+        "data_residency_zones": ["us-west"],
+        "trust_zone": "standard",
+        "sandbox_levels": ["container"],
+        "concurrency_limit": 4,
+        "active_concurrency": 0
+      }
+    }
+  ],
+  "execution_authorized": false,
+  "reservation_created": false,
+  "dispatch_performed": false
+}

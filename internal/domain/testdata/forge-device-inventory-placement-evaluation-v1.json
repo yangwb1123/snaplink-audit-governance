@@ -1,0 +1,47 @@
+{
+  "schema_version": "forge.device-inventory-placement-evaluation/v1",
+  "evaluation_mode": "pure_persisted_inventory_offline_evaluation",
+  "source_fixture": "forge-device-inventory-placement-input-v1.json",
+  "source_case": "online",
+  "evaluated_at_ms": 200500,
+  "policy_requirements": {
+    "os": "linux",
+    "architecture": "amd64",
+    "min_cpu_cores": 4,
+    "min_memory_bytes": 4096,
+    "min_storage_bytes": 1024,
+    "runtime": "oci",
+    "gpu": {
+      "required": false,
+      "min_memory_bytes": 0,
+      "runtime": ""
+    },
+    "data_residency_zones": ["us-west"],
+    "minimum_trust_zone": "standard",
+    "sandbox_floor": "container",
+    "concurrency_slots": 1
+  },
+  "authority": {
+    "placement_evaluated": false,
+    "placement_selected": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "expected": {
+    "accepted": true,
+    "error": "",
+    "revision": 7,
+    "device_id": "device-a",
+    "instance_id": "runner-a",
+    "matches_requirements": false,
+    "exclusion_reasons": [
+      "concurrency_capacity_insufficient",
+      "data_residency_zone_mismatch",
+      "sandbox_floor_unmet",
+      "trust_zone_unconfirmed"
+    ],
+    "owner_declaration_unverified": true,
+    "device_attributes_unverified": true
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "schema_version": "forge.device-inventory-placement-evaluation/v2",
+  "evaluation_mode": "offline_static_only",
+  "source_schema_version": "forge.device-inventory-observation/v2",
+  "evaluation_owner": {
+    "issuer": "issuer",
+    "subject": "user",
+    "tenant_id": "tenant"
+  },
+  "evaluated_at_ms": 200000,
+  "notice": "Every owner, state, timestamp, resource, GPU, reservation, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only comparison selects no target and grants no execution authority.",
+  "requirements": {
+    "os": "linux",
+    "architecture": "amd64",
+    "min_cpu_cores": 4,
+    "min_memory_bytes": 4294967296,
+    "min_storage_bytes": 10737418240,
+    "runtime": "go",
+    "gpu": {
+      "required": true,
+      "min_memory_bytes": 4294967296,
+      "runtime": ""
+    },
+    "data_residency_zones": [
+      "us-west"
+    ],
+    "minimum_trust_zone": "standard",
+    "sandbox_floor": "container",
+    "concurrency_slots": 1
+  },
+  "observation": {
+    "schema_version": "forge.device-inventory-observation/v2",
+    "evaluation_mode": "offline_static_only",
+    "evaluated_at_ms": 200000,
+    "owner_declaration": {
+      "issuer": "issuer",
+      "subject": "user",
+      "tenant_id": "tenant"
+    },
+    "owner_declaration_unverified": true,
+    "inventory_declarations_unverified": true,
+    "notice": "Every owner, instance, state, timestamp, resource, GPU, reservation, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only observation selects no target and grants no execution authority.",
+    "devices": [
+      {
+        "instance_id": "runner-a",
+        "revision": 1,
+        "generation": 1,
+        "heartbeat_sequence": 1,
+        "device": {
+          "device_id": "device-a",
+          "owner": {
+            "issuer": "issuer",
+            "subject": "user",
+            "tenant_id": "tenant"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "reservation_state": "reserved",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 100000,
+          "lease_expires_at_ms": 200000,
+          "os": "linux",
+          "architecture": "amd64",
+          "available_cpu_cores": 7,
+          "available_memory_bytes": 8589934592,
+          "available_storage_bytes": 53687091200,
+          "runtimes": [
+            "go",
+            "rust"
+          ],
+          "gpus": [
+            {
+              "id": "gpu-a",
+              "vendor": "NVIDIA",
+              "memory_bytes": 17179869184,
+              "available_memory_bytes": 12884901888
+            },
+            {
+              "id": "gpu-b",
+              "vendor": "NVIDIA",
+              "memory_bytes": 8589934592,
+              "available_memory_bytes": 4294967296
+            }
+          ],
+          "data_residency_zones": [],
+          "trust_zone": "unknown",
+          "sandbox_levels": [],
+          "concurrency_limit": 0,
+          "active_concurrency": 0
+        }
+      },
+      {
+        "instance_id": "runner-b",
+        "revision": 2,
+        "generation": 2,
+        "heartbeat_sequence": 4,
+        "device": {
+          "device_id": "device-b",
+          "owner": {
+            "issuer": "issuer",
+            "subject": "user",
+            "tenant_id": "tenant"
+          },
+          "approval_state": "pending",
+          "cordon_state": "cordoned",
+          "reservation_state": "none",
+          "liveness": "offline",
+          "snapshot_observed_at_ms": 100000,
+          "lease_expires_at_ms": 200000,
+          "os": "linux",
+          "architecture": "amd64",
+          "available_cpu_cores": 7,
+          "available_memory_bytes": 8589934592,
+          "available_storage_bytes": 53687091200,
+          "runtimes": [
+            "go",
+            "rust"
+          ],
+          "gpus": [],
+          "data_residency_zones": [],
+          "trust_zone": "unknown",
+          "sandbox_levels": [],
+          "concurrency_limit": 0,
+          "active_concurrency": 0
+        }
+      }
+    ],
+    "execution_authorized": false,
+    "reservation_created": false,
+    "dispatch_performed": false
+  },
+  "expected": [
+    {
+      "revision": 1,
+      "generation": 1,
+      "heartbeat_sequence": 1,
+      "device_id": "device-a",
+      "instance_id": "runner-a",
+      "reservation_state": "reserved",
+      "gpu_count": 2,
+      "available_gpu_memory_bytes": 17179869184,
+      "matches_requirements": false,
+      "exclusion_reasons": [
+        "concurrency_capacity_insufficient",
+        "data_residency_zone_mismatch",
+        "declared_lease_expired",
+        "device_reserved",
+        "sandbox_floor_unmet",
+        "snapshot_stale",
+        "trust_zone_unconfirmed"
+      ]
+    },
+    {
+      "revision": 2,
+      "generation": 2,
+      "heartbeat_sequence": 4,
+      "device_id": "device-b",
+      "instance_id": "runner-b",
+      "reservation_state": "none",
+      "gpu_count": 0,
+      "available_gpu_memory_bytes": 0,
+      "matches_requirements": false,
+      "exclusion_reasons": [
+        "approval_pending",
+        "concurrency_capacity_insufficient",
+        "data_residency_zone_mismatch",
+        "declared_lease_expired",
+        "declared_offline",
+        "device_cordoned",
+        "gpu_missing",
+        "sandbox_floor_unmet",
+        "snapshot_stale",
+        "trust_zone_unconfirmed"
+      ]
+    }
+  ],
+  "eligible_candidate_count": 0,
+  "selected_device_id": null,
+  "selected_instance_id": null,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "placement_selected": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  }
+}

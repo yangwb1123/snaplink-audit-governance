@@ -1,0 +1,37 @@
+{
+  "schema_version": "forge.run-attempt-lease-dispatch-preflight/v1",
+  "evaluation_mode": "pure_run_attempt_lease_dispatch_preflight",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-001",
+  "run_id": "run-001",
+  "run_status": "nonterminal",
+  "run_state_admissible": true,
+  "attempt_id": "attempt-001",
+  "attempt_state": "accepted",
+  "attempt_state_admissible": true,
+  "command_id": "command-001",
+  "intent_target_id": "runner-1",
+  "lease_epoch": 1,
+  "lease_active": true,
+  "evaluated_at_ms": 200500,
+  "candidate_count": 2,
+  "declarative_ready_count": 1,
+  "declarative_preflight_ready": true,
+  "rejection_reasons": [],
+  "selected_target_id": null,
+  "preview_only": true,
+  "authority": {
+    "identity_verified": false,
+    "run_authoritative": false,
+    "attempt_persisted": false,
+    "lease_issued": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

@@ -1,0 +1,309 @@
+{
+  "schema_version": "forge.device-inventory-placement-input/v1",
+  "evaluation_mode": "pure_persisted_inventory_to_placement_input",
+  "evaluation_owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "policy_requirements": {
+    "data_residency_zones": ["us-west"],
+    "minimum_trust_zone": "standard",
+    "sandbox_floor": "container",
+    "concurrency_slots": 1
+  },
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "placement_selected": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "state": {
+    "revision": 7,
+    "device": {
+      "device_id": "device-a",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "approval_state": "approved",
+      "cordon_state": "clear",
+      "reservation_state": "none"
+    },
+    "runner": {
+      "device_id": "device-a",
+      "instance_id": "runner-a",
+      "generation": 3,
+      "heartbeat_sequence": 12,
+      "server_observed_at_ms": 200000,
+      "capability_lease_expires_at_ms": 260000,
+      "liveness": "online",
+      "capabilities": {
+        "os": "linux",
+        "architecture": "amd64",
+        "cpu_cores": 8,
+        "available_cpu_cores": 6,
+        "memory_bytes": 16384,
+        "available_memory_bytes": 12288,
+        "storage_bytes": 8192,
+        "available_storage_bytes": 4096,
+        "gpus": [],
+        "runtimes": ["oci"]
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "online",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "stale",
+      "server_observed_at_ms": 100000,
+      "capability_lease_expires_at_ms": 220000,
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 100000,
+        "lease_expires_at_ms": 220000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "expired",
+      "server_observed_at_ms": 160000,
+      "capability_lease_expires_at_ms": 200000,
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 160000,
+        "lease_expires_at_ms": 200000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "pending",
+      "approval_state": "pending",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "pending",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "cordoned",
+      "cordon_state": "cordoned",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "cordoned",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "revoked",
+      "approval_state": "revoked",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "revoked",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "offline",
+      "liveness": "offline",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "offline",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "owner_mismatch",
+      "evaluation_owner": {
+        "issuer": "https://id.example",
+        "subject": "other-user",
+        "tenant_id": "tenant-1"
+      },
+      "expected": { "accepted": false, "error": "owner_mismatch" }
+    },
+    {
+      "name": "runner_device_binding_mismatch",
+      "runner_device_id": "device-b",
+      "expected": { "accepted": false, "error": "runner_device_mismatch" }
+    },
+    {
+      "name": "missing_policy_attributes_fail_closed",
+      "expected": {
+        "accepted": true,
+        "error": "",
+        "revision": 7,
+        "device_id": "device-a",
+        "instance_id": "runner-a",
+        "generation": 3,
+        "heartbeat_sequence": 12,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "none",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 200000,
+        "lease_expires_at_ms": 260000,
+        "owner_declaration_unverified": true,
+        "policy_attributes_unverified": true,
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0,
+        "policy_requirements_met": false
+      }
+    },
+    {
+      "name": "unsafe_snapshot_observed_at_ms",
+      "server_observed_at_ms": 9007199254740992,
+      "capability_lease_expires_at_ms": 9007199254800992,
+      "expected": {
+        "accepted": false,
+        "error": "invalid_persisted_inventory_placement_input"
+      }
+    },
+    {
+      "name": "unsafe_capability_lease_expires_at_ms",
+      "server_observed_at_ms": 9007199254740991,
+      "capability_lease_expires_at_ms": 9007199254741991,
+      "expected": {
+        "accepted": false,
+        "error": "invalid_persisted_inventory_placement_input"
+      }
+    }
+  ]
+}

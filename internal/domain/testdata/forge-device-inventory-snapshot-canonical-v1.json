@@ -1,0 +1,175 @@
+{
+  "schema_version": "forge.device-inventory-snapshot-canonical/v1",
+  "evaluation_mode": "pure_owner_scoped_snapshot_only",
+  "owner_declaration_unverified": true,
+  "inventory_declarations_unverified": true,
+  "authority": {
+    "identity_verified": false,
+    "heartbeat_persisted": false,
+    "inventory_authoritative": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false
+  },
+  "cases": [
+    {
+      "name": "sorts_by_device_then_instance_without_mutating_input",
+      "input": {
+        "snapshot_id": "snapshot-1",
+        "observed_at_ms": 200000,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": [
+          {
+            "device_id": "device-b",
+            "instance_id": "runner-z",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-1"
+            }
+          },
+          {
+            "device_id": "device-a",
+            "instance_id": "runner-z",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-1"
+            }
+          },
+          {
+            "device_id": "device-a",
+            "instance_id": "runner-a",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-1"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "ordered_keys": [
+          "device-a/runner-a",
+          "device-a/runner-z",
+          "device-b/runner-z"
+        ],
+        "canonical_sha256": "6e2bfe4ae401c1cf00f4cbbd9cb6c0998df9123ecee3e16555e4f8f8116e0d44"
+      }
+    },
+    {
+      "name": "empty_snapshot_has_stable_digest",
+      "input": {
+        "snapshot_id": "snapshot-2",
+        "observed_at_ms": 200001,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": []
+      },
+      "expected": {
+        "ordered_keys": [],
+        "canonical_sha256": "03c6d8e8f0f1956294f5adc5ee266111f1ca0d89b32ed64dea98cac4138cf2a8"
+      }
+    },
+    {
+      "name": "foreign_owner_row_rejected",
+      "input": {
+        "snapshot_id": "snapshot-3",
+        "observed_at_ms": 200002,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": [
+          {
+            "device_id": "device-a",
+            "instance_id": "runner-a",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-2"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "error": "owner_mismatch"
+      }
+    },
+    {
+      "name": "duplicate_composite_row_rejected",
+      "input": {
+        "snapshot_id": "snapshot-4",
+        "observed_at_ms": 200003,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": [
+          {
+            "device_id": "device-a",
+            "instance_id": "runner-a",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-1"
+            }
+          },
+          {
+            "device_id": "device-a",
+            "instance_id": "runner-a",
+            "owner": {
+              "issuer": "https://id.example",
+              "subject": "user-1",
+              "tenant_id": "tenant-1"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "error": "duplicate_row"
+      }
+    },
+    {
+      "name": "invalid_snapshot_id_rejected",
+      "input": {
+        "snapshot_id": "snapshot/5",
+        "observed_at_ms": 200004,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": []
+      },
+      "expected": {
+        "error": "invalid_snapshot_id"
+      }
+    },
+    {
+      "name": "zero_observed_time_rejected",
+      "input": {
+        "snapshot_id": "snapshot-6",
+        "observed_at_ms": 0,
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "rows": []
+      },
+      "expected": {
+        "error": "invalid_observed_at"
+      }
+    }
+  ]
+}

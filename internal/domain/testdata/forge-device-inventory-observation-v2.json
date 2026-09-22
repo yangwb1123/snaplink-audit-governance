@@ -1,0 +1,95 @@
+{
+  "schema_version": "forge.device-inventory-observation/v2",
+  "evaluation_mode": "offline_static_only",
+  "evaluated_at_ms": 200000,
+  "owner_declaration": {
+    "issuer": "issuer",
+    "subject": "user",
+    "tenant_id": "tenant"
+  },
+  "owner_declaration_unverified": true,
+  "inventory_declarations_unverified": true,
+  "notice": "Every owner, instance, state, timestamp, resource, GPU, reservation, residency, trust, sandbox, and concurrency value is an unverified caller declaration. This read-only observation selects no target and grants no execution authority.",
+  "devices": [
+    {
+      "instance_id": "runner-a",
+      "revision": 1,
+      "generation": 1,
+      "heartbeat_sequence": 1,
+      "device": {
+        "device_id": "device-a",
+        "owner": {
+          "issuer": "issuer",
+          "subject": "user",
+          "tenant_id": "tenant"
+        },
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "reserved",
+        "liveness": "online",
+        "snapshot_observed_at_ms": 100000,
+        "lease_expires_at_ms": 200000,
+        "os": "linux",
+        "architecture": "amd64",
+        "available_cpu_cores": 7,
+        "available_memory_bytes": 8589934592,
+        "available_storage_bytes": 53687091200,
+        "runtimes": ["go", "rust"],
+        "gpus": [
+          {
+            "id": "gpu-a",
+            "vendor": "NVIDIA",
+            "memory_bytes": 17179869184,
+            "available_memory_bytes": 12884901888
+          },
+          {
+            "id": "gpu-b",
+            "vendor": "NVIDIA",
+            "memory_bytes": 8589934592,
+            "available_memory_bytes": 4294967296
+          }
+        ],
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0
+      }
+    },
+    {
+      "instance_id": "runner-b",
+      "revision": 2,
+      "generation": 2,
+      "heartbeat_sequence": 4,
+      "device": {
+        "device_id": "device-b",
+        "owner": {
+          "issuer": "issuer",
+          "subject": "user",
+          "tenant_id": "tenant"
+        },
+        "approval_state": "pending",
+        "cordon_state": "cordoned",
+        "reservation_state": "none",
+        "liveness": "offline",
+        "snapshot_observed_at_ms": 100000,
+        "lease_expires_at_ms": 200000,
+        "os": "linux",
+        "architecture": "amd64",
+        "available_cpu_cores": 7,
+        "available_memory_bytes": 8589934592,
+        "available_storage_bytes": 53687091200,
+        "runtimes": ["go", "rust"],
+        "gpus": [],
+        "data_residency_zones": [],
+        "trust_zone": "unknown",
+        "sandbox_levels": [],
+        "concurrency_limit": 0,
+        "active_concurrency": 0
+      }
+    }
+  ],
+  "execution_authorized": false,
+  "reservation_created": false,
+  "dispatch_performed": false
+}
