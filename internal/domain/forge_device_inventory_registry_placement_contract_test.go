@@ -23,6 +23,9 @@ const (
 //go:embed testdata/forge-device-inventory-registry-placement-preview-v1.json
 var forgeDeviceInventoryRegistryPlacementPreviewFixture []byte
 
+//go:embed testdata/forge-scheduler-selection-preview-v1.json
+var forgeSchedulerSelectionPreviewFixture []byte
+
 type forgeRegistryPlacementOwner struct {
 	Issuer   string `json:"issuer"`
 	Subject  string `json:"subject"`
@@ -255,6 +258,174 @@ func TestForgeDeviceInventoryRegistryPlacementPreviewReceiver(t *testing.T) {
 		mutated := append(append([]byte(nil), forgeDeviceInventoryRegistryPlacementPreviewFixture...), []byte(` true`)...)
 		if _, err := decodeForgeRegistryPlacementPreview(mutated); err == nil {
 			t.Fatal("trailing registry placement value was accepted")
+		}
+	})
+}
+
+const forgeSchedulerSelectionMaxCandidates = uint64(128)
+
+type forgeSchedulerSelectionOwner struct {
+	Issuer   string `json:"issuer"`
+	Subject  string `json:"subject"`
+	TenantID string `json:"tenant_id"`
+}
+
+type forgeSchedulerSelectionAuthority struct {
+	PlacementSelected   bool `json:"placement_selected"`
+	ReservationCreated  bool `json:"reservation_created"`
+	LeaseIssued         bool `json:"lease_issued"`
+	ExecutionAuthorized bool `json:"execution_authorized"`
+	DispatchPerformed   bool `json:"dispatch_performed"`
+	AuditPublished      bool `json:"audit_published"`
+}
+
+type forgeSchedulerSelectionPreview struct {
+	SchemaVersion          string                           `json:"schema_version"`
+	EvaluationMode         string                           `json:"evaluation_mode"`
+	Owner                  forgeSchedulerSelectionOwner     `json:"owner"`
+	ConversationID         string                           `json:"conversation_id"`
+	RunID                  string                           `json:"run_id"`
+	AttemptID              string                           `json:"attempt_id"`
+	EvaluatedAtMS          uint64                           `json:"evaluated_at_ms"`
+	CandidateCount         uint64                           `json:"candidate_count"`
+	EligibleCandidateCount uint64                           `json:"eligible_candidate_count"`
+	SelectionAvailable     bool                             `json:"selection_available"`
+	SelectionReason        string                           `json:"selection_reason"`
+	SelectedDeviceID       *string                          `json:"selected_device_id"`
+	SelectedInstanceID     *string                          `json:"selected_instance_id"`
+	PreviewOnly            bool                             `json:"preview_only"`
+	Authority              forgeSchedulerSelectionAuthority `json:"authority"`
+}
+
+func decodeForgeSchedulerSelectionPreview(raw []byte) (forgeSchedulerSelectionPreview, error) {
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return forgeSchedulerSelectionPreview{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var preview forgeSchedulerSelectionPreview
+	if err := decoder.Decode(&preview); err != nil {
+		return forgeSchedulerSelectionPreview{}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 15 {
+		return forgeSchedulerSelectionPreview{}, errors.New("scheduler selection top-level fields are not exact")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return forgeSchedulerSelectionPreview{}, errors.New("trailing JSON value")
+		}
+		return forgeSchedulerSelectionPreview{}, err
+	}
+	return preview, nil
+}
+
+func (authority forgeSchedulerSelectionAuthority) isZero() bool {
+	return !authority.PlacementSelected && !authority.ReservationCreated &&
+		!authority.LeaseIssued && !authority.ExecutionAuthorized &&
+		!authority.DispatchPerformed && !authority.AuditPublished
+}
+
+func forgeSchedulerSelectionPreviewIsDisplayOnly(preview forgeSchedulerSelectionPreview) bool {
+	if preview.SchemaVersion != "forge.scheduler-selection-preview/v1" ||
+		preview.EvaluationMode != "pure_scheduler_selection_preview" ||
+		!validForgeRegistryOwnerPart(preview.Owner.Issuer) ||
+		!validForgeRegistryOwnerPart(preview.Owner.Subject) ||
+		!validForgeRegistryOwnerPart(preview.Owner.TenantID) ||
+		!validForgeSchedulerIdentifier(preview.ConversationID) ||
+		!validForgeSchedulerIdentifier(preview.RunID) ||
+		!validForgeSchedulerIdentifier(preview.AttemptID) ||
+		preview.EvaluatedAtMS == 0 || preview.EvaluatedAtMS > forgeRegistryPlacementMaxSafeInteger ||
+		preview.CandidateCount > forgeSchedulerSelectionMaxCandidates ||
+		preview.EligibleCandidateCount > preview.CandidateCount || !preview.PreviewOnly ||
+		!preview.Authority.isZero() {
+		return false
+	}
+	if preview.SelectionAvailable {
+		return preview.EligibleCandidateCount > 0 &&
+			preview.SelectionReason == "first_sorted_eligible_candidate" &&
+			preview.SelectedDeviceID != nil && preview.SelectedInstanceID != nil &&
+			validForgeSchedulerIdentifier(*preview.SelectedDeviceID) &&
+			validForgeSchedulerIdentifier(*preview.SelectedInstanceID)
+	}
+	return preview.SelectionReason == "no_eligible_candidate" &&
+		preview.SelectedDeviceID == nil && preview.SelectedInstanceID == nil
+}
+
+func validForgeSchedulerIdentifier(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && !(index > 0 && (character == '.' ||
+			character == '_' || character == ':' || character == '+' || character == '/' || character == '-')) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestForgeSchedulerSelectionPreviewReceiver(t *testing.T) {
+	preview, err := decodeForgeSchedulerSelectionPreview(forgeSchedulerSelectionPreviewFixture)
+	if err != nil {
+		t.Fatalf("decode scheduler selection preview: %v", err)
+	}
+	if !forgeSchedulerSelectionPreviewIsDisplayOnly(preview) ||
+		preview.CandidateCount != 2 || preview.EligibleCandidateCount != 1 ||
+		preview.SelectedDeviceID == nil || *preview.SelectedDeviceID != "device-a" ||
+		preview.SelectedInstanceID == nil || *preview.SelectedInstanceID != "runner-a" {
+		t.Fatalf("scheduler selection preview crossed an authority or selection boundary: %#v", preview)
+	}
+	t.Run("unknown field", func(t *testing.T) {
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(forgeSchedulerSelectionPreviewFixture, &root); err != nil {
+			t.Fatal(err)
+		}
+		root["unexpected"] = json.RawMessage(`true`)
+		mutated, err := json.Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeForgeSchedulerSelectionPreview(mutated); err == nil {
+			t.Fatal("unknown scheduler selection field was accepted")
+		}
+	})
+	t.Run("authority mutation", func(t *testing.T) {
+		mutated := bytes.Replace(forgeSchedulerSelectionPreviewFixture,
+			[]byte(`"dispatch_performed": false`), []byte(`"dispatch_performed": true`), 1)
+		decoded, err := decodeForgeSchedulerSelectionPreview(mutated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if forgeSchedulerSelectionPreviewIsDisplayOnly(decoded) {
+			t.Fatal("authority-bearing scheduler selection preview was accepted")
+		}
+	})
+	t.Run("selected identifier mutation", func(t *testing.T) {
+		mutated := bytes.Replace(forgeSchedulerSelectionPreviewFixture,
+			[]byte(`"selected_device_id": "device-a"`), []byte(`"selected_device_id": "device\n-a"`), 1)
+		decoded, err := decodeForgeSchedulerSelectionPreview(mutated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if forgeSchedulerSelectionPreviewIsDisplayOnly(decoded) {
+			t.Fatal("invalid scheduler selection identifier was accepted")
+		}
+	})
+	t.Run("duplicate field", func(t *testing.T) {
+		mutated := bytes.Replace(forgeSchedulerSelectionPreviewFixture,
+			[]byte(`"schema_version": "forge.scheduler-selection-preview/v1",`),
+			[]byte(`"schema_version": "forge.scheduler-selection-preview/v1","schema_version": "forge.scheduler-selection-preview/v1",`), 1)
+		if _, err := decodeForgeSchedulerSelectionPreview(mutated); err == nil {
+			t.Fatal("duplicate scheduler selection field was accepted")
+		}
+	})
+	t.Run("trailing value", func(t *testing.T) {
+		mutated := append(append([]byte(nil), forgeSchedulerSelectionPreviewFixture...), []byte(` true`)...)
+		if _, err := decodeForgeSchedulerSelectionPreview(mutated); err == nil {
+			t.Fatal("trailing scheduler selection value was accepted")
 		}
 	})
 }

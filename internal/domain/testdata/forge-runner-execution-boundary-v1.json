@@ -1,0 +1,36 @@
+{
+  "schema_version": "forge.runner-execution-boundary/v1",
+  "evaluation_mode": "p4_runner_authority_execution_boundary_preview",
+  "mode": "execute",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "attempt_state": "accepted",
+  "command_id": "command-1",
+  "command_sha256": "3c0540dea301f478947bde3d4305fd55e925a19553f73f55c47676f0b766dbeb",
+  "target_id": "runner-a",
+  "lease_epoch": 3,
+  "activation_allowed": true,
+  "runner_authority_accepted": true,
+  "dispatch_admission_ready": true,
+  "transport_admission_ready": true,
+  "effect_state": "not_started",
+  "effect_state_startable": true,
+  "cancellation_clear": true,
+  "execution_boundary_ready": true,
+  "rejection_reasons": [],
+  "preview_only": true,
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

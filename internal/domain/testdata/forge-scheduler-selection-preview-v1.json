@@ -1,0 +1,28 @@
+{
+  "schema_version": "forge.scheduler-selection-preview/v1",
+  "evaluation_mode": "pure_scheduler_selection_preview",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-a",
+    "tenant_id": "tenant-a"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "evaluated_at_ms": 1800000000000,
+  "candidate_count": 2,
+  "eligible_candidate_count": 1,
+  "selection_available": true,
+  "selection_reason": "first_sorted_eligible_candidate",
+  "selected_device_id": "device-a",
+  "selected_instance_id": "runner-a",
+  "preview_only": true,
+  "authority": {
+    "placement_selected": false,
+    "reservation_created": false,
+    "lease_issued": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

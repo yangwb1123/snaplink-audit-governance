@@ -1,0 +1,138 @@
+{
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-001",
+  "run_id": "run-001",
+  "run_status": "nonterminal",
+  "dispatch_plan": {
+    "attempt_state": "accepted",
+    "placement_request": {
+      "schema_version": "forge.device-placement-dry-run/v1",
+      "evaluated_at_ms": 200500,
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "max_snapshot_age_ms": 60000,
+      "requirements": {
+        "os": "linux",
+        "architecture": "amd64",
+        "min_cpu_cores": 4,
+        "min_memory_bytes": 8589934592,
+        "min_storage_bytes": 21474836480,
+        "runtime": "oci",
+        "gpu": {
+          "required": false,
+          "min_memory_bytes": 0,
+          "runtime": ""
+        },
+        "data_residency_zones": ["us-west"],
+        "minimum_trust_zone": "standard",
+        "sandbox_floor": "container",
+        "concurrency_slots": 1
+      },
+      "devices": [
+        {
+          "device_id": "runner-1",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 199500,
+          "lease_expires_at_ms": 260500,
+          "os": "linux",
+          "architecture": "amd64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 17179869184,
+          "available_storage_bytes": 107374182400,
+          "runtimes": ["oci"],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": ["us-west"],
+          "trust_zone": "standard",
+          "sandbox_levels": ["container"],
+          "concurrency_limit": 4,
+          "active_concurrency": 1
+        },
+        {
+          "device_id": "runner-2",
+          "owner": {
+            "issuer": "https://id.example",
+            "subject": "user-1",
+            "tenant_id": "tenant-1"
+          },
+          "approval_state": "approved",
+          "cordon_state": "clear",
+          "liveness": "online",
+          "snapshot_observed_at_ms": 199500,
+          "lease_expires_at_ms": 260500,
+          "os": "linux",
+          "architecture": "amd64",
+          "available_cpu_cores": 8,
+          "available_memory_bytes": 17179869184,
+          "available_storage_bytes": 107374182400,
+          "runtimes": ["oci"],
+          "gpu": {
+            "present": false,
+            "memory_bytes": 0,
+            "runtime": ""
+          },
+          "data_residency_zones": ["us-west"],
+          "trust_zone": "standard",
+          "sandbox_levels": ["container"],
+          "concurrency_limit": 4,
+          "active_concurrency": 1
+        }
+      ]
+    },
+    "runner_execution_intent": {
+      "schema_version": "forge.runner-execution-intent/v1",
+      "evaluation_mode": "pure_runner_binding_only",
+      "owner": {
+        "issuer": "https://id.example",
+        "subject": "user-1",
+        "tenant_id": "tenant-1"
+      },
+      "conversation_id": "conversation-001",
+      "prompt_id": "prompt-001",
+      "run_id": "run-001",
+      "attempt_id": "attempt-001",
+      "command_id": "command-001",
+      "target_id": "runner-1",
+      "command_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "idempotency_key": "run-001:attempt-001:command-001",
+      "prompt_run_binding_valid": true,
+      "runner_command_binding_valid": true,
+      "preview_only": true,
+      "selected_target_id": null,
+      "authority": {
+        "device_identity_verified": false,
+        "command_persisted": false,
+        "reservation_created": false,
+        "execution_authorized": false,
+        "dispatch_performed": false,
+        "audit_published": false
+      }
+    },
+    "lease": {
+      "v": 1,
+      "attempt_id": "attempt-001",
+      "target_id": "runner-1",
+      "epoch": 1,
+      "fencing_token": "fence-001",
+      "issued_at_ms": 199500,
+      "expires_at_ms": 205500
+    }
+  }
+}

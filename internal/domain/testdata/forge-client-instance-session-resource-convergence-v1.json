@@ -1,0 +1,213 @@
+{
+  "schema_version": "forge.client-instance-session-resource-convergence/v1",
+  "evaluation_mode": "owner_bound_client_instance_session_resource_convergence_only",
+  "session_view": {
+    "schema_version": "forge.client-instance-session-view/v1",
+    "evaluation_mode": "owner_bound_session_view_only",
+    "owner_declaration": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "owner_declaration_unverified": true,
+    "instances": [
+      {
+        "instance_id": "client-app-001",
+        "client_kind": "app",
+        "session_ids": [
+          "conversation-001"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-cli-001",
+        "client_kind": "cli",
+        "session_ids": [
+          "conversation-001",
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-mobile-001",
+        "client_kind": "mobile",
+        "session_ids": [
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "idle"
+      },
+      {
+        "instance_id": "client-tui-001",
+        "client_kind": "tui",
+        "session_ids": [
+          "conversation-001",
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-web-001",
+        "client_kind": "web",
+        "session_ids": [
+          "conversation-001"
+        ],
+        "observed_at_ms": 200500,
+        "status": "idle"
+      }
+    ],
+    "read_only": true,
+    "authority": {
+      "owner_authenticated": false,
+      "session_read_authorized": false,
+      "prompt_write_authorized": false,
+      "device_identity_verified": false,
+      "reservation_created": false,
+      "execution_authorized": false,
+      "dispatch_performed": false,
+      "audit_published": false
+    }
+  },
+  "resource_view": {
+    "schema_version": "forge.client-instance-resource-view/v1",
+    "evaluation_mode": "owner_bound_instance_resource_view_only",
+    "owner_declaration": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "owner_declaration_unverified": true,
+    "instances": [
+      {
+        "instance_id": "client-app-001",
+        "client_kind": "app",
+        "session_ids": [
+          "conversation-001"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-cli-001",
+        "client_kind": "cli",
+        "session_ids": [
+          "conversation-001",
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-mobile-001",
+        "client_kind": "mobile",
+        "session_ids": [
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "idle"
+      },
+      {
+        "instance_id": "client-tui-001",
+        "client_kind": "tui",
+        "session_ids": [
+          "conversation-001",
+          "conversation-002"
+        ],
+        "observed_at_ms": 200500,
+        "status": "active"
+      },
+      {
+        "instance_id": "client-web-001",
+        "client_kind": "web",
+        "session_ids": [
+          "conversation-001"
+        ],
+        "observed_at_ms": 200500,
+        "status": "idle"
+      }
+    ],
+    "devices": [
+      {
+        "device_id": "device-a",
+        "runner_instance_id": "runner-a",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "revision": 1,
+        "generation": 1,
+        "heartbeat_sequence": 1,
+        "observed_at_ms": 200500,
+        "approval_state": "approved",
+        "cordon_state": "clear",
+        "reservation_state": "reserved",
+        "liveness": "online",
+        "os": "linux",
+        "architecture": "amd64",
+        "cpu_cores": 8,
+        "available_cpu_cores": 7,
+        "memory_bytes": 17179869184,
+        "available_memory_bytes": 8589934592,
+        "storage_bytes": 107374182400,
+        "available_storage_bytes": 53687091200,
+        "gpu_count": 2,
+        "available_gpu_memory_bytes": 17179869184
+      },
+      {
+        "device_id": "device-b",
+        "runner_instance_id": "runner-b",
+        "owner": {
+          "issuer": "https://id.example",
+          "subject": "user-1",
+          "tenant_id": "tenant-1"
+        },
+        "revision": 2,
+        "generation": 2,
+        "heartbeat_sequence": 4,
+        "observed_at_ms": 200500,
+        "approval_state": "pending",
+        "cordon_state": "cordoned",
+        "reservation_state": "none",
+        "liveness": "offline",
+        "os": "linux",
+        "architecture": "amd64",
+        "cpu_cores": 8,
+        "available_cpu_cores": 7,
+        "memory_bytes": 17179869184,
+        "available_memory_bytes": 8589934592,
+        "storage_bytes": 107374182400,
+        "available_storage_bytes": 53687091200,
+        "gpu_count": 0,
+        "available_gpu_memory_bytes": 0
+      }
+    ],
+    "device_attributes_unverified": true,
+    "read_only": true,
+    "authority": {
+      "owner_authenticated": false,
+      "session_read_authorized": false,
+      "prompt_write_authorized": false,
+      "device_identity_verified": false,
+      "reservation_created": false,
+      "execution_authorized": false,
+      "dispatch_performed": false,
+      "audit_published": false
+    }
+  },
+  "converged": true,
+  "read_only": true,
+  "authority": {
+    "owner_authenticated": false,
+    "session_read_authorized": false,
+    "prompt_write_authorized": false,
+    "device_identity_verified": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": "forge.prompt-append-receipt/v1",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "request": {
+    "conversation_id": "conversation-001",
+    "expected_version": 2,
+    "role": "user",
+    "content_sha256": "ba7c92f7b6cf793207184c5eeb0faf9d07f20f822122a3496981848a16237477",
+    "idempotency_key_sha256": "28000a1da51a81095e5dcd089338c3884c551a2538343d090e6459542dc1f3b9"
+  },
+  "receipt": {
+    "conversation_id": "conversation-001",
+    "prompt_id": "prompt-003",
+    "role": "user",
+    "aggregate_version": 3,
+    "created_at_ms": 300,
+    "replayed": false,
+    "storage_commit_observed": true,
+    "content_included": false
+  },
+  "authority": {
+    "run_created": false,
+    "device_selected": false,
+    "reservation_created": false,
+    "dispatch_performed": false,
+    "execution_authorized": false,
+    "audit_published": false
+  }
+}

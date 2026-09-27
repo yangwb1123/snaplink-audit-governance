@@ -1,0 +1,63 @@
+{
+  "schema_version": "forge.runner-command-digest/v1",
+  "digest_domain": "forge.runtime.runner-command.v1",
+  "vectors": [
+    {
+      "name": "baseline",
+      "command": {
+        "v": 1,
+        "command_id": "command-001",
+        "lease_proof": {
+          "attempt_id": "attempt-001",
+          "target_id": "runner-1",
+          "epoch": 1,
+          "fencing_token": "fence-001"
+        },
+        "idempotency_key": "run-001:attempt-001:command-001",
+        "workspace_ref": "workspace-001",
+        "argv": ["forge-task", "--prompt-ref", "prompt-001"],
+        "timeout_ms": 5000,
+        "max_output_bytes": 65536
+      },
+      "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a"
+    },
+    {
+      "name": "punctuation-and-empty-arg",
+      "command": {
+        "v": 1,
+        "command_id": "command-vector-002",
+        "lease_proof": {
+          "attempt_id": "attempt-vector-002",
+          "target_id": "runner-vector-002",
+          "epoch": 7,
+          "fencing_token": "fence-vector-002"
+        },
+        "idempotency_key": "run-vector-002:attempt-vector-002:command-vector-002",
+        "workspace_ref": "workspace-vector-002",
+        "argv": ["forge-task", "--label=alpha_beta", "arg with spaces", ""],
+        "timeout_ms": 600000,
+        "max_output_bytes": 8388608
+      },
+      "command_sha256": "c7f77c312d0f841e30b68ee95ee50ed40efada20ef796a8b957306c29188a8bd"
+    },
+    {
+      "name": "utf8",
+      "command": {
+        "v": 1,
+        "command_id": "command-vector-utf8",
+        "lease_proof": {
+          "attempt_id": "attempt-vector-utf8",
+          "target_id": "runner-vector-utf8",
+          "epoch": 9,
+          "fencing_token": "fence-vector-utf8"
+        },
+        "idempotency_key": "run-vector-utf8:attempt-vector-utf8:command-vector-utf8",
+        "workspace_ref": "workspace-utf8-α",
+        "argv": ["forge-task", "--label=αβ", "路径🚀", ""],
+        "timeout_ms": 123456,
+        "max_output_bytes": 1048576
+      },
+      "command_sha256": "3d36bd53497009273187d1a8d17ef3f8adfa55f2c0cf281a99acafa7ccb88bd6"
+    }
+  ]
+}

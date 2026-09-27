@@ -1,0 +1,25 @@
+{
+  "owner": {"issuer": "https://id.example", "subject": "user-1", "tenant_id": "tenant-1"},
+  "conversation_id": "conversation-001",
+  "prompt_receipt": {
+    "prompt_id": "prompt-001", "conversation_id": "conversation-001", "role": "user", "accepted_at_ms": 200,
+    "intent_id": "intent-001", "initial_event_id": "event-001", "initial_event_sequence": 1,
+    "initial_event_type": "submitted", "replayed": false
+  },
+  "run_reference": {
+    "run_id": "run-001", "conversation_id": "conversation-001", "prompt_id": "prompt-001",
+    "created_at_ms": 200, "latest_sequence": 5, "status": "nonterminal"
+  },
+  "execution_intent": {
+    "conversation_id": "conversation-001", "prompt_id": "prompt-001", "run_id": "run-001",
+    "attempt_id": "attempt-001", "command_id": "command-001", "target_id": "runner-1",
+    "command_sha256": "42ed02a535113450e6f2cc757fb9b4e2cce6143724274191bbae159e9ea8de7a",
+    "idempotency_key": "run-001:attempt-001:command-001", "selected_target_id": null
+  },
+  "command": {
+    "v": 1, "command_id": "command-001",
+    "lease_proof": {"attempt_id": "attempt-001", "target_id": "runner-1", "epoch": 1, "fencing_token": "fence-001"},
+    "idempotency_key": "run-001:attempt-001:command-001", "workspace_ref": "workspace-001",
+    "argv": ["forge-task", "--prompt-ref", "prompt-001"], "timeout_ms": 5000, "max_output_bytes": 65536
+  }
+}

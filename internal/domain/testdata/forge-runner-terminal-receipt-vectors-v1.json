@@ -1,0 +1,173 @@
+{
+  "schema_version": "forge.runner-terminal-receipt-vectors/v1",
+  "evaluation_mode": "pure_runner_terminal_receipt_vectors_only",
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "vectors": [
+    {
+      "name": "completed",
+      "grant": {
+        "v": 1,
+        "attempt_id": "attempt-terminal-complete",
+        "target_id": "runner-terminal-complete",
+        "epoch": 1,
+        "fencing_token": "fence-terminal-\u0063omplete",
+        "issued_at_ms": 100,
+        "expires_at_ms": 10100
+      },
+      "command": {
+        "v": 1,
+        "command_id": "command-terminal-completed",
+        "lease_proof": {
+          "attempt_id": "attempt-terminal-complete",
+          "target_id": "runner-terminal-complete",
+          "epoch": 1,
+          "fencing_token": "fence-terminal-\u0063omplete"
+        },
+        "idempotency_key": "run-terminal-completed:attempt-terminal-complete:command-terminal-completed",
+        "workspace_ref": "workspace-terminal-completed",
+        "argv": ["forge-task", "--mode", "check"],
+        "timeout_ms": 5000,
+        "max_output_bytes": 65536
+      },
+      "receipt": {
+        "v": 1,
+        "command_id": "command-terminal-completed",
+        "command_sha256": "8340a639e9d91769e9b36c82e592c4f2efabf83c63b11707041dec165e26e5c6",
+        "proof": {
+          "attempt_id": "attempt-terminal-complete",
+          "target_id": "runner-terminal-complete",
+          "epoch": 1,
+          "fencing_token": "fence-terminal-\u0063omplete"
+        },
+        "disposition": {
+          "kind": "completed",
+          "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "observed_at_ms": 200
+      },
+      "expected": {
+        "command_sha256": "8340a639e9d91769e9b36c82e592c4f2efabf83c63b11707041dec165e26e5c6",
+        "disposition_kind": "completed",
+        "receipt_valid": true,
+        "uncertain": false,
+        "reconciliation_required": false,
+        "manual_review_required": false,
+        "automatic_retry": false,
+        "follow_up": "none"
+      }
+    },
+    {
+      "name": "failed",
+      "grant": {
+        "v": 1,
+        "attempt_id": "attempt-terminal-failed",
+        "target_id": "runner-terminal-failed",
+        "epoch": 2,
+        "fencing_token": "fence-terminal-\u0066ailed",
+        "issued_at_ms": 200,
+        "expires_at_ms": 10200
+      },
+      "command": {
+        "v": 1,
+        "command_id": "command-terminal-failed",
+        "lease_proof": {
+          "attempt_id": "attempt-terminal-failed",
+          "target_id": "runner-terminal-failed",
+          "epoch": 2,
+          "fencing_token": "fence-terminal-\u0066ailed"
+        },
+        "idempotency_key": "run-terminal-failed:attempt-terminal-failed:command-terminal-failed",
+        "workspace_ref": "workspace-terminal-failed",
+        "argv": ["forge-task", "--mode", "fail", ""],
+        "timeout_ms": 5000,
+        "max_output_bytes": 65536
+      },
+      "receipt": {
+        "v": 1,
+        "command_id": "command-terminal-failed",
+        "command_sha256": "d1b21119efbf38105cb8acb11c8c622485440a5d40328a1bac2f1ba8f8030ccf",
+        "proof": {
+          "attempt_id": "attempt-terminal-failed",
+          "target_id": "runner-terminal-failed",
+          "epoch": 2,
+          "fencing_token": "fence-terminal-\u0066ailed"
+        },
+        "disposition": {
+          "kind": "failed",
+          "reason": "exit_code_7"
+        },
+        "observed_at_ms": 700
+      },
+      "expected": {
+        "command_sha256": "d1b21119efbf38105cb8acb11c8c622485440a5d40328a1bac2f1ba8f8030ccf",
+        "disposition_kind": "failed",
+        "receipt_valid": true,
+        "uncertain": false,
+        "reconciliation_required": false,
+        "manual_review_required": false,
+        "automatic_retry": false,
+        "follow_up": "none"
+      }
+    },
+    {
+      "name": "uncertain",
+      "grant": {
+        "v": 1,
+        "attempt_id": "attempt-terminal-uncertain",
+        "target_id": "runner-terminal-uncertain",
+        "epoch": 3,
+        "fencing_token": "fence-terminal-\u0075ncertain",
+        "issued_at_ms": 300,
+        "expires_at_ms": 10300
+      },
+      "command": {
+        "v": 1,
+        "command_id": "command-terminal-uncertain",
+        "lease_proof": {
+          "attempt_id": "attempt-terminal-uncertain",
+          "target_id": "runner-terminal-uncertain",
+          "epoch": 3,
+          "fencing_token": "fence-terminal-\u0075ncertain"
+        },
+        "idempotency_key": "run-terminal-uncertain:attempt-terminal-uncertain:command-terminal-uncertain",
+        "workspace_ref": "workspace-terminal-uncertain",
+        "argv": ["forge-task", "--mode", "network"],
+        "timeout_ms": 5000,
+        "max_output_bytes": 65536
+      },
+      "receipt": {
+        "v": 1,
+        "command_id": "command-terminal-uncertain",
+        "command_sha256": "ca23f0fbe7707050de00bdfc9ff3987a80e9d00ffa3c36e2937b004acd615007",
+        "proof": {
+          "attempt_id": "attempt-terminal-uncertain",
+          "target_id": "runner-terminal-uncertain",
+          "epoch": 3,
+          "fencing_token": "fence-terminal-\u0075ncertain"
+        },
+        "disposition": {
+          "kind": "uncertain",
+          "reason": "runner_effect_outcome_uncertain"
+        },
+        "observed_at_ms": 900
+      },
+      "expected": {
+        "command_sha256": "ca23f0fbe7707050de00bdfc9ff3987a80e9d00ffa3c36e2937b004acd615007",
+        "disposition_kind": "uncertain",
+        "receipt_valid": true,
+        "uncertain": true,
+        "reconciliation_required": true,
+        "manual_review_required": true,
+        "automatic_retry": false,
+        "follow_up": "reconciliation_manual"
+      }
+    }
+  ]
+}

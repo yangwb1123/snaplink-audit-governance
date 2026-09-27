@@ -1,0 +1,49 @@
+{
+  "schema_version": "forge.session-runner-reconciliation-projection/v1",
+  "evaluation_mode": "pure_session_runner_reconciliation_projection_only",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-001",
+  "prompt_id": "prompt-001",
+  "run_id": "run-001",
+  "source": {
+    "schema_version": "forge.session-runner-receipt-history/v1",
+    "owner": {
+      "issuer": "https://id.example",
+      "subject": "user-1",
+      "tenant_id": "tenant-1"
+    },
+    "conversation_id": "conversation-001",
+    "prompt_id": "prompt-001",
+    "run_id": "run-001",
+    "attempt_count": 2,
+    "latest_attempt_id": "attempt-002",
+    "latest_command_id": "command-002",
+    "latest_target_id": "runner-2",
+    "latest_disposition_kind": "uncertain",
+    "latest_observed_at_ms": 200
+  },
+  "latest_attempt_id": "attempt-002",
+  "latest_command_id": "command-002",
+  "latest_target_id": "runner-2",
+  "latest_disposition_kind": "uncertain",
+  "latest_observed_at_ms": 200,
+  "reconciliation_kind": "manual",
+  "reconciliation_reason": "uncertain_terminal_receipt",
+  "reconciliation_required": true,
+  "manual_review_required": true,
+  "automatic_retry": false,
+  "follow_up": "reconciliation_manual",
+  "selected_target_id": null,
+  "preview_only": true,
+  "authority": {
+    "identity_verified": false,
+    "receipt_persisted": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

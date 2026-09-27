@@ -1,0 +1,33 @@
+{
+  "schema_version": "forge.attempt-lifecycle/v1",
+  "evaluation_mode": "pure_attempt_lifecycle_only",
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "cases": [
+    {"name":"requested_to_accepted","from":"requested","to":"accepted","accepted":true},
+    {"name":"accepted_to_starting","from":"accepted","to":"starting","accepted":true},
+    {"name":"accepted_to_interrupted","from":"accepted","to":"interrupted","accepted":true},
+    {"name":"accepted_to_failed","from":"accepted","to":"failed","accepted":true},
+    {"name":"accepted_to_uncertain","from":"accepted","to":"uncertain","accepted":true},
+    {"name":"starting_to_running","from":"starting","to":"running","accepted":true},
+    {"name":"starting_to_interrupted","from":"starting","to":"interrupted","accepted":true},
+    {"name":"starting_to_failed","from":"starting","to":"failed","accepted":true},
+    {"name":"starting_to_uncertain","from":"starting","to":"uncertain","accepted":true},
+    {"name":"running_to_interrupted","from":"running","to":"interrupted","accepted":true},
+    {"name":"running_to_completed","from":"running","to":"completed","accepted":true},
+    {"name":"running_to_failed","from":"running","to":"failed","accepted":true},
+    {"name":"running_to_uncertain","from":"running","to":"uncertain","accepted":true},
+    {"name":"requested_to_running_rejected","from":"requested","to":"running","accepted":false,"error":"pc_transition_invalid"},
+    {"name":"accepted_to_accepted_rejected","from":"accepted","to":"accepted","accepted":false,"error":"pc_transition_invalid"},
+    {"name":"interrupted_to_running_terminal_rejected","from":"interrupted","to":"running","accepted":false,"error":"pc_transition_invalid"},
+    {"name":"completed_to_failed_terminal_rejected","from":"completed","to":"failed","accepted":false,"error":"pc_transition_invalid"},
+    {"name":"uncertain_to_accepted_terminal_rejected","from":"uncertain","to":"accepted","accepted":false,"error":"pc_transition_invalid"},
+    {"name":"unknown_to_running_rejected","from":"unknown","to":"running","accepted":false,"error":"pc_state_invalid"}
+  ]
+}

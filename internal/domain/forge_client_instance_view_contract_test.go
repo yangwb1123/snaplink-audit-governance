@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // These mirrors are receiver-side compatibility evidence for the display-only
@@ -96,6 +97,14 @@ type forgeClientInstanceResourceView struct {
 // exact owner and resource field contract without duplicating validation code.
 type forgeClientResourceDevice = forgeClientInstanceResourceDevice
 
+const (
+	maxForgeClientInstanceRows                  = 128
+	maxForgeClientInstanceSessionIDs            = 128
+	maxForgeClientInstanceIdentifierBytes       = 128
+	maxForgeClientInstanceOwnerPartBytes        = 512
+	maxForgeClientInstanceObservedAtMS    int64 = 9_007_199_254_740_991
+)
+
 func decodeForgeClientInstanceView(raw []byte, value any) error {
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
 		return err
@@ -120,12 +129,21 @@ func decodeForgeClientInstanceView(raw []byte, value any) error {
 			typed.Authority != (forgeClientInstanceViewAuthority{}) {
 			return errors.New("client-instance session view is not authority-free")
 		}
+		if err := validateForgeClientInstanceViewRows(typed.Owner, typed.Instances); err != nil {
+			return err
+		}
 	case *forgeClientInstanceResourceView:
 		if typed.SchemaVersion != "forge.client-instance-resource-view/v1" ||
 			typed.EvaluationMode != "owner_bound_instance_resource_view_only" ||
 			!typed.OwnerDeclarationUnverified || !typed.DeviceAttributesUnverified ||
 			!typed.ReadOnly || typed.Authority != (forgeClientInstanceViewAuthority{}) {
 			return errors.New("client-instance resource view is not authority-free")
+		}
+		if err := validateForgeClientInstanceViewRows(typed.Owner, typed.Instances); err != nil {
+			return err
+		}
+		if typed.Devices == nil {
+			return errors.New("client-instance resource view devices must be an array")
 		}
 		for _, device := range typed.Devices {
 			if device.Owner != typed.Owner {
@@ -134,6 +152,86 @@ func decodeForgeClientInstanceView(raw []byte, value any) error {
 		}
 	}
 	return nil
+}
+
+// validateForgeClientInstanceViewRows mirrors the accepted source contract at
+// the receiver boundary. Convergence compares the session/resource arrays
+// exactly, so two identically malformed arrays must be rejected before that
+// comparison can make them look consistent.
+func validateForgeClientInstanceViewRows(owner forgeClientInstanceOwner, rows []forgeClientInstanceViewInstance) error {
+	if !validForgeClientInstanceOwner(owner) || rows == nil || len(rows) > maxForgeClientInstanceRows {
+		return errors.New("client-instance view owner/rows are invalid")
+	}
+	for index, row := range rows {
+		if !validForgeClientInstanceIdentifier(row.InstanceID) ||
+			(index > 0 && rows[index-1].InstanceID >= row.InstanceID) ||
+			!validForgeClientInstanceKind(row.ClientKind) || row.SessionIDs == nil ||
+			len(row.SessionIDs) > maxForgeClientInstanceSessionIDs ||
+			row.ObservedAtMS <= 0 || row.ObservedAtMS > maxForgeClientInstanceObservedAtMS ||
+			!validForgeClientInstanceStatus(row.Status) {
+			return errors.New("client-instance view instance row is invalid")
+		}
+		for sessionIndex, sessionID := range row.SessionIDs {
+			if !validForgeClientInstanceIdentifier(sessionID) ||
+				(sessionIndex > 0 && row.SessionIDs[sessionIndex-1] >= sessionID) {
+				return errors.New("client-instance view session row is invalid")
+			}
+		}
+	}
+	return nil
+}
+
+func validForgeClientInstanceOwner(owner forgeClientInstanceOwner) bool {
+	return validForgeClientInstanceOwnerPart(owner.Issuer) &&
+		validForgeClientInstanceOwnerPart(owner.Subject) &&
+		validForgeClientInstanceOwnerPart(owner.TenantID)
+}
+
+func validForgeClientInstanceOwnerPart(value string) bool {
+	if value == "" || len(value) > maxForgeClientInstanceOwnerPartBytes || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validForgeClientInstanceIdentifier(value string) bool {
+	if value == "" || len(value) > maxForgeClientInstanceIdentifierBytes {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') {
+			continue
+		}
+		if index == 0 || !strings.ContainsRune("._:+/-", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validForgeClientInstanceKind(value string) bool {
+	switch value {
+	case "cli", "tui", "web", "app", "mobile":
+		return true
+	default:
+		return false
+	}
+}
+
+func validForgeClientInstanceStatus(value string) bool {
+	switch value {
+	case "active", "idle", "offline", "unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 func TestForgeClientInstanceViewsAreCanonicalAndAuthorityFree(t *testing.T) {
@@ -203,6 +301,42 @@ func TestForgeClientInstanceViewsRejectUnknownAuthorityDuplicateAndForeignOwner(
 	}{
 		{"session authority", forgeClientInstanceSessionViewFixture, func(root map[string]json.RawMessage) {
 			root["authority"] = json.RawMessage(`{"audit_published":true}`)
+		}},
+		{"session invalid instance observation", forgeClientInstanceSessionViewFixture, func(root map[string]json.RawMessage) {
+			var instances []map[string]json.RawMessage
+			if err := json.Unmarshal(root["instances"], &instances); err != nil {
+				t.Fatal(err)
+			}
+			instances[0]["observed_at_ms"] = json.RawMessage(`0`)
+			encoded, err := json.Marshal(instances)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root["instances"] = encoded
+		}},
+		{"session malformed owner", forgeClientInstanceSessionViewFixture, func(root map[string]json.RawMessage) {
+			var owner map[string]json.RawMessage
+			if err := json.Unmarshal(root["owner_declaration"], &owner); err != nil {
+				t.Fatal(err)
+			}
+			owner["issuer"] = json.RawMessage(`""`)
+			encoded, err := json.Marshal(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root["owner_declaration"] = encoded
+		}},
+		{"resource invalid client kind", forgeClientInstanceResourceViewFixture, func(root map[string]json.RawMessage) {
+			var instances []map[string]json.RawMessage
+			if err := json.Unmarshal(root["instances"], &instances); err != nil {
+				t.Fatal(err)
+			}
+			instances[0]["client_kind"] = json.RawMessage(`"runner"`)
+			encoded, err := json.Marshal(instances)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root["instances"] = encoded
 		}},
 		{"resource unknown", forgeClientInstanceResourceViewFixture, func(root map[string]json.RawMessage) {
 			root["unexpected"] = json.RawMessage(`true`)

@@ -1,0 +1,43 @@
+{
+  "schema_version": "forge.runner-transport-admission/v1",
+  "evaluation_mode": "fenced_runner_transport_admission_preview",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "attempt_state": "accepted",
+  "attempt_state_admissible": true,
+  "command_id": "command-1",
+  "command_sha256": "11bd167e5ac9ee8c07f6c0c3b668853e114723f90ed39bed33e82684ded76ebe",
+  "target_id": "runner-1",
+  "lease_epoch": 1,
+  "lease_issued_at_ms": 100,
+  "lease_expires_at_ms": 10100,
+  "evaluated_at_ms": 300,
+  "transport_method": "POST",
+  "transport_path": "/api/v1/runners/runner-1/dispatch",
+  "transport_timestamp": 1700000000,
+  "transport_nonce": "transport-admission-1",
+  "transport_payload_sha256": "6ad570170fca79ef62dad30b16f37314ea65f13895d4e0ea873b6512d1c99333",
+  "transport_payload_bytes": 74,
+  "transport_replay_checked": true,
+  "lease_proof_current": true,
+  "lease_active": true,
+  "command_binding_valid": true,
+  "transport_binding_valid": true,
+  "admission_ready": true,
+  "rejection_reasons": [],
+  "preview_only": true,
+  "authority": {
+    "device_identity_verified": false,
+    "transport_authenticated": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

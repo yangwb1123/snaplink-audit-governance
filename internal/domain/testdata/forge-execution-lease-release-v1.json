@@ -1,0 +1,25 @@
+{
+  "schema_version": "forge.execution-lease-release/v1",
+  "evaluation_mode": "durable_scheduler_lease_release",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-a",
+    "tenant_id": "tenant-a"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "device_id": "device-a",
+  "instance_id": "runner-a",
+  "epoch": 2,
+  "released_at_ms": 1800000040000,
+  "replayed": false,
+  "authority": {
+    "placement_selected": false,
+    "reservation_created": false,
+    "lease_issued": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

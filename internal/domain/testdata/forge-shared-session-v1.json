@@ -1,0 +1,105 @@
+{
+  "conversation_page": {
+    "conversations": [
+      {
+        "conversation": {
+          "id": "conversation-001",
+          "scope": {
+            "kind": "project",
+            "id": "project-7"
+          },
+          "title": "Shared build",
+          "created_at_ms": 100,
+          "updated_at_ms": 150
+        },
+        "aggregate_version": 2
+      },
+      {
+        "conversation": {
+          "id": "conversation-002",
+          "scope": {
+            "kind": "global"
+          },
+          "title": "Run tests",
+          "created_at_ms": 200,
+          "updated_at_ms": 250
+        },
+        "aggregate_version": 1
+      }
+    ],
+    "has_more": false
+  },
+  "conversation_detail": {
+    "conversation": {
+      "id": "conversation-001",
+      "scope": {
+        "kind": "project",
+        "id": "project-7"
+      },
+      "title": "Shared build",
+      "created_at_ms": 100,
+      "updated_at_ms": 150
+    },
+    "aggregate_version": 2
+  },
+  "prompt_page": {
+    "conversation_id": "conversation-001",
+    "prompts": [
+      {
+        "id": "prompt-002",
+        "conversation_id": "conversation-001",
+        "role": "user",
+        "content": "continue the shared task",
+        "created_at_ms": 200
+      },
+      {
+        "id": "prompt-001",
+        "conversation_id": "conversation-001",
+        "role": "user",
+        "content": "inspect the project",
+        "created_at_ms": 100
+      }
+    ],
+    "next_cursor": {
+      "created_at_ms": 100,
+      "prompt_id": "prompt-001"
+    },
+    "has_more": true
+  },
+  "change_page": {
+    "after_cursor": 0,
+    "scanned_through_cursor": 2,
+    "has_more": false,
+    "changes": [
+      {
+        "cursor": 1,
+        "schema_version": 1,
+        "conversation_id": "conversation-001",
+        "entity_id": "conversation-001",
+        "aggregate_version": 1,
+        "kind": "conversation_created",
+        "created_at_ms": 100
+      },
+      {
+        "cursor": 2,
+        "schema_version": 1,
+        "conversation_id": "conversation-001",
+        "entity_id": "prompt-001",
+        "aggregate_version": 2,
+        "kind": "prompt_appended",
+        "created_at_ms": 100
+      }
+    ]
+  },
+  "append_prompt": {
+    "prompt": {
+      "id": "prompt-003",
+      "conversation_id": "conversation-001",
+      "role": "user",
+      "content": "send this from another client",
+      "created_at_ms": 300
+    },
+    "aggregate_version": 3,
+    "replayed": false
+  }
+}

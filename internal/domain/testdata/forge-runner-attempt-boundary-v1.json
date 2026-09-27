@@ -1,0 +1,31 @@
+{
+  "schema_version": "forge.runner-attempt-boundary/v1",
+  "evaluation_mode": "attempt_lifecycle_dispatch_boundary_preview",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "command_id": "command-1",
+  "target_id": "runner-1",
+  "lease_epoch": 1,
+  "current_attempt_state": "accepted",
+  "next_attempt_state": "starting",
+  "transition": "begin_starting",
+  "execution_boundary_ready": true,
+  "attempt_transition_valid": true,
+  "attempt_transition_dispatchable": true,
+  "attempt_boundary_ready": true,
+  "rejection_reasons": [],
+  "preview_only": true,
+  "authority": {
+    "attempt_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

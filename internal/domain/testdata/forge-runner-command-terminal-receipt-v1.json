@@ -1,0 +1,56 @@
+{
+  "schema_version": "forge.runner-command-terminal-receipt/v1",
+  "evaluation_mode": "pure_runner_command_receipt_only",
+  "authority": {
+    "device_identity_verified": false,
+    "command_persisted": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  },
+  "grant": {
+    "v": 1,
+    "attempt_id": "attempt-1",
+    "target_id": "runner-1",
+    "epoch": 1,
+    "fencing_token": "fence-1",
+    "issued_at_ms": 100,
+    "expires_at_ms": 10100
+  },
+  "command": {
+    "v": 1,
+    "command_id": "command-1",
+    "lease_proof": {
+      "attempt_id": "attempt-1",
+      "target_id": "runner-1",
+      "epoch": 1,
+      "fencing_token": "fence-1"
+    },
+    "idempotency_key": "attempt-1-command-1",
+    "workspace_ref": "workspace-1",
+    "argv": ["forge-task", "--check", ""],
+    "timeout_ms": 5000,
+    "max_output_bytes": 65536
+  },
+  "receipt": {
+    "v": 1,
+    "command_id": "command-1",
+    "command_sha256": "aeb0076a9e539d6308ddf0ee55845a7601ecb23b3cc1c0bc5f1192517c2f6eb7",
+    "proof": {
+      "attempt_id": "attempt-1",
+      "target_id": "runner-1",
+      "epoch": 1,
+      "fencing_token": "fence-1"
+    },
+    "disposition": {
+      "kind": "completed",
+      "receipt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "observed_at_ms": 200
+  },
+  "expected": {
+    "command_sha256": "aeb0076a9e539d6308ddf0ee55845a7601ecb23b3cc1c0bc5f1192517c2f6eb7",
+    "receipt_valid": true
+  }
+}

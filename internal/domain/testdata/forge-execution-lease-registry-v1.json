@@ -1,0 +1,35 @@
+{
+  "schema_version": "forge.execution-lease-registry/v1",
+  "evaluation_mode": "durable_scheduler_lease_claim",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-a",
+    "tenant_id": "tenant-a"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "device_id": "device-a",
+  "instance_id": "runner-a",
+  "inventory_revision": 7,
+  "generation": 3,
+  "heartbeat_sequence": 12,
+  "grant": {
+    "v": 1,
+    "attempt_id": "attempt-1",
+    "target_id": "runner-a",
+    "epoch": 1,
+    "fencing_token": "fence-token-a",
+    "issued_at_ms": 1800000000000,
+    "expires_at_ms": 1800000030000
+  },
+  "replayed": false,
+  "authority": {
+    "placement_selected": true,
+    "reservation_created": true,
+    "lease_issued": true,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}

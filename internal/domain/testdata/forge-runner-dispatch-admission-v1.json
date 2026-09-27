@@ -1,0 +1,34 @@
+{
+  "schema_version": "forge.runner-dispatch-admission/v1",
+  "evaluation_mode": "durable_lease_bound_dispatch_admission_preview",
+  "owner": {
+    "issuer": "https://id.example",
+    "subject": "user-1",
+    "tenant_id": "tenant-1"
+  },
+  "conversation_id": "conversation-1",
+  "run_id": "run-1",
+  "attempt_id": "attempt-1",
+  "attempt_state": "accepted",
+  "attempt_state_admissible": true,
+  "command_id": "command-1",
+  "command_sha256": "697bf50c577fe1213592317f6a6a3be6c493c0b98756c8ce39978771e3540954",
+  "target_id": "runner-a",
+  "lease_epoch": 1,
+  "lease_issued_at_ms": 100,
+  "lease_expires_at_ms": 1000,
+  "evaluated_at_ms": 300,
+  "lease_proof_current": true,
+  "lease_active": true,
+  "command_binding_valid": true,
+  "admission_ready": true,
+  "rejection_reasons": [],
+  "preview_only": true,
+  "authority": {
+    "device_identity_verified": false,
+    "reservation_created": false,
+    "execution_authorized": false,
+    "dispatch_performed": false,
+    "audit_published": false
+  }
+}
