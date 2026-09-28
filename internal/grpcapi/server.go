@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	auditv1 "github.com/snaplink/audit-governance/api/proto"
 	"github.com/snaplink/audit-governance/internal/auth"
@@ -182,16 +183,25 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 	if err != nil {
 		return err
 	}
-	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
+	expiry, _ := claims.EffectiveExpiry()
 	skips := 0
 	for {
-		request, receiveErr := stream.Recv()
+		request, receiveErr := s.receiveWriteStreamRequest(stream, expiry)
 		if receiveErr != nil {
 			if errors.Is(receiveErr, io.EOF) {
 				return nil
 			}
 			return receiveErr
 		}
+		// Re-run the same bearer-token verifier and permission gate before
+		// looking at the envelope. The claims used for this message are the
+		// freshly verified claims, not the initial stream snapshot.
+		claims, err = s.authenticate(stream.Context(), "audit:event:write")
+		if err != nil {
+			return err
+		}
+		expiry, _ = claims.EffectiveExpiry()
+		principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 		if request == nil || request.GetEvent() == nil {
 			return status.Error(codes.InvalidArgument, "event is required")
 		}
@@ -222,6 +232,64 @@ func (s *Server) WriteStream(stream auditv1.Ingest_WriteStreamServer) error {
 			return sendErr
 		}
 	}
+}
+
+type streamReceiveResult struct {
+	request *auditv1.WriteRequest
+	err     error
+}
+
+// receiveWriteStreamRequest bounds a blocked Recv by the already verified
+// effective JWT expiry. Recv has no context/deadline parameter, so the one
+// active receive is isolated in a buffered-result goroutine; when the timer
+// wins, the handler returns the authentication status and the gRPC transport
+// closes the underlying receive. A result that races the timer is still
+// checked against the authenticator clock before it can be processed.
+func (s *Server) receiveWriteStreamRequest(stream auditv1.Ingest_WriteStreamServer, expiry time.Time) (*auditv1.WriteRequest, error) {
+	if expiry.IsZero() {
+		return stream.Recv()
+	}
+	wait := expiry.Sub(s.Auth.CurrentTime())
+	if wait <= 0 {
+		return nil, streamAuthenticationFailed()
+	}
+	resultCh := make(chan streamReceiveResult, 1)
+	done := make(chan struct{})
+	go func() {
+		request, err := stream.Recv()
+		select {
+		case resultCh <- streamReceiveResult{request: request, err: err}:
+		case <-done:
+		}
+	}()
+	timer := time.NewTimer(wait)
+	defer func() {
+		close(done)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-timer.C:
+		return nil, streamAuthenticationFailed()
+	case result := <-resultCh:
+		if !s.Auth.CurrentTime().Before(expiry) {
+			return nil, streamAuthenticationFailed()
+		}
+		select {
+		case <-timer.C:
+			return nil, streamAuthenticationFailed()
+		default:
+		}
+		return result.request, result.err
+	}
+}
+
+func streamAuthenticationFailed() error {
+	return status.Error(codes.Unauthenticated, "authentication failed")
 }
 
 func (s *Server) authenticate(ctx context.Context, permission string) (auth.Claims, error) {

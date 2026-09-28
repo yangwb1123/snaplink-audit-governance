@@ -444,12 +444,13 @@ func TestStatusErrorLogsDetailServerSide(t *testing.T) {
 // grpcHarnessOptions tunes newGRPCHarnessOpts for tests that need a custom
 // server logger, transport-level server options, or a ledgered publisher.
 type grpcHarnessOptions struct {
-	logger       *log.Logger               // nil => Server.Logger stays nil (nil-guard exercised)
-	serverOpts   []grpc.ServerOption       // e.g. grpc.MaxRecvMsgSize for the production-cap harness
-	publisher    service.LedgeredPublisher // when set, Service.Ingest writes LedgeredOutbox rows
-	archiveStore archive.Store             // when set, injects the ingest archive seam
-	signer       service.Signer            // when set, injects the segment-signing seam
-	segmentSize  int                       // when positive, overrides the service default
+	logger        *log.Logger               // nil => Server.Logger stays nil (nil-guard exercised)
+	serverOpts    []grpc.ServerOption       // e.g. grpc.MaxRecvMsgSize for the production-cap harness
+	publisher     service.LedgeredPublisher // when set, Service.Ingest writes LedgeredOutbox rows
+	authenticator *auth.Authenticator       // when set, replaces the dev-auth default
+	archiveStore  archive.Store             // when set, injects the ingest archive seam
+	signer        service.Signer            // when set, injects the segment-signing seam
+	segmentSize   int                       // when positive, overrides the service default
 }
 
 // newGRPCHarness builds the bufconn-based ingest harness used by the
@@ -493,7 +494,11 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	}
 	listener := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer(opts.serverOpts...)
-	auditv1.RegisterIngestServer(grpcServer, &Server{Service: svc, Auth: auth.Authenticator{AllowDev: true}, Logger: opts.logger})
+	authenticator := auth.Authenticator{AllowDev: true}
+	if opts.authenticator != nil {
+		authenticator = *opts.authenticator
+	}
+	auditv1.RegisterIngestServer(grpcServer, &Server{Service: svc, Auth: authenticator, Logger: opts.logger})
 	go func() { _ = grpcServer.Serve(listener) }()
 	t.Cleanup(grpcServer.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))

@@ -18,7 +18,12 @@ type Claims struct {
 	Roles       []string
 	Permissions map[string]bool
 	Platform    bool
-	Service     bool
+	// effectiveExpiry is populated only for verified JWTs. It is the exact
+	// exp + ClockSkew boundary used by parseJWT, not a value parsed by a
+	// transport from the untrusted token text. Development tokens retain their
+	// existing non-expiring semantics and leave this unset.
+	effectiveExpiry time.Time
+	Service         bool
 	// ConsoleAuditRead maps the audience-bound Snaplink admin:read scope only
 	// onto event reads; it grants no governance mutation permission.
 	ConsoleAuditRead bool
@@ -50,6 +55,32 @@ type Authenticator struct {
 	// or are not-yet-active up to ClockSkew in the future. The zero
 	// value (default) preserves strict zero-tolerance behaviour.
 	ClockSkew time.Duration
+	// Now is an optional clock seam for expiry validation. Production uses
+	// time.Now when it is nil. Keeping the clock in the authenticator makes
+	// the stream expiry monitor and the per-message verifier share the same
+	// time semantics in deterministic tests.
+	Now func() time.Time
+}
+
+// CurrentTime returns the clock used by JWT time validation. It is exported
+// so a transport-level expiry monitor can schedule against exactly the same
+// clock as AuthenticateTokenContext; the default remains the wall clock.
+func (a Authenticator) CurrentTime() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+// EffectiveExpiry reports the verified JWT expiry boundary, including the
+// configured ClockSkew. The boolean is false for development tokens and for
+// a zero-value Claims. Callers must use this value rather than parsing an
+// authorization token independently.
+func (c Claims) EffectiveExpiry() (time.Time, bool) {
+	if c.effectiveExpiry.IsZero() {
+		return time.Time{}, false
+	}
+	return c.effectiveExpiry, true
 }
 
 func (a Authenticator) Authenticate(r *http.Request) (Claims, error) {
@@ -136,7 +167,8 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 		return Claims{}, fmt.Errorf("invalid token claims: %w", err)
 	}
 	claims := Claims{Permissions: map[string]bool{}}
-	now := time.Now().Unix()
+	now := a.CurrentTime().Unix()
+	clockSkewSeconds := int64(a.ClockSkew.Seconds())
 	// exp is mandatory: a bearer token without an expiry is valid forever,
 	// which turns token theft into a permanent replay credential in an audit
 	// system. Requiring the claim keeps the verifier fail-closed even when a
@@ -145,10 +177,10 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	if !hasExpiry {
 		return Claims{}, fmt.Errorf("token must contain exp")
 	}
-	if now >= int64(expiry)+int64(a.ClockSkew.Seconds()) {
+	if now >= int64(expiry)+clockSkewSeconds {
 		return Claims{}, fmt.Errorf("token is expired")
 	}
-	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore)-int64(a.ClockSkew.Seconds()) {
+	if notBefore, ok := numericClaim(payload, "nbf"); ok && now < int64(notBefore)-clockSkewSeconds {
 		return Claims{}, fmt.Errorf("token is not active")
 	}
 	// Asymmetric trust always requires both configured pins. This remains
@@ -204,6 +236,13 @@ func (a Authenticator) parseJWT(ctx context.Context, token string) (Claims, erro
 	claims.CrossTenantAuditRead = claims.ConsoleAuditRead && claims.TenantID == ""
 	claims.Platform = claims.Permissions["audit:platform:cross_tenant"] || contains(claims.Roles, "platform-admin")
 	claims.Service = contains(claims.Roles, "service") || contains(claims.Roles, "event-writer")
+	// Keep the exact integer-second boundary used above. In particular, do
+	// not use time.Duration arithmetic here: fractional skew has historically
+	// been truncated by the verifier and the stream monitor must match it.
+	// Assign it only after all signed identity and authorization claims have
+	// been validated, so EffectiveExpiry can only be observed on a complete
+	// verified Claims value.
+	claims.effectiveExpiry = time.Unix(int64(expiry)+clockSkewSeconds, 0)
 	return claims, nil
 }
 

@@ -96,3 +96,37 @@ func TestNegativeClockSkewTightensExpValidation(t *testing.T) {
 		t.Fatalf("negative skew must tighten exp check, err=%v", err)
 	}
 }
+
+func TestVerifiedClaimsExposeEffectiveExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 900_000_000)
+	const expOffset = int64(10)
+	a := Authenticator{
+		JWTSecret:       testHMACSecret,
+		AllowLocalHS256: true,
+		ClockSkew:       2500 * time.Millisecond,
+		Now:             func() time.Time { return now },
+	}
+	token := signJWT(t, map[string]any{
+		"sub": "service-subject", "tenant_id": "tenant-a", "exp": now.Unix() + expOffset,
+	})
+	claims, err := a.AuthenticateToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := claims.EffectiveExpiry()
+	if !ok {
+		t.Fatal("verified JWT did not expose an effective expiry")
+	}
+	want := time.Unix(now.Unix()+expOffset+int64(a.ClockSkew.Seconds()), 0)
+	if !got.Equal(want) {
+		t.Fatalf("effective expiry=%v, want %v", got, want)
+	}
+
+	devClaims, err := (Authenticator{AllowDev: true}).AuthenticateToken("dev:tenant-a:service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devClaims.EffectiveExpiry(); ok {
+		t.Fatal("development token unexpectedly has an expiry")
+	}
+}
