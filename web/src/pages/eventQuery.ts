@@ -34,15 +34,35 @@ export const emptyEventFilters: EventFilterDraft = {
   payloadDigest: '',
 }
 
+function exclusiveEndOfSelectedDate(end: Date): Date {
+  const exclusiveEnd = new Date(end)
+  if (
+    end.getHours() === 0 &&
+    end.getMinutes() === 0 &&
+    end.getSeconds() === 0 &&
+    end.getMilliseconds() === 0
+  ) {
+    exclusiveEnd.setDate(exclusiveEnd.getDate() + 1)
+  }
+  return exclusiveEnd
+}
+
 export function buildEventQuery(
   range: { start: Date | null; end: Date | null },
   filters: EventFilterDraft,
   pageSize = 100,
 ): EventQuery | null {
-  if (!range.start || !range.end || range.start >= range.end) return null
+  if (
+    !range.start ||
+    !range.end ||
+    !Number.isFinite(range.start.getTime()) ||
+    !Number.isFinite(range.end.getTime())
+  ) return null
+  const exclusiveEnd = exclusiveEndOfSelectedDate(range.end)
+  if (range.start >= exclusiveEnd) return null
   return {
     from: range.start.toISOString(),
-    to: range.end.toISOString(),
+    to: exclusiveEnd.toISOString(),
     event_type: filters.eventType.trim(),
     source_system: filters.sourceSystem.trim(),
     outcome: filters.outcome.trim(),

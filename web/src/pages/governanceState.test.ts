@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { RestoreRun } from '../api/types'
-import { restoreDecisionBlockReason, shouldPollExport } from './governanceState'
+import {
+  canAutoPollExport,
+  EXPORT_POLL_MAX_ATTEMPTS,
+  restoreDecisionBlockReason,
+  shouldPollExport,
+} from './governanceState'
 
 const pending: RestoreRun = {
   id: 'restore-1',
@@ -18,6 +23,14 @@ describe('governance workflow state', () => {
     expect(shouldPollExport('running')).toBe(true)
     expect(shouldPollExport('completed')).toBe(false)
     expect(shouldPollExport('failed')).toBe(false)
+  })
+
+  it('bounds automatic export polling and allows an explicit retry after pausing', () => {
+    expect(canAutoPollExport('running', 0, false)).toBe(true)
+    expect(canAutoPollExport('running', EXPORT_POLL_MAX_ATTEMPTS - 1, false)).toBe(true)
+    expect(canAutoPollExport('running', EXPORT_POLL_MAX_ATTEMPTS, false)).toBe(false)
+    expect(canAutoPollExport('running', 0, true)).toBe(false)
+    expect(canAutoPollExport('completed', 0, false)).toBe(false)
   })
 
   it('enforces restore separation of duties before calling the API', () => {

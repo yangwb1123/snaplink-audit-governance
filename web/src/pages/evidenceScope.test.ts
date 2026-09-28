@@ -10,8 +10,8 @@ describe('evidence scope', () => {
   it('builds a trimmed cross-service governance query', () => {
     const query = buildEvidenceScopeQuery(
       {
-        start: new Date('2026-08-01T00:00:00Z'),
-        end: new Date('2026-08-23T00:00:00Z'),
+        start: new Date(2026, 7, 1),
+        end: new Date(2026, 7, 23),
       },
       {
         ...emptyEvidenceScope,
@@ -28,6 +28,7 @@ describe('evidence scope', () => {
       operation_id: 'op-100',
       correlation_id: 'flow-100',
       page_size: 1000,
+      to: new Date(2026, 7, 24).toISOString(),
     })
   })
 
@@ -42,8 +43,8 @@ describe('evidence scope', () => {
   it('summarizes the persisted legal-hold scope', () => {
     const query = buildEvidenceScopeQuery(
       {
-        start: new Date('2026-08-01T00:00:00Z'),
-        end: new Date('2026-08-23T00:00:00Z'),
+        start: new Date(2026, 7, 1),
+        end: new Date(2026, 7, 23),
       },
       { ...emptyEvidenceScope, actorId: 'user-1', outcome: 'failed' },
     )!

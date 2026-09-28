@@ -35,9 +35,32 @@ describe('event query builder', () => {
     })
   })
 
-  it('rejects an incomplete or reversed time range', () => {
+  it('includes the selected end date while preserving precise end times', () => {
+    const start = new Date(2026, 7, 1)
+    const selectedEnd = new Date(2026, 7, 23)
+    const expectedExclusiveEnd = new Date(2026, 7, 24)
+    const selectedRange = buildEventQuery(
+      { start, end: selectedEnd },
+      emptyEventFilters,
+    )
+    expect(selectedRange?.to).toBe(expectedExclusiveEnd.toISOString())
+
+    const preciseEnd = new Date(2026, 7, 23, 15, 30)
+    const preciseRange = buildEventQuery({ start, end: preciseEnd }, emptyEventFilters)
+    expect(preciseRange?.to).toBe(preciseEnd.toISOString())
+
+    const sameDay = new Date(2026, 7, 23)
+    expect(
+      buildEventQuery({ start: sameDay, end: sameDay }, emptyEventFilters)?.to,
+    ).toBe(new Date(2026, 7, 24).toISOString())
+  })
+
+  it('rejects an incomplete, invalid, or reversed time range', () => {
     expect(buildEventQuery({ start: null, end: new Date() }, emptyEventFilters)).toBeNull()
-    const same = new Date('2026-08-22T00:00:00Z')
+    expect(
+      buildEventQuery({ start: new Date(Number.NaN), end: new Date() }, emptyEventFilters),
+    ).toBeNull()
+    const same = new Date('2026-08-22T12:00:00Z')
     expect(buildEventQuery({ start: same, end: same }, emptyEventFilters)).toBeNull()
     expect(
       buildEventQuery(

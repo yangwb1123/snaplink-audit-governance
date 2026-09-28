@@ -18,6 +18,13 @@
   import StatusBadge from '../components/StatusBadge.svelte'
   import { formatDate } from '../components/format'
   import { assessPlatformAuditContracts } from './platformAuditContracts'
+  import {
+    canEvaluateRetention,
+    canSaveRetention,
+    defaultRetentionPolicy,
+    retentionReadFailureState,
+    type RetentionState,
+  } from './retentionState'
   import { parseSchemaFieldList, validateSchemaFieldPolicy } from './schemaPolicy'
 
   let { tenantId }: { tenantId?: string } = $props()
@@ -28,9 +35,11 @@
   let sources = $state<SourceSystem[]>([])
   let schemas = $state<EventSchema[]>([])
   let actions = $state<AdminAction[]>([])
-  let policy = $state<RetentionPolicy | null>(null)
   let error = $state<unknown>(null)
   let revision = $state(0)
+  let retentionScope = ''
+  let loadGeneration = 0
+  let retentionOperationGeneration = 0
 
   const classificationItems = [
     { value: 'public', label: '公开（public）' },
@@ -64,29 +73,63 @@
   ]
 
   async function load(): Promise<void> {
-    error = null
+    const generation = ++loadGeneration
     const scoped = Boolean(tenantId || !session?.platform)
+    const policyTenantId = tenantId ?? session?.tenantId ?? ''
+    error = null
+
+    if (scoped) {
+      if (retentionScope !== policyTenantId) {
+        retentionScope = policyTenantId
+        draft = { tenant_id: policyTenantId, hot_days: 0, warm_days: 0, archive_days: 0, retention_class: '' }
+        retentionBusy = false
+        retentionOperationGeneration += 1
+      }
+      retentionState = 'loading'
+      retentionError = null
+      retentionReport = null
+      void api.getRetention(tenantId).then((loadedPolicy) => {
+        if (generation !== loadGeneration) return
+        draft = { ...loadedPolicy }
+        retentionState = 'configured'
+        retentionError = null
+      }).catch((cause: unknown) => {
+        if (generation !== loadGeneration) return
+        const failedState = retentionReadFailureState(cause)
+        retentionState = failedState
+        retentionError = failedState === 'error' ? cause : null
+        retentionReport = null
+      })
+    } else {
+      retentionScope = ''
+      retentionState = 'unscoped'
+      retentionError = null
+      retentionReport = null
+      retentionBusy = false
+      retentionOperationGeneration += 1
+    }
+
     try {
-      const [tenantResult, sourceResult, schemaResult, actionResult, policyResult] = await Promise.all([
+      const [tenantResult, sourceResult, schemaResult, actionResult] = await Promise.all([
         session?.platform ? api.listTenants() : Promise.resolve({ items: [] as Tenant[], count: 0 }),
         scoped ? api.listSources(tenantId) : Promise.resolve({ items: [] as SourceSystem[], count: 0 }),
         scoped ? api.listSchemas(tenantId) : Promise.resolve({ items: [] as EventSchema[], count: 0 }),
         api.listAdminActions(tenantId, 100),
-        scoped ? api.getRetention(tenantId).catch(() => null) : Promise.resolve(null),
       ])
+      if (generation !== loadGeneration) return
       tenants = tenantResult.items
       sources = sourceResult.items
       schemas = schemaResult.items
       actions = actionResult.items
-      policy = policyResult
     } catch (cause) {
-      error = cause
+      if (generation === loadGeneration) error = cause
     }
   }
 
   $effect(() => {
     void tenantId
     void session?.platform
+    void session?.tenantId
     void revision
     void load()
   })
@@ -244,37 +287,59 @@
   }
 
   // Retention management
-  let draft = $state<RetentionPolicy>({ tenant_id: '', hot_days: 30, warm_days: 90, archive_days: 365, retention_class: 'default' })
+  let draft = $state<RetentionPolicy>({ tenant_id: '', hot_days: 0, warm_days: 0, archive_days: 0, retention_class: '' })
+  let retentionState = $state<RetentionState>('unscoped')
   let retentionError = $state<unknown>(null)
   let retentionReport = $state<RetentionReport | null>(null)
   let retentionBusy = $state(false)
-  $effect(() => {
-    const current = policy
-    const id = tenantId ?? session?.tenantId ?? ''
-    draft = current ?? { tenant_id: id, hot_days: 30, warm_days: 90, archive_days: 365, retention_class: 'default' }
+
+  function beginRetentionCreation(): void {
+    if (retentionState !== 'unconfigured' || !writable) return
+    draft = defaultRetentionPolicy(tenantId ?? session?.tenantId ?? '')
+    retentionState = 'creating'
+    retentionError = null
     retentionReport = null
-  })
+  }
+
   async function saveRetention(): Promise<void> {
+    if (!canSaveRetention(retentionState, writable, retentionBusy)) return
+    const generation = loadGeneration
+    const operationGeneration = ++retentionOperationGeneration
+    const targetTenantId = tenantId ?? session?.tenantId ?? ''
+    const stateAtSubmit = retentionState
     retentionBusy = true
     retentionError = null
     try {
-      await api.setRetention({ ...draft, tenant_id: tenantId ?? session?.tenantId ?? '' }, tenantId)
+      const savedPolicy = await api.setRetention({ ...draft, tenant_id: targetTenantId }, tenantId)
+      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
+      draft = { ...savedPolicy }
+      retentionState = 'configured'
+      retentionReport = null
       refresh()
     } catch (cause) {
+      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
+      retentionState = stateAtSubmit
       retentionError = cause
     } finally {
-      retentionBusy = false
+      if (operationGeneration === retentionOperationGeneration) retentionBusy = false
     }
   }
+
   async function evaluateRetention(): Promise<void> {
+    if (!canEvaluateRetention(retentionState, retentionBusy)) return
+    const generation = loadGeneration
+    const operationGeneration = ++retentionOperationGeneration
     retentionBusy = true
     retentionError = null
     try {
-      retentionReport = await api.evaluateRetention(tenantId)
+      const report = await api.evaluateRetention(tenantId)
+      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
+      retentionReport = report
     } catch (cause) {
+      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
       retentionError = cause
     } finally {
-      retentionBusy = false
+      if (operationGeneration === retentionOperationGeneration) retentionBusy = false
     }
   }
 </script>
@@ -360,15 +425,29 @@
 
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">保留策略</h3>
-      <div class="retention-form">
-        <IrisFormField label="Retention class"><IrisInput value={draft.retention_class} oninput={(event) => (draft.retention_class = event.currentTarget.value)} /></IrisFormField>
-        <IrisFormField label="热存储天数"><IrisInput type="number" min={0} value={draft.hot_days} oninput={(event) => (draft.hot_days = Number(event.currentTarget.value))} /></IrisFormField>
-        <IrisFormField label="温存储天数"><IrisInput type="number" min={0} value={draft.warm_days} oninput={(event) => (draft.warm_days = Number(event.currentTarget.value))} /></IrisFormField>
-        <IrisFormField label="归档天数"><IrisInput type="number" min={0} value={draft.archive_days} oninput={(event) => (draft.archive_days = Number(event.currentTarget.value))} /></IrisFormField>
-        <div class="button-row"><IrisButton variant="solid" disabled={!writable || retentionBusy} onclick={() => void saveRetention()}>{retentionBusy ? '处理中…' : '保存策略'}</IrisButton><IrisButton variant="outline" disabled={retentionBusy} onclick={() => void evaluateRetention()}>评估</IrisButton></div>
-      </div>
-      <ErrorNotice error={retentionError} />
-      {#if retentionReport}<div class="result-panel"><StatusBadge value={retentionReport.action} /><span>可归档 {retentionReport.eligible_events} 条</span><span>法律保留保护 {retentionReport.protected_events} 条</span><span>保留规则 {retentionReport.hold_ids?.join(', ') || '无'}</span></div>{/if}
+      {#if retentionState === 'loading'}
+        <p class="muted-copy" role="status" aria-live="polite">正在读取当前租户的保留策略…</p>
+      {:else if retentionState === 'error'}
+        <ErrorNotice error={retentionError} onRetry={refresh} />
+      {:else if retentionState === 'unconfigured'}
+        <div class="retention-empty-state">
+          <p class="muted-copy">当前租户尚未配置保留策略。此状态仅在 API 明确返回 404 时显示；不会将读取错误当作空策略，也不会自动写入默认值。</p>
+          <IrisButton variant="solid" disabled={!writable} onclick={beginRetentionCreation}>新建保留策略（默认草稿）</IrisButton>
+        </div>
+      {:else if retentionState === 'creating' || retentionState === 'configured'}
+        {#if retentionState === 'creating'}
+          <p class="table-hint">这是尚未保存的默认策略草稿；确认后显式保存才会创建策略。</p>
+        {/if}
+        <div class="retention-form">
+          <IrisFormField label="Retention class"><IrisInput value={draft.retention_class} oninput={(event) => (draft.retention_class = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="热存储天数"><IrisInput type="number" min={0} value={draft.hot_days} oninput={(event) => (draft.hot_days = Number(event.currentTarget.value))} /></IrisFormField>
+          <IrisFormField label="温存储天数"><IrisInput type="number" min={0} value={draft.warm_days} oninput={(event) => (draft.warm_days = Number(event.currentTarget.value))} /></IrisFormField>
+          <IrisFormField label="归档天数"><IrisInput type="number" min={0} value={draft.archive_days} oninput={(event) => (draft.archive_days = Number(event.currentTarget.value))} /></IrisFormField>
+          <div class="button-row"><IrisButton variant="solid" disabled={!canSaveRetention(retentionState, writable, retentionBusy)} onclick={() => void saveRetention()}>{retentionBusy ? '处理中…' : '保存策略'}</IrisButton><IrisButton variant="outline" disabled={!canEvaluateRetention(retentionState, retentionBusy)} onclick={() => void evaluateRetention()}>评估</IrisButton></div>
+        </div>
+        <ErrorNotice error={retentionError} />
+        {#if retentionReport}<div class="result-panel"><StatusBadge value={retentionReport.action} /><span>可归档 {retentionReport.eligible_events} 条</span><span>法律保留保护 {retentionReport.protected_events} 条</span><span>保留规则 {retentionReport.hold_ids?.join(', ') || '无'}</span></div>{/if}
+      {/if}
     </IrisCard>
   {/if}
 

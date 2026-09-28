@@ -1,9 +1,15 @@
 import type { RestoreRun } from '../api/types'
 
 const terminalExportStatuses = new Set(['completed', 'failed'])
+export const EXPORT_POLL_INTERVAL_MS = 1200
+export const EXPORT_POLL_MAX_ATTEMPTS = 60
 
 export function shouldPollExport(status: string): boolean {
   return !terminalExportStatuses.has(status.toLowerCase())
+}
+
+export function canAutoPollExport(status: string, attempts: number, paused: boolean): boolean {
+  return shouldPollExport(status) && !paused && attempts < EXPORT_POLL_MAX_ATTEMPTS
 }
 
 export function restoreDecisionBlockReason(

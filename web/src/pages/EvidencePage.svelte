@@ -25,7 +25,13 @@
     evidenceScopeSummary,
     type EvidenceScopeDraft,
   } from './evidenceScope'
-  import { restoreDecisionBlockReason, shouldPollExport } from './governanceState'
+  import {
+    canAutoPollExport,
+    EXPORT_POLL_INTERVAL_MS,
+    EXPORT_POLL_MAX_ATTEMPTS,
+    restoreDecisionBlockReason,
+    shouldPollExport,
+  } from './governanceState'
   import { bindRestorePreview, restorePreviewBlockReason, type BoundRestorePreview } from './restoreWorkflow'
   import EvidenceScopeFields, { type DateRange } from './EvidenceScopeFields.svelte'
 
@@ -61,20 +67,64 @@
   let jobId = $state('')
   let job = $state<ExportJob | null>(null)
   let exportError = $state<unknown>(null)
+  let exportPollingError = $state<unknown>(null)
+  let exportPollingAttempts = $state(0)
+  let exportPollingPaused = $state(false)
   let exportBusy = $state(false)
+  let exportDownloadBusy = $state(false)
+  let exportContextGeneration = 0
+  let exportTenantScope: string | undefined
+  let hasExportTenantScope = false
+
+  $effect(() => {
+    const scopeTenantId = tenantId
+    if (!hasExportTenantScope) {
+      exportTenantScope = scopeTenantId
+      hasExportTenantScope = true
+      return
+    }
+    if (scopeTenantId === exportTenantScope) return
+    exportTenantScope = scopeTenantId
+    exportContextGeneration += 1
+    job = null
+    jobId = ''
+    exportError = null
+    exportPollingError = null
+    exportPollingAttempts = 0
+    exportPollingPaused = false
+    exportBusy = false
+    exportDownloadBusy = false
+  })
 
   $effect(() => {
     const current = job
-    if (!current || !shouldPollExport(current.status)) return
+    const attempts = exportPollingAttempts
+    const paused = exportPollingPaused
+    const scopeTenantId = tenantId
+    const generation = exportContextGeneration
+    if (
+      !current ||
+      (scopeTenantId && current.tenant_id !== scopeTenantId) ||
+      !canAutoPollExport(current.status, attempts, paused)
+    ) return
     let active = true
     const timer = window.setTimeout(() => {
-      void api.getExport(current.id, tenantId).then((next) => {
-        if (!active) return
+      void api.getExport(current.id, scopeTenantId).then((next) => {
+        if (!active || generation !== exportContextGeneration || scopeTenantId !== tenantId) return
+        if (scopeTenantId && next.tenant_id !== scopeTenantId) {
+          exportPollingError = new Error('导出任务的租户与当前选择不匹配')
+          exportPollingPaused = true
+          return
+        }
         job = next
-      }).catch((cause) => {
-        if (active) exportError = cause
+        exportError = null
+        exportPollingAttempts = attempts + 1
+      }).catch((cause: unknown) => {
+        if (!active || generation !== exportContextGeneration || scopeTenantId !== tenantId) return
+        exportPollingError = cause
+        exportPollingPaused = true
       })
-    }, 1200)
+    }, EXPORT_POLL_INTERVAL_MS)
     return () => {
       active = false
       window.clearTimeout(timer)
@@ -85,51 +135,89 @@
     return { ...scope, [field]: value }
   }
 
+  function selectExportJob(next: ExportJob, scopeTenantId?: string): void {
+    if (scopeTenantId && next.tenant_id !== scopeTenantId) {
+      job = null
+      exportError = new Error('导出任务的租户与当前选择不匹配')
+      return
+    }
+    job = next
+    jobId = next.id
+    exportError = null
+    exportPollingAttempts = 0
+    exportPollingPaused = false
+    exportPollingError = null
+  }
+
+  function retryExportPolling(): void {
+    if (!job || !shouldPollExport(job.status)) return
+    exportPollingAttempts = 0
+    exportPollingPaused = false
+    exportPollingError = null
+    exportError = null
+  }
+
   async function createExport(): Promise<void> {
     const query = buildEvidenceScopeQuery(exportRange, exportScope)
     if (!query) {
       exportError = new Error('请选择有效且非空的导出时间范围')
       return
     }
+    const generation = exportContextGeneration
+    const scopeTenantId = tenantId
     exportBusy = true
     exportError = null
     try {
-      const next = await api.createExport(query, tenantId)
-      job = next
-      jobId = next.id
+      const next = await api.createExport(query, scopeTenantId)
+      if (generation !== exportContextGeneration || scopeTenantId !== tenantId) return
+      selectExportJob(next, scopeTenantId)
     } catch (cause) {
-      exportError = cause
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportError = cause
     } finally {
-      exportBusy = false
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportBusy = false
     }
   }
 
   async function lookupExport(): Promise<void> {
-    if (!jobId.trim()) return
+    const requestedId = jobId.trim()
+    if (!requestedId) return
+    const generation = exportContextGeneration
+    const scopeTenantId = tenantId
     exportBusy = true
     exportError = null
+    exportPollingPaused = true
+    exportPollingError = null
     try {
-      job = await api.getExport(jobId.trim(), tenantId)
+      const next = await api.getExport(requestedId, scopeTenantId)
+      if (generation !== exportContextGeneration || scopeTenantId !== tenantId) return
+      selectExportJob(next, scopeTenantId)
     } catch (cause) {
-      exportError = cause
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportError = cause
     } finally {
-      exportBusy = false
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportBusy = false
     }
   }
 
   async function downloadExport(): Promise<void> {
-    if (!job) return
+    const current = job
+    if (!current || current.status !== 'completed' || exportDownloadBusy) return
+    const generation = exportContextGeneration
+    const scopeTenantId = tenantId
+    exportDownloadBusy = true
     exportError = null
     try {
-      const blob = await api.downloadExport(job.id, tenantId)
+      const blob = await api.downloadExport(current.id, scopeTenantId)
+      if (generation !== exportContextGeneration || scopeTenantId !== tenantId || job?.id !== current.id) return
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `${job.id}.jsonl`
+      link.download = `${current.id}.jsonl`
       link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch (cause) {
-      exportError = cause
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportError = cause
+    } finally {
+      if (generation === exportContextGeneration && scopeTenantId === tenantId) exportDownloadBusy = false
     }
   }
 
@@ -338,10 +426,17 @@
         {#if job}
           <div class="result-panel">
             <StatusBadge value={job.status} /><span>{job.id} · {job.event_count} 条事件</span>
-            {#if job.status === 'completed'}<IrisButton size="sm" variant="outline" onclick={() => void downloadExport()}>下载 JSONL</IrisButton>{/if}
-            {#if shouldPollExport(job.status)}<IrisProgress indeterminate size="sm" />{/if}
+            {#if job.status === 'completed'}<IrisButton size="sm" variant="outline" disabled={exportDownloadBusy} onclick={() => void downloadExport()}>{exportDownloadBusy ? '准备下载…' : '下载 JSONL'}</IrisButton>{/if}
+            {#if canAutoPollExport(job.status, exportPollingAttempts, exportPollingPaused)}<IrisProgress indeterminate size="sm" />{/if}
             {#if job.error}<span class="error-copy">{job.error}</span>{/if}
           </div>
+        {/if}
+        <ErrorNotice error={exportPollingError} onRetry={retryExportPolling} />
+        {#if job && shouldPollExport(job.status) && exportPollingPaused && !exportPollingError}
+          <div class="result-panel"><span>自动状态查询已暂停。</span><IrisButton size="sm" variant="outline" disabled={exportBusy} onclick={() => void lookupExport()}>重新查询</IrisButton></div>
+        {/if}
+        {#if job && shouldPollExport(job.status) && !exportPollingPaused && exportPollingAttempts >= EXPORT_POLL_MAX_ATTEMPTS}
+          <div class="result-panel"><span>已达到自动查询上限（{EXPORT_POLL_MAX_ATTEMPTS} 次）。任务仍在处理中，可手动继续查询。</span><IrisButton size="sm" variant="outline" onclick={retryExportPolling}>继续查询</IrisButton></div>
         {/if}
       </IrisCard>
     {/if}
