@@ -166,14 +166,13 @@ def cmd_openapi_contract() -> int:
 
 
 def cmd_check_root() -> int:
-    allowed = {".git", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "AGENTS.md",
-               "Makefile", "go.mod", "go.sum", "cli.py", "api", "cmd", "deploy",
-               "docs", "internal", "migrations", "checks", "test", "bin", "scripts", "web", ".github",
-               ".trends", ".pi-batch", "engineering.yaml", "__pycache__"}
-    unexpected = [path.name for path in ROOT.iterdir() if path.name not in allowed and not path.name.startswith(".pi-batch.lock")]
-    if unexpected:
-        print("root directories/files:", ", ".join(sorted(unexpected)))
-    return int(bool(unexpected))
+    # Single implementation lives in checks/root_files.py, which is what the
+    # quality gate runs. This launcher used to carry a second, smaller copy of
+    # the same policy that had already drifted (it rejected the vendored
+    # runner tooling on a clean tree), so it now delegates instead of
+    # re-deriving the allow-list.
+    from checks.root_files import run
+    return run()
 
 
 def cmd_generate() -> int:
