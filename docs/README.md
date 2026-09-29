@@ -14,7 +14,7 @@
 - [`ENGINEERING_GATE.md`](ENGINEERING_GATE.md) — 强制门禁的阶段清单；失败行即阶段命令
 - [`CONTRACT_SYNC.md`](CONTRACT_SYNC.md) — 契约面与运行时的同步规则（proto 三道防线等）
 - [`adr/`](adr/) — 已决策且不再重开的问题（消息接入、编码、分段哈希链、投影路由、归档与密钥、租户键框架、开发认证、导出完整性、平台 token 过滤、跨进程一致性键）
-- [`design/`](design/) · [`proposals/`](proposals/) — 设计与提案；`proposals/` 是历史决策输入，不是当前规范
+- [`design/`](design/) · [`proposals/`](proposals/) — 设计与提案；每篇的规模与状态见 [`proposals/README.md`](proposals/README.md)（历史决策输入，不是当前规范）
 - [`THREAT_MODEL.md`](THREAT_MODEL.md) — 威胁模型（含归档传输与留存门禁）
 
 ## 我要部署或值班
@@ -27,7 +27,7 @@
 
 ## 我在查历史与状态
 
-- [`release-notes.md`](release-notes.md) — 按日期的变更流水（追加式，最新在前）
+- [`release-notes/`](release-notes/) — 按月的变更流水（[`2026-09`](release-notes/2026-09.md) · [`2026-08`](release-notes/2026-08.md)，新月份在前；`docs/release-notes.md` 是指针）
 - [`platform-gate-status.md`](platform-gate-status.md) — 跨仓 G1–G8 门禁矩阵的**日期快照**，含归属说明
 - [`MAINTENANCE_REPORT.md`](MAINTENANCE_REPORT.md) — 早期 AI 维护轮次的执行报告
 - [`campaigns/`](campaigns/) — 批次门禁矩阵与 campaign 运行方式
