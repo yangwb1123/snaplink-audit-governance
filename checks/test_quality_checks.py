@@ -8,9 +8,11 @@ from checks.route_contract import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# checks/config.py is an import-time helper (it parses engineering.yaml for the
-# other modules), not a gate stage, so it has no command of its own.
-NON_STAGE_MODULES = {"__init__", "config"}
+# Import-time helpers, not gate stages, so they have no command of their own:
+# checks/config.py parses engineering.yaml for the other modules, and
+# checks/ingest_invariants.py locates the ingest function the two ingest
+# guards reason about.
+NON_STAGE_MODULES = {"__init__", "config", "ingest_invariants"}
 
 
 class QualityChecksTest(unittest.TestCase):
@@ -117,19 +119,21 @@ class TenantConsistencyCheckTest(unittest.TestCase):
     the ErrTenantMismatch check; re-stamping before it fails the gate."""
 
     GOOD = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tevent.TenantID = tenantID\n"
+        "\treturn nil\n"
         "}\n"
     )
     BAD = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tevent.TenantID = tenantID\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
+        "\treturn nil\n"
         "}\n"
     )
 
@@ -166,51 +170,56 @@ class StreamConsistencyCheckTest(unittest.TestCase):
     server stamp must follow the derivation; any reorder fails the gate."""
 
     GOOD = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tevent.StreamID = \"\"\n"
         "\tstreamID := event.Stream()\n"
         "\tevent.StreamID = streamID\n"
+        "\treturn nil\n"
         "}\n"
     )
     BAD_ORDER = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tstreamID := event.Stream()\n"
         "\tevent.StreamID = \"\"\n"
         "\tevent.StreamID = streamID\n"
+        "\treturn nil\n"
         "}\n"
     )
     BAD_NO_STRIP = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tstreamID := event.Stream()\n"
         "\tevent.StreamID = streamID\n"
+        "\treturn nil\n"
         "}\n"
     )
     BAD_NO_STAMP = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tevent.StreamID = \"\"\n"
         "\tstreamID := event.Stream()\n"
+        "\treturn nil\n"
         "}\n"
     )
     BAD_STRIP_BEFORE_TENANT = (
-        "func ingest() {\n"
+        "func (s *Service) Ingest(ctx context.Context) error {\n"
         "\tevent.StreamID = \"\"\n"
         "\tif event.TenantID != \"\" && event.TenantID != tenantID {\n"
         "\t\treturn ErrTenantMismatch\n"
         "\t}\n"
         "\tstreamID := event.Stream()\n"
         "\tevent.StreamID = streamID\n"
+        "\treturn nil\n"
         "}\n"
     )
 
