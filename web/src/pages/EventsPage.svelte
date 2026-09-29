@@ -45,7 +45,9 @@
   let selected = $state<AuditEvent | null>(null)
   let receipt = $state<EventReceipt | null>(null)
   let detailError = $state<unknown>(null)
+  let failedCursor = $state('')
   let requestSequence = 0
+  let detailRequestSequence = 0
 
   const advancedFields: Array<{ name: keyof EventFilterDraft; label: string; placeholder: string }> = [
     { name: 'actorId', label: 'Actor ID', placeholder: '用户或服务主体' },
@@ -97,19 +99,36 @@
 
   async function runQuery(cursor = '', append = false): Promise<void> {
     const sequence = ++requestSequence
+    const query = { ...appliedQuery, cursor }
+    if (!append) {
+      events = []
+      total = 0
+      nextCursor = ''
+      failedCursor = ''
+      closeDetail()
+    }
     loading = true
     error = null
     try {
-      const result = await api.queryEvents({ ...appliedQuery, cursor }, tenantId)
+      const result = await api.queryEvents(query, tenantId)
       if (sequence !== requestSequence) return
       events = append ? [...events, ...result.items] : result.items
       total = result.count
       nextCursor = result.next_cursor ?? ''
+      failedCursor = ''
     } catch (cause) {
-      if (sequence === requestSequence) error = cause
+      if (sequence === requestSequence) {
+        error = cause
+        failedCursor = append ? cursor : ''
+      }
     } finally {
       if (sequence === requestSequence) loading = false
     }
+  }
+
+  function retryQuery(): void {
+    const cursor = failedCursor
+    void (cursor ? runQuery(cursor, true) : runQuery())
   }
 
   $effect(() => {
@@ -118,19 +137,29 @@
     void runQuery()
   })
 
+  function closeDetail(): void {
+    detailRequestSequence += 1
+    selected = null
+    receipt = null
+    detailError = null
+  }
+
   async function openDetail(event: AuditEvent): Promise<void> {
+    const request = ++detailRequestSequence
+    const eventId = event.event_id
     selected = event
     receipt = null
     detailError = null
     try {
       const [full, eventReceipt] = await Promise.all([
-        api.getEvent(event.event_id, tenantId),
-        api.getReceipt(event.event_id, tenantId),
+        api.getEvent(eventId, tenantId),
+        api.getReceipt(eventId, tenantId),
       ])
+      if (request !== detailRequestSequence || selected?.event_id !== eventId) return
       selected = full
       receipt = eventReceipt
     } catch (cause) {
-      detailError = cause
+      if (request === detailRequestSequence && selected?.event_id === eventId) detailError = cause
     }
   }
 
@@ -194,7 +223,7 @@
       <IrisButton size="sm" variant="outline" disabled={loading} onclick={resetQuery}>重置为最近 24 小时</IrisButton>
     </div>
   </IrisCard>
-  <ErrorNotice {error} onRetry={() => void runQuery()} />
+  <ErrorNotice {error} onRetry={retryQuery} />
   {#if loading && events.length === 0}<LoadingBlock />{/if}
   <IrisCard variant="outline" padding="none" style="" header={undefined} footer={undefined}>
     <div class="table-summary" role="status">已加载 {events.length} / 共 {total} 条事件</div>
@@ -221,7 +250,7 @@
     {/if}
   </IrisCard>
 
-  <IrisDrawer open={selected !== null} onOpenChange={(open) => !open && (selected = null)} size="min(720px, 92vw)">
+  <IrisDrawer open={selected !== null} onOpenChange={(open) => !open && closeDetail()} size="min(720px, 92vw)">
     <IrisDrawerContent>
       <IrisDrawerTitle>审计事件详情</IrisDrawerTitle>
       {#if selected}

@@ -5,9 +5,11 @@
   import ErrorNotice from '../components/ErrorNotice.svelte'
   import { formatDate } from '../components/format'
   import HistoryTimeline from './HistoryTimeline.svelte'
+  import { LatestLookup } from './lookupState'
 
   let { tenantId }: { tenantId?: string } = $props()
   const api = useAuditApi()
+  const lookupState = new LatestLookup()
   let operationId = $state('')
   let summary = $state<OperationSummary | null>(null)
   let timeline = $state<QueryResult | null>(null)
@@ -15,24 +17,44 @@
   let loading = $state(false)
   let error = $state<unknown>(null)
 
+  function lookupKey(id = operationId.trim()): string {
+    return JSON.stringify([tenantId ?? '', id])
+  }
+
+  function updateOperationId(value: string): void {
+    operationId = value
+    lookupState.invalidate()
+    summary = null
+    timeline = null
+    replay = null
+    error = null
+    loading = false
+  }
+
   async function lookup(): Promise<void> {
-    if (!operationId.trim()) return
+    const id = operationId.trim()
+    if (!id || loading) return
+    const key = lookupKey(id)
+    const request = lookupState.begin(key)
     loading = true
     error = null
+    summary = null
+    timeline = null
+    replay = null
     try {
-      const id = operationId.trim()
       const [nextSummary, nextTimeline, nextReplay] = await Promise.all([
         api.getOperation(id, tenantId),
         api.getOperationTimeline(id, { pageSize: 200, tenantId }),
         api.replayOperation(id, tenantId),
       ])
+      if (!lookupState.isCurrent(request, lookupKey())) return
       summary = nextSummary
       timeline = nextTimeline
       replay = nextReplay
     } catch (cause) {
-      error = cause
+      if (lookupState.isCurrent(request, lookupKey())) error = cause
     } finally {
-      loading = false
+      if (lookupState.isCurrent(request, lookupKey())) loading = false
     }
   }
 </script>
@@ -42,7 +64,7 @@
     <IrisInput
       value={operationId}
       placeholder="输入 operation_id"
-      oninput={(event) => (operationId = event.currentTarget.value)}
+      oninput={(event) => updateOperationId(event.currentTarget.value)}
       onkeydown={(event) => event.key === 'Enter' && void lookup()}
     />
   </IrisFormField>

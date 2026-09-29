@@ -1,5 +1,5 @@
 import type { EventQuery } from '../api/types'
-import { buildEventQuery, emptyEventFilters } from './eventQuery'
+import { buildCalendarEventQuery, emptyEventFilters } from './eventQuery'
 
 export interface EvidenceScopeDraft {
   sourceSystem: string
@@ -30,7 +30,7 @@ export function buildEvidenceScopeQuery(
   range: { start: Date | null; end: Date | null },
   scope: EvidenceScopeDraft,
 ): EventQuery | null {
-  return buildEventQuery(
+  return buildCalendarEventQuery(
     range,
     {
       ...emptyEventFilters,

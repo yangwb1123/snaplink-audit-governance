@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildEventQuery, emptyEventFilters } from './eventQuery'
+import { buildCalendarEventQuery, buildEventQuery, emptyEventFilters } from './eventQuery'
 
 describe('event query builder', () => {
   it('maps and trims every cross-service correlation filter', () => {
@@ -39,7 +39,7 @@ describe('event query builder', () => {
     const start = new Date(2026, 7, 1)
     const selectedEnd = new Date(2026, 7, 23)
     const expectedExclusiveEnd = new Date(2026, 7, 24)
-    const selectedRange = buildEventQuery(
+    const selectedRange = buildCalendarEventQuery(
       { start, end: selectedEnd },
       emptyEventFilters,
     )
@@ -48,11 +48,18 @@ describe('event query builder', () => {
     const preciseEnd = new Date(2026, 7, 23, 15, 30)
     const preciseRange = buildEventQuery({ start, end: preciseEnd }, emptyEventFilters)
     expect(preciseRange?.to).toBe(preciseEnd.toISOString())
+    const midnightEnd = new Date(2026, 7, 24)
+    const datetimeRange = buildEventQuery(
+      { start: new Date(2026, 7, 23), end: midnightEnd },
+      emptyEventFilters,
+    )
+    expect(datetimeRange?.to).toBe(midnightEnd.toISOString())
 
     const sameDay = new Date(2026, 7, 23)
     expect(
-      buildEventQuery({ start: sameDay, end: sameDay }, emptyEventFilters)?.to,
+      buildCalendarEventQuery({ start: sameDay, end: sameDay }, emptyEventFilters)?.to,
     ).toBe(new Date(2026, 7, 24).toISOString())
+    expect(buildEventQuery({ start: sameDay, end: sameDay }, emptyEventFilters)).toBeNull()
   })
 
   it('rejects an incomplete, invalid, or reversed time range', () => {

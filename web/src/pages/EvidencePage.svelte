@@ -48,16 +48,27 @@
   let integrityResult = $state<IntegrityResult | null>(null)
   let integrityError = $state<unknown>(null)
   let integrityBusy = $state(false)
+  let integrityRequest = 0
+
+  function updateStreamId(value: string): void {
+    streamId = value
+    integrityResult = null
+    integrityError = null
+  }
 
   async function verifyIntegrity(): Promise<void> {
+    const request = ++integrityRequest
+    const requestedStream = streamId.trim()
     integrityBusy = true
     integrityError = null
+    integrityResult = null
     try {
-      integrityResult = await api.verifyIntegrity(streamId.trim(), tenantId)
+      const result = await api.verifyIntegrity(requestedStream, tenantId)
+      if (request === integrityRequest) integrityResult = result
     } catch (cause) {
-      integrityError = cause
+      if (request === integrityRequest) integrityError = cause
     } finally {
-      integrityBusy = false
+      if (request === integrityRequest) integrityBusy = false
     }
   }
 
@@ -231,17 +242,23 @@
   let pendingRelease = $state<LegalHold | null>(null)
   let holdBusy = $state(false)
   let holdRevision = $state(0)
+  let holdRequest = 0
 
   async function loadHolds(): Promise<void> {
+    const request = ++holdRequest
+    const scopeTenantId = tenantId
     if (disabled) {
       legalHolds = []
+      holdError = null
       return
     }
     try {
-      const result = await api.listLegalHolds(tenantId)
+      const result = await api.listLegalHolds(scopeTenantId)
+      if (request !== holdRequest || scopeTenantId !== tenantId || disabled) return
       legalHolds = result.items
+      holdError = null
     } catch (cause) {
-      holdError = cause
+      if (request === holdRequest && scopeTenantId === tenantId && !disabled) holdError = cause
     }
   }
 
@@ -395,7 +412,7 @@
         <h3 class="card-heading">账本完整性验证</h3>
         <p class="card-copy">留空验证整个租户，或填写 stream_id 验证一条哈希链。</p>
         <div class="stack-form">
-          <IrisFormField label="Stream ID"><IrisInput value={streamId} placeholder="可选" oninput={(event) => (streamId = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="Stream ID"><IrisInput value={streamId} placeholder="可选" disabled={integrityBusy} oninput={(event) => updateStreamId(event.currentTarget.value)} /></IrisFormField>
           <IrisButton variant="solid" disabled={disabled || integrityBusy} onclick={() => void verifyIntegrity()}>{integrityBusy ? '验证中…' : '开始验证'}</IrisButton>
         </div>
         <ErrorNotice error={integrityError} />
@@ -419,7 +436,7 @@
         />
         <IrisButton variant="solid" disabled={disabled || exportBusy} onclick={() => void createExport()}>{exportBusy ? '提交中…' : '创建范围导出'}</IrisButton>
         <div class="inline-form">
-          <IrisInput value={jobId} placeholder="export job id" oninput={(event) => (jobId = event.currentTarget.value)} />
+          <IrisInput value={jobId} placeholder="export job id" disabled={exportBusy} oninput={(event) => (jobId = event.currentTarget.value)} />
           <IrisButton variant="outline" disabled={exportBusy || !jobId.trim()} onclick={() => void lookupExport()}>查询</IrisButton>
         </div>
         <ErrorNotice error={exportError} />
@@ -445,8 +462,8 @@
       <IrisCard variant="outline" class="wide-card" style="" header={undefined} footer={undefined}>
         <h3 class="card-heading">法律保留</h3>
         <div class="three-field-form">
-          <IrisFormField label="名称"><IrisInput value={holdName} oninput={(event) => (holdName = event.currentTarget.value)} /></IrisFormField>
-          <IrisFormField label="原因"><IrisInput value={holdReason} oninput={(event) => (holdReason = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="名称"><IrisInput value={holdName} disabled={holdBusy} oninput={(event) => (holdName = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="原因"><IrisInput value={holdReason} disabled={holdBusy} oninput={(event) => (holdReason = event.currentTarget.value)} /></IrisFormField>
           <IrisButton variant="solid" disabled={disabled || holdBusy || !holdName.trim() || !holdReason.trim()} onclick={() => void createLegalHold()}>{holdBusy ? '处理中…' : '创建范围保留'}</IrisButton>
         </div>
         <EvidenceScopeFields
@@ -487,15 +504,15 @@
       <IrisCard variant="outline" class="wide-card" style="" header={undefined} footer={undefined}>
         <h3 class="card-heading">恢复预演与审批</h3>
         <div class="three-field-form">
-          <IrisFormField label="Operation ID"><IrisInput value={operationId} oninput={(event) => (operationId = event.currentTarget.value)} /></IrisFormField>
-          <IrisFormField label="恢复原因"><IrisInput value={restoreReason} oninput={(event) => (restoreReason = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="Operation ID"><IrisInput value={operationId} disabled={restoreBusy} oninput={(event) => (operationId = event.currentTarget.value)} /></IrisFormField>
+          <IrisFormField label="恢复原因"><IrisInput value={restoreReason} disabled={restoreBusy} oninput={(event) => (restoreReason = event.currentTarget.value)} /></IrisFormField>
           <div class="button-row">
             <IrisButton variant="outline" disabled={disabled || restoreBusy || !operationId.trim() || !restoreReason.trim()} onclick={() => void previewRestore()}>预演</IrisButton>
             {#if holds}<IrisButton variant="solid" disabled={disabled || restoreBusy || Boolean(previewBlockReason)} onclick={() => (createConfirmation = true)}>创建审批单</IrisButton>{/if}
           </div>
         </div>
         <div class="inline-form">
-          <IrisInput value={runId} placeholder="restore run id" oninput={(event) => (runId = event.currentTarget.value)} />
+          <IrisInput value={runId} placeholder="restore run id" disabled={restoreBusy} oninput={(event) => (runId = event.currentTarget.value)} />
           <IrisButton variant="outline" disabled={restoreBusy || !runId.trim()} onclick={() => void lookupRestore()}>查询运行</IrisButton>
         </div>
         <ErrorNotice error={restoreError} />

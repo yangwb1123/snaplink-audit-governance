@@ -9,6 +9,8 @@ PKCE S256 登录。管理端覆盖跨服务高级事件检索（operation/correl
 
 法律保留和合规导出可分别设置时间范围、来源系统、事件类型、Operation、Actor、
 Correlation 与结果条件；服务端使用同一查询契约完成读取自审计、保留冲突检查和证据选取。
+平台会话必须先从成功加载的租户列表中选择有效租户，Web 才会挂载租户级页面并发出
+scoped API 请求；没有可用租户时仍可通过治理目录创建租户，但不会降级为全租户审计查询。
 
 治理目录还会按六项目平台部署契约检查 Aero ID、Aero IM、Aero Vault 的 Snaplink
 M2M Client、租户来源与固定 Schema 版本。Aero ID/Vault 的 Source ID 由服务端按租户

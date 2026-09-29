@@ -19,6 +19,7 @@
   let loading = $state(true)
   let error = $state<unknown>(null)
   let revision = $state(0)
+  let loadGeneration = 0
   const readable = $derived(Boolean($authState.session && can($authState.session, 'audit:event:read')))
   const policyReadable = $derived(Boolean($authState.session && can($authState.session, 'audit:policy:read')))
 
@@ -43,10 +44,13 @@
   }
 
   async function load(): Promise<void> {
+    const generation = ++loadGeneration
+    const scopeTenantId = tenantId
     if (!readable) {
       events = []
       facets = null
       actions = []
+      error = null
       loading = false
       return
     }
@@ -55,17 +59,18 @@
     try {
       const range = recentWindow()
       const [eventResult, facetResult, actionResult] = await Promise.all([
-        api.queryEvents(range, tenantId),
-        api.getEventFacets({ since: range.from, until: range.to }, tenantId),
-        policyReadable ? api.listAdminActions(tenantId, 25) : Promise.resolve({ items: [] as AdminAction[], count: 0 }),
+        api.queryEvents(range, scopeTenantId),
+        api.getEventFacets({ since: range.from, until: range.to }, scopeTenantId),
+        policyReadable ? api.listAdminActions(scopeTenantId, 25) : Promise.resolve({ items: [] as AdminAction[], count: 0 }),
       ])
+      if (generation !== loadGeneration || scopeTenantId !== tenantId) return
       events = eventResult.items ?? []
       facets = facetResult.facets
       actions = actionResult.items ?? []
     } catch (cause) {
-      error = cause
+      if (generation === loadGeneration && scopeTenantId === tenantId) error = cause
     } finally {
-      loading = false
+      if (generation === loadGeneration && scopeTenantId === tenantId) loading = false
     }
   }
 
@@ -102,7 +107,7 @@
 
 <section>
   {#snippet headerActions()}
-    <IrisButton variant="outline" onclick={() => (revision += 1)}>刷新</IrisButton>
+    <IrisButton variant="outline" disabled={loading} onclick={() => (revision += 1)}>{loading ? '刷新中…' : '刷新'}</IrisButton>
   {/snippet}
   <PageHeader
     title="审计态势"

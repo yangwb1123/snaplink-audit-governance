@@ -17,6 +17,7 @@
   import PageHeader from '../components/PageHeader.svelte'
   import StatusBadge from '../components/StatusBadge.svelte'
   import { formatDate } from '../components/format'
+  import { TENANTS_CHANGED_EVENT } from '../tenantScope'
   import { assessPlatformAuditContracts } from './platformAuditContracts'
   import {
     canEvaluateRetention,
@@ -170,6 +171,7 @@
       })
       tenantDraftId = ''
       tenantDraftName = ''
+      window.dispatchEvent(new Event(TENANTS_CHANGED_EVENT))
       refresh()
     } catch (cause) {
       tenantError = cause

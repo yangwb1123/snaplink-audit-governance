@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import {
     IrisAdminLayout,
+    IrisAlert,
     IrisBadge,
     IrisButton,
     IrisIcon,
@@ -12,11 +13,13 @@
   import type { Tenant } from './api/types'
   import { can } from './auth/claims'
   import { authState, logout } from './auth/store'
+  import type { UserSession } from './auth/types'
   import CatalogPage from './pages/CatalogPage.svelte'
   import EventsPage from './pages/EventsPage.svelte'
   import EvidencePage from './pages/EvidencePage.svelte'
   import OperationsPage from './pages/OperationsPage.svelte'
   import OverviewPage from './pages/OverviewPage.svelte'
+  import { resolveTenantSelection, TENANTS_CHANGED_EVENT } from './tenantScope'
 
   interface PageDefinition {
     key: string
@@ -36,8 +39,13 @@
   const api = useAuditApi()
   const { skin, setSkin, setMode } = useSkin()
   let route = $state(readRoute())
-  let tenantId = $state($authState.session?.tenantId ?? '')
+  let tenantId = $state($authState.session?.platform ? '' : $authState.session?.tenantId ?? '')
   let tenants = $state<Tenant[]>([])
+  let tenantLoading = $state(false)
+  let tenantLoadError = $state<unknown>(null)
+  let tenantListSessionKey = $state('')
+  let tenantRequestGeneration = 0
+  let lastTenantListSessionKey = ''
 
   const visiblePages = $derived(
     pageDefinitions.filter(
@@ -51,6 +59,26 @@
     visiblePages.some((page) => page.key === route) ? route : 'overview',
   )
   const isDark = $derived($skin.type === 'dark')
+  const sessionScopeKey = $derived(
+    $authState.session
+      ? JSON.stringify([
+          $authState.session.subject,
+          $authState.session.platform,
+          $authState.session.tenantId,
+        ])
+      : '',
+  )
+  const tenantScopeReady = $derived(
+    $authState.session?.platform
+      ? tenantListSessionKey === sessionScopeKey &&
+        !tenantLoading &&
+        !tenantLoadError &&
+        tenants.some((tenant) => tenant.id === tenantId)
+      : Boolean($authState.session?.tenantId && tenantId === $authState.session.tenantId),
+  )
+  const platformCatalogBootstrap = $derived(
+    Boolean($authState.session?.platform && activeRoute === 'catalog' && !tenantId),
+  )
 
   function readRoute(): string {
     return window.location.hash.replace(/^#\/?/, '') || 'overview'
@@ -70,45 +98,110 @@
     if (route !== current) navigate(current)
   })
 
-  $effect(() => {
-    const session = $authState.session
-    const platform = Boolean(session?.platform)
-    if (!platform) {
+  async function loadTenants(session: UserSession | null): Promise<void> {
+    const generation = ++tenantRequestGeneration
+    const scopeKey = session
+      ? JSON.stringify([session.subject, session.platform, session.tenantId])
+      : ''
+
+    if (!session) {
       tenants = []
+      tenantId = ''
+      tenantLoading = false
+      tenantLoadError = null
+      tenantListSessionKey = ''
+      lastTenantListSessionKey = ''
       return
     }
-    let active = true
-    void api
-      .listTenants()
-      .then((result) => {
-        if (active) tenants = result.items
-      })
-      .catch(() => {
-        if (active) tenants = []
-      })
+
+    if (!session.platform) {
+      tenants = []
+      tenantId = session.tenantId
+      tenantLoading = false
+      tenantLoadError = null
+      tenantListSessionKey = scopeKey
+      lastTenantListSessionKey = scopeKey
+      return
+    }
+
+    const currentSelection = lastTenantListSessionKey === scopeKey ? untrack(() => tenantId) : ''
+    tenantListSessionKey = ''
+    lastTenantListSessionKey = ''
+    tenantLoading = true
+    tenantLoadError = null
+    try {
+      const result = await api.listTenants()
+      if (generation !== tenantRequestGeneration) return
+      const available = [...result.items].sort(
+        (left, right) => left.name.localeCompare(right.name, 'zh-CN') || left.id.localeCompare(right.id),
+      )
+      tenants = available
+      tenantId = resolveTenantSelection(available, currentSelection, session.tenantId)
+      tenantListSessionKey = scopeKey
+      lastTenantListSessionKey = scopeKey
+    } catch (cause) {
+      if (generation !== tenantRequestGeneration) return
+      tenants = []
+      tenantId = ''
+      tenantLoadError = cause
+      tenantListSessionKey = ''
+      lastTenantListSessionKey = ''
+    } finally {
+      if (generation === tenantRequestGeneration) tenantLoading = false
+    }
+  }
+
+  function refreshTenants(): void {
+    void loadTenants($authState.session)
+  }
+
+  $effect(() => {
+    const session = $authState.session
+    void session?.subject
+    void session?.platform
+    void session?.tenantId
+    void loadTenants(session)
     return () => {
-      active = false
+      tenantRequestGeneration += 1
     }
   })
 
   onMount(() => {
     const update = () => (route = readRoute())
+    const updateTenants = () => refreshTenants()
     window.addEventListener('hashchange', update)
-    return () => window.removeEventListener('hashchange', update)
+    window.addEventListener(TENANTS_CHANGED_EVENT, updateTenants)
+    return () => {
+      window.removeEventListener('hashchange', update)
+      window.removeEventListener(TENANTS_CHANGED_EVENT, updateTenants)
+    }
   })
 </script>
 
 {#snippet toolbar()}
   {#if $authState.session?.platform}
-    <label class="tenant-picker">
-      <span>租户范围</span>
-      <select bind:value={tenantId} aria-label="租户范围">
-        <option value="">全部租户 / 未指定</option>
+    <div class="tenant-picker">
+      <label for="tenant-scope">租户范围</label>
+      <select
+        id="tenant-scope"
+        bind:value={tenantId}
+        aria-label="租户范围"
+        disabled={tenantLoading || Boolean(tenantLoadError) || tenants.length === 0}
+      >
+        <option value="" disabled>请选择租户</option>
         {#each tenants as tenant (tenant.id)}
           <option value={tenant.id}>{tenant.name} ({tenant.id})</option>
         {/each}
       </select>
-    </label>
+      {#if tenantLoading}
+        <small role="status">读取租户…</small>
+      {:else if tenantLoadError}
+        <small role="alert">租户列表读取失败</small>
+      {:else if tenants.length === 0}
+        <small role="status">没有可用租户</small>
+      {/if}
+      <IrisButton variant="outline" size="sm" disabled={tenantLoading} onclick={refreshTenants}>刷新租户</IrisButton>
+    </div>
   {:else}
     <IrisBadge tone="neutral">tenant: {$authState.session?.tenantId || '未设置'}</IrisBadge>
   {/if}
@@ -130,19 +223,43 @@
 {/snippet}
 
 {#snippet children(_layout: { activeKey: string })}
-  {#key `${activeRoute}:${tenantId}`}
-    {#if activeRoute === 'events'}
-      <EventsPage tenantId={tenantId || undefined} />
-    {:else if activeRoute === 'operations'}
-      <OperationsPage tenantId={tenantId || undefined} />
-    {:else if activeRoute === 'evidence'}
-      <EvidencePage tenantId={tenantId || undefined} />
-    {:else if activeRoute === 'catalog'}
-      <CatalogPage tenantId={tenantId || undefined} />
+  {#if !tenantScopeReady && !platformCatalogBootstrap}
+    {#if $authState.session?.platform && tenantLoading}
+      <IrisAlert tone="info" title="读取可用租户" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        正在确认租户范围；完成前不会发出租户级审计请求。
+      </IrisAlert>
+    {:else if $authState.session?.platform && tenantLoadError}
+      <IrisAlert tone="danger" title="无法读取可用租户" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        租户范围验证失败，已暂停租户级请求。<IrisButton size="sm" variant="outline" onclick={refreshTenants}>重试</IrisButton>
+      </IrisAlert>
+    {:else if $authState.session?.platform && tenants.length === 0}
+      <IrisAlert tone="warning" title="没有可用租户" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        创建或授权至少一个租户后，才能访问租户范围内的审计页面。
+      </IrisAlert>
+    {:else if $authState.session?.platform}
+      <IrisAlert tone="warning" title="请选择租户" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        当前 API 路由要求明确的 tenant_id；请选择租户后再加载页面。
+      </IrisAlert>
     {:else}
-      <OverviewPage tenantId={tenantId || undefined} />
+      <IrisAlert tone="danger" title="会话缺少租户范围" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        当前会话没有有效的 tenant_id，已停止发出审计请求。请重新登录或联系管理员。
+      </IrisAlert>
     {/if}
-  {/key}
+  {:else}
+    {#key `${activeRoute}:${tenantId}`}
+      {#if activeRoute === 'events'}
+        <EventsPage tenantId={tenantId || undefined} />
+      {:else if activeRoute === 'operations'}
+        <OperationsPage tenantId={tenantId || undefined} />
+      {:else if activeRoute === 'evidence'}
+        <EvidencePage tenantId={tenantId || undefined} />
+      {:else if activeRoute === 'catalog'}
+        <CatalogPage tenantId={tenantId || undefined} />
+      {:else}
+        <OverviewPage tenantId={tenantId || undefined} />
+      {/if}
+    {/key}
+  {/if}
 {/snippet}
 
 <IrisAdminLayout

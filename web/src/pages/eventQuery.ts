@@ -34,7 +34,7 @@ export const emptyEventFilters: EventFilterDraft = {
   payloadDigest: '',
 }
 
-function exclusiveEndOfSelectedDate(end: Date): Date {
+function exclusiveEndOfSelectedCalendarDate(end: Date): Date {
   const exclusiveEnd = new Date(end)
   if (
     end.getHours() === 0 &&
@@ -47,10 +47,11 @@ function exclusiveEndOfSelectedDate(end: Date): Date {
   return exclusiveEnd
 }
 
-export function buildEventQuery(
+function buildQuery(
   range: { start: Date | null; end: Date | null },
   filters: EventFilterDraft,
-  pageSize = 100,
+  pageSize: number,
+  inclusiveCalendarEnd: boolean,
 ): EventQuery | null {
   if (
     !range.start ||
@@ -58,7 +59,9 @@ export function buildEventQuery(
     !Number.isFinite(range.start.getTime()) ||
     !Number.isFinite(range.end.getTime())
   ) return null
-  const exclusiveEnd = exclusiveEndOfSelectedDate(range.end)
+  const exclusiveEnd = inclusiveCalendarEnd
+    ? exclusiveEndOfSelectedCalendarDate(range.end)
+    : range.end
   if (range.start >= exclusiveEnd) return null
   return {
     from: range.start.toISOString(),
@@ -79,4 +82,20 @@ export function buildEventQuery(
     payload_digest: filters.payloadDigest.trim(),
     page_size: pageSize,
   }
+}
+
+export function buildEventQuery(
+  range: { start: Date | null; end: Date | null },
+  filters: EventFilterDraft,
+  pageSize = 100,
+): EventQuery | null {
+  return buildQuery(range, filters, pageSize, false)
+}
+
+export function buildCalendarEventQuery(
+  range: { start: Date | null; end: Date | null },
+  filters: EventFilterDraft,
+  pageSize = 100,
+): EventQuery | null {
+  return buildQuery(range, filters, pageSize, true)
 }
