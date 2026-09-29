@@ -11,28 +11,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
-import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-
-
-def quality_limit(name: str, fallback: int) -> int:
-    config = ROOT / "engineering.yaml"
-    if not config.exists():
-        return fallback
-    match = re.search(rf"^\s*{re.escape(name)}:\s*(\d+)\s*$", config.read_text(encoding="utf-8"), re.MULTILINE)
-    return int(match.group(1)) if match else fallback
-
-
-QUALITY_MAX_GO_LINES = quality_limit("max_go_lines", 1500)
-QUALITY_MAX_FUNCTION_LINES = quality_limit("max_function_lines", 260)
-QUALITY_MAX_DECISIONS = quality_limit("max_decisions", 45)
 
 
 def run(*args: str, cwd: Path = ROOT, check: bool = False) -> int:
@@ -105,52 +91,20 @@ def cmd_predeploy() -> int:
 
 
 def cmd_check_filesize() -> int:
-    # The sibling CLI treats this as a gate.  Keep a generous threshold for
-    # service implementations while still catching accidental generated blobs.
-    # Test suites are exempt, matching checks/filesize.py (the checker the
-    # quality gate runs): the line budget governs production code only.
-    limit = QUALITY_MAX_GO_LINES
-    failed = False
-    for path in sorted(ROOT.rglob("*.go")):
-        if any(part in {".git", "bin", "vendor"} for part in path.parts):
-            continue
-        if "_test.go" in path.name:
-            continue
-        lines = len(path.read_text(encoding="utf-8").splitlines())
-        if lines > limit:
-            print(f"file-size: {path.relative_to(ROOT)} has {lines} lines (limit {limit})")
-            failed = True
-    if not failed:
-        print(f"filesize: PASS (max {limit} lines)")
-    return int(failed)
+    # Single implementation lives in checks/filesize.py, which is what the
+    # quality gate runs. This launcher used to carry a second copy of the same
+    # budget (and a second parser of engineering.yaml); it now delegates so a
+    # command and the gate can never disagree.
+    from checks.filesize import run
+    return run()
 
 
 def cmd_complexity() -> int:
-    # Lightweight, dependency-free guard for pathological functions.  It is
-    # deliberately conservative; detailed cyclomatic analysis remains an
-    # optional golangci-lint concern.
-    function = re.compile(r"^func \([^)]*\) (\w+)|^func (\w+)")
-    starts: list[tuple[str, int]] = []
-    failed = False
-    for path in sorted(ROOT.rglob("*.go")):
-        if any(part in {".git", "bin", "vendor"} for part in path.parts):
-            continue
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(lines):
-            match = function.match(line)
-            if match:
-                starts.append((match.group(1) or match.group(2), index))
-        for position, (name, start) in enumerate(starts):
-            end = starts[position + 1][1] if position + 1 < len(starts) else len(lines)
-            body = lines[start:end]
-            decisions = sum(line.count(token) for line in body for token in (" if ", " for ", "switch ", "case ", "&&", "||"))
-            if len(body) > QUALITY_MAX_FUNCTION_LINES or decisions > QUALITY_MAX_DECISIONS:
-                print(f"complexity: {path.relative_to(ROOT)}:{start + 1} {name} is large/branch-heavy (lines={len(body)}, decisions={decisions})")
-                failed = True
-        starts.clear()
-    if not failed:
-        print(f"complexity: PASS (max {QUALITY_MAX_FUNCTION_LINES} function lines, {QUALITY_MAX_DECISIONS} decisions)")
-    return int(failed)
+    # Single implementation lives in checks/complexity.py (the stage the gate
+    # runs). The inlined copy diverged: it scanned _test.go files and applied
+    # its own engineering.yaml parsing.
+    from checks.complexity import run
+    return run()
 
 
 def cmd_check_routes() -> int:
@@ -190,38 +144,12 @@ def cmd_generate() -> int:
     return proto_sync(ROOT)
 
 
-def go_imports(path: Path) -> set[str]:
-    text = path.read_text(encoding="utf-8")
-    values = set(re.findall(r'^\s*"([^"]+)"\s*$', text, re.MULTILINE))
-    values.update(re.findall(r'import\s+"([^"]+)"', text))
-    return values
-
-
 def cmd_architecture() -> int:
-    # Keep the dependency direction explicit for the reference service:
-    # domain/security/auth/store are lower layers and cannot import API or
-    # service packages.
-    forbidden = {
-        "internal/domain": {"internal/service", "internal/httpapi", "internal/grpcapi"},
-        "internal/security": {"internal/service", "internal/httpapi", "internal/grpcapi"},
-        "internal/auth": {"internal/service", "internal/httpapi", "internal/grpcapi"},
-        "internal/store": {"internal/service", "internal/httpapi", "internal/grpcapi"},
-    }
-    errors: list[str] = []
-    for package, disallowed in forbidden.items():
-        directory = ROOT / package
-        if not directory.exists():
-            continue
-        for path in directory.glob("*.go"):
-            for imported in go_imports(path):
-                for target in disallowed:
-                    if imported.endswith(target):
-                        errors.append(f"{path.relative_to(ROOT)} imports {target}")
-    if errors:
-        print("architecture violations:", *errors, sep="\n  ")
-        return 1
-    print("architecture: dependency direction is clean")
-    return 0
+    # Single implementation lives in checks/architecture.py, the dependency
+    # direction stage the gate runs. The inlined copy below used to re-declare
+    # the same forbidden-import map.
+    from checks.architecture import run
+    return run()
 
 
 def cmd_diagnose() -> int:
@@ -263,70 +191,24 @@ def cmd_trend() -> int:
 
 
 def cmd_check_exemptions() -> int:
-    # Exemptions are intentionally explicit.  A missing registry is valid for
-    # this small reference implementation; silently malformed entries are not.
-    path = ROOT / "engineering-exemptions.yaml"
-    if not path.exists():
-        print("exemptions: none")
-        return 0
-    text = path.read_text(encoding="utf-8")
-    if "reason:" not in text or "owner:" not in text:
-        print(f"invalid exemption registry: {path}")
-        return 1
-    print(f"exemptions: validated {path.relative_to(ROOT)}")
-    return 0
-
-
-def default_secrets_single_source() -> list[str]:
-    # The well-known development secrets must exist only in
-    # internal/service/secrets.go (non-test Go). Any other occurrence (a
-    # binary envOr fallback, a scanner, a wrapper) would split the single
-    # source of truth for the deny-list and could silently re-introduce
-    # hard-coded defaults.
-    allowed = {str((ROOT / "internal" / "service" / "secrets.go").resolve())}
-    offenders = []
-    for directory in (ROOT / "internal", ROOT / "cmd"):
-        for path in sorted(directory.rglob("*.go")):
-            if path.name.endswith("_test.go") or str(path.resolve()) in allowed:
-                continue
-            text = path.read_text(encoding="utf-8")
-            for secret in ("development-signing-key-change-me", "development-encryption-key-change-me"):
-                if secret in text:
-                    offenders.append(f"{path.relative_to(ROOT)} contains {secret!r}")
-    return offenders
+    # Single implementation lives in checks/exemptions.py (the gate stage).
+    from checks.exemptions import run
+    return run()
 
 
 def cmd_check_invariants() -> int:
-    checks = {
-        "tenant-context": ("TenantID = tenantID", "tenant context assignment"),
-        "sensitive-field-filter": ("rejectSensitive", "sensitive field rejection"),
-        "hash-chain": ("PrevHash", "hash chain linkage"),
-        "request-size-limit": ("MaxBytesReader", "HTTP request limit"),
-    }
-    source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "internal").rglob("*.go"))
-    missing = [label for needle, label in checks.values() if needle not in source]
-    offenders = default_secrets_single_source()
-    if missing:
-        print("missing security invariants:", *missing, sep="\n  ")
-    if offenders:
-        print("default secrets outside single source:", *offenders, sep="\n  ")
-    if missing or offenders:
-        return 1
-    print("security invariants: clean")
-    return 0
+    # Single implementation lives in checks/invariants.py, the stage the gate
+    # runs (including the default-secrets single-source scan).
+    from checks.invariants import run
+    return run()
 
 
 def cmd_adr_compliance() -> int:
-    required = [ROOT / "docs" / "ARCHITECTURE_PLAN.md",
-                ROOT / "docs" / "VALIDATION_PLAN.md",
-                ROOT / "api" / "openapi" / "openapi.yaml",
-                ROOT / "api" / "asyncapi" / "asyncapi.yaml"]
-    missing = [str(path.relative_to(ROOT)) for path in required if not path.exists()]
-    if missing:
-        print("missing architecture evidence:", *missing, sep="\n  ")
-        return 1
-    print("architecture evidence: present")
-    return 0
+    # Single implementation lives in checks/adr_compliance.py (the gate stage).
+    # The inlined copy required a different evidence set than the stage the
+    # gate actually runs, so the command could pass while the gate failed.
+    from checks.adr_compliance import run
+    return run()
 
 
 def cmd_self_test() -> int:
@@ -347,11 +229,6 @@ def cmd_skill_test() -> int:
     for path in sorted(skills.glob("*/test_skill.py")):
         failures += int(run(sys.executable, "-m", "pytest", str(path)) != 0)
     return int(failures != 0)
-
-
-def cmd_skill() -> int:
-    print("skill: no local skills configured")
-    return 1
 
 
 def cmd_modules() -> int:
@@ -386,8 +263,8 @@ def check_module(name: str) -> int:
 
 
 def cmd_coverage() -> int:
-    with tempfile.NamedTemporaryFile(prefix="audit-coverage-", suffix=".out") as file:
-        return run("go", "test", "-coverprofile=" + file.name, "./...")
+    from checks.coverage import run
+    return run()
 
 
 def cmd_check() -> int:
@@ -442,8 +319,22 @@ def cmd_quality() -> int:
                     prometheus_rules,
                     sensitive_logging,
                     cmd_vet, cmd_python_checks, cmd_test, cmd_race, build):
-        if command() != 0:
-            return 1
+        # Label every stage and report its cost: a bare loop left a failing
+        # run with only the last check's output, and no way to tell whether
+        # the ~95s Go stages or the fast static guards were to blame. The label
+        # is also the re-runnable command (`python3 cli.py <label>`). Stage
+        # functions are imported as `from checks.<stage> import run as <stage>`,
+        # so __name__ is always "run": the label comes from the defining module.
+        module = getattr(command, "__module__", "")
+        stem = "" if module in {"__main__", "", "builtins"} else module.rsplit(".", 1)[-1]
+        label = (stem or command.__name__).removeprefix("cmd_").replace("_", "-")
+        started = time.monotonic()
+        code = command()
+        elapsed = time.monotonic() - started
+        if code != 0:
+            print(f"FAIL: {label} ({elapsed:.1f}s)", file=sys.stderr)
+            return code
+        print(f"PASS: {label} ({elapsed:.1f}s)")
     print("QUALITY PASS")
     return 0
 
@@ -534,9 +425,33 @@ COMMANDS = {
     "profiles": cmd_build,
     "lint": cmd_lint,
     "security-scan": cmd_security_scan,
-    "skill": cmd_skill,
     "help": cmd_help,
 }
+
+# Every gate stage gets a re-runnable entrypoint. A stage that can only fail
+# inside `python3 cli.py quality` costs a full gate cycle (~10 min) to
+# re-check one thing, so each checks/ module behind a stage is reachable by
+# name. checks/test_quality_checks.py asserts that coverage stays complete.
+# Only modules without an entrypoint are added: an existing command already
+# wraps the same policy (cmd_architecture, cmd_coverage, cmd_build,
+# cmd_consistency_check, ...), and replacing a wrapper with a bare module call
+# would silently change its arguments.
+STAGE_MODULES = (
+    "adr_compliance", "asyncapi_channels", "complexity", "contract_fields",
+    "coverage", "dev_auth_manifest", "directory_fanout", "exemptions",
+    "filesize", "health_report", "invariants", "make_help", "prometheus_rules",
+    "proto_sync", "replay_round_reset", "root_business_code", "root_files",
+    "route_contract", "sensitive_logging", "stream_consistency",
+    "tenant_consistency", "tenant_scope",
+)
+COMMANDS.update({
+    name: handler
+    for name, handler in (
+        (module.replace("_", "-"), (lambda m: lambda: check_module(m))(module))
+        for module in STAGE_MODULES
+    )
+    if name not in COMMANDS
+})
 
 
 def main() -> int:

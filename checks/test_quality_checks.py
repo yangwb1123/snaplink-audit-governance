@@ -6,6 +6,12 @@ from checks.config import get_config
 from checks.invariants import default_secrets_single_source
 from checks.route_contract import normalize
 
+ROOT = Path(__file__).resolve().parents[1]
+
+# checks/config.py is an import-time helper (it parses engineering.yaml for the
+# other modules), not a gate stage, so it has no command of its own.
+NON_STAGE_MODULES = {"__init__", "config"}
+
 
 class QualityChecksTest(unittest.TestCase):
     def test_config_has_quality_limits(self):
@@ -23,12 +29,49 @@ class QualityChecksTest(unittest.TestCase):
     def test_default_secrets_are_single_source(self):
         self.assertEqual(default_secrets_single_source(), [])
 
+    def test_every_gate_stage_is_rerunnable_from_the_cli(self):
+        # A stage reachable only through `python3 cli.py quality` costs a full
+        # gate cycle (~10 min) to re-check. Every checks/ module behind a stage
+        # must be runnable by name; this pins that affordance so a new stage
+        # cannot ship without an entrypoint.
+        import cli
+
+        source = ROOT.joinpath("cli.py").read_text(encoding="utf-8")
+        modules = {
+            path.stem
+            for path in (ROOT / "checks").glob("*.py")
+            if not path.name.startswith("test_")
+        } - NON_STAGE_MODULES
+        for module in modules:
+            reachable = (
+                module in cli.STAGE_MODULES
+                or module.replace("_", "-") in cli.COMMANDS
+                or f'check_module("{module}")' in source
+                or f"from checks.{module} import" in source
+            )
+            self.assertTrue(reachable, f"no `python3 cli.py <stage>` entrypoint for {module}")
+        for stage in cli.STAGE_MODULES:
+            self.assertIn(stage.replace("_", "-"), cli.COMMANDS)
+
+    def test_cli_does_not_reimplement_a_gate_policy(self):
+        # cli.py used to carry second copies of the filesize, complexity,
+        # architecture, invariants, adr-compliance, exemptions, coverage and
+        # root-file policies. They had already drifted from the stages the gate
+        # runs, so the commands could pass while the gate failed. Keep the CLI
+        # a launcher: budgets come from checks/config.py, policies from
+        # checks/<policy>.py.
+        source = ROOT.joinpath("cli.py").read_text(encoding="utf-8")
+        for token in ("QUALITY_MAX_", "def quality_limit", "forbidden = {",
+                      "def go_imports", "def default_secrets_single_source"):
+            self.assertNotIn(token, source,
+                             f"cli.py must not re-implement a gate policy ({token})")
+
     def test_python_quality_checks_buffer_expected_negative_cases(self):
         # Several checker tests intentionally run malformed trees and expect a
         # FAIL line. Keep those lines out of a successful gate transcript so a
         # log-only runner cannot mistake a passing unittest suite for a gate
         # failure.
-        source = (Path(__file__).resolve().parents[1] / "cli.py").read_text(encoding="utf-8")
+        source = ROOT.joinpath("cli.py").read_text(encoding="utf-8")
         self.assertIn('"-m", "unittest", "discover", "-b"', source)
 
 

@@ -431,7 +431,7 @@ def run(root: Path | None = None) -> int:
     the complete statusForError mapping.
 
     root defaults to the repository root (computed from checks/config.py), so
-    zero-arg callers (checks/self_test.py, cmd_quality) keep working and the
+    zero-arg callers (cli.py commands, cmd_quality) keep working and the
     gate is never cwd-dependent.
     """
     if root is None:
