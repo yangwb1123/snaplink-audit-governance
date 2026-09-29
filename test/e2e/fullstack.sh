@@ -91,6 +91,16 @@ else
   AUTH_SECONDARY="Bearer dev:demo:compliance"
 fi
 
+# DS-08 source identity binding: ingest resolves source_system on the server and
+# rejects a source that does not admit the token's client id. A three-segment
+# development token takes its client id from the tenant, so the bootstrapped
+# "demo" source admits it; a real IdP token carries the registered client id and
+# needs a source bound to that id. Register one bound to whichever client this
+# run writes as, and use it for the outbox record, the gRPC write and the
+# restore event.
+WRITE_CLIENT_ID="${AUDIT_IDP_CLIENT_ID:-demo}"
+E2E_SOURCE="e2e"
+
 log "starting infrastructure (postgres/redpanda/clickhouse/minio/jaeger)"
 $COMPOSE up -d postgres redpanda clickhouse minio jaeger
 
@@ -219,6 +229,17 @@ if ! $COMPOSE logs audit-governance-worker 2>/dev/null | grep -q "archive_ready=
 fi
 log "PASS: worker archive readiness probe passed"
 
+log "registering e2e source for client id $WRITE_CLIENT_ID"
+if ! curl -sf -X POST "${API}/api/v1/sources?tenant_id=demo" \
+  -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"$E2E_SOURCE\",\"name\":\"e2e source\",\"allowed_client_ids\":[\"$WRITE_CLIENT_ID\"]}" \
+  >/dev/null; then
+  $COMPOSE logs audit-api | tail -5
+  log "FAIL: could not register the e2e source (client id $WRITE_CLIENT_ID)"
+  exit 1
+fi
+log "PASS: e2e source registered (allowed_client_ids=[$WRITE_CLIENT_ID])"
+
 log "checking gRPC ingest (B1-6 topology: listener + real Write over socket)"
 if (exec 3<>/dev/tcp/localhost/19051) 2>/dev/null; then
   log "gRPC listener: open on 19051"
@@ -229,6 +250,7 @@ else
 fi
 G_TOKEN="${AUTH_WRITE#Bearer }"
 if (cd "${ROOT}" && go run ./test/e2e/grpcwrite -address localhost:19051 -token "$G_TOKEN" \
+    -source-system "$E2E_SOURCE" \
     -event-id "grpc-e2e-$(date +%s)" | grep -q "grpc-write-ok"); then
   log "PASS: gRPC Write ingested"
 else
@@ -260,7 +282,7 @@ log "inserting outbox record $EVENT_ID"
 $COMPOSE exec -T postgres psql -U audit -d audit <<SQL >/dev/null
 INSERT INTO audit_outbox (event_id, tenant_id, idempotency_key, payload, occurred_at)
 VALUES ('$EVENT_ID', 'demo', 'fs-$EVENT_ID',
-'{"event_id":"$EVENT_ID","tenant_id":"demo","source_system":"demo","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T12:00:00Z","correlation_id":"fullstack-web-contract","trace_id":"0123456789abcdef0123456789abcdef","aggregate_type":"verification","aggregate_id":"$EVENT_ID","aggregate_version":1,"actor":{"id":"user-1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"fs-$EVENT_ID","payload":{"note":"fullstack e2e"}}',
+'{"event_id":"$EVENT_ID","tenant_id":"demo","source_system":"$E2E_SOURCE","event_type":"audit.event","schema_id":"audit.event","schema_version":1,"occurred_at":"2026-08-05T12:00:00Z","correlation_id":"fullstack-web-contract","trace_id":"0123456789abcdef0123456789abcdef","aggregate_type":"verification","aggregate_id":"$EVENT_ID","aggregate_version":1,"actor":{"id":"user-1"},"action":"update","outcome":"success","data_classification":"internal","retention_class":"standard","idempotency_key":"fs-$EVENT_ID","payload":{"note":"fullstack e2e"}}',
 now());
 SQL
 
@@ -349,7 +371,7 @@ log "verifying restore approval chain (separation of duties)"
 RESTORE_OP="restore-op-$(date +%s)"
 curl -s -X POST "$API/api/v1/events?wait_for=ledgered" \
   -H "Authorization: $AUTH_WRITE" -H 'Content-Type: application/json' \
-  -d "{\"event_id\":\"restore-evt-$(date +%s)\",\"operation_id\":\"$RESTORE_OP\",\"source_system\":\"demo\",\"event_type\":\"audit.event\",\"schema_id\":\"audit.event\",\"schema_version\":1,\"occurred_at\":\"2026-08-07T12:00:00Z\",\"actor\":{\"id\":\"u\"},\"action\":\"update\",\"outcome\":\"success\",\"data_classification\":\"internal\",\"retention_class\":\"standard\",\"idempotency_key\":\"restore-idem-$(date +%s)\",\"payload\":{\"x\":1}}" \
+  -d "{\"event_id\":\"restore-evt-$(date +%s)\",\"operation_id\":\"$RESTORE_OP\",\"source_system\":\"$E2E_SOURCE\",\"event_type\":\"audit.event\",\"schema_id\":\"audit.event\",\"schema_version\":1,\"occurred_at\":\"2026-08-07T12:00:00Z\",\"actor\":{\"id\":\"u\"},\"action\":\"update\",\"outcome\":\"success\",\"data_classification\":\"internal\",\"retention_class\":\"standard\",\"idempotency_key\":\"restore-idem-$(date +%s)\",\"payload\":{\"x\":1}}" \
   -o /dev/null -w '%{http_code}' | grep -q 202 || { log "FAIL: restore op event ingest"; exit 1; }
 RUN_ID="$(curl -s -X POST "$API/api/v1/restores?tenant_id=demo" \
   -H "Authorization: $AUTH_POLICY" -H 'Content-Type: application/json' \

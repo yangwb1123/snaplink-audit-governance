@@ -3,6 +3,15 @@
 // bearer token in metadata (same Authenticator as HTTP) and writes one
 // canonical event, printing the receipt. Used by test/e2e/fullstack.sh to
 // cover the B1-6 "supported inbound" contract over a real socket.
+//
+// The envelope's source_system must name a source registered for the token's
+// client id: the ingest path resolves the source on the server and rejects a
+// source that does not admit the caller (DS-08 source identity binding). The
+// defaults below describe the auto-bootstrapped local source, which admits
+// only a client whose id equals the source id — true for a three-segment
+// development token (client id defaults to the tenant) and false for a real
+// IdP token, so a real-token run must pass -source-system for a source whose
+// allowed_client_ids contains that client.
 package main
 
 import (
@@ -25,9 +34,16 @@ func main() {
 	address := flag.String("address", "localhost:19051", "audit-api gRPC address")
 	eventID := flag.String("event-id", fmt.Sprintf("grpc-e2e-%d", time.Now().Unix()), "event id")
 	token := flag.String("token", os.Getenv("AUDIT_E2E_TOKEN"), "bearer token (defaults to AUDIT_E2E_TOKEN)")
+	sourceSystem := flag.String("source-system", "demo", "source system to write as; must be registered for the token's client id")
+	eventType := flag.String("event-type", "audit.event", "event type (and default schema id)")
+	schemaID := flag.String("schema-id", "", "schema id (defaults to -event-type)")
+	schemaVersion := flag.Int("schema-version", 1, "schema version")
 	flag.Parse()
 	if *token == "" {
 		log.Fatalf("token is required: pass -token or set AUDIT_E2E_TOKEN")
+	}
+	if *schemaID == "" {
+		*schemaID = *eventType
 	}
 	connection, err := grpc.NewClient(*address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -37,8 +53,8 @@ func main() {
 	client := auditv1.NewIngestClient(connection)
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+*token))
 	request := &auditv1.WriteRequest{WaitFor: "ledgered", Event: &auditv1.EventEnvelope{
-		EventId: *eventID, SourceSystem: "demo", EventType: "audit.event",
-		SchemaId: "audit.event", SchemaVersion: 1,
+		EventId: *eventID, SourceSystem: *sourceSystem, EventType: *eventType,
+		SchemaId: *schemaID, SchemaVersion: int32(*schemaVersion),
 		OccurredAt: timestamppb.New(time.Now().UTC()),
 		Actor:      &auditv1.Actor{Id: "grpc-e2e"},
 		Action:     "update", Outcome: "success",
