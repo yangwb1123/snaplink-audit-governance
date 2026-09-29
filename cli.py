@@ -34,6 +34,35 @@ def gofmt_files() -> list[str]:
     return [line for line in result.stdout.splitlines() if line and ".git/" not in line]
 
 
+def _defined_in_cli(command) -> bool:
+    """True when the callable is implemented in this file.
+
+    __module__ is "cli" when the CLI is imported (the gate's own suite, or a
+    test) and "__main__" when it is run as a script, so a stage defined here
+    has to be recognised by its source file rather than by its module name.
+    """
+    code = getattr(command, "__code__", None)
+    if code is None:
+        return False
+    return Path(code.co_filename).resolve() == Path(__file__).resolve()
+
+
+def stage_label(command) -> str:
+    """CLI name of a gate stage, and therefore the name of the command that
+    re-runs exactly that stage.
+
+    Gate stages are imported as ``from checks.<stage> import run as <stage>``,
+    so ``__name__`` is always "run" and the stage has to be named after the
+    module that defines it; stages defined in this file (fmt, vet, test, ...)
+    fall back to the function name. Every label must be a command in COMMANDS:
+    a gate failure prints ``FAIL: <label>``, and that message is only useful if
+    ``python3 cli.py <label>`` re-runs the stage.
+    """
+    module = "" if _defined_in_cli(command) else getattr(command, "__module__", "")
+    stem = "" if module in {"__main__", "cli", "", "builtins"} else module.rsplit(".", 1)[-1]
+    return (stem or command.__name__).removeprefix("cmd_").replace("_", "-")
+
+
 def cmd_fmt() -> int:
     files = gofmt_files()
     if files:
@@ -322,12 +351,8 @@ def cmd_quality() -> int:
         # Label every stage and report its cost: a bare loop left a failing
         # run with only the last check's output, and no way to tell whether
         # the ~95s Go stages or the fast static guards were to blame. The label
-        # is also the re-runnable command (`python3 cli.py <label>`). Stage
-        # functions are imported as `from checks.<stage> import run as <stage>`,
-        # so __name__ is always "run": the label comes from the defining module.
-        module = getattr(command, "__module__", "")
-        stem = "" if module in {"__main__", "", "builtins"} else module.rsplit(".", 1)[-1]
-        label = (stem or command.__name__).removeprefix("cmd_").replace("_", "-")
+        # is also the re-runnable command (`python3 cli.py <label>`).
+        label = stage_label(command)
         started = time.monotonic()
         code = command()
         elapsed = time.monotonic() - started
@@ -402,6 +427,10 @@ COMMANDS = {
     "check-invariants": cmd_check_invariants,
     "check-routes": cmd_check_routes,
     "check-openapi": cmd_openapi_contract,
+    # Aliases that match the label cmd_quality prints for these stages, so the
+    # "FAIL: <label>" line is always a runnable command.
+    "openapi-contract": cmd_openapi_contract,
+    "python-checks": cmd_python_checks,
     "check-root": cmd_check_root,
     "root-files": lambda: check_module("root_files"),
     "root-business-code": lambda: check_module("root_business_code"),

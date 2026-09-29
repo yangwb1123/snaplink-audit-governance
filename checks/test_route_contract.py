@@ -509,28 +509,11 @@ class RouteContractTest(unittest.TestCase):
         code, output = run_capture(cli.cmd_check_routes)
         self.assertEqual(code, 0, output)
 
-    def test_real_repo_cli_check_passes(self):
-        # cli.py check now includes the route stage; skipped when the quality
-        # gate itself is running this suite (it exercises check separately).
-        if os.environ.get("AUDIT_QUALITY_ACTIVE"):
-            self.skipTest("already inside the quality gate")
-        result = subprocess.run(
-            [sys.executable, "cli.py", "check"], cwd=ROOT,
-            capture_output=True, text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-3000:])
-
-    def test_quality_gate(self):
-        # AGENTS.md gate. The recursion guard prevents `cli.py quality` ->
-        # unittest suite -> `cli.py quality` -> ... when this suite is run
-        # from inside the gate (cmd_quality sets AUDIT_QUALITY_ACTIVE).
-        if os.environ.get("AUDIT_QUALITY_ACTIVE"):
-            self.skipTest("quality gate already active; run `python3 cli.py quality` directly")
-        result = subprocess.run(
-            [sys.executable, "cli.py", "quality"], cwd=ROOT,
-            capture_output=True, text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-4000:])
+    # `cli.py check` and `cli.py quality` are not re-run from here. They spawn
+    # the Go toolchain, and the gate already runs both stage sets (this suite
+    # included), so a nested invocation could only ever execute in a manual
+    # run of the suite, never in the CI job that runs the gate. Their wiring
+    # is asserted statically in checks/test_gate_wiring.py instead.
 
 
 if __name__ == "__main__":
