@@ -103,3 +103,49 @@ func mergeAdminActions(snapshot, trail []domain.AdminAction, tenantID string, pl
 	}
 	return result
 }
+func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([]domain.AdminAction, error) {
+	if tenantID == "" && !platform {
+		return nil, fmt.Errorf("%w: tenant_id is required", domain.ErrInvalid)
+	}
+	if err := requireOptionalTenantScope(tenantID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	// Read the trail BEFORE the snapshot so a corrupt trail fails closed
+	// without masking the snapshot read, and so the fast path never opens an
+	// RLock inside Store.Read (lock-order safety with Store.mu writers).
+	trail, err := s.Store.ReadAdminTrail()
+	if err != nil {
+		return nil, err
+	}
+	var result []domain.AdminAction
+	if len(trail) == 0 {
+		// Fast path — no read facts: the verbatim pre-trail loop.
+		err = s.Store.Read(func(data *store.Snapshot) error {
+			for i := len(data.AdminActions) - 1; i >= 0 && len(result) < limit; i-- {
+				action := data.AdminActions[i]
+				if (platform && tenantID == "") || action.TenantID == tenantID {
+					result = append(result, action)
+				}
+			}
+			return nil
+		})
+		return result, err
+	}
+	// Merge path: snapshot mutation facts ∪ read trail, newest-first
+	// (equal CreatedAt ⇒ trail first, then reverse-append within source).
+	var snapshot []domain.AdminAction
+	err = s.Store.Read(func(data *store.Snapshot) error {
+		snapshot = data.AdminActions
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mergeAdminActions(snapshot, trail, tenantID, platform, limit), nil
+}
+
+// Marshal is kept here as a small compile-time guard that the domain model
+// remains JSON serializable for the file store and export path.
