@@ -242,6 +242,16 @@
   const schemaRows = $derived(schemas.map((schema) => ({ ...schema, row_key: `${schema.schema_id}:${schema.version}` })))
   const selectedSchema = $derived(schemaRows.find((schema) => schema.row_key === selectedSchemaKey))
 
+  function selectSchema(rowKey: string): void {
+    selectedSchemaKey = rowKey
+  }
+
+  function handleSchemaKeydown(event: KeyboardEvent, rowKey: string): void {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    selectSchema(rowKey)
+  }
+
   function fieldSummary(fields?: string[]): string {
     return fields?.length ? fields.join(', ') : '未配置'
   }
@@ -417,7 +427,7 @@
       <ErrorNotice error={schemaError} />
       <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Schema ID</th><th>版本</th><th>事件类型</th><th>分级</th><th>状态</th></tr></thead><tbody>
         {#each schemaRows as schema (schema.row_key)}
-          <tr class:selected-row={selectedSchemaKey === schema.row_key} onclick={() => (selectedSchemaKey = schema.row_key)}><td>{schema.schema_id}</td><td>{schema.version}</td><td>{schema.event_type}</td><td>{schema.classification}</td><td><StatusBadge value={schema.active} /></td></tr>
+          <tr tabindex="0" aria-selected={selectedSchemaKey === schema.row_key} class:selected-row={selectedSchemaKey === schema.row_key} onclick={() => selectSchema(schema.row_key)} onkeydown={(event) => handleSchemaKeydown(event, schema.row_key)}><td>{schema.schema_id}</td><td>{schema.version}</td><td>{schema.event_type}</td><td>{schema.classification}</td><td><StatusBadge value={schema.active} /></td></tr>
         {:else}<tr><td colspan="5" class="empty-cell">暂无 Schema</td></tr>{/each}
       </tbody></table></div>
       {#if selectedSchema}

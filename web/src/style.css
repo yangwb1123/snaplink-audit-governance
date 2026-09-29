@@ -304,6 +304,11 @@ select {
   background: var(--iris-surface);
 }
 
+.data-table tr[tabindex="0"]:focus-visible > td {
+  outline: 2px solid var(--iris-primary);
+  outline-offset: -2px;
+}
+
 .schema-policy-view {
   display: grid;
   gap: var(--iris-space-md, 16px);
