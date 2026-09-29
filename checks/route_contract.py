@@ -270,12 +270,24 @@ def _response_schema(document: dict, response: object) -> object | None:
 
 
 def _runtime_error_mappings(root: Path) -> dict[str, int]:
-    """Extract statusForError's ordered sentinel mapping plus its default."""
-    source = root / "internal/httpapi/server.go"
-    try:
-        text = source.read_text(encoding="utf-8")
-    except OSError as error:
-        raise RouteContractError(f"cannot read statusForError source: {error}") from None
+    """Extract statusForError's ordered sentinel mapping plus its default.
+
+    The function is looked up across the whole httpapi package, not in one
+    file: the surface is split by concern (server.go routing, handlers_*.go,
+    authz.go), and a guard that pins a file name fails every time the code
+    moves for a reason that has nothing to do with this contract.
+    """
+    package = root / "internal" / "httpapi"
+    text = ""
+    for source in sorted(package.glob("*.go")):
+        if source.name.endswith("_test.go"):
+            continue
+        try:
+            text += source.read_text(encoding="utf-8")
+        except OSError as error:
+            raise RouteContractError(f"cannot read {source.name}: {error}") from None
+    if not text:
+        raise RouteContractError("no httpapi sources found")
     function = re.search(
         r"func statusForError\(err error\) int \{(?P<body>.*?\n\})",
         text,

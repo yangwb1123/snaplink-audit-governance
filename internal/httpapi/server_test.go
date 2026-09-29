@@ -3046,32 +3046,52 @@ var eventReturningServiceMethods = map[string]bool{
 // timeline strip loop fails this test; adding an unstripped event-returning
 // route to Handler() + table fails it too. It also failed on the pre-fix tree
 // (both timeline handlers called event-returning methods without stripping).
-func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
-	src, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatalf("read server.go (go test runs with CWD=package dir): %v", err)
-	}
+// packageFuncs parses every non-test source file of the httpapi package and
+// returns the file set, the function declarations by name, and the
+// concatenated source. Source guards must not pin a single file: the surface
+// is split by concern (server.go routing, handlers_events.go,
+// handlers_governance.go, authz.go), and a guard that reads one file stops
+// checking anything the moment a handler moves.
+func packageFuncs(t *testing.T) (*token.FileSet, map[string]*ast.FuncDecl, string) {
+	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "server.go", src, parser.AllErrors)
+	functions := map[string]*ast.FuncDecl{}
+	var text strings.Builder
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse server.go: %v", err)
+		t.Fatalf("read package dir (go test runs with CWD=package dir): %v", err)
 	}
-
-	// Locate func (s *Server) Handler() — the sole route registrar.
-	var handlerDecl *ast.FuncDecl
-	handlers := map[string]*ast.FuncDecl{}
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Recv == nil {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		handlers[fd.Name.Name] = fd
-		if fd.Name.Name == "Handler" {
-			handlerDecl = fd
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		text.Write(source)
+		file, err := parser.ParseFile(fset, name, source, parser.AllErrors)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok {
+				functions[fd.Name.Name] = fd
+			}
 		}
 	}
+	if len(functions) == 0 {
+		t.Fatal("no httpapi sources parsed")
+	}
+	return fset, functions, text.String()
+}
+
+func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
+	fset, handlers, _ := packageFuncs(t)
+	handlerDecl := handlers["Handler"]
 	if handlerDecl == nil {
-		t.Fatal("server.go: func (s *Server) Handler() not found")
+		t.Fatal("func (s *Server) Handler() not found in package httpapi")
 	}
 
 	// Route inventory: every mux.HandleFunc("METHOD /path", s.handler) call
@@ -4138,25 +4158,10 @@ func TestTenantForBoundaryGuard(t *testing.T) {
 	if count := strings.Count(text, rawRead); count != 1 {
 		t.Fatalf("scope.go contains %d raw tenant query parses, want exactly 1 (inside queryTenantSelector)", count)
 	}
-	serverSrc, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatalf("read server.go (go test runs with CWD=package dir): %v", err)
-	}
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "server.go", serverSrc, parser.AllErrors)
-	if err != nil {
-		t.Fatalf("parse server.go: %v", err)
-	}
-	var tenantFor *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != "tenantFor" {
-			continue
-		}
-		tenantFor = fd
-	}
+	_, functions, _ := packageFuncs(t)
+	tenantFor := functions["tenantFor"]
 	if tenantFor == nil {
-		t.Fatal("server.go: func tenantFor not found")
+		t.Fatal("func tenantFor not found in package httpapi")
 	}
 	if tenantFor.Type.Results == nil || len(tenantFor.Type.Results.List) != 2 {
 		t.Fatalf("tenantFor must return (string, error), got %d result groups", len(tenantFor.Type.Results.List))
