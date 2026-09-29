@@ -407,11 +407,17 @@ class ProtoSyncTest(unittest.TestCase):
         code, output = run_capture(cli.cmd_generate)
         self.assertEqual(code, 0, output)
 
-    # -- AC-3d README CI assertion -----------------------------------------
+    # -- AC-3d documented CI assertion -------------------------------------
 
-    def test_readme_documents_ci_assertion(self):
+    def test_ci_assertion_is_documented_and_reachable(self):
+        # The proto no-diff assertion CI runs must be documented where a
+        # contributor will look for it. The procedure itself lives in
+        # docs/CONTRACT_SYNC.md; this also asserts that document is reachable
+        # from the README, so moving the prose cannot quietly drop the guard.
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn('make proto && test -z "$(git status --porcelain api/proto)"', readme)
+        self.assertIn("docs/CONTRACT_SYNC.md", readme)
+        contract = (ROOT / "docs" / "CONTRACT_SYNC.md").read_text(encoding="utf-8")
+        self.assertIn('make proto && test -z "$(git status --porcelain api/proto)"', contract)
 
     # -- pin parsers agree -------------------------------------------------
 

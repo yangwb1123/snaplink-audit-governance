@@ -1,5 +1,15 @@
 # 平台批次联合核查报告（G1–G8 门禁矩阵）
 
+> **这是 2026-08-07 的快照，不是当前状态。** 本文件是一次联合核查的证据记录，
+> 用于说明 COMPOSE-2026-017 已批准契约 v2 下各仓库的批次归属与门禁条件。它**不是**
+> 跨仓进度看板：标 ⚠️ 的行属于其它仓库（aero-id / aero-vault / aero-im / console /
+> IdP 部署仓），本仓既不能验证它们是否收口，也不应替它们宣布状态。要确认它们的现状，
+> 去看各自仓库的门禁与 CI；要确认本仓（sink）的现状，跑 `python3 cli.py quality`。
+>
+> 本仓在快照之后的变更见 [`docs/campaigns/README.md`](campaigns/README.md) 与
+> [`docs/release-notes.md`](release-notes.md)；2026-08-15 起的 R-1 归档 COMPLIANCE 门禁、
+> 2026-08-06 起的开发认证默认失败关闭均已在本仓落地，快照里的“B1-1 ✅”描述仍然成立。
+
 状态：2026-08-07 实测核查（代码证据 + 本仓库 e2e 断言链）
 依据：`docs/campaigns/implementation-gate.md`（COMPOSE-2026-017 已批准契约 v2）
 
@@ -52,7 +62,9 @@
 - 拓扑收敛 ✅（gRPC 真实写入 + 契约声明 + grep 无孤儿路径）
 - 容量 envelope ✅（bench 曲线 + cutover 门禁记录）
 
-## 4. 剩余动作（跨仓，非 sink 代码）
+## 4. 剩余动作（跨仓，不在本仓代码范围）
+
+> 以下均为**其它仓库**的待办，本仓无法代为完成；列出仅为说明快照时的共识边界。
 
 1. **IdP 部署仓**：把 `deploy/idp.verify.yaml` 的 scope registry 参考配置（9 审计 scope）应用到生产部署清单；`AUDIT_IDP_*` 注入 CI。
 2. **aero-id（G3）**：B2 全项已实现（claim dispatch/contract suite/audit-replay/激活门），剩余为仓库门禁收口（注意：并行代理的 worktree 曾有接口漂移半成品，需其完成后跑 done-gate）。
@@ -60,4 +72,4 @@
 4. **aero-im（G6）/ console（G7）**：各自批次推进。
 5. **G8**：全部仓库 CI 全绿 + 迁移骨架 + 首个事件端到端验证。
 
-sink（本仓库）作为平台基线的全部契约、实现、部署与验证证据已就绪。
+sink（本仓）作为平台基线的全部契约、实现、部署与验证证据在快照时已就绪。

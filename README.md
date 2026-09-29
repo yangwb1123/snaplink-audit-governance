@@ -23,15 +23,11 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - [威胁模型](docs/THREAT_MODEL.md)
 - [Outbox writer inventory and rollout verification](docs/outbox-writer-rollout.md)
 - [术语表](docs/GLOSSARY.md)
-- [平台批次联合核查报告（G1–G8 门禁矩阵）](docs/platform-gate-status.md)
-- [ADR-0001 消息传输与接入](docs/adr/ADR-0001.md)
-- [ADR-0002 事件编码与 Schema 兼容](docs/adr/ADR-0002.md)
-- [ADR-0003 哈希链分段与检查点](docs/adr/ADR-0003.md)
-- [ADR-0004 查询投影与租户路由](docs/adr/ADR-0004.md)
-- [ADR-0005 合规归档与密钥](docs/adr/ADR-0005.md)
-- [ADR-0006 租户 ID 键框架校验](docs/adr/ADR-0006.md)
-- [ADR-0007 开发认证默认失败关闭](docs/adr/ADR-0007.md)
-- [ADR-0010 API/worker 签名与归档一致性键](docs/adr/ADR-0010.md)
+- [工程门禁](docs/ENGINEERING_GATE.md) — `python3 cli.py quality` 的阶段清单与设计约束
+- [契约同步](docs/CONTRACT_SYNC.md) — OpenAPI / AsyncAPI / Proto 三条线的漂移防线
+- [部署 / 回滚 runbook](docs/DEPLOY_RUNBOOK.md) — WORM COMPLIANCE 门禁、cutover、一致性键、全栈验证
+- [平台批次联合核查报告（G1–G8 门禁矩阵快照）](docs/platform-gate-status.md)
+- ADR：[0001 消息传输与接入](docs/adr/ADR-0001.md) · [0002 事件编码与 Schema 兼容](docs/adr/ADR-0002.md) · [0003 哈希链分段与检查点](docs/adr/ADR-0003.md) · [0004 查询投影与租户路由](docs/adr/ADR-0004.md) · [0005 合规归档与密钥](docs/adr/ADR-0005.md) · [0006 租户 ID 键框架校验](docs/adr/ADR-0006.md) · [0007 开发认证默认失败关闭](docs/adr/ADR-0007.md) · [0010 API/worker 签名与归档一致性键](docs/adr/ADR-0010.md)
 
 ## 当前实现
 
@@ -92,20 +88,20 @@ Snaplink 的 client_credentials Token 不投射通用 `tenant_id`。写入服务
 go test ./...
 ```
 
-工程质量检查统一入口：
+工程质量检查统一入口（`python3 cli.py quality` 是 `AGENTS.md` 强制的改动门禁）：
 
 ```sh
 python3 cli.py check       # gofmt、文件大小、go vet、单元测试
-python3 cli.py quality     # 完整质量门禁：复杂度、架构、竞态、构建等
+python3 cli.py quality     # 完整质量门禁：约 28 个阶段，含竞态与发布构建
 python3 cli.py race        # race detector
 python3 cli.py build       # 构建 API/worker 等发布二进制
-python3 cli.py consistency-check  # 比较两个已构建二进制的纯一致性键
 python3 cli.py bench       # 本机基准（基准结果见 docs/BENCHMARKS.md）
-python3 cli.py accept      # 完整验收：check、race、构建、路由契约
 python3 cli.py help
 ```
 
-也可以使用等价的 `make check`、`make quality`、`make test`、`make race` 和 `make build`。
+门禁的阶段清单、失败行如何按阶段单独重跑、以及门禁自身的接线约束，见
+[docs/ENGINEERING_GATE.md](docs/ENGINEERING_GATE.md)。也可以使用等价的 `make check`、
+`make quality`、`make test`、`make race` 和 `make build`。
 
 ## Web 管理端
 
@@ -123,111 +119,17 @@ make web-stack-up  # Snaplink Hosted Login + PKCE + Audit API 完整本机联调
 Snaplink 必须注册 public client `audit-governance-web`；完整回调、代理和容器部署配置见
 [`web/README.md`](web/README.md)。
 
-### Proto 生成代码同步（api/proto）
+## 契约与运维文档
 
-`api/proto/audit.proto` 与检入的生成代码（`audit.pb.go`/`audit_grpc.pb.go`，即 gRPC
-运行时实际编译的线面）由三道防线守护，全部挂在 `python3 cli.py quality` 中：
+功能规格留在本文件；跨文件、跨发布、跨值班的信息各自成篇：
 
-1. **描述符解析（零外部工具，始终执行）**：`checks/proto_sync.py` 直接解码
-   `audit.pb.go` 内嵌的 `file_audit_proto_rawDesc`（纯标准库 wire walker），逐消息逐字段
-   与 `audit.proto` 比对——`.proto` 新增字段但未重新生成会立即失败并点名该字段/消息。
-2. **生成器版本钉（始终执行）**：`engineering.yaml` 的 `proto:` 块是唯一 pin 清单；
-   生成头注释中的版本与 pin 不一致（或 `protoc-gen-go` pin 与 `go.mod` 的
-   `google.golang.org/protobuf` 版本不一致）即失败。
-3. **字节级重放（工具链存在时）**：`scripts/proto-gen.py --check` 用钉住的工具链在临时
-   目录重新生成并与检入文件逐字节比对，注释/格式级漂移也能捕获；工具链缺失时显式打印
-   跳过说明，描述符与版本检查仍强制执行（失败关闭，绝不静默通过）。
+- [契约同步](docs/CONTRACT_SYNC.md)：`api/proto` 生成代码的三道防线、
+  `make proto` 与漂移模拟、契约改动时的最小动作。
+- [部署 / 回滚 runbook](docs/DEPLOY_RUNBOOK.md)：WORM COMPLIANCE 默认留存门禁（R-1）、
+  既有桶 cutover 分类、回滚语义、跨进程一致性键、本机全栈验证脚本。
+- [工程门禁](docs/ENGINEERING_GATE.md)：`python3 cli.py quality` 的 28 个阶段与设计约束。
 
-重新生成（首次运行会下载钉住的 protoc 到 `bin/protoc-<pin>/` 并用 `go install @<pin>`
-安装两个生成器到被 gitignore 的 `bin/`，不触碰 `go.mod`/`go.sum`）：
-
-```sh
-make proto
-```
-
-CI 无差异断言（本地可复现，`make proto` 在未漂移树上幂等）：
-
-```sh
-make proto && test -z "$(git status --porcelain api/proto)"
-```
-
-漂移模拟（在 `git archive HEAD` 副本中注入字段、跑完整门禁、恢复后再跑一次，绝不改动
-工作区）：
-
-```sh
-bash scripts/drift-simulate.sh
-```
-
-门禁级漂移测试的等价命令：`AUDIT_DRIFT_SIM=1 python3 -m unittest checks.test_proto_sync`
-（默认跳过以避免完整门禁耗时翻倍）。
-
-全栈容器验证（outbox → relay → Kafka → 账本 + ClickHouse 投影 + MinIO WORM 归档 +
-DLQ 重放 + gRPC 入站，2026-08-07 真实容器全链路通过）：
-
-```sh
-bash test/e2e/fullstack.sh
-```
-
-B1-7 真实 IdP token 注入（G1 模式，**自包含**）：设置 `AUDIT_IDP_CLIENT_ID`/
-`AUDIT_IDP_CLIENT_SECRET` 两个变量即可——compose 栈自带 `audit-idp` 容器
-（从兄弟仓库 snaplink 构建，配置 `deploy/idp.verify.yaml`），e2e 自动铸造带
-`tenant_id`/`scope` claims 的 JWT 并把栈切换到 **dev auth 关闭 + JWKS 验证**
-（dev token 负向断言 401；JWKS 经 host-gateway 别名访问容器 IdP；issuer 校验）。
-验证栈同时发送 RFC 8707 `resource=audit-governance`，并在 Audit API 强制校验同名
-audience；可选 `AUDIT_IDP_SCOPE`/`AUDIT_IDP_RESOURCE`/`AUDIT_IDP_TOKEN_URL` 覆盖。未配置时过渡期使用 dev
-token 并告警。两种模式均实测通过（2026-08-07）。
-
-### COMPLIANCE 默认留存 cutover 验证（R-1 部署配套，2026-08-15）
-
-fullstack.sh 在启动任何应用之前自举归档桶并**自动化 cutover 验证**：用 worker
-二进制（宿主 `go build`，5 秒有界探针）对一次性 `worm-audit-cutover` 桶依次断言
-
-| 桶状态 | `-check-config` 期望 |
-|---|---|
-| 无默认留存（`--with-lock` + versioning 后） | 退出码 1 + `no default retention`（R-3a），不打印 `check_config=ok` |
-| `mc retention set --default governance 365d` | 退出码 1 + `GOVERNANCE`（R-3b），不打印 `check_config=ok` |
-| `mc retention set --default compliance 365d` | 退出码 0 + `check_config=ok` |
-
-随后给真实 `worm-audit` 桶设置 COMPLIANCE 365d 默认留存（幂等覆盖）并正向复核，
-然后才启动 worker——否则 worker 启动即 fatal 进入重启退避。scratch 桶从不写入
-数据、无留存对象，`mc rb --force` 可安全重建（带留存对象的 WORM 桶无法强制删除）。
-本镜像内置 mc 的 retention 子命令使用**位置参数模式**（`mc retention set
---default compliance 365d`，而非 `--compliance`），已在 pinned 镜像上实测。
-
-### 部署 / 回滚 runbook（R-1 COMPLIANCE 默认留存门禁）
-
-**部署（新环境）**：
-
-1. 创建/校验归档桶：`mc mb --with-lock <alias>/worm-audit` + `mc version enable`
-   + `mc retention set --default compliance 365d <alias>/worm-audit`。
-2. 预检（不打开状态存储、不绑定监听器；S3 仅做 5 秒有界探针）：
-   `AUDIT_SIGNING_SECRET=… AUDIT_ENCRYPTION_KEY=… AUDIT_S3_ENDPOINT=…
-   AUDIT_S3_BUCKET=worm-audit AUDIT_S3_ACCESS_KEY=… AUDIT_S3_SECRET_KEY=…
-   ./bin/audit-governance-worker -check-config` → 退出码 0 且输出
-   `check_config=ok … archive=s3`。
-3. 部署新二进制（API + worker 同发布），观察 worker 启动日志
-   `archive_ready=ok`；`/readyz` 返回 200。
-
-**部署（既有桶 cutover）**：对每个现存归档桶先跑
-`./bin/audit-governance-worker -check-config` 分类：
-
-- 报 `no default retention`（R-3a）或 `GOVERNANCE`（R-3b）→ 桶处于可删除
-  状态，先修复再升级：`mc retention set --default compliance 365d <bucket>`，
-  重跑 `-check-config` 到 `check_config=ok`。
-- 已是 COMPLIANCE + 正有效期 → 直接升级，行为不变。
-
-已写对象不受影响（留存固定在写入时刻）；门禁只保护新写入。
-
-**回滚**：
-
-1. 重新部署旧二进制（`git revert` 或部署上一版本镜像）。旧二进制接受所有既有
-   桶配置（pre-gate 行为），包括 GOVERNANCE/无默认留存——因此回滚总是成功。
-2. 桶上已设置的 COMPLIANCE 默认留存**无需撤销**：它是合法配置，旧二进制同样
-   接受（默认留存只约束新对象，不删除/改写任何数据）。
-3. 若回滚发生在 cutover 之后且新二进制已写入对象：对象留存继承自写入时刻的
-   桶默认，不会因回滚解除；无需清理。
-4. fullstack.sh 的 cutover 负向断言依赖 R-1 门禁（pre-gate 二进制三类桶全通过）
-   ——回滚到 pre-gate 后 CI 不应再跑该 e2e 的负向断言，或与门禁代码一起回滚。
+完整的文档地图见 [`docs/README.md`](docs/README.md)。
 
 ## 核心原则
 
