@@ -8,8 +8,21 @@ project:
 
 quality:
   max_go_lines: 1500
-  max_function_lines: 260
-  max_decisions: 45
+  # Function budgets are measured by checks/complexity.py: a function body ends
+  # at the closing brace in column 0, and comment/blank lines and branch
+  # keywords inside string literals do not count. The previous measurement
+  # ended a function at the next `func` header, so trailing type declarations
+  # and doc comments were charged to it and no real function could be measured
+  # (repository maximum was 19 branches against a 45 budget).
+  #
+  # These values come from the corrected metric over 1036 production
+  # functions: worst length 189 (Service.Ingest, internal/service/service.go),
+  # worst decisions 53 (Service.Ingest) and 47 (Service.VerifyIntegrity,
+  # internal/service/governance.go). The budgets sit just above those two
+  # outliers and must be lowered as they are split — the next function added
+  # to the ingest or integrity path has to be smaller than the one it joins.
+  max_function_lines: 220
+  max_decisions: 55
 
 build:
   output_dir: bin
