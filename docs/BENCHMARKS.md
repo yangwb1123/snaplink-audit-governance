@@ -48,6 +48,116 @@ python3 cli.py bench        # 全仓库
 go test -bench=Benchmark -benchmem -benchtime=1s ./internal/service/
 ```
 
+## gRPC `WriteStream` capacity decision-gate observations (2026-09-28)
+
+**Status: evidence only.** This section records a real listener/client load
+observation; it does not select a handler capacity, establish a safe default,
+create an overload contract, or define a production SLO. The existing
+reference-implementation disclaimer above remains in force.
+
+### Reproduction metadata
+
+- **Revision:** `950d5b7` (`HEAD`) plus the working-tree measurement changes
+  recorded in this report; rerun from a clean revision before comparing results.
+- **Date:** 2026-09-28 UTC.
+- **Host/container:** local host `u1-FAEX9`, Linux `7.0.0-31-generic`,
+  `linux/amd64`; not a production container or multi-node environment.
+- **Runtime:** Go `go1.26.5`; gRPC `v1.83.0`.
+- **Server:** real `net.Listen("tcp", "127.0.0.1:0")`, registered
+  `Ingest.WriteStream`, production keepalive parameters, 512 KiB receive cap,
+  stream recovery interceptor, in-memory hot/cold store, `SegmentSize=100000`,
+  and an injected test `LedgeredPublisher`. Local insecure transport is used
+  only to isolate this test; authentication is still performed with a signed
+  HS256 JWT.
+- **Client connections:** two independently created `grpc.ClientConn` values
+  to the same listener (`client-conn-1` and `client-conn-2`), with streams
+  assigned round-robin.
+- **Authentication/expiry:** JWT `sub=writestream-capacity-load`,
+  `tenant_id=tenant-a`, `client_id=crm`, `roles=[service]`, HS256 local test
+  secret, `exp=now+30m`; every stream therefore exercises a non-zero effective
+  expiry and its `Recv` worker path.
+- **Exact command and implementation:**
+
+  ```sh
+  go test -tags=writestream_load ./internal/grpcapi \
+    -run '^TestGRPCWriteStreamCapacityLoad$' -count=1 -timeout=60s -v
+  ```
+
+  The implementation is `internal/grpcapi/writestream_capacity_load_test.go`.
+  The `writestream_load` build tag is test-only; it is not a server setting.
+
+### Workload matrix and measurement method
+
+The fixed offered levels are 4, 12, and 24. They are observations, not
+approved limits. The mix is idle expiry-aware / normal producer / slow reader:
+1/2/1, 4/5/3, and 8/10/6 respectively. Slow readers withhold receipt reads
+for 700 ms; normal streams send and read repeatedly. The dependency fault is
+injected only at level 24, at approximately +650 ms for a requested 350 ms.
+
+Active handlers and expiry-aware `Recv` workers are counted by a test-only
+start/finish interceptor, which has no admission method and is absent in production.
+Goroutines use `runtime.NumGoroutine`; Go heap uses
+`runtime.ReadMemStats().HeapAlloc`; process RSS uses `/proc/self/status` `VmRSS`; file descriptors use `/proc/self/fd`. A zero/unavailable `/proc`
+value is not interpreted as a limit. Latencies are milliseconds, with p50/p95/
+max; stream-open is the observed stream establishment timing, while admission
+latency is explicitly `n=0` because no admission path exists. Receipt latency
+is the message round trip from successful `Send` to receipt `Recv`. Terminal
+latency is measured from the workload-level shutdown signal to each final
+terminal `Recv` observation after load workers drain; it is a harness drain
+measurement, not a per-RPC SLO.
+
+### Aggregate process observations
+
+| Offered | Opened / active sample | Mix (idle/normal/slow) | Peak handlers | Peak expiry `Recv` workers | Peak goroutines | Peak Go heap | Peak RSS | Peak FDs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 4 / 4 | 1 / 2 / 1 | 4 | 4 | 35 | 3,804,848 B | 29,310,976 B | 12 |
+| 12 | 12 / 12 | 4 / 5 / 3 | 12 | 12 | 64 | 5,645,096 B | 33,427,456 B | 12 |
+| 24 | 24 / 24 | 8 / 10 / 6 | 24 | 24 | 109 | 6,091,480 B | 36,737,024 B | 12 |
+
+| Offered | Stream-open p95 | Admission p95 | Send p95 | Receipt p95 | Terminal p95 | Recorded status/error distribution |
+|---:|---:|---:|---:|---:|---:|---|
+| 4 | 0.615 ms | n/a (0) | 0.039 ms | 699.749 ms | 11.895 ms | `send:EOF=2`, `terminal:Canceled=3`, `terminal:EOF=1` |
+| 12 | 0.032 ms | n/a (0) | 0.077 ms | 1,552.274 ms | 19.292 ms | `receipt:Canceled=7`, `send:EOF=1`, `terminal:Canceled=8`, `terminal:EOF=4` |
+| 24 | 0.009 ms | n/a (0) | 0.040 ms | 1,610.071 ms | 18.394 ms | `receipt:Canceled=15`, `send:EOF=1`, `terminal:Canceled=16`, `terminal:EOF=8` |
+
+The process resource columns include both the server and in-process load
+clients because this test intentionally keeps the real server and clients in
+one Go test process. They are observations for this harness, not a production
+server resource budget.
+
+### Independent connection observations
+
+| Level | Connection | Offered / opened / active sample | Idle | Normal | Slow reader |
+|---:|---|---:|---:|---:|---:|
+| 4 | client-conn-1 | 2 / 2 / 2 | 1 | 1 | 0 |
+| 4 | client-conn-2 | 2 / 2 / 2 | 0 | 1 | 1 |
+| 12 | client-conn-1 | 6 / 6 / 6 | 2 | 2 | 2 |
+| 12 | client-conn-2 | 6 / 6 / 6 | 2 | 3 | 1 |
+| 24 | client-conn-1 | 12 / 12 / 12 | 4 | 5 | 3 |
+| 24 | client-conn-2 | 12 / 12 / 12 | 4 | 5 | 3 |
+
+### Controlled dependency degradation
+
+At offered level 24, `service.Config.LedgeredPublisher.Publish` returned a
+controlled error after a 120 ms bounded delay while degraded. The requested
+fault window was 350 ms; the observed window was 300 ms. The captured run
+recorded 71 publisher calls, 3 dependency errors, and 38 successful
+publications after fault recovery. This observational test does not assert
+durable outbox state; existing ingest/outbox tests remain the durability
+oracle. The fault result is not converted into a capacity threshold.
+
+### Limitations and decision gate
+
+This is one local, single-process run with an in-memory store, local HS256
+authentication, insecure loopback transport, and a synthetic publisher fault.
+It does not model production TLS, kernel/container limits, external storage,
+network hops, replicas, broker/database saturation, or production traffic
+mix. Repeat it in a production-relevant environment and publish the raw output
+and environment metadata before making a decision. No row above is a safe
+numeric handler capacity, runtime default, or overload contract. A benchmark
+result alone does not approve a global `ResourceExhausted` admission limit or
+its numeric capacity.
+
 ## 容量 envelope 与 cutover 门禁（B1-3 决策 #7）
 
 v2 file store 采用**热/冷分层**：控制面和每租户热文档只承载有界写集，receipt、
