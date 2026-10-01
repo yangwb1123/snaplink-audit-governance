@@ -309,7 +309,18 @@ func (e exportBlockedError) Unwrap() error { return domain.ErrForbidden }
 // hold blocks iff at least one tenant event matches the export query AND is
 // covered by the hold under the existing holdMatchesEvent semantics. An
 // export selecting zero events is never blocked.
+//
+// The candidate set is proven before any event is touched: it reads only the
+// in-memory control-plane hold map, so an empty result is a complete and
+// cost-free proof that the export is not blocked and no schema map is copied,
+// no event is cloned and no WORM object is read. Every surviving hold is then
+// evaluated exactly as before, so the returned (hold, blocked) pair, the
+// denial text and the reported hold ID are unchanged.
 func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool, error) {
+	holds := s.holdBlockingCandidates(data, tenantID, query)
+	if len(holds) == 0 {
+		return domain.LegalHold{}, false, nil
+	}
 	schemas := map[string]domain.EventSchema{}
 	for key, schema := range data.Schemas {
 		schemas[key] = schema
@@ -320,13 +331,6 @@ func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, quer
 	if err != nil {
 		return domain.LegalHold{}, false, err
 	}
-	var holds []domain.LegalHold
-	for _, hold := range data.LegalHolds {
-		if hold.TenantID == tenantID && hold.ReleasedAt == nil {
-			holds = append(holds, hold)
-		}
-	}
-	sort.Slice(holds, func(i, j int) bool { return holds[i].ID < holds[j].ID })
 	for _, hold := range holds {
 		for _, event := range events {
 			if s.holdMatchesEvent(hold, event, schemas) {
@@ -335,6 +339,25 @@ func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, quer
 		}
 	}
 	return domain.LegalHold{}, false, nil
+}
+
+// holdBlockingCandidates returns the tenant's active holds (ReleasedAt == nil)
+// that can still block an export of query, ordered by hold ID. It reads only
+// the in-memory control-plane hold map: no event, receipt, archive object or
+// store call, so an empty result is a complete and cost-free proof that the
+// export is not blocked. A dropped hold provably cannot match any event the
+// query selects, so the candidate list is a subsequence of the sorted active
+// list and the first matching hold is the same hold as before (lowest-ID
+// determinism, TestMultipleHoldsReportLowestID).
+func (s *Service) holdBlockingCandidates(data *store.Snapshot, tenantID string, query domain.Query) []domain.LegalHold {
+	holds := make([]domain.LegalHold, 0, len(data.LegalHolds))
+	for _, hold := range data.LegalHolds {
+		if hold.TenantID == tenantID && hold.ReleasedAt == nil && holdCanSelectAnySelected(hold, query) {
+			holds = append(holds, hold)
+		}
+	}
+	sort.Slice(holds, func(i, j int) bool { return holds[i].ID < holds[j].ID })
+	return holds
 }
 
 // failExportBlocked transitions a job to failed because an active legal hold

@@ -128,6 +128,51 @@ func (s *Service) holdMatchesEvent(hold domain.LegalHold, event domain.Event, sc
 	return s.matches(event, filter, schemas)
 }
 
+// holdCanSelectAnySelected is a conservative pre-filter the export gate runs
+// before it materializes any event. It answers only "must this hold be
+// evaluated?" — never "is this export blocked?". A true result says nothing
+// about the outcome; the gate still decides with holdMatchesEvent.
+//
+// Soundness: eventsFromSnapshot materializes the set E of events with
+// Q.From <= e.OccurredAt < Q.To that also satisfy the other query predicates,
+// and for a fully bound filter F, holdMatchesEvent requires
+// F.From <= e.OccurredAt < F.To.
+// So h can match an element of E only if [F.From, F.To) intersects
+// [Q.From, Q.To). An empty intersection rejects every element of E, so dropping
+// h removes only iterations guaranteed to fail; every surviving hold is
+// evaluated by the same predicate over the same event set in the same ID order,
+// so the first match — and therefore the reported hold ID, the 403 body, the
+// export.blocked fact and job.Error — are unchanged.
+//
+// The half-open convention is matches' own (occurred_at == To is rejected), so
+// touching windows F.To == Q.From and F.From == Q.To are disjoint. The rule is
+// derived from that convention; no tolerance, slack or threshold is introduced.
+// A degenerate query window never permits a skip: with QueryEvents' own bound
+// validation such a job cannot be created, and a hand-edited or legacy job row
+// must not be able to use it to drop a hold.
+func holdCanSelectAnySelected(hold domain.LegalHold, query domain.Query) bool {
+	filter := hold.Filter
+	if filter.From.IsZero() && filter.To.IsZero() {
+		return true // unbound: holdMatchesEvent matches every event (fail-closed)
+	}
+	if filter.From.IsZero() || filter.To.IsZero() {
+		return false // one-sided: holdMatchesEvent returns false for every event
+	}
+	if query.From.IsZero() || query.To.IsZero() || !query.From.Before(query.To) {
+		return true // degenerate export window: never skip
+	}
+	if !filter.From.Before(filter.To) {
+		// Empty hold window (inverted or zero-span). matches would reject
+		// every event, so keeping it is conservative rather than exact. The
+		// shape is only reachable from a hand-edited or legacy snapshot row —
+		// CreateLegalHold rejects it — so keeping it costs one materialization
+		// in practice never observed, while dropping it would let row-level
+		// data that no production writer can produce decide a hold's fate.
+		return true
+	}
+	return filter.From.Before(query.To) && query.From.Before(filter.To)
+}
+
 func appendUnique(values []string, wanted string) []string {
 	for _, value := range values {
 		if value == wanted {
