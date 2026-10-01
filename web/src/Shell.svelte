@@ -68,12 +68,19 @@
         ])
       : '',
   )
+  // Readiness tracks the last-known-good platform scope, never the transient
+  // refresh flags: reloading an established scope must not unmount the routed
+  // page (and therefore must not drop the page's drafts or re-run its queries).
+  const platformScopeEstablished = $derived(
+    Boolean(
+      $authState.session?.platform &&
+        tenantListSessionKey === sessionScopeKey &&
+        tenants.some((tenant) => tenant.id === tenantId),
+    ),
+  )
   const tenantScopeReady = $derived(
     $authState.session?.platform
-      ? tenantListSessionKey === sessionScopeKey &&
-        !tenantLoading &&
-        !tenantLoadError &&
-        tenants.some((tenant) => tenant.id === tenantId)
+      ? platformScopeEstablished
       : Boolean($authState.session?.tenantId && tenantId === $authState.session.tenantId),
   )
   const platformCatalogBootstrap = $derived(
@@ -124,9 +131,16 @@
       return
     }
 
-    const currentSelection = lastTenantListSessionKey === scopeKey ? untrack(() => tenantId) : ''
-    tenantListSessionKey = ''
-    lastTenantListSessionKey = ''
+    // A refresh keeps the established scope (list, selection, session keys) until
+    // the new list resolves; only an initial load or a session-scope change wipes it.
+    const refreshingScope = lastTenantListSessionKey === scopeKey
+    const scopeEstablished =
+      refreshingScope && untrack(() => tenants.some((tenant) => tenant.id === tenantId))
+    const currentSelection = refreshingScope ? untrack(() => tenantId) : ''
+    if (!scopeEstablished) {
+      tenantListSessionKey = ''
+      lastTenantListSessionKey = ''
+    }
     tenantLoading = true
     tenantLoadError = null
     try {
@@ -141,9 +155,10 @@
       lastTenantListSessionKey = scopeKey
     } catch (cause) {
       if (generation !== tenantRequestGeneration) return
+      tenantLoadError = cause
+      if (scopeEstablished) return
       tenants = []
       tenantId = ''
-      tenantLoadError = cause
       tenantListSessionKey = ''
       lastTenantListSessionKey = ''
     } finally {
@@ -246,6 +261,11 @@
       </IrisAlert>
     {/if}
   {:else}
+    {#if $authState.session?.platform && tenantLoadError}
+      <IrisAlert tone="warning" title="租户列表刷新失败" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
+        仍在使用上次成功读取的租户范围，页面保持可用。<IrisButton size="sm" variant="outline" onclick={refreshTenants}>重试</IrisButton>
+      </IrisAlert>
+    {/if}
     {#key `${activeRoute}:${tenantId}`}
       {#if activeRoute === 'events'}
         <EventsPage tenantId={tenantId || undefined} />
