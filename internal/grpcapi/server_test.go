@@ -451,6 +451,8 @@ type grpcHarnessOptions struct {
 	archiveStore  archive.Store             // when set, injects the ingest archive seam
 	signer        service.Signer            // when set, injects the segment-signing seam
 	segmentSize   int                       // when positive, overrides the service default
+	injectedStore *store.Store              // when set, replaces the temp-file store (fault-injection fixtures)
+	seeded        bool                      // when true with injectedStore, skip CreateTenant/AddSource/RegisterSchema
 }
 
 // newGRPCHarness builds the bufconn-based ingest harness used by the
@@ -465,9 +467,13 @@ func newGRPCHarness(t *testing.T) (*store.Store, auditv1.IngestClient, context.C
 // logger can be replaced (Register always wires log.Default()).
 func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, auditv1.IngestClient, context.Context) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
+	st := opts.injectedStore
+	if st == nil {
+		opened, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		st = opened
 	}
 	config := service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true, LedgeredPublisher: opts.publisher}
 	if opts.archiveStore != nil {
@@ -483,14 +489,19 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
-		t.Fatal(err)
+	// A seeded injected store already carries the tenant/source/schema control
+	// plane, and writing them through a fault-injecting backend would consume
+	// the very Save calls the fixture asserts on.
+	if !opts.seeded {
+		if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	listener := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer(opts.serverOpts...)

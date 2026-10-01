@@ -15,6 +15,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/auth"
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/service"
+	"github.com/snaplink/audit-governance/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -140,6 +141,40 @@ func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*
 	return outcomes
 }
 
+// rejectionCode maps a gRPC status code to the machine-readable rejection
+// token published on WriteBatchOutcome.rejection_code. The vocabulary is
+// closed: every string below plus "unknown" (for a code outside the switch,
+// which cannot happen today because every status the ingest surface returns
+// is produced by toStatus or by an explicit status.Error on a listed code).
+//
+// Reachability from toStatus (the ingest error mapper) — "reachable" means the
+// same transport maps the sentinel below to the code:
+//
+//	invalid_argument     reachable (domain.ErrInvalid, ErrEnvelopeTooLarge,
+//	                              ErrOccurredAtOutOfRange)
+//	unauthenticated      reachable (domain.ErrUnauthorized; also authenticate)
+//	permission_denied    reachable (domain.ErrForbidden; also authenticate)
+//	not_found            reachable (domain.ErrNotFound)
+//	already_exists       reachable (domain.ErrConflict)
+//	resource_exhausted   reachable (domain.ErrQuotaExceeded, stream skip cap,
+//	                              transport cap)
+//	failed_precondition  reachable (domain.ErrSchemaNotFound,
+//	                              domain.ErrTenantMismatch)
+//	internal             reachable (toStatus default)
+//	unavailable          reachable (store.ErrSnapshotConflict — an exhausted
+//	                              optimistic-lock retry, i.e. a transient
+//	                              concurrent-writer outcome)
+//	aborted              reserved (no sentinel maps to it yet)
+//	canceled             reserved
+//	deadline_exceeded    reserved
+//	out_of_range         reserved
+//	unimplemented        reserved
+//	data_loss            reserved
+//	unknown              unreachable by construction (the switch default)
+//
+// The reserved entries keep the vocabulary stable for clients that branch on
+// the token; they are not part of the retryable-transient class until a
+// sentinel maps to them.
 func rejectionCode(err error) string {
 	code := status.Code(err)
 	switch code {
@@ -420,6 +455,16 @@ func toStatus(err error) error {
 	case errors.Is(err, domain.ErrTenantMismatch):
 		// 与 HTTP 422 对齐：请求语义有效但租户一致性不成立。
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, store.ErrSnapshotConflict):
+		// Optimistic-lock exhaustion is transient, not an internal fault:
+		// replicas share one audit_state_snapshot row, so losing
+		// snapshotConflictRetries times is a normal concurrent-writer
+		// outcome in which nothing was committed. The HTTP boundary maps
+		// the same sentinel to 503 snapshot_conflict, so gRPC uses the
+		// direct analogue — codes.Unavailable is retried by the standard
+		// at-least-once gRPC policy while codes.Internal is not, and the
+		// ingest request is idempotent, so a retry is safe.
+		return status.Error(codes.Unavailable, snapshotConflictMessage)
 	default:
 		// Internal errors never carry the underlying text (filesystem paths,
 		// errno strings, Vault/pgx details): the detail is logged server-side
@@ -429,11 +474,27 @@ func toStatus(err error) error {
 	}
 }
 
+// snapshotConflictMessage is the fixed client-facing text for an exhausted
+// optimistic-lock retry. It is a constant, never err.Error(): a backend may
+// wrap the sentinel with a state path, an errno string or a pgx/Vault detail,
+// and none of that may cross the boundary. The text is retry-guiding because
+// the condition is transient and the ingest request is idempotent.
+const snapshotConflictMessage = "state snapshot changed concurrently; retry the request"
+
 // statusError converts err for the client and logs the full detail of
 // internal errors server-side before the redacted status is returned.
+// An exhausted optimistic-lock conflict keeps its own log prefix: the detail
+// is preserved for operators, but a normal concurrent-writer outcome must not
+// be filed as an internal fault.
 func (s *Server) statusError(err error) error {
 	converted := toStatus(err)
-	if status.Code(converted) == codes.Internal && s.Logger != nil {
+	if s.Logger == nil {
+		return converted
+	}
+	switch {
+	case errors.Is(err, store.ErrSnapshotConflict):
+		s.Logger.Printf("grpc snapshot conflict: %v", err)
+	case status.Code(converted) == codes.Internal:
 		s.Logger.Printf("grpc internal error: %v", err)
 	}
 	return converted
