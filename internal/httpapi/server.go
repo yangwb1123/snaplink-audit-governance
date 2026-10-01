@@ -232,6 +232,13 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "audit_ingest_duplicates_total %d\n", s.ingestDuplicateCount.Load())
 	fmt.Fprintf(w, "audit_ingest_conflicts_total %d\n", s.ingestConflictCount.Load())
 	fmt.Fprintf(w, "audit_ingest_quota_exceeded_total %d\n", s.ingestQuotaCount.Load())
+	// Unlabelled and monotonic: this counter is evidence that a tenant commit
+	// died between its durable cold append and its control-plane write, and an
+	// idempotent retry re-created the missing publication intent. A tenant,
+	// event or route label would make the cardinality unbounded.
+	if s.Service != nil {
+		fmt.Fprintf(w, "audit_ledgered_intent_repaired_total %d\n", s.Service.LedgeredIntentRepairs())
+	}
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"valid\"} %d\n", s.integrityValidCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"invalid\"} %d\n", s.integrityInvalidCount.Load())

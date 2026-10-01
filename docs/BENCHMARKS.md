@@ -158,6 +158,50 @@ numeric handler capacity, runtime default, or overload contract. A benchmark
 result alone does not approve a global `ResourceExhausted` admission limit or
 its numeric capacity.
 
+## Post-ledger publication intent: one commit, and the window that remains
+
+Not a benchmark: a measured finding about the tenant (hot/cold) ingest path, kept
+here because it changes how the ingest cost gate above should be read.
+
+**Finding.** On the tenant path the durable publication intent for
+`audit.events.ledgered.v1` (`Snapshot.LedgeredOutbox`) used to be written by a
+*second* store operation — `Store.UpdateControl` — after `Store.UpdateTenant` had
+already committed the event and its cold receipt. `Store.UpdateControl` takes its
+own `Store.mu` hold and rewrites the control document, so a crash, SIGKILL or
+failed control write between the two commits left a committed ledger record plus a
+WORM object with nothing owed to the projection feed. No path repaired it: the
+duplicate branch returned before the intent write, `FlushLedgeredOutbox` iterates
+only existing rows, and the outbox loop only calls that flush. The event was then
+permanently absent from the ClickHouse projection — with no DLQ record, no replay
+path and no metric. This is an at-least-once violation on a post-ledger feed.
+
+**Cost consequence (measured direction, not a new number).** Ingest with a
+configured `LedgeredPublisher` performs **one** durable control-plane write per
+event instead of two: the tenant commit now carries the intent, and the separate
+`UpdateControl` write is gone. The write set per ingest is therefore the same
+tenant hot document plus one control write, i.e. strictly less control-plane
+I/O than before. Re-measure `BenchmarkIngestWithArchivedLedger` before quoting a
+new cost gate; this entry does not claim one.
+
+**Residual window.** Moving the intent into the closure removes the
+*application-level* window only. The durable order on both backends is still hot
+document → cold ledger → control document (`internal/store/hotcold_commit.go`
+`commitTenant`; `internal/store/postgres_hotcold.go` `updateTenantOnce`), so a
+commit can still die between the cold append and the control write. The
+compensating control is a repair on the idempotent retry path, gated on a receipt
+that is still `ledgered` with no pending intent row, bounded to one re-creation
+per event key per process.
+
+**How to read the metric.** `GET /metrics` exposes
+`audit_ledgered_intent_repaired_total` (unlabelled, monotonic, bounded
+cardinality). Each increment is direct evidence that a tenant commit died between
+its durable cold append and its control-plane write. It must read `0`; a *rising*
+value alongside a flat `audit_ingest_duplicates_total` means a lost intent is
+still owed, because a repair only happens when a client retries. A fire-and-forget
+producer that never retries leaves the intent owed with nothing to raise — the
+counter is the cheap detector that justifies building a boot-time reconciler over
+`Receipts \ LedgeredOutbox` later, with real data behind the decision.
+
 ## 容量 envelope 与 cutover 门禁（B1-3 决策 #7）
 
 v2 file store 采用**热/冷分层**：控制面和每租户热文档只承载有界写集，receipt、

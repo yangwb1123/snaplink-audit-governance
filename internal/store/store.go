@@ -198,6 +198,38 @@ func Open(path string) (*Store, error) {
 	return &Store{backend: backend, split: split}, nil
 }
 
+// ControlWriteFault is consulted immediately before the v2 file store makes a
+// durable control-plane write. It is a test seam in the same shape as Backend:
+// the production constructors leave it nil and every write site pays one nil
+// check. A hook is armed and disarmed by the test through the closure it
+// installs, so there is no setter and no arm/disarm API.
+type ControlWriteFault func() error
+
+// OpenWithControlWriteFault opens the same v2 file split store as Open and
+// installs fault on every durable control-plane write of that store: the
+// control delta of a tenant commit and Store.UpdateControl. At a tenant commit
+// the hot document and the cold ledger are already durable when the control
+// document is written, so a fault here reproduces exactly the window a crash
+// between those steps leaves behind — a committed event with no durable
+// control-plane delta. A nil fault is rejected so a mis-wired seam fails loudly
+// instead of being silently inert.
+func OpenWithControlWriteFault(path string, fault ControlWriteFault) (*Store, error) {
+	if fault == nil {
+		return nil, errors.New("store: control write fault seam requires a non-nil hook")
+	}
+	backend, err := openFileBackend(path)
+	if err != nil {
+		return nil, err
+	}
+	split, err := newSplitStore(backend.data, path)
+	if err != nil {
+		_ = backend.Close()
+		return nil, err
+	}
+	split.controlWriteFault = fault
+	return &Store{backend: backend, split: split}, nil
+}
+
 // OpenPostgres returns a store whose snapshot lives in the single-row
 // audit_state_snapshot table. Multiple replicas can share the row; the
 // optimistic version check surfaces lost-update conflicts instead of

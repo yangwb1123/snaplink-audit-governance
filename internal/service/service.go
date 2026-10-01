@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/archive"
@@ -114,6 +115,16 @@ type Service struct {
 	// the durable queue flusher. Without this gate both paths could read the
 	// same pending event and issue an avoidable duplicate concurrently.
 	ledgeredPublishMu sync.Mutex
+	// ledgeredIntentRepairs counts publication intents an interrupted tenant
+	// ingest lost and an idempotent retry re-created. Each increment is direct
+	// evidence that a tenant commit died between its durable cold append and
+	// its control-plane write.
+	ledgeredIntentRepairs atomic.Uint64
+	// repairedMu guards repairedIntents, the bounded process-local set of keys
+	// already repaired. It is deliberately not Store.mu: the repair predicate
+	// runs inside an UpdateTenant closure, which already holds Store.mu.
+	repairedMu      sync.Mutex
+	repairedIntents map[string]struct{}
 }
 
 type quotaWindow struct {
@@ -167,7 +178,7 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}, nil
+	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}, repairedIntents: map[string]struct{}{}}, nil
 }
 
 // resolveSecrets fills the development defaults when explicitly allowed and

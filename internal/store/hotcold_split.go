@@ -40,6 +40,9 @@ type splitStore struct {
 	root    string
 	control *Snapshot
 	tenant  map[string]*tenantState
+	// controlWriteFault is nil in production. When set (OpenWithControlWriteFault)
+	// it is consulted before every durable control-plane write of this store.
+	controlWriteFault ControlWriteFault
 }
 
 // newSplitStore opens the v2 layout. A v1 file is migrated before the

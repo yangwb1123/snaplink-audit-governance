@@ -8,15 +8,28 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-// ingestTenant writes the event and its receipt/segment/checkpoint metadata
-// through the tenant-scoped split API. The closure never scans another
-// tenant or materializes the cold ledger; receipt idempotency is served by
-// TenantLedger's in-memory index.
+// ingestTenant writes the event, its receipt/segment/checkpoint metadata and
+// its post-ledger publication intent through one tenant-scoped store
+// operation. The closure never scans another tenant or materializes the cold
+// ledger; receipt idempotency is served by TenantLedger's in-memory index.
+//
+// The intent is written on view.Global, not through a second Store call:
+// Store.mu is a non-reentrant mutex held for the whole UpdateTenant, and a
+// separate control write would be a separate durability boundary that a crash
+// can fall between.
 func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal domain.IngestPrincipal, tenantID string, event domain.Event, inputDigest string) (domain.Event, domain.EventReceipt, []domain.Segment, error) {
 	var receipt domain.EventReceipt
 	var sealed []domain.Segment
+	key := store.EventKey(tenantID, event.EventID)
+	// repaired records that THIS attempt re-created a lost publication intent.
+	// It is reset at the top of every closure invocation because a commit may
+	// re-run the closure (PostgreSQL ErrSnapshotConflict retry), and it is
+	// claimed outside the closure because a failed commit must not consume the
+	// key — that would suppress the retry that actually re-creates the intent.
+	var repaired bool
 	err := s.Store.UpdateTenant(tenantID, store.HotFirst, func(view *store.TenantView) error {
 		sealed = sealed[:0]
+		repaired = false
 		if view.Global == nil {
 			return fmt.Errorf("%w: tenant control view unavailable", domain.ErrInvalid)
 		}
@@ -24,9 +37,13 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 		if accessErr != nil || commitTenant != tenantID {
 			return sourceAccessError()
 		}
-		key := store.EventKey(tenantID, event.EventID)
 		if existing, found, existingErr := s.checkExistingTenantIngest(ctx, view, tenantID, event.EventID, inputDigest); found {
 			receipt = existing
+			// Only a clean duplicate is repairable: a content conflict
+			// (existingErr != nil) must never queue anything for publication.
+			if existingErr == nil && s.repairLedgeredIntent(view, existing, key) {
+				repaired = true
+			}
 			return existingErr
 		}
 		if idempotencyKeyReusedTenant(view, tenantID, key, event.IdempotencyKey) {
@@ -62,6 +79,10 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 		}
 		view.Hot.Streams[streamKey] = stream
 		view.Hot.Events[key] = event
+		// Same commit, same durability boundary as the receipt below. The
+		// committed event is queued, not the caller-supplied input, so no
+		// client-supplied stream/sequence/hash can reach the projection feed.
+		s.ensureLedgeredIntent(view, event, key)
 		receipt.StreamID = event.StreamID
 		receipt.Sequence = event.Sequence
 		receipt.Hash = event.Hash
@@ -91,19 +112,11 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 	if err != nil {
 		return event, receipt, sealed, err
 	}
+	if repaired {
+		s.rememberLedgeredIntentRepair(key)
+	}
 	if receipt.Duplicate {
 		return event, receipt, sealed, nil
-	}
-	if s.Config.LedgeredPublisher != nil {
-		if err := s.Store.UpdateControl(func(data *store.Snapshot) error {
-			if data.LedgeredOutbox == nil {
-				data.LedgeredOutbox = map[string]domain.Event{}
-			}
-			data.LedgeredOutbox[store.EventKey(tenantID, event.EventID)] = event
-			return nil
-		}); err != nil {
-			return event, receipt, sealed, err
-		}
 	}
 	return event, receipt, sealed, nil
 }

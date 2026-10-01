@@ -111,6 +111,15 @@ func (s *splitStore) commitTenant(tenantID string, order CommitOrder, hot *Snaps
 	}
 	if globalChanged {
 		if s.path != "" {
+			// The hot document and the cold ledger are already durable when
+			// this write runs. A failure here therefore drops only the
+			// control-plane delta — the residual crash window that the
+			// service's lost-intent repair compensates for.
+			if s.controlWriteFault != nil {
+				if err := s.controlWriteFault(); err != nil {
+					return err
+				}
+			}
 			if err := writeControlFile(s.path, global); err != nil {
 				return err
 			}

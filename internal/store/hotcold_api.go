@@ -103,9 +103,10 @@ func (s *Store) LedgerScan(tenantID string, fn func(LedgerRecord) error) error {
 	return nil
 }
 
-// UpdateControl mutates only the global hot control document. It is used for
-// delivery aids such as LedgeredOutbox after a tenant ledger commit and never
-// materializes cold receipts, segments, checkpoints or archived events.
+// ReadControl executes fn against a clone of the global hot control document
+// only. It never materializes tenant hot documents or cold receipts, segments,
+// checkpoints or archived events, so a control-plane reader cannot widen its
+// own working set by accident.
 func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
@@ -130,9 +131,14 @@ func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 	return fn(control)
 }
 
-// UpdateControl mutates only the global hot control document. It is used for
-// delivery aids such as LedgeredOutbox after a tenant ledger commit and never
+// UpdateControl mutates only the global hot control document and never
 // materializes cold receipts, segments, checkpoints or archived events.
+//
+// It takes its own Store.mu hold, so it is a separate store operation from a
+// tenant commit and therefore a separate durability boundary. A writer that
+// owns control-plane state as part of a tenant commit — the ingest publication
+// intent, for example — must set that state on view.Global inside the
+// UpdateTenant closure instead, so one store operation carries both.
 func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
@@ -162,6 +168,11 @@ func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
 		return err
 	}
 	if s.split.path != "" {
+		if s.split.controlWriteFault != nil {
+			if err := s.split.controlWriteFault(); err != nil {
+				return err
+			}
+		}
 		if err := writeControlFile(s.split.path, retained); err != nil {
 			return err
 		}
@@ -283,6 +294,20 @@ func copyTenantView(data *Snapshot, tenantID string, view *TenantView) error {
 	}
 	for key, checkpoints := range view.Ledger.checkpoints {
 		data.Checkpoints[key] = cloneCheckpoints(checkpoints)
+	}
+	// A tenant closure may add control-plane delivery state (the ingest
+	// publication intent). Commit that delta here too, so the v1 tenant API
+	// gives the same single-commit durability as the split backends. Keys are
+	// overlaid, never replacing the whole map, so a row another writer added
+	// survives; this also matches mergeControlDelta's rule on PostgreSQL. A
+	// control key DELETED inside a tenant closure is not propagated: this path
+	// has no baseline to tell a deliberate removal from an untouched field,
+	// and no closure removes control keys.
+	if data.LedgeredOutbox == nil {
+		data.LedgeredOutbox = map[string]domain.Event{}
+	}
+	for key, event := range view.Global.LedgeredOutbox {
+		data.LedgeredOutbox[key] = event
 	}
 	return nil
 }
