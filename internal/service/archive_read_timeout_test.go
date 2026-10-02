@@ -25,10 +25,12 @@ func (b *blockingArchiveGet) Get(ctx context.Context, _ string) ([]byte, error) 
 
 func (b *blockingArchiveGet) Ready(context.Context) error { return nil }
 
-// TestArchivedEventReadIsBounded pins the fallback's per-call timeout. A
-// WORM client that honors context cancellation must release the caller even
-// when the original request has no deadline (GetEvent's service API has no
-// context parameter).
+// TestArchivedEventReadIsBounded pins the fallback's ceiling. A WORM client
+// that honors context cancellation must release the caller even when the
+// caller passes no deadline at all: archivedEventContext derives
+// min(archiveReadTimeout, Store.OperationTimeout()) from the context it is
+// given, and this fixture has a nil Store, so the ceiling alone must bound the
+// read.
 func TestArchivedEventReadIsBounded(t *testing.T) {
 	original := archiveReadTimeout
 	archiveReadTimeout = 25 * time.Millisecond

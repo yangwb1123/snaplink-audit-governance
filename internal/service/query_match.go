@@ -23,7 +23,7 @@ func (s *Service) eventsFor(ctx context.Context, tenantID string, predicate func
 	var events []domain.Event
 	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, tenantID, predicate)
+		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, predicate)
 		return resolveErr
 	})
 	return events, err

@@ -279,7 +279,12 @@ nothing below is a production SLO.
 
 `AUDIT_STORE_OPERATION_TIMEOUT` must be **strictly below** audit-api's 30s HTTP
 `WriteTimeout`; the binary refuses to start otherwise, because the retryable
-`503 store_timeout` could not otherwise reach the client.
+`503 store_timeout` could not otherwise reach the client. The same bound also
+covers the WORM archive-fallback reads a hot-evicted event triggers
+(`internal/service/archive_fallback.go`): they run inside the same store
+operation, derive one deadline per operation rather than one per archived
+receipt, and are capped above by the package-level `archiveReadTimeout`, so
+raising this knob also raises the archive-fallback headroom.
 
 ### Effective-default table (the shipped shape)
 
@@ -311,7 +316,9 @@ services, drive the ingest load, and re-read the same five lines.
    `max_open` will not help.
 3. `audit_store_operation_deadline_exceeded_total` non-zero ⇒ statements are
    already being aborted at the store deadline; a larger pool makes the
-   database slower, not the process faster.
+   database slower, not the process faster. The same counter also fires when a
+   WORM archive-fallback read exhausts that deadline, so a non-zero value can
+   mean a slow archive backend rather than a slow database.
 
 ### Observation actually run
 

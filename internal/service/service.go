@@ -796,7 +796,7 @@ func (s *Service) GetEvent(ctx context.Context, tenantID, actor, eventID string)
 	var event domain.Event
 	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
-		event, resolveErr = s.eventFromSnapshot(context.Background(), data, tenantID, eventID)
+		event, resolveErr = s.eventFromSnapshot(ctx, data, tenantID, eventID)
 		return resolveErr
 	})
 	if err != nil {
@@ -851,7 +851,7 @@ func (s *Service) QueryEvents(ctx context.Context, tenantID, actor string, query
 			schemas[key] = schema
 		}
 		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, tenantID, func(event domain.Event) bool {
+		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
 			return s.matches(event, query, schemas)
 		})
 		return resolveErr

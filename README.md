@@ -38,7 +38,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - 聚合 checkpoint 每租户按上限保留（默认 1000 条，drop-oldest，`AUDIT_AGGREGATE_CHECKPOINT_HISTORY` 可覆盖，下限 1）；根与签名未变化的周期去重、空闲周期不写快照，`VerifyIntegrity` 聚合校验工作量由此有界。
 - 导出作业卡在 `running` 超过阈值（默认 24 小时，从 `CreatedAt` 起算，`AUDIT_GOVERNANCE_STUCK_EXPORT_AGE`/`-stuck-export-age` 可覆盖；`0` = 默认）由 worker 在每次 pass 中失败并写入 `export.recovered` 自审计事实（状态变更与事实同一次原子保存；终态作业永不回退；空闲 pass 零写入）。
 - 操作时间线与聚合历史支持 `page_size`（默认 100、最大 1000）和作用域绑定的 `cursor`；分页响应的 `count` 是总匹配数，`next_cursor` 可安全续读，旧的 service 全量方法仍保留 10,000 条保护上限。
-- 归档成功后事件正文从控制面热快照淘汰，仅保留 receipt/hash 链元数据；`GET /events`、`GET /events/{id}`、操作/聚合时间线、回放、导出和完整性校验会从 WORM 归档读回并校验身份与哈希。查询结果在淘汰前后保持一致。
+- 归档成功后事件正文从控制面热快照淘汰，仅保留 receipt/hash 链元数据；`GET /events`、`GET /events/{id}`、操作/聚合时间线、回放、导出和完整性校验会从 WORM 归档读回并校验身份与哈希。这些归档回读发生在同一个存储操作闭包内（`Store.mu` 已持锁），因此与数据库语句共享同一个 `AUDIT_STORE_OPERATION_TIMEOUT` 上限：单次服务操作只派生一次回读上限，回读超时按既有的 `store_timeout` 可重试 503 失败关闭，而不会按 receipt 逐个重新计时。查询结果在淘汰前后保持一致。
 - `go run ./cmd/audit-outbox-relay -once` 消费业务库 `audit_outbox` 待投递记录并写入审计 API；成功标记 delivered，失败按指数退避重试，超过上限或遇到客户端错误死信。
 - `go run ./cmd/audit-kafka-dlq-replay -once` 恢复死信事件（从 accepted topic 按 key 找回原消息重发或经 API 重新接入，状态文件去重）。
 - 默认本地状态保存到 `./data/state.json`，归档保存到 `./data/archive`。

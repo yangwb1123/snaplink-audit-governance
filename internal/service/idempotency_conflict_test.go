@@ -99,6 +99,57 @@ func TestIdempotencyConflictKeepsArchivedOwnerReceiptClean(t *testing.T) {
 	assertOwnerReceiptClean(t, svc, true, owner.EventID)
 }
 
+// TestArchivedDuplicateIngestAndConflictUnchanged pins AC-7 on the hot-evicted
+// path the bounded fallback serves: an identical retry resolves through the
+// WORM read and still answers Duplicate with the ARCHIVED receipt, a
+// content-differing retry still answers domain.ErrConflict, and neither adds a
+// second ledger entry. The bound added by archiveFallbackContext adds no error
+// path between checkExistingIngest's digest comparison and its return, so
+// at-least-once and idempotency semantics are unchanged.
+func TestArchivedDuplicateIngestAndConflictUnchanged(t *testing.T) {
+	svc := testService(t, true)
+	at := time.Unix(1_700_000_010, 0).UTC()
+
+	first, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("arch-idem-1", "arch-idem-op", at), domain.StatusArchived)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	// The fixture must really be hot-evicted, or the duplicate would never
+	// touch the WORM fallback this direction bounds.
+	if first.Status != domain.StatusArchived || first.ArchivedAt.IsZero() {
+		t.Fatalf("fixture must be hot-evicted, got %+v", first)
+	}
+
+	duplicate, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("arch-idem-1", "arch-idem-op", at), domain.StatusArchived)
+	if err != nil || !duplicate.Duplicate {
+		t.Fatalf("identical retry of an archived event: receipt=%+v err=%v, want Duplicate", duplicate, err)
+	}
+	if duplicate.Status != domain.StatusArchived {
+		t.Fatalf("duplicate receipt=%+v, want the archived receipt preserved", duplicate)
+	}
+
+	conflicting := testEvent("arch-idem-1", "arch-idem-op", at)
+	conflicting.Payload["value"] = 11
+	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, conflicting, domain.StatusArchived); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("content-differing retry: err=%v, want ErrConflict", err)
+	}
+
+	// No second ledger entry: the integrity scan still sees exactly one event.
+	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
+	if err != nil {
+		t.Fatalf("VerifyIntegrity: %v", err)
+	}
+	if !result.Valid || result.EventCount != 1 {
+		t.Fatalf("integrity=%+v, want one valid event and no duplicate ledger entry", result)
+	}
+
+	// The fallback still resolves after the conflict was recorded.
+	retry, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("arch-idem-1", "arch-idem-op", at), domain.StatusArchived)
+	if err != nil || !retry.Duplicate {
+		t.Fatalf("retry after conflict: receipt=%+v err=%v, want Duplicate", retry, err)
+	}
+}
+
 // assertOwnerReceiptClean reads the persisted snapshot (legacy) or tenant
 // ledger (hot/cold) for the owner event and fails if any conflict marker was
 // written to it — i.e. the Store closure must not have persisted a mutation to

@@ -13,11 +13,54 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-// archiveReadTimeout bounds every WORM read used by a fallback surface. A
+// archiveReadTimeout caps every WORM read used by a fallback surface. A
 // missing or black-holed archive must fail the read, not retain the store
-// read lock or HTTP handler forever. The package variable is a narrow test
-// seam so cancellation behavior can be tested without waiting 30 seconds.
+// read lock or HTTP handler forever. It is an UPPER CEILING, not the bound:
+// the effective bound is archiveReadBound. The package variable is a narrow
+// test seam so cancellation behavior can be tested without waiting 30 seconds.
 var archiveReadTimeout = 30 * time.Second
+
+// archiveReadBound is the single source of the WORM fallback bound: the
+// tighter of archiveReadTimeout and Store.OperationTimeout(). There is no new
+// constant, no new Config field and no new environment variable — the store's
+// existing operator knob (AUDIT_STORE_OPERATION_TIMEOUT) already is the number,
+// and archiveReadTimeout still caps it from above.
+//
+// A nil Store degrades to archiveReadTimeout alone instead of panicking:
+// service.New(nil, cfg) is a shipped path (audit-api -check-config resolves a
+// configuration without ever opening a store).
+func (s *Service) archiveReadBound() time.Duration {
+	if s.Store == nil {
+		return archiveReadTimeout
+	}
+	if bound := s.Store.OperationTimeout(); bound > 0 && bound < archiveReadTimeout {
+		return bound
+	}
+	return archiveReadTimeout
+}
+
+// archiveFallbackContext derives ONE bound for ONE service operation: a child
+// of ctx carrying archiveReadBound, so an earlier caller deadline still wins
+// unchanged and caller cancellation still aborts the read.
+//
+// PLACEMENT IS LOAD-BEARING: every caller must derive this INSIDE the store
+// closure, never before the Store.Read / Store.Update call. Store.begin arms
+// op.ctx with the store's own operationTimeout at t0, this derivation happens
+// at t1 > t0, and archiveReadBound is at most operationTimeout — so the
+// fallback deadline is never earlier than op.ctx's. When the fallback is
+// exhausted, op.ctx.Err() is therefore already context.DeadlineExceeded and
+// Store.end deterministically classifies the closure error as
+// store.ErrOperationDeadline: the retryable 503 store_timeout every affected
+// route already declares, plus audit_store_operation_deadline_exceeded_total.
+// Deriving before the store call inverts that order — op.ctx is still live
+// when the fallback fails, Store.end does not classify, and the client gets an
+// opaque 500 instead of the retryable status.
+func (s *Service) archiveFallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, s.archiveReadBound())
+}
 
 // eventArchiveKey is the single archive-key format used by both writers and
 // readers. The encoded components are injective, so an archived event cannot
@@ -26,22 +69,27 @@ func eventArchiveKey(tenantID, streamID string, sequence int64, eventID string) 
 	return fmt.Sprintf("events/%s/%s/%020d-%s.json", safeName(tenantID), safeName(streamID), sequence, safeName(eventID))
 }
 
-// archivedEvent loads and verifies an archived event. A receipt is the
+// archivedEventContext loads and verifies an archived event. A receipt is the
 // retained linkage anchor after hot eviction; any missing, malformed, or
 // mismatched object is an integrity error rather than a silent 404.
-func (s *Service) archivedEvent(receipt domain.EventReceipt) (domain.Event, error) {
-	return s.archivedEventContext(context.Background(), receipt)
-}
-
 func (s *Service) archivedEventContext(ctx context.Context, receipt domain.EventReceipt) (domain.Event, error) {
 	if !archive.Configured(s.Config.Archive) {
 		return domain.Event{}, fmt.Errorf("archived event %s: archive is not configured", receipt.EventID)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	readCtx, cancel := context.WithTimeout(ctx, archiveReadTimeout)
+	// Every WORM read is bounded here, so no caller can reach Archive.Get
+	// unbounded — including a nil ctx, which falls back to the BOUNDED
+	// derivation rather than to an unbounded background read. A caller that
+	// already derived once for its whole operation (eventsFromSnapshot,
+	// GetEventAcrossTenants) inherits the same bound; re-deriving here can
+	// only produce an equal-or-sooner deadline, never a later one.
+	readCtx, cancel := s.archiveFallbackContext(ctx)
 	defer cancel()
+	// Short-circuit an already-exhausted bound before any remote work: a doomed
+	// read must not issue another Get. Every archived read funnels through this
+	// function, so this single guard also bounds the multi-receipt loops.
+	if err := readCtx.Err(); err != nil {
+		return domain.Event{}, fmt.Errorf("archived event %s: %w", receipt.EventID, err)
+	}
 	raw, err := s.Config.Archive.Get(readCtx, eventArchiveKey(receipt.TenantID, receipt.StreamID, receipt.Sequence, receipt.EventID))
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("archived event %s: %w", receipt.EventID, err)
@@ -111,9 +159,18 @@ func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, 
 		}
 	}
 	sort.Strings(keys)
+	if len(keys) == 0 {
+		return events, nil
+	}
+	// ONE bound for the whole pass, derived here once instead of re-armed per
+	// receipt: this is what converts N receipts × archiveReadTimeout into at
+	// most one bound. archivedEventContext re-derives a child of this context,
+	// which can only make the deadline earlier.
+	readCtx, cancel := s.archiveFallbackContext(ctx)
+	defer cancel()
 	for _, key := range keys {
 		receipt := data.Receipts[key]
-		event, err := s.archivedEventContext(ctx, receipt)
+		event, err := s.archivedEventContext(readCtx, receipt)
 		if err != nil {
 			return nil, err
 		}

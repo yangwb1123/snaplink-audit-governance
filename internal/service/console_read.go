@@ -95,7 +95,7 @@ func (s *Service) consoleEvents(ctx context.Context, tenantID string, query doma
 			schemas[key] = schema
 		}
 		var readErr error
-		events, readErr = s.eventsFromSnapshot(context.Background(), data, tenantID, func(event domain.Event) bool {
+		events, readErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
 			return s.matches(event, query, schemas)
 		})
 		return readErr
@@ -163,6 +163,12 @@ func (s *Service) GetEventAcrossTenants(ctx context.Context, actor, eventID stri
 			}
 			matches = append(matches, cloned)
 		}
+		// ONE bound for this tenant's archived receipts, derived inside the
+		// store closure (see archiveFallbackContext). This loop is a
+		// multi-receipt pass like eventsFromSnapshot, so deriving per receipt
+		// would reintroduce N × bound amplification.
+		readCtx, cancel := s.archiveFallbackContext(ctx)
+		defer cancel()
 		for key, receipt := range data.Receipts {
 			if receipt.EventID != eventID || receipt.Status != domain.StatusArchived {
 				continue
@@ -170,7 +176,7 @@ func (s *Service) GetEventAcrossTenants(ctx context.Context, actor, eventID stri
 			if _, hot := data.Events[key]; hot {
 				continue
 			}
-			event, readErr := s.archivedEventContext(context.Background(), receipt)
+			event, readErr := s.archivedEventContext(readCtx, receipt)
 			if readErr != nil {
 				return readErr
 			}

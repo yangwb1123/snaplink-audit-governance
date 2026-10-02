@@ -261,7 +261,7 @@ func (f *gateCostFixture) runGate() (domain.LegalHold, bool, error) {
 		gateErr error
 	)
 	err := f.svc.Store.Read(testCtx, func(data *store.Snapshot) error {
-		hold, blocked, gateErr = f.svc.holdBlockingExport(data, "tenant-a", f.query)
+		hold, blocked, gateErr = f.svc.holdBlockingExport(testCtx, data, "tenant-a", f.query)
 		return gateErr
 	})
 	if err != nil {

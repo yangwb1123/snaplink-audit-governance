@@ -39,7 +39,7 @@ func (s *Service) CreateExport(ctx context.Context, tenantID, requestedBy string
 	blocked := false
 	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var holdErr error
-		hold, blocked, holdErr = s.holdBlockingExport(data, tenantID, query)
+		hold, blocked, holdErr = s.holdBlockingExport(ctx, data, tenantID, query)
 		return holdErr
 	}); err != nil {
 		return domain.ExportJob{}, err
@@ -84,7 +84,7 @@ func (s *Service) GetExport(ctx context.Context, tenantID, jobID string) (domain
 		// R4 (legal-hold gate): fail closed while any active hold covers the
 		// job's query, regardless of job status (covers exports completed
 		// before the hold). Read-only denial: no block fact is appended.
-		hold, blocked, holdErr := s.holdBlockingExport(data, tenantID, value.Query)
+		hold, blocked, holdErr := s.holdBlockingExport(ctx, data, tenantID, value.Query)
 		if holdErr != nil {
 			return holdErr
 		}
@@ -121,7 +121,7 @@ func (s *Service) RecordExportDownload(ctx context.Context, tenantID, actor, job
 			return domain.ErrNotFound
 		}
 		var holdErr error
-		hold, blocked, holdErr = s.holdBlockingExport(data, tenantID, value.Query)
+		hold, blocked, holdErr = s.holdBlockingExport(ctx, data, tenantID, value.Query)
 		return holdErr
 	}); err != nil {
 		return err
@@ -322,7 +322,10 @@ func (e exportBlockedError) Unwrap() error { return domain.ErrForbidden }
 // no event is cloned and no WORM object is read. Every surviving hold is then
 // evaluated exactly as before, so the returned (hold, blocked) pair, the
 // denial text and the reported hold ID are unchanged.
-func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool, error) {
+//
+// ctx is the caller's store-operation context, threaded so the archived-event
+// pass below inherits the store bound; it only reaches eventsFromSnapshot.
+func (s *Service) holdBlockingExport(ctx context.Context, data *store.Snapshot, tenantID string, query domain.Query) (domain.LegalHold, bool, error) {
 	holds := s.holdBlockingCandidates(data, tenantID, query)
 	if len(holds) == 0 {
 		return domain.LegalHold{}, false, nil
@@ -331,7 +334,7 @@ func (s *Service) holdBlockingExport(data *store.Snapshot, tenantID string, quer
 	for key, schema := range data.Schemas {
 		schemas[key] = schema
 	}
-	events, err := s.eventsFromSnapshot(context.Background(), data, tenantID, func(event domain.Event) bool {
+	events, err := s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
 		return s.matches(event, query, schemas)
 	})
 	if err != nil {
@@ -413,7 +416,7 @@ func (s *Service) runExport(ctx context.Context, jobID string) {
 		// hold created after CreateExport's gate blocks the seal (no archive
 		// write). The block is reported after the read returns — an Update
 		// inside a Read closure would self-deadlock on the store RWMutex.
-		hold, ok, holdErr := s.holdBlockingExport(data, job.TenantID, job.Query)
+		hold, ok, holdErr := s.holdBlockingExport(ctx, data, job.TenantID, job.Query)
 		if holdErr != nil {
 			return holdErr
 		}
@@ -422,7 +425,7 @@ func (s *Service) runExport(ctx context.Context, jobID string) {
 			return nil
 		}
 		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, job.TenantID, func(event domain.Event) bool {
+		events, resolveErr = s.eventsFromSnapshot(ctx, data, job.TenantID, func(event domain.Event) bool {
 			return s.matches(event, job.Query, schemas)
 		})
 		return resolveErr
