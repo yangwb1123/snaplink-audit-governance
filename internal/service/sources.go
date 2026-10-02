@@ -96,6 +96,15 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 	if err := domain.ValidArchiveComponentLength("source id", source.ID); err != nil {
 		return domain.SourceSystem{}, err
 	}
+	// Control-plane resource caps (arity + per-entry bytes). Checked before
+	// the copy, the dedup map and the sort below, so an over-cap allow-list
+	// never allocates or does O(n) work proportional to it, and before
+	// AddSource/UpdateSource enters Store.Update: no Sources row, no mutation,
+	// no admin action, no durable write. Read paths stay ungated, so a row
+	// registered before the cap existed keeps authorizing.
+	if err := domain.ValidateSourceCaps(source); err != nil {
+		return domain.SourceSystem{}, err
+	}
 	source.AllowedClientIDs = append([]string(nil), source.AllowedClientIDs...)
 	seen := make(map[string]struct{}, len(source.AllowedClientIDs))
 	for _, clientID := range source.AllowedClientIDs {

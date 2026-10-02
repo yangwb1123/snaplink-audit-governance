@@ -337,3 +337,119 @@ remains the shipped configuration, and choosing a value requires operator
 evidence from a production-relevant environment plus the published raw
 metrics. Re-measure and record the result here before treating any number as
 approved.
+
+## Control-plane list cap decision gate (2026-10-02)
+
+**Status: evidence only; the shipped values are provisional.** This section
+records how `domain.MaxSourceClientIDs` and `domain.MaxSchemaFields` were
+derived and what still has to be measured before either is treated as a
+production value. The reference-implementation disclaimer at the top of this
+file remains in force: nothing below is a production SLO.
+
+### Reproduction metadata
+
+- **Revision:** the worktree commit that adds `internal/domain/limits.go`
+  `ValidateSourceCaps` / `ValidateSchemaCaps` and the two service call sites.
+- **Date:** 2026-10-02 UTC.
+- **Host/container:** local host (the machine line at the top of this file:
+  Zorin OS 18.1, AMD Ryzen AI Max+ 395, 124GiB); **not** a production host.
+- **Runtime:** Go 1.26.5, `-benchtime=1s`.
+- **Input:** the repository fixture only (`benchService` plus injected
+  1 / 8 / 64 / over-cap rows). See the limitation below.
+
+### Command
+
+```sh
+go test ./internal/service -run TestControlPlaneListDistributionReport -v
+go test -run=^$ -bench 'ControlPlane|SourceClientID|SchemaFieldList' -benchmem ./internal/service/
+```
+
+### Measured list distribution (fixture snapshot, not production)
+
+| list | lists | entries_total | max_count | p95_count | max_entry_bytes | p95_entry_bytes | max_total_bytes | over_cap rows |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `allowed_client_ids` | 5 | 330 | 257 | 257 | 13 | 13 | 3341 | 1 |
+| `required_fields` | 5 | 331 | 257 | 257 | 13 | 13 | 3341 | 1 |
+| `allowed_fields` | 5 | 332 | 257 | 257 | 13 | 13 | 3341 | 1 |
+| `encrypted_fields` | 5 | 330 | 257 | 257 | 13 | 13 | 3341 | 1 |
+| `searchable_fields` | 5 | 330 | 257 | 257 | 13 | 13 | 3341 | 1 |
+
+The fixture deliberately spans the shapes (0/1/8/64/`cap+1` entries, 13-byte
+entries) so the walker's own arithmetic is pinned; it is **not** a sample of
+real deployments. Percentiles are nearest-rank (`ceil(q*n)`, 1-indexed) over
+one sample per stored list.
+
+### Per-ingest cost the caps bound
+
+`allowed_client_ids` is scanned by `SourceSystem.AllowsClient` once per ingested
+event, and once per `Snapshot.Sources` entry in the platform sweep of
+`resolveIngestTenantFromData`; each schema field list is walked by
+`protectSensitiveFields` per event and by `reconstructEventForDigest` per
+integrity verification.
+
+| `AllowsClient` case | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| n=1, authorized first | 2.0 | 0 | 0 |
+| n=1, authorized last | 2.0 | 0 | 0 |
+| n=64, authorized last | 139.7 | 0 | 0 |
+| n=128, authorized last | 235.6 | 0 | 0 |
+| n=256 (= `MaxSourceClientIDs`), authorized last | 416.8 | 0 | 0 |
+| n=256, authorized first | 2.0 | 0 | 0 |
+
+| schema field-list walk | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `protectSensitiveFields`, 1 entry | 3,184 | 5,005 | 61 |
+| `protectSensitiveFields`, 256 entries | 9,014 | 5,004 | 61 |
+| `reconstructEventForDigest`, 1 entry | 10,285 | 14,016 | 160 |
+| `reconstructEventForDigest`, 256 entries | 15,952 | 14,016 | 160 |
+
+Both shapes are linear and allocation-free in list length: the growth comes
+from map lookups per listed field, not from the list itself. The worst-case
+authorization scan at the cap is 417 ns — about 0.03% of the 1.27 ms/op
+`BenchmarkIngest` above — which is why the cap is justified by bounding a
+caller-controlled input rather than by protecting this machine.
+
+### Derivation of the shipped constants
+
+| Constant | Shipped | Rule | Status |
+|---|---:|---|---|
+| `MaxEnvelopeFieldBytes` (per entry, all five lists) | 8192 | existing, already pinned | shipped |
+| `MaxSourceClientIDs` | 256 | `nextPow2(max(2 × observed p95 count, MaxChangedFields))`, and the A6 guard must show the scan at that length stays inside its budget | provisional |
+| `MaxSchemaFields` (each of the four lists) | 256 | `nextPow2(max(2 × observed p95 count, MaxChangedFields))` | provisional |
+
+The anchor is internal rather than asserted: `MaxChangedFields = 256` is the
+already-shipped, already-pinned bound on the comparable per-event payload-shape
+map, and an allow-list or a schema field list is not allowed to be larger than
+the number of changed fields one event may carry — one number, one place to
+change it. `allowed_client_ids` is additionally kept within one order of
+magnitude of the per-ingest ingest arity caps (`MaxActorRoles`,
+`MaxTargetsPerEvent` = 64), since it is scanned on every ingest.
+
+### Limitations and decision gate
+
+**Not measured against production here.** No deployment state file was
+reachable from this run, so the table above is a synthetic fixture and both
+values remain provisional. Re-run the recipe below against a copy of a real
+state directory before treating either constant as approved:
+
+```sh
+cp -r /var/lib/audit-governance ./state-copy   # the file backend flocks <path>.lock
+AUDIT_CAPS_STATE=./state-copy/state.json go test ./internal/service -run TestControlPlaneListDistributionReport -v
+AUDIT_CAPS_STATE_GLOB='/srv/*/state.json' go test ./internal/service -run TestControlPlaneListDistributionReport -v
+```
+
+The `production-snapshot` subtest **skips** (with the command above printed)
+when neither variable is set; that skip is recorded here rather than hidden.
+The subtest fails if a stored list already exceeds the shipped cap: such a row
+keeps serving and keeps authorizing (the caps are write-boundary only), but its
+first rewrite now fails until an operator trims it.
+
+**Not measured: total bytes per list or per document.** `max_total_bytes` above
+is reported precisely so a future per-document total-byte cap has an evidence
+hook, but this change approves none — with arity 256 and the 8192-byte per-entry
+cap, the 512 KiB transport body cap remains the effective total-byte bound of a
+single write.
+
+**Not measured: `AdminAction.Detail` growth.** `allowed_client_ids=%v` is still
+copied into every source create/update fact. Bounding it would change audit-fact
+content and is a separate direction.

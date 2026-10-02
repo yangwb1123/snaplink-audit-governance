@@ -26,6 +26,29 @@ const (
 	MaxBatchEvents = 500
 )
 
+// Control-plane list caps, enforced at the control-plane WRITE boundary only
+// (internal/service normalizeSource / RegisterSchema) because, unlike the
+// ingest caps above, the rows they bound are persisted verbatim into the
+// control-plane snapshot and are re-read on the hot ingest path:
+// allowed_client_ids is scanned by SourceSystem.AllowsClient once per ingested
+// event and once per entry of Snapshot.Sources in the platform sweep of
+// resolveIngestTenantFromData, and each EventSchema field list is walked once
+// per ingested event, once per integrity verification and once per audit
+// query. Without an arity cap, per-ingest cost and every control-plane
+// snapshot clone/serialize become a function of one caller-controlled array.
+// Read paths are deliberately NOT gated, so a row registered before the cap
+// was introduced keeps authorizing and keeps ingesting: a read-path gate
+// would convert a historical data condition into a tenant-wide ingest outage.
+// The per-entry byte bound is MaxEnvelopeFieldBytes (no second byte
+// vocabulary); with this arity the transport body cap (MaxEventBytes*2)
+// remains the effective total-byte bound of a single write. The values are
+// provisional and derived by the recorded recipe in docs/BENCHMARKS.md;
+// TestControlPlaneCapsAreFixed pins them.
+const (
+	MaxSourceClientIDs = 256 // SourceSystem.AllowedClientIDs entry count
+	MaxSchemaFields    = 256 // entry count of each of the four EventSchema field lists
+)
+
 // ErrEnvelopeTooLarge wraps ErrInvalid: an envelope (or batch) exceeded a
 // configured size/arity cap. Distinct from other ErrInvalid classes so the
 // gRPC WriteStream can skip-and-continue only this class while preserving
@@ -50,6 +73,66 @@ func CheckString(name, value string) error {
 func CheckCount(name string, n, max int) error {
 	if n > max {
 		return fmt.Errorf("%w: %s count %d, max %d", ErrEnvelopeTooLarge, name, n, max)
+	}
+	return nil
+}
+
+// ValidateSourceCaps applies the control-plane resource caps to one source
+// registration. Arity is checked first (O(1)) so an over-cap request is
+// rejected before any per-entry work is done for it; the per-entry byte walk
+// then runs in ascending order, so the reported violation does not depend on
+// the order the entries arrived in. An empty allow-list stays legal and keeps
+// its meaning: SourceSystem.AllowsClient then requires client_id == id. The
+// caller's slice is never mutated. Message text comes from CheckCount and
+// CheckString only, so it is identical on every transport.
+func ValidateSourceCaps(source SourceSystem) error {
+	if err := CheckCount("allowed_client_ids", len(source.AllowedClientIDs), MaxSourceClientIDs); err != nil {
+		return err
+	}
+	return checkFieldListCaps("allowed_client_ids", source.AllowedClientIDs)
+}
+
+// ValidateSchemaCaps applies the same two dimensions to each EventSchema
+// field list, in the fixed order required_fields, allowed_fields,
+// encrypted_fields, searchable_fields, so the first reported violation is
+// deterministic. Counts include duplicates (duplicate padding cannot evade the
+// cap) and no dedup or normalization is applied: RegisterSchema stores the
+// caller's slices verbatim and the ingest path consumes them in registration
+// order. Like ValidateSourceCaps it only calls CheckCount and CheckString and
+// never reorders the caller's slices (the byte walk sorts a copy).
+func ValidateSchemaCaps(schema EventSchema) error {
+	for _, list := range []struct {
+		name   string
+		fields []string
+	}{
+		{"required_fields", schema.RequiredFields},
+		{"allowed_fields", schema.AllowedFields},
+		{"encrypted_fields", schema.EncryptedFields},
+		{"searchable_fields", schema.SearchableFields},
+	} {
+		if err := CheckCount(list.name, len(list.fields), MaxSchemaFields); err != nil {
+			return err
+		}
+		if err := checkFieldListCaps(list.name, list.fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkFieldListCaps bounds every entry of one control-plane list by
+// MaxEnvelopeFieldBytes (UTF-8 bytes, the same accounting as
+// http.MaxBytesReader), walking a sorted COPY so the reported first violation
+// is deterministic while the caller's slice — and therefore the stored row —
+// keeps the order it arrived in. Reached only after CheckCount passed, so the
+// copy is bounded by the arity cap.
+func checkFieldListCaps(name string, entries []string) error {
+	ordered := append([]string(nil), entries...)
+	sort.Strings(ordered)
+	for _, entry := range ordered {
+		if err := CheckString(name+"[]", entry); err != nil {
+			return err
+		}
 	}
 	return nil
 }

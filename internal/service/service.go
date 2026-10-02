@@ -328,6 +328,14 @@ func (s *Service) RegisterSchema(ctx context.Context, actor string, schema domai
 	if err := domain.ValidKeyComponent("schema id", schema.SchemaID); err != nil {
 		return err
 	}
+	// Control-plane resource caps (arity + per-entry bytes) on the four field
+	// lists. Like the key-framing check above, this runs before the snapshot
+	// closure: an over-cap registration writes no Schemas key and no
+	// schema.created admin action. The in-closure version-monotonicity and
+	// required/allowed superset rules are untouched.
+	if err := domain.ValidateSchemaCaps(schema); err != nil {
+		return err
+	}
 	if schema.CreatedAt.IsZero() {
 		schema.CreatedAt = s.Now()
 	}
