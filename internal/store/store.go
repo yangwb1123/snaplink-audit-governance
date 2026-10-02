@@ -629,6 +629,13 @@ type fileBackend struct {
 	trailCount   int64                // baseline-seeded append count (F-4)
 	trailCounted bool                 // baseline scan done
 	trail        []domain.AdminAction // in-memory mode trail
+
+	// trailCompactions counts compaction rewrites that actually replaced the
+	// trail file; it is incremented only after os.Rename succeeds, so a
+	// no-op compaction and a pre-rename fault are not counted. Guarded by f.mu
+	// (compactTrail holds it exclusively). Read only by same-package tests to
+	// pin the amortized watermark schedule — not exported, not a metric.
+	trailCompactions int64
 }
 
 // openFileBackend builds a file-backed store. For a non-empty path it first

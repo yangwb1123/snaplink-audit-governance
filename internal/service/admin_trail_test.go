@@ -83,7 +83,7 @@ func TestReadsDoNotRewriteSnapshotFile(t *testing.T) {
 		t.Fatalf("snapshot AdminActions=%d, want <= 100 (reads must not grow the snapshot)", len(snap.AdminActions))
 	}
 	// The trail file holds the read facts, bounded by the trail cap
-	// (compaction keeps the newest 100).
+	// (compaction keeps the newest half of the cap, between 51 and 100 here).
 	trailPath := statePath + ".admin-trail.jsonl"
 	contents, err := os.ReadFile(trailPath)
 	if err != nil {

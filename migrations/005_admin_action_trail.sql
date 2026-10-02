@@ -6,8 +6,11 @@
 -- MaxAdminActions (drop-oldest).
 --
 -- seq is the compaction watermark: compaction deletes rows with
--- seq < (the seq of the cap-th newest row), so a concurrent replica's
--- INSERT (allocated a newer BIGSERIAL seq) is never deleted.
+-- seq < (the seq of the W-th newest row), where W is the amortization
+-- watermark cap - max(1, cap/2) of the operator's audit-trail cap, so a
+-- concurrent replica's INSERT (allocated a newer BIGSERIAL seq) is never
+-- deleted. $1 is W, not the cap: trimming to W is what makes compaction
+-- amortized across the following cap/2 appends.
 CREATE TABLE IF NOT EXISTS admin_action_trail (
     seq         BIGSERIAL PRIMARY KEY,
     id          TEXT NOT NULL,

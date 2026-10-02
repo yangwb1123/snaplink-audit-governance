@@ -20,8 +20,9 @@ import (
 type AdminTrail interface {
 	// AppendAdminFact durably records one read-path fact. trailCap bounds
 	// the trail (0 = unbounded, operator-explicit): a positive value
-	// compacts the trail to its newest trailCap facts once the bound is
-	// exceeded. An error means the fact is not persisted (fail closed).
+	// compacts the trail to the newest trailWatermark(trailCap) facts once
+	// the bound is exceeded. An error means the fact is not persisted (fail
+	// closed).
 	AppendAdminFact(ctx context.Context, fact domain.AdminAction, trailCap int) error
 	// ReadAdminTrail returns trail facts newest-first (reverse append
 	// order); an empty result when the backend has no trail.
@@ -80,6 +81,43 @@ func (s *Store) ReadAdminTrail(ctx context.Context) (_ []domain.AdminAction, err
 // self-audit trail, e.g. ./data/state.json -> ./data/state.json.admin-trail.jsonl.
 const trailPathSuffix = ".admin-trail.jsonl"
 
+// trailWatermark is how many of the newest facts a compaction retains for an
+// operator cap of trailCap: half the cap, at least one. Compacting to the
+// watermark instead of to the cap is what makes compaction amortized: the
+// trail oscillates in [W, trailCap] and the O(trailCap) rewrite runs once per
+// headroom+1 appends instead of once per append. For trailCap == 3 the trail
+// settles at the same steady state it had when compaction trimmed to the cap
+// (2 + ((n-2) mod 2) facts), which is why the existing exact-length
+// compaction expectations are unchanged. 0 for an unbounded cap, where the
+// compaction trigger is unreachable and nothing is ever trimmed.
+func trailWatermark(trailCap int) int {
+	if trailCap <= 0 {
+		return 0
+	}
+	headroom := trailCap / 2
+	if headroom < 1 {
+		headroom = 1
+	}
+	if watermark := trailCap - headroom; watermark >= 1 {
+		return watermark
+	}
+	return 1
+}
+
+// trailHeadroom is how many further appends fit before the next compaction
+// (trailCap - trailWatermark(trailCap)); the trigger itself fires on the
+// (headroom+1)-th one. 0 for an unbounded cap and for the degenerate
+// trailCap == 1, which keeps compact-per-append behaviour because no positive
+// headroom exists under a one-fact cap. Doc-and-test helper: the production
+// schedule is driven by trailCount and the trailCap trigger, so no caller
+// schedules work from this value.
+func trailHeadroom(trailCap int) int {
+	if trailCap <= 0 {
+		return 0
+	}
+	return trailCap - trailWatermark(trailCap)
+}
+
 // AppendAdminFact appends one fact to <state>.admin-trail.jsonl as a JSONL
 // line, fsynced per append (durability parity with Save). The persistent
 // O_APPEND fd is lazily opened (parent 0o750, file 0o640, dir-chain fsync
@@ -98,9 +136,11 @@ func (f *fileBackend) AppendAdminFact(ctx context.Context, fact domain.AdminActi
 		// In-memory mode: a plain bounded slice under f.mu.
 		f.trail = append(f.trail, fact)
 		if trailCap > 0 && len(f.trail) > trailCap {
-			// Copy the tail so the dropped prefix's backing array can be
-			// garbage-collected.
-			f.trail = append([]domain.AdminAction(nil), f.trail[len(f.trail)-trailCap:]...)
+			// Trim to the same watermark the file backend uses, so all three
+			// retention paths agree on depth. Copy the tail so the dropped
+			// prefix's backing array can be garbage-collected.
+			keep := trailWatermark(trailCap)
+			f.trail = append([]domain.AdminAction(nil), f.trail[len(f.trail)-keep:]...)
 		}
 		return nil
 	}
@@ -120,7 +160,10 @@ func (f *fileBackend) AppendAdminFact(ctx context.Context, fact domain.AdminActi
 	}
 	f.trailCount++
 	if trailCap > 0 && f.trailCount > int64(trailCap) {
-		if err := f.compactTrail(trailCap); err != nil {
+		// Compact to the watermark, not to the cap: resetting trailCount to
+		// keep (rather than to trailCap) is what buys trailHeadroom(trailCap)
+		// further appends before the next O(trailCap) rewrite.
+		if err := f.compactTrail(trailWatermark(trailCap)); err != nil {
 			return err
 		}
 	}
@@ -202,22 +245,24 @@ func (f *fileBackend) ensureTrailFile() error {
 	return nil
 }
 
-// compactTrail rewrites the trail keeping the newest trailCap facts.
-// Crash-atomic: write tmp -> fsync -> rename -> dir-chain sync -> reopen the
-// persistent fd (the old fd points at the pre-rename inode). On any error
-// before the rename the pre-compaction trail is intact (FM-5); the caller
-// fails the append closed and the next append retries the compaction once
-// the trigger condition persists. Caller holds f.mu exclusively.
-func (f *fileBackend) compactTrail(trailCap int) error {
+// compactTrail rewrites the trail keeping the newest keepCount facts (keepCount
+// is the watermark trailWatermark(trailCap), not the cap itself, so the rewrite
+// is amortized across trailHeadroom(trailCap) further appends). Crash-atomic:
+// write tmp -> fsync -> rename -> dir-chain sync -> reopen the persistent fd
+// (the old fd points at the pre-rename inode). On any error before the rename
+// the pre-compaction trail is intact (FM-5); the caller fails the append
+// closed and the next append retries the compaction once the trigger
+// condition persists. Caller holds f.mu exclusively.
+func (f *fileBackend) compactTrail(keepCount int) error {
 	facts, err := f.readTrailFileLocked()
 	if err != nil {
 		return err
 	}
-	if len(facts) <= trailCap {
+	if len(facts) <= keepCount {
 		f.trailCount = int64(len(facts))
 		return nil
 	}
-	keep := facts[len(facts)-trailCap:] // newest trailCap, oldest-first order
+	keep := facts[len(facts)-keepCount:] // newest keepCount, oldest-first order
 	tmp := f.trailPath + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
 	if err != nil {
@@ -248,6 +293,7 @@ func (f *fileBackend) compactTrail(trailCap int) error {
 	if err := os.Rename(tmp, f.trailPath); err != nil {
 		return err
 	}
+	f.trailCompactions++
 	if f.trailFile != nil {
 		_ = f.trailFile.Close()
 		f.trailFile = nil
@@ -338,9 +384,14 @@ const (
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	// trailCompactQuery keeps the newest $1 rows via a seq watermark so a
 	// concurrent replica's INSERT (allocated a newer BIGSERIAL seq after the
-	// DELETE's statement snapshot) can never be deleted (F-4). With the
-	// per-replica soft cap the table briefly exceeds the bound; this is
-	// self-correcting (FM-7).
+	// DELETE's statement snapshot) can never be deleted (F-4). $1 is the
+	// watermark trailWatermark(trailCap), never the cap itself: trimming to
+	// the watermark is what makes compaction amortized. With the per-replica
+	// soft cap the table briefly exceeds the bound; the overshoot is bounded
+	// by watermark + (headroom+1) rows per sharing replica and self-corrects
+	// (FM-7). The DELETE — not the local counter — is authoritative, so an
+	// over-count only costs a redundant no-op DELETE and an under-count only
+	// defers one.
 	trailCompactQuery = `DELETE FROM admin_action_trail WHERE seq < (
     SELECT seq FROM admin_action_trail ORDER BY seq DESC OFFSET ($1 - 1) LIMIT 1)`
 	trailReadQuery = `SELECT id, tenant_id, actor, action, target_type, target_id, detail, created_at
@@ -354,6 +405,17 @@ const (
 // process; across replicas BIGSERIAL seq provides total order. The table is
 // lazily ensured once per process (F-5); trailCount is seeded with a lazy
 // count so the soft-cap check is O(1) per append (F-4).
+//
+// Compaction is amortized by trimming to trailWatermark(trailCap) and then
+// resetting trailCount to that watermark, so the O(trailCap) DELETE runs once
+// per trailHeadroom(trailCap)+1 appends instead of on every append past the
+// cap — previously trailCount was never reset, so every audited read issued
+// the offset scan while holding trailMu, serializing every other audited
+// read's append behind it. The reset makes trailCount a lower bound on the
+// global row count, which is the tightest bound that cannot over-delete
+// (FM-7): a concurrent replica's rows are simply not counted, so this replica
+// trims again after a bounded headroom instead of tracking them exactly.
+// A compaction error leaves the counter high, so the next append retries.
 func (p *postgresBackend) AppendAdminFact(ctx context.Context, fact domain.AdminAction, trailCap int) error {
 	p.trailMu.Lock()
 	defer p.trailMu.Unlock()
@@ -377,9 +439,11 @@ func (p *postgresBackend) AppendAdminFact(ctx context.Context, fact domain.Admin
 	}
 	p.trailCount++
 	if trailCap > 0 && p.trailCount > int64(trailCap) {
-		if _, err := p.db.ExecContext(ctx, trailCompactQuery, trailCap); err != nil {
+		keep := trailWatermark(trailCap)
+		if _, err := p.db.ExecContext(ctx, trailCompactQuery, keep); err != nil {
 			return fmt.Errorf("compact admin action trail: %w", err)
 		}
+		p.trailCount = int64(keep)
 	}
 	return nil
 }

@@ -14,10 +14,11 @@ import (
 const DefaultMaxAdminActions = 10000
 
 // DefaultMaxAdminTrailActions caps the separate read self-audit trail. Once
-// the bound is exceeded the trail is compacted to its newest
-// DefaultMaxAdminTrailActions facts (amortized O(1) per append on Postgres;
-// the file backend rewrites the capped JSONL). 0 = unbounded append-only,
-// an operator-explicit choice.
+// the bound is exceeded the trail is compacted to the newest half of the
+// cap (the amortization watermark, O(1) per append on both backends) and
+// the next compaction runs only after another half-cap of appends, so the
+// trail oscillates between half the cap and the cap. 0 = unbounded
+// append-only, an operator-explicit choice.
 const DefaultMaxAdminTrailActions = 100000
 
 // resolveAdminTrailConfig resolves and validates the admin-trail caps with
