@@ -219,7 +219,11 @@ ledger stream。
 - 可选构建 OpenSearch 全文索引。
 - 支持从账本或 Kafka 保留区重新构建。
 
-投影失败不回滚账本，通过重试和 DLQ 修复。
+投影失败不回滚账本，通过重试和 DLQ 修复：投影死信写入独立 topic
+`audit.events.projection.dlq.v1`，不与摄入 DLQ（`audit.events.dlq.v1`，
+由 `audit-kafka-dlq-replay` 按 key 从 accepted topic 恢复）共用。投影原像
+在 ledgered topic，摄入 DLQ 重放既无法解决也无法关闭投影失败，因此投影失败
+从 ledgered topic 重新驱动投影，而不是用 `audit-kafka-dlq-replay` 重放。
 
 ### 6.5 audit-query-api
 
@@ -344,7 +348,8 @@ wait_for=ledgered，但必须设置有限超时，超时返回处理中状态而
 | audit.events.ledgered.v1 | 已进入账本的事件 |
 | audit.events.projection.v1 | 投影任务 |
 | audit.events.archive.v1 | 归档任务 |
-| audit.events.dlq.v1 | 终止重试后的隔离事件 |
+| audit.events.dlq.v1 | 终止重试后的隔离事件（摄入 DLQ；`audit-kafka-dlq-replay` 从 accepted topic 恢复原像） |
+| audit.events.projection.dlq.v1 | 投影失败隔离事件（原像在 ledgered topic，需从 ledgered topic 重新驱动，不经 `audit-kafka-dlq-replay`） |
 | audit.control.invalidate.v1 | Schema、租户和策略缓存失效 |
 
 ## 10. 不可变账本和哈希链

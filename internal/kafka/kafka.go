@@ -35,6 +35,17 @@ const TopicDLQ = "audit.events.dlq.v1"
 // after a successful ledger commit; the projector consumes it.
 const TopicLedgered = "audit.events.ledgered.v1"
 
+// TopicProjectionDLQ is the AsyncAPI topic for ClickHouse projection
+// failures (api/asyncapi/asyncapi.yaml channel projectionDlq). It is
+// deliberately distinct from TopicDLQ: a projection failure's original event
+// lives on TopicLedgered, while the ingest replay tool recovers originals from
+// the accepted topic, so a shared topic let the replayer either re-publish the
+// event as a redundant accepted re-ingest (never a ClickHouse re-insert) or
+// close it as unresolvable — permanently, and without ever retrying the
+// projection. Recovery for this topic is a projection-specific re-drive from
+// the ledgered topic, not audit-kafka-dlq-replay.
+const TopicProjectionDLQ = "audit.events.projection.dlq.v1"
+
 // Dead-letter error codes carried in Failure.ErrorCode, matching the
 // AsyncAPI Failure payload vocabulary.
 const (

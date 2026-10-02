@@ -175,16 +175,17 @@ func TestTopicOverrideEnv(t *testing.T) {
 }
 
 // AC-3.1 (DLQ config): with no -max-attempts / -dlq-topic override, the
-// resolved defaults are the consumer's attempt cap (8) and kafka.TopicDLQ,
-// both visible in the first log line.
+// resolved defaults are the consumer's attempt cap (8) and the PROJECTION DLQ
+// (kafka.TopicProjectionDLQ — not the ingest DLQ, which
+// audit-kafka-dlq-replay owns), both visible in the first log line.
 func TestResolvedDefaultDLQConfig(t *testing.T) {
 	output := runProjectorBinary(t, 5*time.Second, cleanEnv(), "-brokers", "127.0.0.1:1")
 	first := firstLine(output)
 	if !strings.Contains(first, "max_attempts=8") {
 		t.Fatalf("first log line %q: want max_attempts=8; full output:\n%s", first, output)
 	}
-	if !strings.Contains(first, `dlq_topic="audit.events.dlq.v1"`) {
-		t.Fatalf(`first log line %q: want dlq_topic="audit.events.dlq.v1"; full output:
+	if !strings.Contains(first, `dlq_topic="audit.events.projection.dlq.v1"`) {
+		t.Fatalf(`first log line %q: want dlq_topic="audit.events.projection.dlq.v1"; full output:
 %s`, first, output)
 	}
 }

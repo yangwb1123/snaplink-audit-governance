@@ -51,10 +51,15 @@ Fail-closed conditions (FM-1 ... FM-13):
 - FM-13 Go source unreadable during the symbol scan.
 
 Symbol derivation (repo convention, pinned by table-driven tests): drop a
-trailing ``v<N>`` segment, take the last remaining segment, use
-``KNOWN_ABBREVIATIONS`` verbatim when the segment matches exactly (``dlq`` ->
-``DLQ`` reproduces ``TopicDLQ``), otherwise capitalize its first character,
-and prefix ``Topic``.
+trailing ``v<N>`` segment, then match the REMAINING segments as a dotted
+ADDRESS SUFFIX against ``KNOWN_ABBREVIATIONS`` -- longest suffix first -- and
+prefix ``Topic`` to the matched spelling.  Longest-suffix-first is what lets
+``audit.events.projection.dlq.v1`` derive ``TopicProjectionDLQ`` (the
+``projection.dlq`` row) while ``audit.events.dlq.v1`` still derives
+``TopicDLQ`` (the ``dlq`` row) and ``audit.events.projection.v1`` still
+derives ``TopicProjection``.  When no suffix matches, the last remaining
+segment is capitalized instead.  A single-segment address that abbreviates to
+the empty string fails closed rather than yielding a bare ``Topic``.
 """
 
 from __future__ import annotations
@@ -63,11 +68,19 @@ import re
 import sys
 from pathlib import Path
 
-# Derivation table: segments whose Go constant keeps an all-caps spelling.
+# Derivation table: dotted ADDRESS SUFFIXES (the segments left after a trailing
+# v<N> is dropped) whose Go constant keeps an all-caps spelling. Matched
+# LONGEST SUFFIX FIRST, so "projection.dlq" wins over "dlq" for
+# audit.events.projection.dlq.v1 -> TopicProjectionDLQ while
+# audit.events.dlq.v1 stays TopicDLQ and audit.events.projection.v1 stays
+# TopicProjection. Matching suffixes rather than a single segment is what
+# keeps the projection DLQ address ending in the same "dlq" token as the
+# ingest one without inventing a second naming convention.
+#
 # Deliberately explicit -- a length threshold would silently map e.g. "hold"
 # to TopicHOLD and force the Go author to guess the spelling; add a row only
 # when a real channel address needs it.
-KNOWN_ABBREVIATIONS = {"dlq": "DLQ"}
+KNOWN_ABBREVIATIONS = {"dlq": "DLQ", "projection.dlq": "ProjectionDLQ"}
 
 VERSION_SUFFIX_RE = re.compile(r"^v\d+$")
 
@@ -468,18 +481,22 @@ def _scan_go_symbols(root: Path) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 def derive_symbol(address: str) -> str:
-    """Derive the expected Go constant name for a channel address."""
+    """Derive the expected Go constant name for a channel address.
+
+    Longest dotted-suffix match against KNOWN_ABBREVIATIONS first, then the
+    capitalized last segment; see the module docstring for the contract and
+    the pinning test for the table."""
     segments = address.split(".")
     if len(segments) > 1 and VERSION_SUFFIX_RE.fullmatch(segments[-1]):
         segments = segments[:-1]
+    for size in range(len(segments), 0, -1):
+        symbol = KNOWN_ABBREVIATIONS.get(".".join(segments[-size:]))
+        if symbol:
+            return "Topic" + symbol
     last = segments[-1]
     if not last:
         raise AsyncAPIError(f"cannot derive symbol from address {address!r}")
-    if last in KNOWN_ABBREVIATIONS:
-        symbol = KNOWN_ABBREVIATIONS[last]
-    else:
-        symbol = last[:1].upper() + last[1:]
-    return "Topic" + symbol
+    return "Topic" + last[:1].upper() + last[1:]
 
 
 def _rule_a(channels: dict, operations: list, symbols: dict) -> list[str]:

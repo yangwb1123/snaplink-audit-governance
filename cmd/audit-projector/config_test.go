@@ -67,8 +67,14 @@ func TestResolveProjectorConfigDefaultsAndEmptyValueSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve defaults error = %v", err)
 	}
-	if cfg.sourceTopic != kafka.TopicLedgered || cfg.dlqTopic != kafka.TopicDLQ || cfg.group != "audit-projector" {
+	if cfg.sourceTopic != kafka.TopicLedgered || cfg.dlqTopic != kafka.TopicProjectionDLQ || cfg.group != "audit-projector" {
 		t.Fatalf("defaults = source %q, dlq %q, group %q", cfg.sourceTopic, cfg.dlqTopic, cfg.group)
+	}
+	// The default projection DLQ must be its own address: never the ingest
+	// replay DLQ (whose accepted-original recovery cannot resolve or close a
+	// projection failure) and never the projector's own source topic.
+	if cfg.dlqTopic == kafka.TopicDLQ || cfg.dlqTopic == cfg.sourceTopic {
+		t.Fatalf("default projection DLQ %q collides with the ingest DLQ or the source topic", cfg.dlqTopic)
 	}
 	if cfg.backoff != 2*time.Second || cfg.maxAttempts != 8 {
 		t.Fatalf("scalar defaults = backoff %s, max attempts %d", cfg.backoff, cfg.maxAttempts)
@@ -122,6 +128,21 @@ func TestResolveProjectorConfigRejectsTopologyCollisions(t *testing.T) {
 			name: "empty source fallback",
 			args: []string{"-topic", "", "-dlq-topic", kafka.TopicAccepted},
 		},
+		{
+			// The defect this direction removes: the projector used to accept
+			// the ingest replay DLQ, whose recovery semantics do not apply to
+			// projection failures.
+			name: "ingest replay DLQ from environment",
+			env:  map[string]string{"AUDIT_KAFKA_DLQ_TOPIC": kafka.TopicDLQ},
+		},
+		{
+			name: "ingest replay DLQ from flag",
+			args: []string{"-dlq-topic", kafka.TopicDLQ},
+		},
+		{
+			name: "projection DLQ equal to the source topic",
+			args: []string{"-topic", kafka.TopicProjectionDLQ, "-dlq-topic", kafka.TopicProjectionDLQ},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -170,6 +191,16 @@ func TestRunProjectorRejectsInvalidTopologyBeforeFactories(t *testing.T) {
 				backoff: time.Second, maxAttempts: 1, dlqTopic: "dlq",
 			},
 		},
+		{
+			// Fail closed on the shared DLQ before any external resource: an
+			// invalid topology must not have opened ClickHouse, a producer or
+			// a consumer.
+			name: "ingest replay DLQ",
+			cfg: projectorConfig{
+				brokers: "broker", sourceTopic: kafka.TopicLedgered, group: "group",
+				backoff: time.Second, maxAttempts: 1, dlqTopic: kafka.TopicDLQ,
+			},
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -193,6 +224,43 @@ func TestRunProjectorRejectsInvalidTopologyBeforeFactories(t *testing.T) {
 			}
 			if called {
 				t.Fatal("a projector factory was called for invalid topology")
+			}
+		})
+	}
+}
+
+// TestRunProjectorDeadLettersToProjectionDLQ pins the wiring, not just the
+// default: the producer handed to the consumer must be bound to the resolved
+// projection DLQ address, so a projection failure can never be published to a
+// topic the ingest replayer drains.
+func TestRunProjectorDeadLettersToProjectionDLQ(t *testing.T) {
+	for _, want := range []string{kafka.TopicProjectionDLQ, "audit.events.projection.dlq.staging.v1"} {
+		t.Run(want, func(t *testing.T) {
+			var producerTopic string
+			factories := projectorFactories{
+				openStore: func(string) (projectorStore, error) {
+					return &projectorTestStore{events: &[]string{}}, nil
+				},
+				newProducer: func(_ []string, topic string) failureProducer {
+					producerTopic = topic
+					return &projectorTestProducer{events: &[]string{}}
+				},
+				newConsumer: func([]string, string, string, kafka.IngestFunc, time.Duration, *log.Logger, ...kafka.ConsumerOption) projectorConsumer {
+					return &projectorTestConsumer{events: &[]string{}}
+				},
+			}
+			cfg := projectorConfig{
+				brokers: "broker", sourceTopic: kafka.TopicLedgered, group: "group",
+				backoff: time.Second, maxAttempts: 1, dlqTopic: want,
+			}
+			if err := runProjector(context.Background(), cfg, log.New(io.Discard, "", 0), factories); err != nil {
+				t.Fatalf("runProjector() error = %v", err)
+			}
+			if producerTopic != want {
+				t.Fatalf("producer topic = %q, want the resolved projection DLQ %q", producerTopic, want)
+			}
+			if producerTopic == kafka.TopicDLQ {
+				t.Fatal("the projector must never dead-letter into the ingest replay DLQ")
 			}
 		})
 	}

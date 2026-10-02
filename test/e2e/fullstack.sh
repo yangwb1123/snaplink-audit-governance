@@ -276,6 +276,8 @@ $COMPOSE exec -T redpanda rpk topic create audit.events.ledgered.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 $COMPOSE exec -T redpanda rpk topic create audit.events.dlq.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
+$COMPOSE exec -T redpanda rpk topic create audit.events.projection.dlq.v1 \
+  --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 
 EVENT_ID="fullstack-e2e-$(date +%s)"
 log "inserting outbox record $EVENT_ID"

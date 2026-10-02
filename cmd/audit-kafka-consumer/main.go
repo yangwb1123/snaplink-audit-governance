@@ -108,6 +108,13 @@ func validateConsumerTopology(sourceTopic, dlqTopic, groupID string) error {
 	if err := kafka.ValidateTopicTopology(sourceTopic, dlqTopic); err != nil {
 		return err
 	}
+	// An operator override must not route ingest failures into the
+	// projection DLQ: nothing drains that topic, so the records would be
+	// unrecoverable evidence. Checked before the empty-DLQ refusal so a
+	// disabled DLQ keeps its own diagnostic.
+	if err := kafka.ValidateIngestDLQ(dlqTopic); err != nil {
+		return err
+	}
 	if strings.TrimSpace(dlqTopic) == "" {
 		return fmt.Errorf("DLQ topic is required; refusing unsafe no-publisher mode")
 	}

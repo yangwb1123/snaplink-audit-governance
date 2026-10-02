@@ -358,6 +358,7 @@ operations:
             "audit.events.archive.v1": "TopicArchive",
             "audit.events.ghost.v1": "TopicGhost",
             "audit.events.dlq.v2": "TopicDLQ",
+            "audit.events.projection.dlq.v1": "TopicProjectionDLQ",
             "audit.events.api.v1": "TopicApi",
             "audit.events.hold.v1": "TopicHold",
             "accepted": "TopicAccepted",

@@ -2,16 +2,13 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/snaplink/audit-governance/internal/kafka"
 	"github.com/snaplink/audit-governance/internal/outbox"
@@ -23,57 +20,52 @@ import (
 // byte-for-byte (default) or re-ingested through the audit API
 // (-api-url/-token). Replayed event IDs are persisted to -state, making
 // re-scans idempotent. Run with -once from a scheduler, or as a daemon.
+//
+// Because the recovery source is the accepted topic, this tool owns the
+// ingest DLQ (kafka.TopicDLQ) only. The projector's DLQ
+// (kafka.TopicProjectionDLQ) holds failures whose originals live on the
+// ledgered topic, so resolveReplayConfig rejects it: replaying it would
+// produce redundant accepted re-ingests or permanent unresolvable closes,
+// never a retried ClickHouse projection.
 func main() {
-	brokers := flag.String("brokers", os.Getenv("AUDIT_KAFKA_BROKERS"), "comma-separated Kafka brokers")
-	dlqTopic := flag.String("dlq-topic", envOr("AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic")
-	acceptedTopic := flag.String("accepted-topic", envOr("AUDIT_KAFKA_ACCEPTED_TOPIC", kafka.TopicAccepted), "accepted topic to recover original events from")
-	group := flag.String("group", envOr("AUDIT_KAFKA_DLQ_REPLAY_GROUP", "audit-dlq-replay"), "consumer group id prefix")
-	statePath := flag.String("state", envOr("AUDIT_DLQ_REPLAY_STATE", "./data/dlq-replay-state.json"), "replayed event id state file")
-	once := flag.Bool("once", false, "run a single replay round and exit")
-	interval := flag.Duration("interval", durationEnv("AUDIT_DLQ_REPLAY_INTERVAL", 5*time.Minute), "round interval in daemon mode")
-	apiURL := flag.String("api-url", envOr("AUDIT_OUTBOX_API_URL", ""), "audit API base URL; when set, recovered events are re-ingested via HTTP instead of re-published to Kafka")
-	token := flag.String("token", os.Getenv("AUDIT_OUTBOX_TOKEN"), "bearer token for audit API ingestion")
-	tenantScope := flag.String("tenant-scope", os.Getenv("AUDIT_DLQ_REPLAY_TENANT_SCOPE"), "explicit single-tenant scope for the static API replay token (required for token use)")
-	timeout := flag.Duration("timeout", durationEnv("AUDIT_KAFKA_TIMEOUT", 30*time.Second), "per-event ingest timeout in API mode")
-	replayAuthBlocked := flag.Bool("replay-auth-blocked", false, "re-publish DLQ records with error_code=unauthorized (set only after the ingest token is fixed)")
-	metricsListen := flag.String("metrics-listen", os.Getenv("AUDIT_DLQ_REPLAY_METRICS"), "optional metrics listen address (e.g. :9091)")
-	flag.Parse()
-	if err := kafka.ValidateReplayTopology(*acceptedTopic, *dlqTopic, *group); err != nil {
+	// resolveReplayConfig owns flag/env resolution AND validation, so both
+	// run before kafka.LoadReplayState, kafka.NewProducer and
+	// kafka.NewReplayer: an invalid topology (notably -dlq-topic pointed at
+	// the projection DLQ) exits non-zero without constructing a client.
+	cfg, err := resolveReplayConfig(os.Args[1:], os.Getenv)
+	if err != nil {
 		log.Fatalf("replay topology: %v", err)
-	}
-	if *brokers == "" {
-		log.Fatalf("brokers are required: pass -brokers or set AUDIT_KAFKA_BROKERS")
 	}
 	logger := log.New(os.Stdout, "audit-kafka-dlq-replay ", log.LstdFlags|log.Lmicroseconds)
 	// F3 (RFC 6750 §1): in HTTP mode the re-ingest token must never travel
 	// over plaintext http except to loopback targets (or the explicit
 	// dev/verify-stack opt-in). Kafka republish mode (no -api-url) is
 	// unaffected.
-	if *apiURL != "" {
-		if err := outbox.ValidateAPIURL(*apiURL, outbox.InsecureAPIURLAllowed()); err != nil {
+	if cfg.apiURL != "" {
+		if err := outbox.ValidateAPIURL(cfg.apiURL, outbox.InsecureAPIURLAllowed()); err != nil {
 			logger.Fatalf("api-url: %v", err)
 		}
-		if outbox.InsecureAPIURLAllowed() && outbox.IsInsecureHTTPURL(*apiURL) {
-			logger.Printf("warning: %s=true: the re-ingest bearer token is sent over plaintext HTTP (%s) — verify-stack/dev-only, never production", outbox.APIURLInsecureEnv, *apiURL)
+		if outbox.InsecureAPIURLAllowed() && outbox.IsInsecureHTTPURL(cfg.apiURL) {
+			logger.Printf("warning: %s=true: the re-ingest bearer token is sent over plaintext HTTP (%s) — verify-stack/dev-only, never production", outbox.APIURLInsecureEnv, cfg.apiURL)
 		}
 	}
-	state, err := kafka.LoadReplayState(*statePath)
+	state, err := kafka.LoadReplayState(cfg.statePath)
 	if err != nil {
 		logger.Fatalf("state: %v", err)
 	}
-	if *tenantScope != "" {
-		state.SetLegacyTenantScope(*tenantScope)
+	if cfg.tenantScope != "" {
+		state.SetLegacyTenantScope(cfg.tenantScope)
 	}
 	var republish kafka.RepublishFunc
-	if *apiURL != "" {
-		if strings.TrimSpace(*tenantScope) == "" {
+	if cfg.apiURL != "" {
+		if strings.TrimSpace(cfg.tenantScope) == "" {
 			logger.Printf("warning: AUDIT_DLQ_REPLAY_TENANT_SCOPE is empty; API-mode replay will keep every recovered event pending and will not apply the static token")
 		}
-		if strings.TrimSpace(*token) == "" {
+		if strings.TrimSpace(cfg.token) == "" {
 			logger.Printf("warning: AUDIT_OUTBOX_TOKEN is empty; API-mode replay will keep records pending until a tenant-scoped credential is configured")
 		}
-		resolver := outbox.StaticTenantCredentialResolver(*tenantScope, *token)
-		deliver := outbox.HTTPDelivererForTenant(*apiURL, resolver, &http.Client{Timeout: *timeout})
+		resolver := outbox.StaticTenantCredentialResolver(cfg.tenantScope, cfg.token)
+		deliver := outbox.HTTPDelivererForTenant(cfg.apiURL, resolver, &http.Client{Timeout: cfg.timeout})
 		republish = func(ctx context.Context, key, value []byte) error {
 			event, err := kafka.EventFromCanonical(value)
 			if err != nil {
@@ -83,40 +75,40 @@ func main() {
 			return err
 		}
 	} else {
-		producer := kafka.NewProducer(strings.Split(*brokers, ","), *acceptedTopic)
+		producer := kafka.NewProducer(strings.Split(cfg.brokers, ","), cfg.acceptedTopic)
 		defer producer.Close()
 		republish = producer.Republish
 	}
-	replayer := kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group, state, republish, logger)
+	replayer := kafka.NewReplayer(strings.Split(cfg.brokers, ","), cfg.dlqTopic, cfg.acceptedTopic, cfg.group, state, republish, logger)
 	defer replayer.Close()
 	// -replay-auth-blocked is the operator-acknowledgment switch: default off
 	// holds error_code=unauthorized records blocked (pending); on re-admits
 	// them. Must be set on every replayer instance, including the -once
 	// replacement below.
-	replayer.SetReplayAuthBlocked(*replayAuthBlocked)
-	if *replayAuthBlocked {
-		if *apiURL != "" && strings.TrimSpace(*token) == "" {
+	replayer.SetReplayAuthBlocked(cfg.replayAuthBlocked)
+	if cfg.replayAuthBlocked {
+		if cfg.apiURL != "" && strings.TrimSpace(cfg.token) == "" {
 			logger.Printf("warning: -replay-auth-blocked enabled but AUDIT_OUTBOX_TOKEN is empty; HTTP-mode re-ingest will be rejected (401) and records will re-enter the DLQ each round — fix the token first")
 		}
 		logger.Printf("replay-auth-blocked enabled: unauthorized DLQ records will be re-published; ensure the ingest token is valid")
 	}
 	// -once 使用独立 group：与常驻实例共享 group 会在 rebalance 中竞争
 	// accepted partition，导致单轮扫描读不到消息（静默 replayed=0）。
-	if *once {
+	if cfg.once {
 		if err := replayer.Close(); err != nil {
 			logger.Printf("close initial replayer: %v", err)
 		}
-		replayer = kafka.NewReplayer(strings.Split(*brokers, ","), *dlqTopic, *acceptedTopic, *group+"-once", state, republish, logger)
+		replayer = kafka.NewReplayer(strings.Split(cfg.brokers, ","), cfg.dlqTopic, cfg.acceptedTopic, cfg.group+"-once", state, republish, logger)
 		defer replayer.Close()
-		replayer.SetReplayAuthBlocked(*replayAuthBlocked)
+		replayer.SetReplayAuthBlocked(cfg.replayAuthBlocked)
 	}
-	if *metricsListen != "" && !*once {
-		go serveMetrics(*metricsListen, replayer, logger)
+	if cfg.metricsListen != "" && !cfg.once {
+		go serveMetrics(cfg.metricsListen, replayer, logger)
 	}
-	logger.Printf("brokers=%s dlq_topic=%s accepted_topic=%s group=%s api_mode=%v state=%s", *brokers, *dlqTopic, *acceptedTopic, *group, *apiURL != "", *statePath)
+	logger.Printf("brokers=%s dlq_topic=%s accepted_topic=%s group=%s api_mode=%v state=%s", cfg.brokers, cfg.dlqTopic, cfg.acceptedTopic, cfg.group, cfg.apiURL != "", cfg.statePath)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if *once {
+	if cfg.once {
 		replayed, err := replayer.RunOnce(ctx)
 		if err != nil && ctx.Err() == nil {
 			logger.Fatalf("replay round: %v", err)
@@ -124,7 +116,7 @@ func main() {
 		logger.Printf("replay round done replayed=%d", replayed)
 		return
 	}
-	if err := replayer.ReplayScheduler(ctx, *interval); err != nil && ctx.Err() == nil {
+	if err := replayer.ReplayScheduler(ctx, cfg.interval); err != nil && ctx.Err() == nil {
 		logger.Fatalf("replay scheduler: %v", err)
 	}
 	logger.Printf("shutting down")
@@ -180,35 +172,4 @@ func metricsText(m kafka.ReplayerMetrics) string {
 		m.DLQRecords, m.AcceptedScanned, m.Replayed, m.Permanent,
 		m.Unresolvable, m.UnparsableMarks, m.AttemptsExhausted, m.RepublishFailures, m.Pending,
 		m.AuthBlocked, m.AuthBlockedPending, m.Malformed)
-}
-
-func envOr(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func durationEnv(name string, fallback time.Duration) time.Duration {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func intEnv(name string, fallback int) int {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }

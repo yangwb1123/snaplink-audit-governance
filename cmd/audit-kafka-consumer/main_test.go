@@ -152,6 +152,26 @@ func TestConsumerTopologyValidationUsesLibraryRules(t *testing.T) {
 	}
 }
 
+// The ingest consumer must not be routable into the projector's DLQ: nothing
+// drains that topic, so ingest failures published there would be evidence no
+// tool can recover. A guard, not a default change — the ingest default stays
+// kafka.TopicDLQ.
+func TestConsumerTopologyRejectsProjectionDLQ(t *testing.T) {
+	if err := validateConsumerTopology(kafka.TopicAccepted, kafka.TopicProjectionDLQ, "group"); err == nil {
+		t.Fatal("the ingest consumer must reject the projection DLQ")
+	} else if !strings.Contains(err.Error(), "projection") {
+		t.Fatalf("error = %v, want a diagnostic naming the projection DLQ", err)
+	}
+	if err := validateConsumerTopology(kafka.TopicAccepted, kafka.TopicDLQ, "group"); err != nil {
+		t.Fatalf("the stock ingest DLQ must stay valid: %v", err)
+	}
+	// Ordering: a disabled DLQ keeps its own diagnostic rather than the
+	// projection-collision one.
+	if err := validateConsumerTopology(kafka.TopicAccepted, "", "group"); err == nil || !strings.Contains(err.Error(), "refusing unsafe no-publisher mode") {
+		t.Fatalf("empty DLQ error = %v, want the no-publisher refusal", err)
+	}
+}
+
 func TestConsumerRejectsNonPositiveMaxAttemptsFlag(t *testing.T) {
 	output, exit := runBinary(t, "-brokers", "localhost:9092", "-max-attempts", "0")
 	if exit != 1 {

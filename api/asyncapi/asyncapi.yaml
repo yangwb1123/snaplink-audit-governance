@@ -37,6 +37,30 @@ channels:
               description: MUST equal the LedgeredEvent payload's event_id.
   dlq:
     address: audit.events.dlq.v1
+    description: >-
+      Ingest dead letters: accepted events whose retries were exhausted, or
+      which failed permanently. audit-kafka-dlq-replay drains this channel and
+      recovers each original from the accepted topic, so recovery here means
+      re-ingesting the original event.
+    messages:
+      failure:
+        $ref: '#/components/messages/Failure'
+        bindings:
+          kafka:
+            key:
+              type: string
+              description: MUST equal the Failure payload's event_id.
+  projectionDlq:
+    address: audit.events.projection.dlq.v1
+    description: >-
+      ClickHouse projection dead letters, emitted by audit-projector for
+      events on audit.events.ledgered.v1. NOT recoverable by
+      audit-kafka-dlq-replay: that tool recovers originals from the accepted
+      topic, and a projection failure's original is on the ledgered channel,
+      so replaying this channel would produce a redundant accepted re-ingest
+      or a permanent unresolvable close — never a retried projection.
+      Recovery is a projection-specific re-drive from the ledgered topic. The
+      Kafka message key MUST equal the Failure payload's event_id.
     messages:
       failure:
         $ref: '#/components/messages/Failure'
@@ -58,6 +82,10 @@ operations:
     action: send
     channel:
       $ref: '#/channels/dlq'
+  publishProjectionFailure:
+    action: send
+    channel:
+      $ref: '#/channels/projectionDlq'
 components:
   messages:
     # Deprecated compatibility alias. It is intentionally not referenced by

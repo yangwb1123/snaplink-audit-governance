@@ -117,3 +117,25 @@ make e2e-projector-permanent-dlq
 ```
 
 本机隔离依赖栈定义在 `deploy/docker-compose.verify.yml`。
+
+## Kafka topic 预创建（DLQ 分离后）
+
+两个死信 topic 的恢复语义不同，必须分别预创建，并给对应服务主体授权（生产 broker
+关闭 auto-create 时，topic 缺失会让 `Consumer.deadLetter` 发布失败、offset 不提交，
+投影管道停滞——停滞而非丢数）：
+
+```sh
+rpk topic create audit.events.dlq.v1 --partitions 1 --replicas 1               # 摄入 DLQ
+rpk topic create audit.events.projection.dlq.v1 --partitions 1 --replicas 1     # 投影 DLQ
+```
+
+发布顺序：**先建 topic 与 ACL，再滚动 `audit-projector`**。`audit-projector` 默认
+`-dlq-topic=audit.events.projection.dlq.v1`（`AUDIT_KAFKA_DLQ_TOPIC` 可覆盖）；滚动
+后其启动日志会打印 `dlq_topic="audit.events.projection.dlq.v1"`，据此确认生效。
+`audit-kafka-dlq-replay` 保持默认摄入 DLQ 与 accepted topic，无需改动。
+
+投影 DLQ 的记录**不能**用 `audit-kafka-dlq-replay` 恢复：它的原像在
+`audit.events.ledgered.v1`，而该工具只按 key 从 accepted topic 恢复原消息，喂入投影
+死信只会得到无意义的 accepted 重投或永久 unresolvable 关闭。恢复动作是从 ledgered
+topic 重新驱动投影；把 `-dlq-topic` 指向投影 DLQ（或把 consumer/replay 指向摄入
+DLQ 以外的对端地址）会在启动时 fail closed 且不建立任何 Kafka 连接。

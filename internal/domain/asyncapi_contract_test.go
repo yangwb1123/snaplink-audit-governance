@@ -50,10 +50,10 @@ func TestAsyncAPIActiveChannelCatalogAndRefs(t *testing.T) {
 			channels = append(channels, strings.TrimSpace(strings.TrimSuffix(line, ":")))
 		}
 	}
-	if strings.Join(channels, ",") != "accepted,ledgered,dlq" {
-		t.Fatalf("active channels=%v, want [accepted ledgered dlq]", channels)
+	if strings.Join(channels, ",") != "accepted,ledgered,dlq,projectionDlq" {
+		t.Fatalf("active channels=%v, want [accepted ledgered dlq projectionDlq]", channels)
 	}
-	for _, name := range []string{"  accepted:", "  ledgered:", "  dlq:"} {
+	for _, name := range []string{"  accepted:", "  ledgered:", "  dlq:", "  projectionDlq:"} {
 		if !strings.Contains(channelSection, name) {
 			t.Fatalf("active channel %q missing", strings.TrimSpace(name))
 		}
@@ -81,8 +81,19 @@ func TestAsyncAPIActiveChannelCatalogAndRefs(t *testing.T) {
 			t.Fatalf("Kafka key binding %q missing", binding)
 		}
 	}
-	if strings.Contains(spec, "publishProjection") || strings.Contains(spec, "publishArchive") {
-		t.Fatal("projection/archive operations must not be declared")
+	// The reserved projection-TASK and archive channels stay undeclared. The
+	// guard matches the exact channel names and operation names, not the
+	// "publishProjection" prefix: publishProjectionFailure (the projection
+	// dead-letter channel) is legitimately active.
+	for _, reserved := range []string{
+		"$ref: '#/channels/projection'",
+		"$ref: '#/channels/archive'",
+		"  publishProjection:",
+		"  publishArchive:",
+	} {
+		if strings.Contains(spec, reserved) {
+			t.Fatalf("reserved projection/archive declaration %q must not exist", reserved)
+		}
 	}
 	if !strings.Contains(spec, "AuditEvent:\n      deprecated: true") {
 		t.Fatal("AuditEvent compatibility alias must remain deprecated")

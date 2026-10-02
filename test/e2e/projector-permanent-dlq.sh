@@ -49,7 +49,12 @@ curl -sf -u audit:audit-local-only -X POST \
 log "ensuring Kafka topics"
 $COMPOSE exec -T redpanda rpk topic create audit.events.accepted.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
-$COMPOSE exec -T redpanda rpk topic create audit.events.dlq.v1 \
+# The projector's dead-letter topic is audit.events.projection.dlq.v1, NOT the
+# ingest DLQ: this run asserts on the projection DLQ, and pinning
+# AUDIT_KAFKA_DLQ_TOPIC=audit.events.dlq.v1 is no longer a way out (the
+# projector now fails closed on the ingest DLQ at startup). The one-off
+# container therefore keeps the default and inherits no DLQ override.
+$COMPOSE exec -T redpanda rpk topic create audit.events.projection.dlq.v1 \
   --partitions 1 --replicas 1 >/dev/null 2>&1 || true
 
 EVENT_ID="projector-perm-$(date +%s)"
@@ -99,11 +104,11 @@ if [ "$DEAD_LINES" != 1 ]; then
 fi
 log "PASS: exactly one dead-letter line, zero retry lines (single ingest attempt)"
 
-log "reading the DLQ (bounded read, H1) and asserting the Failure record"
+log "reading the projection DLQ (bounded read, H1) and asserting the Failure record"
 DLQ_OUT="$(mktemp)"
 # rpk topic consume without a bound blocks forever awaiting new messages, so
 # the whole read is wrapped in a host-side timeout and captured to a file.
-if timeout 15 $COMPOSE exec -T redpanda rpk topic consume audit.events.dlq.v1 -p 0 -o 0 >"$DLQ_OUT" 2>/dev/null; then
+if timeout 15 $COMPOSE exec -T redpanda rpk topic consume audit.events.projection.dlq.v1 -p 0 -o 0 >"$DLQ_OUT" 2>/dev/null; then
   :
 fi
 # rpk (v24.x) prints each record as a pretty-printed JSON object with the
@@ -140,7 +145,7 @@ if printf '%s\n' "$RECORD" | grep -q 'attempts_exhausted'; then
   exit 1
 fi
 rm -f "$DLQ_OUT"
-log "PASS: exactly one DLQ record with error_code=permanent_error, never attempts_exhausted"
+log "PASS: exactly one projection DLQ record with error_code=permanent_error, never attempts_exhausted"
 
 log "cleaning up the one-off projector"
 docker stop "$PROJ" >/dev/null 2>&1 || true

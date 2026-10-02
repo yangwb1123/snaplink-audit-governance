@@ -77,7 +77,7 @@ func resolveProjectorConfig(args []string, getenv func(string) string) (projecto
 	dsn := flags.String("clickhouse-dsn", envOrWith(getenv, "AUDIT_CLICKHOUSE_DSN", "clickhouse://audit:audit-local-only@localhost:19000/audit"), "ClickHouse native DSN")
 	backoff := flags.Duration("backoff", durationEnvWith(getenv, "AUDIT_KAFKA_BACKOFF", 2*time.Second), "retry backoff on projection failure")
 	maxAttempts := flags.Int("max-attempts", intEnvWith(getenv, "AUDIT_KAFKA_MAX_ATTEMPTS", 8), "max projection attempts per message before dead-lettering")
-	dlqTopic := flags.String("dlq-topic", envOrWith(getenv, "AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicDLQ), "dead-letter topic; required for durable failure evidence")
+	dlqTopic := flags.String("dlq-topic", envOrWith(getenv, "AUDIT_KAFKA_DLQ_TOPIC", kafka.TopicProjectionDLQ), "projection dead-letter topic; required for durable failure evidence")
 	if err := flags.Parse(args); err != nil {
 		return projectorConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -105,7 +105,11 @@ func effectiveSourceTopic(topic string) string {
 }
 
 func validateProjectorTopology(cfg projectorConfig) error {
-	if err := kafka.ValidateTopicTopology(cfg.sourceTopic, cfg.dlqTopic); err != nil {
+	// ValidateProjectionDLQ (not the shared ValidateTopicTopology): a
+	// projection failure's original lives on the ledgered topic, so the
+	// projector's DLQ must not be the ingest replay DLQ that recovers
+	// originals from the accepted topic.
+	if err := kafka.ValidateProjectionDLQ(cfg.sourceTopic, cfg.dlqTopic); err != nil {
 		return fmt.Errorf("invalid projector topology: %w", err)
 	}
 	if err := kafka.ValidateConsumerGroup(cfg.group); err != nil {

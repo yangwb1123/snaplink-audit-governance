@@ -31,6 +31,7 @@
 | **来源绑定（source binding）** | 来源的 `allowed_client_ids` 精确白名单；空列表只允许 `client_id == source.id`；未知/停用/越权来源同一拒绝 |
 | **自审计轨迹（AdminAction）** | append-only 管理操作记录（含读路径 `audit.event.read`/`audit.event.export`），与变更同事务原子写入 |
 | **DLQ（audit.events.dlq.v1）** | 终止重试后的失败事件隔离 topic；`Failure` 记录（event_id/error_code/error_message），含 `unparsable_message` |
+| **投影 DLQ（audit.events.projection.dlq.v1）** | 投影失败隔离 topic；原像在 ledgered topic，`audit-kafka-dlq-replay` 不适用，需从 ledgered topic 重新驱动 |
 | **DLQ 重放（audit-kafka-dlq-replay）** | 按 key 从 accepted topic 恢复原消息重发（或经 API 重新接入）；状态文件去重、瞬态失败下轮重试、永久拒绝收敛 |
 | **聚合 Checkpoint** | 对租户内全部流最新 checkpoint 的周期签名 Merkle 根（第三层证据链） |
 | **G1 模式** | 真实 IdP token 的 e2e 模式：dev auth 关闭 + JWKS 验证 + dev token 401 负向断言（B1-7） |
