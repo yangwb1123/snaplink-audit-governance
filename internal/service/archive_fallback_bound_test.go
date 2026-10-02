@@ -22,10 +22,22 @@ import (
 // counts the calls it received. It is not an *archive.FileStore or
 // *archive.S3Store, so archive.Configured reports it as configured and the
 // counter observes real fallback reads instead of short-circuiting.
+//
+// settle, when set, is a short pause AFTER the read context ends. The archive
+// fallback bound is min(archiveReadTimeout, Store.OperationTimeout()), so when
+// the shipped ceiling is above the operation bound the two derived deadlines
+// carry the SAME duration and differ only by the microseconds between
+// Store.begin and the fallback derivation. Without the pause, whether
+// Store.end observes op.ctx as already expired — i.e. whether the retryable
+// store.ErrOperationDeadline classification is applied — would be a coin flip
+// between two timer callbacks that are due at the same instant. A real remote
+// read (S3, pgx) returns slightly after its context ends; the pause reproduces
+// that shape instead of racing it.
 type countingBlockingArchive struct {
 	mu      sync.Mutex
 	gets    int
 	started chan struct{}
+	settle  time.Duration
 }
 
 func (a *countingBlockingArchive) Put(context.Context, string, []byte) error { return nil }
@@ -34,11 +46,15 @@ func (a *countingBlockingArchive) Get(ctx context.Context, _ string) ([]byte, er
 	a.mu.Lock()
 	a.gets++
 	first := a.gets == 1
+	settle := a.settle
 	a.mu.Unlock()
 	if first && a.started != nil {
 		close(a.started)
 	}
 	<-ctx.Done()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
 	return nil, ctx.Err()
 }
 
@@ -88,7 +104,7 @@ func boundTestReceipt(eventID string) domain.EventReceipt {
 func TestArchiveFallbackIsBoundedByStoreOperationTimeout(t *testing.T) {
 	t.Run("store operation timeout is the tighter bound", func(t *testing.T) {
 		withArchiveReadTimeout(t, 5*time.Second)
-		arch := &countingBlockingArchive{}
+		arch := &countingBlockingArchive{settle: 10 * time.Millisecond}
 		svc := boundTestService(t, 25*time.Millisecond, arch)
 		var readErr error
 		started := time.Now()

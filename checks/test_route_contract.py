@@ -459,6 +459,182 @@ class RouteContractTest(unittest.TestCase):
         self.assertIn("receiver method", output)
         self.assertNotIn("Traceback", output)
 
+    # -- C1/C2: the withdrawal class is extracted explicitly, not silently --
+
+    # A statusForError carrying the two caller-withdrawal arms, each returning
+    # the package-local 499 constant. Everything else is irrelevant to the
+    # extractor except that it must not bleed across arms.
+    GO_WITHDRAWAL_MAPPING = (
+        "package httpapi\n"
+        "\n"
+        "import (\n"
+        '\t"context"\n'
+        '\t"errors"\n'
+        '\t"net/http"\n'
+        ")\n"
+        "\n"
+        "const statusClientClosedRequest = 499\n"
+        "\n"
+        "func (s *Server) Handler() http.Handler {\n"
+        "\tmux := http.NewServeMux()\n"
+        '\tmux.HandleFunc("GET /api/v1/events/{eventID}", s.spanWrap(s.getEvent))\n'
+        "\treturn mux\n"
+        "}\n"
+        "\n"
+        "func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {\n"
+        "\ts.writeError(w, r, statusForError(domain.ErrNotFound), nil)\n"
+        "}\n"
+        "\n"
+        "func statusForError(err error) int {\n"
+        "\tswitch {\n"
+        "\tcase errors.Is(err, domain.ErrNotFound):\n"
+        "\t\treturn http.StatusNotFound\n"
+        "\tcase errors.Is(err, store.ErrOperationDeadline):\n"
+        "\t\treturn http.StatusServiceUnavailable\n"
+        "\tcase errors.Is(err, context.Canceled):\n"
+        "\t\treturn statusClientClosedRequest\n"
+        "\tcase errors.Is(err, context.DeadlineExceeded):\n"
+        "\t\treturn statusClientClosedRequest\n"
+        "\tdefault:\n"
+        "\t\treturn http.StatusInternalServerError\n"
+        "\t}\n"
+        "}\n"
+    )
+
+    def withdrawal_spec(self, *mappings: str) -> str:
+        """A minimal opt-in executable-contract document (x-runtime-handler
+        enables stage 4) carrying the given error-code declarations."""
+        declared = ", ".join(
+            "{ code: %s, status: %d }" % item for item in mappings
+        )
+        return (
+            "openapi: 3.1.0\n"
+            "x-contract-version: 1\n"
+            "paths:\n"
+            "  /api/v1/events/{eventId}:\n"
+            "    get:\n"
+            "      operationId: getEvent\n"
+            "      x-runtime-handler: getEvent\n"
+            "      x-required-permission: audit:event:read\n"
+            "      x-error-mappings: [%s]\n"
+            "      responses:\n"
+            "        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }\n"
+            "        '404': { $ref: '#/components/responses/Error' }\n"
+            "        '499': { $ref: '#/components/responses/Error' }\n"
+            "        '500': { $ref: '#/components/responses/Error' }\n"
+            "        '503': { $ref: '#/components/responses/Error' }\n"
+            "components:\n"
+            "  schemas:\n"
+            "    Event: { type: object }\n"
+            "    Error: { type: object }\n"
+            "  responses:\n"
+            "    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }\n"
+            % declared
+        )
+
+    WITHDRAWAL_MAPPINGS = (
+        ("not_found", 404),
+        ("store_timeout", 503),
+        ("internal_error", 500),
+        ("client_cancelled", 499),
+        ("client_deadline_exceeded", 499),
+    )
+
+    def test_withdrawal_arm_is_extracted_and_declared_passes(self):
+        """The new arms resolve through the explicit local-constant allow-list,
+        so a spec that declares them at 499 satisfies stage 4."""
+        root = self.make_tree(self.withdrawal_spec(*self.WITHDRAWAL_MAPPINGS), self.GO_WITHDRAWAL_MAPPING)
+        code, output = run_capture(run, root)
+        self.assertEqual(code, 0, output)
+
+    def test_withdrawal_code_absent_from_spec_fails(self):
+        """F3: the arms are extracted, so omitting the declaration fails loudly
+        instead of the new codes being invisible to the gate."""
+        spec = self.withdrawal_spec(
+            *(m for m in self.WITHDRAWAL_MAPPINGS if m[0] != "client_cancelled"))
+        root = self.make_tree(spec, self.GO_WITHDRAWAL_MAPPING)
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("client_cancelled", output)
+        self.assertIn("want runtime status 499", output)
+
+    def test_withdrawal_wrong_status_fails(self):
+        spec = self.withdrawal_spec(
+            ("not_found", 404), ("store_timeout", 503), ("internal_error", 500),
+            ("client_cancelled", 400), ("client_deadline_exceeded", 499))
+        root = self.make_tree(spec, self.GO_WITHDRAWAL_MAPPING)
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("client_cancelled", output)
+        self.assertIn("want runtime status 499", output)
+
+    def test_extraction_is_arm_bounded(self):
+        """C1: a sentinel arm whose body returns no status must fail loudly
+        instead of silently adopting a LATER arm's return (which would model
+        a 499-arm sentinel as 500)."""
+        go = self.GO_WITHDRAWAL_MAPPING.replace(
+            "\tcase errors.Is(err, context.Canceled):\n"
+            "\t\treturn statusClientClosedRequest\n",
+            "\tcase errors.Is(err, context.Canceled):\n",
+        )
+        root = self.make_tree(self.withdrawal_spec(*self.WITHDRAWAL_MAPPINGS), go)
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("Canceled", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_store_arm_keeps_its_own_503_next_to_the_499_arms(self):
+        """Regression: store_timeout must stay 503 even though the following
+        arms return a non-net/http constant."""
+        from checks.route_contract import _runtime_error_mappings
+        mappings = _runtime_error_mappings(self.real_withdrawal_tree())
+        self.assertEqual(mappings["store_timeout"], 503)
+        self.assertEqual(mappings["client_cancelled"], 499)
+        self.assertEqual(mappings["client_deadline_exceeded"], 499)
+
+    def real_withdrawal_tree(self) -> Path:
+        tree = tempfile.TemporaryDirectory()
+        root = Path(tree.name)
+        self.addCleanup(tree.cleanup)
+        (root / "internal" / "httpapi").mkdir(parents=True)
+        (root / "internal" / "httpapi" / "authz.go").write_text(
+            self.GO_WITHDRAWAL_MAPPING, encoding="utf-8")
+        return root
+
+    def test_comment_mentioned_sentinel_is_not_extracted(self):
+        """A sentinel named only in a comment must not create a mapping: the
+        extractor blanks comment lines before scanning."""
+        go = self.GO_WITHDRAWAL_MAPPING.replace(
+            "\tcase errors.Is(err, context.Canceled):",
+            "\t// case errors.Is(err, context.Canceled): would return 499",
+        ).replace(
+            "\t\treturn statusClientClosedRequest\n\tcase errors.Is(err, context.DeadlineExceeded):",
+            "\t// (see the withdrawn arm)\n\tcase errors.Is(err, context.DeadlineExceeded):",
+        )
+        from checks.route_contract import _runtime_error_mappings
+        mappings = _runtime_error_mappings(self.go_only_tree(go))
+        self.assertNotIn("client_cancelled", mappings)
+        self.assertEqual(mappings["client_deadline_exceeded"], 499)
+
+    def go_only_tree(self, go: str) -> Path:
+        tree = tempfile.TemporaryDirectory()
+        root = Path(tree.name)
+        self.addCleanup(tree.cleanup)
+        (root / "internal" / "httpapi").mkdir(parents=True)
+        (root / "internal" / "httpapi" / "authz.go").write_text(go, encoding="utf-8")
+        return root
+
+    def test_unmappable_local_status_constant_fails_loudly(self):
+        """H2 preserved: only statusClientClosedRequest is allow-listed. Any
+        other package-local constant still fails the gate by name."""
+        go = self.GO_WITHDRAWAL_MAPPING.replace(
+            "return statusClientClosedRequest", "return statusTeapot")
+        root = self.make_tree(self.withdrawal_spec(*self.WITHDRAWAL_MAPPINGS), go)
+        code, output = run_capture(run, root)
+        self.assertNotEqual(code, 0)
+        self.assertIn("statusTeapot", output)
+        self.assertNotIn("Traceback", output)
+
     # -- AC-4: corrected real repo passes ---------------------------------
 
     def make_real_contract_tree(self) -> Path:

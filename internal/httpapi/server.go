@@ -29,6 +29,15 @@ type Server struct {
 	ingestCount  atomic.Uint64
 	queryCount   atomic.Uint64
 
+	// Caller withdrawal (HTTP 499): context.Canceled versus a caller-context
+	// context.DeadlineExceeded that reached the transport boundary. Split
+	// into two atomic counters rather than one labelled family so the only
+	// metric label is a fixed two-value reason; a tenant, event, route or URL
+	// label would make the cardinality unbounded. Deliberately separate from
+	// errorCount: withdrawal is not an availability signal.
+	withdrawalCancelCount   atomic.Uint64
+	withdrawalDeadlineCount atomic.Uint64
+
 	// Domain-level observability counters required by the architecture plan:
 	// idempotency hits, content conflicts, quota enforcement and integrity
 	// verification outcomes.
@@ -228,6 +237,17 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "audit_http_requests_total %d\n", s.requestCount.Load())
 	fmt.Fprintf(w, "audit_http_errors_total %d\n", s.errorCount.Load())
+	// Caller withdrawal, rendered unconditionally (including 0) so the series
+	// exists from the first scrape after a deploy and the withdrawal-rate
+	// alert can never fire on a missing series. reason is a closed two-value
+	// vocabulary: "cancelled" and "deadline_exceeded" are caller-side reasons
+	// (client timeouts, scanners, load balancers) and are deliberately NOT
+	// part of audit_http_errors_total, so they never consume the error
+	// budget. Note that reason="deadline_exceeded" is a CALLER deadline and
+	// is distinct from the server-side store bound reported by
+	// audit_store_operation_deadline_exceeded_total.
+	fmt.Fprintf(w, "audit_http_request_cancelled_total{reason=\"cancelled\"} %d\n", s.withdrawalCancelCount.Load())
+	fmt.Fprintf(w, "audit_http_request_cancelled_total{reason=\"deadline_exceeded\"} %d\n", s.withdrawalDeadlineCount.Load())
 	fmt.Fprintf(w, "audit_ingest_requests_total %d\n", s.ingestCount.Load())
 	fmt.Fprintf(w, "audit_ingest_duplicates_total %d\n", s.ingestDuplicateCount.Load())
 	fmt.Fprintf(w, "audit_ingest_conflicts_total %d\n", s.ingestConflictCount.Load())

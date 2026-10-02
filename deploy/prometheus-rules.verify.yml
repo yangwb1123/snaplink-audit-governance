@@ -100,6 +100,14 @@ groups:
           summary: Audit ingest error rate above SLO budget
           description: "Ingest 5xx/error rate {{ $value }} > 1% over 5m. Check ingest and storage dependencies (SLO 99.99% / month)."
 
+      - alert: AuditClientRequestWithdrawal
+        expr: rate(audit_http_request_cancelled_total[5m]) / rate(audit_http_requests_total[5m]) > 0.05
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit API caller request withdrawal rate high
+          description: "Caller withdrawal ratio {{ $value }} > 5% over 5m on audit_http_request_cancelled_total{reason} (reason is caller-side: client timeouts, scanners, load-balancer cancellations; a withdrawn request is HTTP 499 client_cancelled / client_deadline_exceeded). This class is deliberately EXCLUDED from audit_http_errors_total and therefore from AuditIngestErrorRate and the availability error budget, so this alert is the only signal it produces. Investigate client-side timeout budgets, proxy/LB settings and scanner traffic, not the store; the 5% threshold is a FIRST-CALIBRATION PLACEHOLDER to be retuned against real load before launch."
+
       - alert: AuditDuplicateStorm
         expr: increase(audit_ingest_duplicates_total[5m]) > 10 * increase(audit_ingest_requests_total[5m])
         labels:

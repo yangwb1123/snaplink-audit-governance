@@ -98,9 +98,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 		if capErr := domain.ValidateEventCaps(event); capErr != nil {
 			receipts = append(receipts, domain.EventReceipt{})
 			partialStatus := statusForError(capErr)
-			if partialStatus >= 500 {
-				s.errorCount.Add(1)
-			}
+			s.recordOutcome(partialStatus, capErr)
 			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, capErr, r)})
 			return
 		}
@@ -117,9 +115,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 				s.ingestQuotaCount.Add(1)
 			}
 			partialStatus := statusForError(ingestErr)
-			if partialStatus >= 500 {
-				s.errorCount.Add(1)
-			}
+			s.recordOutcome(partialStatus, ingestErr)
 			writeJSON(w, partialStatus, map[string]any{"receipts": receipts, "error": errorBody(partialStatus, ingestErr, r)})
 			return
 		}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -47,6 +48,13 @@ type gateHTTPArchive struct {
 	mu         sync.Mutex
 	gets       map[string]int
 	failEvents bool
+	// entered is nil until blockUntilCancelled is called. It is the additive
+	// seam for the caller-withdrawal tests: a Get then reports that it was
+	// entered, blocks on the caller's context and returns a detail-carrying
+	// ctx.Err() wrapper, which is what makes a redaction assertion
+	// meaningful. The constructor signature is unchanged, so the three tests
+	// that use this archive keep compiling and passing.
+	entered chan struct{}
 }
 
 func newGateHTTPArchive(dir string, failEvents bool) *gateHTTPArchive {
@@ -61,11 +69,40 @@ func (a *gateHTTPArchive) Get(ctx context.Context, key string) ([]byte, error) {
 	a.mu.Lock()
 	a.gets[namespaceOf(key)]++
 	fail := a.failEvents && strings.HasPrefix(key, gateEventPrefix)
+	entered := a.entered
 	a.mu.Unlock()
 	if fail {
 		return nil, errors.New("worm event object unavailable")
 	}
-	return a.inner.Get(ctx, key)
+	if entered == nil {
+		return a.inner.Get(ctx, key)
+	}
+	// Signal before blocking so the test can cancel (or drop the socket) only
+	// once the read is genuinely in flight.
+	select {
+	case entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, fmt.Errorf("get %s: %w", key, ctx.Err())
+}
+
+// blockUntilCancelled switches this archive into the caller-withdrawal mode
+// and returns the channel that fires once per entered Get. Reads stay counted,
+// so the existing cost oracle keeps working.
+func (a *gateHTTPArchive) blockUntilCancelled() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.entered = make(chan struct{}, 8)
+	return a.entered
+}
+
+// blocked returns the channel that fires once per entered Get, or nil when the
+// archive is not in the blocking mode.
+func (a *gateHTTPArchive) blocked() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.entered
 }
 
 func (a *gateHTTPArchive) Ready(ctx context.Context) error { return a.inner.Ready(ctx) }

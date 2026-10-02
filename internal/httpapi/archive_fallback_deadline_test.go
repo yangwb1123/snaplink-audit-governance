@@ -67,10 +67,25 @@ func (a *memoryArchive) Ready(context.Context) error { return nil }
 // blackHoleArchive accepts every write and black-holes every read until its
 // context ends, which is what a lost WORM endpoint looks like to the service.
 // It counts reads so the bound's early stop is observable.
+//
+// Get pauses briefly after the context ends (see blackHoleSettle): the archive
+// fallback bound is min(archiveReadTimeout, OperationTimeout()), so the fallback
+// deadline and the store operation deadline carry the SAME duration here and
+// differ only by the microseconds between their derivation. Without the pause,
+// whether Store.end observes op.ctx as already expired — i.e. whether the
+// documented retryable store_timeout classification is applied — would be a
+// coin flip between two timer callbacks due at the same instant. A real remote
+// read returns slightly after its context ends; the pause reproduces that
+// shape instead of racing it.
 type blackHoleArchive struct {
 	mu   sync.Mutex
 	gets int
 }
+
+// blackHoleSettle is the post-deadline pause described on blackHoleArchive. It
+// is far below the 150ms operation bound, so every "bounded, not hung"
+// assertion in this file keeps its margin.
+const blackHoleSettle = 10 * time.Millisecond
 
 func (a *blackHoleArchive) Put(context.Context, string, []byte) error { return nil }
 
@@ -79,6 +94,7 @@ func (a *blackHoleArchive) Get(ctx context.Context, _ string) ([]byte, error) {
 	a.gets++
 	a.mu.Unlock()
 	<-ctx.Done()
+	time.Sleep(blackHoleSettle)
 	return nil, ctx.Err()
 }
 

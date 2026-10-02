@@ -171,8 +171,11 @@ func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*
 //	                              idempotently retryable, which is why they
 //	                              share one code.)
 //	aborted              reserved (no sentinel maps to it yet)
-//	canceled             reserved
-//	deadline_exceeded    reserved
+//	canceled             reachable (context.Canceled — the caller withdrew)
+//	deadline_exceeded    reachable (a caller-context context.DeadlineExceeded
+//	                              that reached this boundary; a deadline
+//	                              consumed inside a store operation is
+//	                              store.ErrOperationDeadline above)
 //	out_of_range         reserved
 //	unimplemented        reserved
 //	data_loss            reserved
@@ -479,6 +482,24 @@ func toStatus(err error) error {
 		// to 503 store_timeout, so gRPC uses codes.Unavailable and a fixed
 		// message instead of codes.Internal.
 		return status.Error(codes.Unavailable, storeDeadlineMessage)
+	case errors.Is(err, context.Canceled):
+		// ORDERING (load-bearing): the two caller-withdrawal arms must stay
+		// AFTER the store arms. An exhausted store bound is wrapped as
+		// fmt.Errorf("%w: %w", ErrOperationDeadline, err) with err carrying
+		// the deadline error, so it also satisfies
+		// errors.Is(err, context.DeadlineExceeded); an earlier withdrawal arm
+		// would silently turn the documented retryable Unavailable into
+		// DeadlineExceeded and stop clients retrying an unknown-outcome write.
+		//
+		// A withdrawal is the caller's own decision, not a server fault:
+		// codes.Canceled / codes.DeadlineExceeded are two of the handful of
+		// codes gRPC clients treat as caller-terminal-and-retry-at-caller's-
+		// choice, while codes.Internal is not retried at all. The HTTP
+		// boundary maps the same sentinels to 499 client_cancelled /
+		// client_deadline_exceeded.
+		return status.Error(codes.Canceled, canceledMessage)
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, deadlineExceededMessage)
 	default:
 		// Internal errors never carry the underlying text (filesystem paths,
 		// errno strings, Vault/pgx details): the detail is logged server-side
@@ -503,11 +524,30 @@ const snapshotConflictMessage = "state snapshot changed concurrently; retry the 
 // retry converges the half-completed commit.
 const storeDeadlineMessage = "store operation deadline exceeded; retry the request"
 
+// canceledMessage and deadlineExceededMessage are the fixed client-facing
+// texts for caller withdrawal. Like the two messages above they are constants
+// and never err.Error(): a wrapped cause can carry a DSN, a pgx detail, an
+// archive key or an event id, and a withdrawal is answered by nobody worth
+// telling that to. They are spelled identically to the HTTP boundary's
+// cancelledMessage / deadlineExceededMessage so the two transports cannot
+// drift; cross-transport equality is pinned by the literal assertions in
+// internal/httpapi/caller_withdrawal_mapping_test.go and
+// internal/grpcapi/caller_withdrawal_status_test.go.
+const (
+	canceledMessage         = "client cancelled the request"
+	deadlineExceededMessage = "client request deadline exceeded"
+)
+
 // statusError converts err for the client and logs the full detail of
 // internal errors server-side before the redacted status is returned.
 // An exhausted optimistic-lock conflict keeps its own log prefix: the detail
 // is preserved for operators, but a normal concurrent-writer outcome must not
 // be filed as an internal fault.
+// A caller withdrawal is deliberately neither logged as an internal fault nor
+// given backend text: toStatus returns codes.Canceled / codes.DeadlineExceeded,
+// so status.Code(converted) is not codes.Internal and no log line is emitted.
+// One scanner can withdraw thousands of requests a minute; logging each one as
+// a server error would bury the faults that matter.
 func (s *Server) statusError(err error) error {
 	converted := toStatus(err)
 	if s.Logger == nil {

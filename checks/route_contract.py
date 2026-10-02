@@ -214,6 +214,23 @@ ERROR_CODE_BY_SENTINEL = {
     # class as snapshot_conflict, so it shares the documented 503 status.
     "ErrOperationDeadline": "store_timeout",
 }
+# Caller withdrawal: the two context sentinels that reach the transport
+# boundary as themselves (the store wraps its own bound in
+# ErrOperationDeadline, so its composite never lands here). They share the
+# non-5xx 499 withdrawal class, which is deliberately outside the
+# availability error counter.
+ERROR_CODE_BY_CONTEXT_SENTINEL = {
+    "Canceled": "client_cancelled",
+    "DeadlineExceeded": "client_deadline_exceeded",
+}
+# Go defines no http.StatusClientClosedRequest (net/http has no 499, and
+# Python's http.HTTPStatus has no 499 member), so the httpapi package declares
+# its own constant (statusClientClosedRequest). The gate resolves such a
+# locally-declared status only through this explicit allow-list; anything
+# absent from it AND absent from net/http still fails loudly, so the list can
+# never degrade into "accept anything".
+LOCAL_STATUS_CONSTANTS = {"statusClientClosedRequest": 499}
+GO_HTTP_STATUS_PREFIX = "http.Status"
 
 
 def _load_openapi(root: Path) -> dict:
@@ -273,6 +290,37 @@ def _response_schema(document: dict, response: object) -> object | None:
     return None
 
 
+# Arm-bounded extraction of statusForError's sentinel mapping. The arm body
+# stops at the next `case`, the `default` arm or the closing brace, so an arm
+# can never pair with a LATER arm's return (a lazy cross-arm `.*?` was only
+# invisible while every arm returned an http.Status* literal; the withdrawal
+# arms return a locally-declared constant, which made that assumption false).
+# Comment lines are blanked first, so a sentinel merely named in prose is
+# never extracted.
+RUNTIME_MAPPING_ARM = re.compile(
+    r"case\s+errors\.Is\(err,\s*"
+    r"(?:(?P<package>domain|store)\.(?P<sentinel>Err\w+)"
+    r"|context\.(?P<context_sentinel>Canceled|DeadlineExceeded))\s*\):"
+    r"(?P<body>.*?)(?=\n\tcase\s|\n\tdefault:|\n\}|\Z)",
+    re.DOTALL,
+)
+RETURN_STATUS = re.compile(r"return\s+(?P<expression>[\w.]+)")
+
+
+def _status_expression(expression: str) -> int:
+    """Resolve a statusForError return expression to its numeric status.
+
+    net/http constants resolve through _status_code (net/http -> HTTPStatus);
+    a package-local constant resolves only through LOCAL_STATUS_CONSTANTS.
+    Anything else fails loudly naming the expression (H2), because a silently
+    skipped mapping would hide spec drift."""
+    if expression in LOCAL_STATUS_CONSTANTS:
+        return LOCAL_STATUS_CONSTANTS[expression]
+    if expression.startswith(GO_HTTP_STATUS_PREFIX):
+        return _status_code(expression[len(GO_HTTP_STATUS_PREFIX):])
+    raise RouteContractError(f"unmappable statusForError return {expression!r}")
+
+
 def _runtime_error_mappings(root: Path) -> dict[str, int]:
     """Extract statusForError's ordered sentinel mapping plus its default.
 
@@ -300,17 +348,23 @@ def _runtime_error_mappings(root: Path) -> dict[str, int]:
     if not function:
         raise RouteContractError("statusForError function is not discoverable")
     mappings: dict[str, int] = {}
-    for match in re.finditer(
-        r"case\s+errors\.Is\(err,\s*(?:domain|store)\.(Err\w+)\):"
-        r".*?return\s+http\.Status(\w+)",
-        function.group("body"),
-        re.DOTALL,
-    ):
-        sentinel, status_name = match.groups()
-        code = ERROR_CODE_BY_SENTINEL.get(sentinel)
+    for match in RUNTIME_MAPPING_ARM.finditer(_strip_line_comments(function.group("body"))):
+        sentinel = match.group("sentinel")
+        context_sentinel = match.group("context_sentinel")
+        code = (
+            ERROR_CODE_BY_CONTEXT_SENTINEL.get(context_sentinel)
+            if context_sentinel
+            else ERROR_CODE_BY_SENTINEL.get(sentinel)
+        )
         if code is None:
-            raise RouteContractError(f"unmapped statusForError sentinel {sentinel}")
-        mappings[code] = _status_code(status_name)
+            name = f"context.{context_sentinel}" if context_sentinel else sentinel
+            raise RouteContractError(f"unmapped statusForError sentinel {name}")
+        returned = RETURN_STATUS.search(match.group("body"))
+        if returned is None:
+            raise RouteContractError(
+                f"statusForError arm for {sentinel or context_sentinel} has no return status"
+            )
+        mappings[code] = _status_expression(returned.group("expression"))
     if not mappings:
         raise RouteContractError("statusForError has no discoverable sentinel mappings")
     mappings["internal_error"] = HTTPStatus.INTERNAL_SERVER_ERROR

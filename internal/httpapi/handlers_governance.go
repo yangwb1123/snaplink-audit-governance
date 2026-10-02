@@ -93,7 +93,11 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusNotFound, domain.ErrNotFound)
 			return
 		}
-		s.writeError(w, r, http.StatusInternalServerError, err)
+		// The archive read is the caller's own read: a withdrawal here is the
+		// caller's cancellation reaching the boundary, not a server fault.
+		// Any genuine archive failure still falls through statusForError's
+		// default arm to 500 internal_error with the redacted message.
+		s.writeError(w, r, statusForError(err), err)
 		return
 	}
 	// 下载完整性：绑定认证 + 摘要格式 + 摘要一致全部通过后才返回明文。
