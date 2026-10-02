@@ -5,6 +5,7 @@ package service
 // read of it is audited like any other governance fact.
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, error) {
+func (s *Service) CreateLegalHold(ctx context.Context, hold domain.LegalHold) (domain.LegalHold, error) {
 	if err := requireTenantScope(hold.TenantID); err != nil {
 		return domain.LegalHold{}, err
 	}
@@ -33,7 +34,7 @@ func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, erro
 	if hold.CreatedAt.IsZero() {
 		hold.CreatedAt = s.Now()
 	}
-	if err := s.Store.Update(func(data *store.Snapshot) error {
+	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[hold.TenantID]; !ok {
 			return domain.ErrNotFound
 		}
@@ -49,12 +50,12 @@ func (s *Service) CreateLegalHold(hold domain.LegalHold) (domain.LegalHold, erro
 	return hold, nil
 }
 
-func (s *Service) ListLegalHolds(tenantID string) ([]domain.LegalHold, error) {
+func (s *Service) ListLegalHolds(ctx context.Context, tenantID string) ([]domain.LegalHold, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
 	var result []domain.LegalHold
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, hold := range data.LegalHolds {
 			if hold.TenantID == tenantID {
 				result = append(result, hold)
@@ -66,12 +67,12 @@ func (s *Service) ListLegalHolds(tenantID string) ([]domain.LegalHold, error) {
 	return result, err
 }
 
-func (s *Service) ReleaseLegalHold(tenantID, holdID, releasedBy string) (domain.LegalHold, error) {
+func (s *Service) ReleaseLegalHold(ctx context.Context, tenantID, holdID, releasedBy string) (domain.LegalHold, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.LegalHold{}, err
 	}
 	var hold domain.LegalHold
-	if err := s.Store.Update(func(data *store.Snapshot) error {
+	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		value, ok := data.LegalHolds[holdID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound

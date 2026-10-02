@@ -65,7 +65,7 @@ func TestGRPCWriteStreamRejectsPostExpiryMessage(t *testing.T) {
 		t.Fatalf("post-expiry code=%v, want Unauthenticated (err=%v)", status.Code(err), err)
 	}
 	assertNoFramedKeys(t, st, rejected.GetEventId())
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, ok := data.Events[store.EventKey("tenant-a", accepted.GetEventId())]; !ok {
 			t.Fatal("pre-expiry event was not persisted")
 		}
@@ -145,7 +145,7 @@ func TestGRPCWriteStreamClaimsAreNotExtendedByEventFields(t *testing.T) {
 	if receipt.GetTenantId() != "tenant-a" {
 		t.Fatalf("receipt tenant=%q, want server-derived tenant-a", receipt.GetTenantId())
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		stored, ok := data.Events[store.EventKey("tenant-a", trusted.GetEventId())]
 		if !ok {
 			t.Fatal("claims-isolation event was not persisted")

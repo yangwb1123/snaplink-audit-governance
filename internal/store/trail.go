@@ -22,10 +22,10 @@ type AdminTrail interface {
 	// the trail (0 = unbounded, operator-explicit): a positive value
 	// compacts the trail to its newest trailCap facts once the bound is
 	// exceeded. An error means the fact is not persisted (fail closed).
-	AppendAdminFact(fact domain.AdminAction, trailCap int) error
+	AppendAdminFact(ctx context.Context, fact domain.AdminAction, trailCap int) error
 	// ReadAdminTrail returns trail facts newest-first (reverse append
 	// order); an empty result when the backend has no trail.
-	ReadAdminTrail() ([]domain.AdminAction, error)
+	ReadAdminTrail(ctx context.Context) ([]domain.AdminAction, error)
 }
 
 // AppendAdminFact records one read self-audit fact (audit.event.read and
@@ -39,13 +39,21 @@ type AdminTrail interface {
 // Store.Update (F-1): the fact is appended to Snapshot.AdminActions and
 // snapshotCap bounds that slice (drop-oldest) so even the fallback cannot
 // regrow it unboundedly.
-func (s *Store) AppendAdminFact(fact domain.AdminAction, snapshotCap, trailCap int) error {
+func (s *Store) AppendAdminFact(ctx context.Context, fact domain.AdminAction, snapshotCap, trailCap int) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.appendAdminFact(op.ctx, fact, snapshotCap, trailCap)
+}
+
+// appendAdminFact is AppendAdminFact's body; see Store.read for the nesting
+// rule.
+func (s *Store) appendAdminFact(ctx context.Context, fact domain.AdminAction, snapshotCap, trailCap int) error {
 	if trail, ok := s.backend.(AdminTrail); ok {
-		return trail.AppendAdminFact(fact, trailCap)
+		return trail.AppendAdminFact(ctx, fact, trailCap)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateLocked(func(data *Snapshot) error {
+	return s.updateLocked(ctx, func(data *Snapshot) error {
 		data.AdminActions = append(data.AdminActions, fact)
 		if snapshotCap > 0 && len(data.AdminActions) > snapshotCap {
 			data.AdminActions = data.AdminActions[len(data.AdminActions)-snapshotCap:]
@@ -57,9 +65,11 @@ func (s *Store) AppendAdminFact(fact domain.AdminAction, snapshotCap, trailCap i
 // ReadAdminTrail returns the read self-audit trail newest-first for the
 // merged ListAdminActions view. The trail is independent of the snapshot, so
 // this never takes Store.mu (F-2); backends without a trail report nil.
-func (s *Store) ReadAdminTrail() ([]domain.AdminAction, error) {
+func (s *Store) ReadAdminTrail(ctx context.Context) (_ []domain.AdminAction, err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
 	if trail, ok := s.backend.(AdminTrail); ok {
-		return trail.ReadAdminTrail()
+		return trail.ReadAdminTrail(op.ctx)
 	}
 	return nil, nil
 }
@@ -78,7 +88,10 @@ const trailPathSuffix = ".admin-trail.jsonl"
 // crash-atomically (tmp + fsync + rename + dir-chain sync + fd reopen,
 // F-7): the trailing fact that overflowed the bound is dropped with the
 // oldest facts.
-func (f *fileBackend) AppendAdminFact(fact domain.AdminAction, trailCap int) error {
+func (f *fileBackend) AppendAdminFact(ctx context.Context, fact domain.AdminAction, trailCap int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.path == "" {
@@ -118,7 +131,10 @@ func (f *fileBackend) AppendAdminFact(fact domain.AdminAction, trailCap int) err
 // line fails closed (the governance surface must not silently truncate
 // evidence); a truncated FINAL line (crash mid-append) is tolerated and
 // dropped (FM-6). An empty result when the trail file does not exist yet.
-func (f *fileBackend) ReadAdminTrail() ([]domain.AdminAction, error) {
+func (f *fileBackend) ReadAdminTrail(ctx context.Context) ([]domain.AdminAction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if f.path == "" {
@@ -338,10 +354,12 @@ const (
 // process; across replicas BIGSERIAL seq provides total order. The table is
 // lazily ensured once per process (F-5); trailCount is seeded with a lazy
 // count so the soft-cap check is O(1) per append (F-4).
-func (p *postgresBackend) AppendAdminFact(fact domain.AdminAction, trailCap int) error {
+func (p *postgresBackend) AppendAdminFact(ctx context.Context, fact domain.AdminAction, trailCap int) error {
 	p.trailMu.Lock()
 	defer p.trailMu.Unlock()
-	ctx := context.Background()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !p.trailEnsured {
 		if _, err := p.db.ExecContext(ctx, ensureTrailTableQuery); err != nil {
 			return fmt.Errorf("ensure admin action trail: %w", err)
@@ -372,8 +390,8 @@ func (p *postgresBackend) AppendAdminFact(fact domain.AdminAction, trailCap int)
 // between the two sources by design. A missing table (migration 005 not
 // applied) fails closed — the runbook requires 005 before rollout and readyz
 // surfaces the missing table fast (F-5).
-func (p *postgresBackend) ReadAdminTrail() ([]domain.AdminAction, error) {
-	rows, err := p.db.QueryContext(context.Background(), trailReadQuery)
+func (p *postgresBackend) ReadAdminTrail(ctx context.Context) ([]domain.AdminAction, error) {
+	rows, err := p.db.QueryContext(ctx, trailReadQuery)
 	if err != nil {
 		return nil, fmt.Errorf("read admin action trail: %w", err)
 	}

@@ -41,7 +41,7 @@ func TestGetExportDeterministicAndRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Register the standard test domain so tenant-a is known.
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,7 +51,7 @@ func TestGetExportDeterministicAndRedacted(t *testing.T) {
 	// Seed a running job directly (the terminal-write fault/recovery paths are
 	// pinned by the service-layer T1/T2/T3; here we verify the HTTP reader
 	// never sees the raw diagnostic and converges deterministically).
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[jobID] = domain.ExportJob{
 			ID:          jobID,
 			TenantID:    "tenant-a",
@@ -101,7 +101,7 @@ func TestGetExportDeterministicAndRedacted(t *testing.T) {
 	// Phase 2: converge via the exported recovery path; the job becomes failed
 	// and the error is masked. Repeated reads are deterministic.
 	svc.Config.Now = func() time.Time { return now.Add(48 * time.Hour) }
-	if _, err := svc.RecoverStuckExports("tenant-a"); err != nil {
+	if _, err := svc.RecoverStuckExports(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 

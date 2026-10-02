@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -11,8 +12,8 @@ import (
 // bounded legacy method, the paged API, and replay. Keeping the source read
 // separate lets replay retain its safety cap while HTTP clients walk large
 // timelines page by page.
-func (s *Service) operationTimelineEventsNoAudit(tenantID, operationID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+func (s *Service) operationTimelineEventsNoAudit(ctx context.Context, tenantID, operationID string) ([]domain.Event, error) {
+	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
 	if err != nil {
 		return nil, err
 	}
@@ -26,8 +27,8 @@ func (s *Service) operationTimelineEventsNoAudit(tenantID, operationID string) (
 // operationTimelineNoAudit is the un-audited core shared by the bounded
 // compatibility method and ReplayOperation, so a single replay call appends
 // exactly one fact (FR-3: no delegation path may append twice).
-func (s *Service) operationTimelineNoAudit(tenantID, operationID string) ([]domain.Event, error) {
-	events, err := s.operationTimelineEventsNoAudit(tenantID, operationID)
+func (s *Service) operationTimelineNoAudit(ctx context.Context, tenantID, operationID string) ([]domain.Event, error) {
+	events, err := s.operationTimelineEventsNoAudit(ctx, tenantID, operationID)
 	if err != nil {
 		return nil, err
 	}
@@ -39,8 +40,8 @@ func (s *Service) operationTimelineNoAudit(tenantID, operationID string) ([]doma
 
 // aggregateTimelineEventsNoAudit mirrors operationTimelineEventsNoAudit for
 // aggregates. Aggregate-version ordering is the domain order for this path.
-func (s *Service) aggregateTimelineEventsNoAudit(tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(tenantID, func(event domain.Event) bool {
+func (s *Service) aggregateTimelineEventsNoAudit(ctx context.Context, tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
+	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool {
 		return event.AggregateType == aggregateType && event.AggregateID == aggregateID
 	})
 	if err != nil {
@@ -60,8 +61,8 @@ func (s *Service) aggregateTimelineEventsNoAudit(tenantID, aggregateType, aggreg
 
 // aggregateTimelineNoAudit preserves the bounded behavior of the original
 // service method and keeps replay fail-closed for unexpectedly huge inputs.
-func (s *Service) aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
-	events, err := s.aggregateTimelineEventsNoAudit(tenantID, aggregateType, aggregateID)
+func (s *Service) aggregateTimelineNoAudit(ctx context.Context, tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
+	events, err := s.aggregateTimelineEventsNoAudit(ctx, tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +136,11 @@ func timelineCursorFor(kind, scope string, event domain.Event) domain.TimelineCu
 // OperationTimelinePage returns one deterministic operation page and records
 // exactly one read fact for the page request. A page walk therefore remains
 // auditable without exposing an unbounded response body.
-func (s *Service) OperationTimelinePage(tenantID, actor, operationID string, pageSize int, cursor string) (domain.QueryResult, error) {
+func (s *Service) OperationTimelinePage(ctx context.Context, tenantID, actor, operationID string, pageSize int, cursor string) (domain.QueryResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.operationTimelineEventsNoAudit(tenantID, operationID)
+	events, err := s.operationTimelineEventsNoAudit(ctx, tenantID, operationID)
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
@@ -147,7 +148,7 @@ func (s *Service) OperationTimelinePage(tenantID, actor, operationID string, pag
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
@@ -156,11 +157,11 @@ func (s *Service) OperationTimelinePage(tenantID, actor, operationID string, pag
 // AggregateTimelinePage is the aggregate counterpart to OperationTimelinePage.
 // Its cursor follows aggregate_version/event_id ordering, not chronological
 // occurred_at ordering used by event queries and operation timelines.
-func (s *Service) AggregateTimelinePage(tenantID, actor, aggregateType, aggregateID string, pageSize int, cursor string) (domain.QueryResult, error) {
+func (s *Service) AggregateTimelinePage(ctx context.Context, tenantID, actor, aggregateType, aggregateID string, pageSize int, cursor string) (domain.QueryResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.aggregateTimelineEventsNoAudit(tenantID, aggregateType, aggregateID)
+	events, err := s.aggregateTimelineEventsNoAudit(ctx, tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
@@ -169,37 +170,37 @@ func (s *Service) AggregateTimelinePage(tenantID, actor, aggregateType, aggregat
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
 }
 
-func (s *Service) OperationTimeline(tenantID, actor, operationID string) ([]domain.Event, error) {
+func (s *Service) OperationTimeline(ctx context.Context, tenantID, actor, operationID string) ([]domain.Event, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
-	events, err := s.operationTimelineNoAudit(tenantID, operationID)
+	events, err := s.operationTimelineNoAudit(ctx, tenantID, operationID)
 	if err != nil {
 		return nil, err
 	}
 	// Read self-audit (F-06): append-before-serve, fail-closed — a timeline
 	// read that cannot leave its governance fact is not served.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
 		return nil, err
 	}
 	return events, nil
 }
 
-func (s *Service) AggregateTimeline(tenantID, actor, aggregateType, aggregateID string) ([]domain.Event, error) {
+func (s *Service) AggregateTimeline(ctx context.Context, tenantID, actor, aggregateType, aggregateID string) ([]domain.Event, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
-	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
+	events, err := s.aggregateTimelineNoAudit(ctx, tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
 		return nil, err
 	}
 	return events, nil

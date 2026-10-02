@@ -17,9 +17,9 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) validateEvent(tenantID string, principal domain.IngestPrincipal, event domain.Event) (domain.EventSchema, error) {
+func (s *Service) validateEvent(ctx context.Context, tenantID string, principal domain.IngestPrincipal, event domain.Event) (domain.EventSchema, error) {
 	var schema domain.EventSchema
-	err := s.Store.ReadControl(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 		if !sourceAccessAllowed(data, tenantID, event.SourceSystem, principal.ClientID) {
 			return sourceAccessError()
 		}

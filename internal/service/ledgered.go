@@ -57,7 +57,7 @@ func (s *Service) publishLedgered(ctx context.Context, event domain.Event) {
 	if !s.publishLedgeredNow(ctx, event) {
 		return
 	}
-	if err := s.ackLedgered(event); err != nil {
+	if err := s.ackLedgered(ctx, event); err != nil {
 		s.logf("ledgered outbox acknowledgement failed event_id=%s error=%v", event.EventID, err)
 		return
 	}
@@ -97,9 +97,9 @@ func (s *Service) publishLedgeredNow(ctx context.Context, event domain.Event) bo
 	return true
 }
 
-func (s *Service) ackLedgered(event domain.Event) error {
+func (s *Service) ackLedgered(ctx context.Context, event domain.Event) error {
 	key := store.EventKey(event.TenantID, event.EventID)
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		delete(data.LedgeredOutbox, key)
 		return nil
 	})
@@ -121,10 +121,10 @@ const (
 )
 
 // pendingLedgeredOutbox returns the durable intents in stable key order.
-func (s *Service) pendingLedgeredOutbox() ([]string, map[string]domain.Event, error) {
+func (s *Service) pendingLedgeredOutbox(ctx context.Context) ([]string, map[string]domain.Event, error) {
 	keys := make([]string, 0, ledgeredOutboxBatchSize)
 	events := make(map[string]domain.Event, ledgeredOutboxBatchSize)
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for key, event := range data.LedgeredOutbox {
 			keys = append(keys, key)
 			events[key] = event
@@ -153,10 +153,10 @@ type ledgeredRevalidator struct {
 	failed  bool
 }
 
-func (r *ledgeredRevalidator) stillPending(key string) bool {
+func (r *ledgeredRevalidator) stillPending(ctx context.Context, key string) bool {
 	if !r.read {
 		r.read = true
-		if err := r.svc.Store.Read(func(data *store.Snapshot) error {
+		if err := r.svc.Store.Read(ctx, func(data *store.Snapshot) error {
 			r.pending = make(map[string]struct{}, len(data.LedgeredOutbox))
 			for pending := range data.LedgeredOutbox {
 				r.pending[pending] = struct{}{}
@@ -190,7 +190,7 @@ func (s *Service) flushLedgeredKey(ctx context.Context, key string, event domain
 	// Only a request-path acknowledgement can make a key in this round's
 	// snapshot stale, so the counter decides whether revalidation is needed
 	// at all.
-	if s.ledgeredRequestAcks.Load() != acksAtSnapshot && !revalidate.stillPending(key) {
+	if s.ledgeredRequestAcks.Load() != acksAtSnapshot && !revalidate.stillPending(ctx, key) {
 		return ledgeredKeySkipped, nil
 	}
 	if !s.publishLedgeredNow(ctx, event) {
@@ -203,7 +203,7 @@ func (s *Service) flushLedgeredKey(ctx context.Context, key string, event domain
 		}
 		return ledgeredKeyFailed, nil
 	}
-	if err := s.ackLedgered(event); err != nil {
+	if err := s.ackLedgered(ctx, event); err != nil {
 		return ledgeredKeyFailed, err
 	}
 	return ledgeredKeyPublished, nil
@@ -249,7 +249,7 @@ func (s *Service) FlushLedgeredOutbox(ctx context.Context, limit int) (int, erro
 	// make a key in this snapshot stale, so this is what decides whether any
 	// key needs revalidating at all.
 	acksAtSnapshot := s.ledgeredRequestAcks.Load()
-	keys, events, err := s.pendingLedgeredOutbox()
+	keys, events, err := s.pendingLedgeredOutbox(ctx)
 	if err != nil {
 		return 0, err
 	}

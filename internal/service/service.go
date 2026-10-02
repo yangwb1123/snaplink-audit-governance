@@ -269,7 +269,7 @@ func (s *Service) adminAction(tenantID, actor, action, targetType, targetID, det
 	return domain.AdminAction{ID: newID("admin"), TenantID: tenantID, Actor: actor, Action: action, TargetType: targetType, TargetID: targetID, Detail: detail, CreatedAt: s.Now()}
 }
 
-func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
+func (s *Service) CreateTenant(ctx context.Context, actor string, tenant domain.Tenant) error {
 	if strings.TrimSpace(tenant.ID) == "" || strings.TrimSpace(tenant.Name) == "" {
 		return fmt.Errorf("%w: tenant id and name are required", domain.ErrInvalid)
 	}
@@ -288,7 +288,7 @@ func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
 	if !tenant.Active {
 		tenant.Active = true
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		if _, exists := data.Tenants[tenant.ID]; exists {
 			return fmt.Errorf("%w: tenant already exists", domain.ErrConflict)
 		}
@@ -298,9 +298,9 @@ func (s *Service) CreateTenant(actor string, tenant domain.Tenant) error {
 	})
 }
 
-func (s *Service) ListTenants() ([]domain.Tenant, error) {
+func (s *Service) ListTenants(ctx context.Context) ([]domain.Tenant, error) {
 	var result []domain.Tenant
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, tenant := range data.Tenants {
 			result = append(result, tenant)
 		}
@@ -310,7 +310,7 @@ func (s *Service) ListTenants() ([]domain.Tenant, error) {
 	return result, err
 }
 
-func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error {
+func (s *Service) RegisterSchema(ctx context.Context, actor string, schema domain.EventSchema) error {
 	if err := requireTenantScope(schema.TenantID); err != nil {
 		return err
 	}
@@ -334,7 +334,7 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 	if !schema.Active {
 		schema.Active = true
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[schema.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -393,12 +393,12 @@ func (s *Service) RegisterSchema(actor string, schema domain.EventSchema) error 
 	})
 }
 
-func (s *Service) ListSchemas(tenantID string) ([]domain.EventSchema, error) {
+func (s *Service) ListSchemas(ctx context.Context, tenantID string) ([]domain.EventSchema, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
 	var result []domain.EventSchema
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, schema := range data.Schemas {
 			if schema.TenantID == tenantID {
 				result = append(result, schema)
@@ -415,7 +415,7 @@ func (s *Service) ListSchemas(tenantID string) ([]domain.EventSchema, error) {
 	return result, err
 }
 
-func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy) error {
+func (s *Service) SetRetentionPolicy(ctx context.Context, actor string, policy domain.RetentionPolicy) error {
 	if err := requireTenantScope(policy.TenantID); err != nil {
 		return err
 	}
@@ -423,7 +423,7 @@ func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy
 		policy.ArchiveDays < 0 || policy.HotDays < 0 || policy.WarmDays < 0 {
 		return fmt.Errorf("%w: invalid retention policy", domain.ErrInvalid)
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[policy.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -433,12 +433,12 @@ func (s *Service) SetRetentionPolicy(actor string, policy domain.RetentionPolicy
 	})
 }
 
-func (s *Service) GetRetentionPolicy(tenantID string) (domain.RetentionPolicy, error) {
+func (s *Service) GetRetentionPolicy(ctx context.Context, tenantID string) (domain.RetentionPolicy, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RetentionPolicy{}, err
 	}
 	var result domain.RetentionPolicy
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		policy, ok := data.Policies[tenantID]
 		if !ok {
 			return domain.ErrNotFound
@@ -449,11 +449,11 @@ func (s *Service) GetRetentionPolicy(tenantID string) (domain.RetentionPolicy, e
 	return result, err
 }
 
-func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.RetentionReport, error) {
+func (s *Service) EvaluateRetention(ctx context.Context, tenantID string, now time.Time) (domain.RetentionReport, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RetentionReport{}, err
 	}
-	policy, err := s.GetRetentionPolicy(tenantID)
+	policy, err := s.GetRetentionPolicy(ctx, tenantID)
 	if err != nil {
 		return domain.RetentionReport{}, err
 	}
@@ -463,7 +463,7 @@ func (s *Service) EvaluateRetention(tenantID string, now time.Time) (domain.Rete
 	report := domain.RetentionReport{TenantID: tenantID, EvaluatedAt: now.UTC(), Policy: policy, Action: "archive_only_immutable_ledger"}
 	cutoff := now.Add(-time.Duration(policy.ArchiveDays) * 24 * time.Hour)
 	var holds []domain.LegalHold
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		schemas := map[string]domain.EventSchema{}
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
@@ -503,6 +503,16 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	if waitFor != "" && waitFor != domain.StatusAccepted && waitFor != domain.StatusLedgered && waitFor != domain.StatusIndexed && waitFor != domain.StatusArchived {
 		return domain.EventReceipt{}, fmt.Errorf("%w: unsupported wait_for value", domain.ErrInvalid)
 	}
+	// F1: a commit that is ALREADY durable is never rolled back by caller
+	// cancellation. The ledger commit itself runs on ctx, so a context
+	// cancelled before the commit aborts the ingest promptly and records
+	// nothing; only the post-commit receipt transition runs on commitCtx,
+	// because failing that write can never undo the ledgered event — it can
+	// only leave the durable receipt at `ledgered`, which the worker
+	// converges. Cancellation stays bounded either way, by the store's own
+	// operation deadline. The store itself never strips cancellation:
+	// detachment is this caller's decision, taken once, at the F1 boundary.
+	commitCtx := context.WithoutCancel(ctx)
 	clonedEvent, err := domain.CloneEvent(event)
 	if err != nil {
 		return domain.EventReceipt{}, err
@@ -521,7 +531,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			return domain.EventReceipt{}, err
 		}
 	}
-	resolvedTenant, err := s.resolveIngestTenant(tenantHint, principal.ClientID, event.SourceSystem)
+	resolvedTenant, err := s.resolveIngestTenant(ctx, tenantHint, principal.ClientID, event.SourceSystem)
 	if err != nil {
 		return domain.EventReceipt{}, err
 	}
@@ -545,7 +555,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	// never participate in stream resolution, StreamKey, storage, hashing,
 	// segment sealing or archive keys. stream_id is a read/query filter only.
 	event.StreamID = ""
-	if err := s.checkTenantAndQuota(tenantID); err != nil {
+	if err := s.checkTenantAndQuota(ctx, tenantID); err != nil {
 		return domain.EventReceipt{}, err
 	}
 	event.TenantID = tenantID
@@ -557,7 +567,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 		return domain.EventReceipt{}, err
 	}
 	event.SourceDigest = sourceDigest
-	schema, err := s.validateEvent(tenantID, principal, event)
+	schema, err := s.validateEvent(ctx, tenantID, principal, event)
 	if err != nil {
 		return domain.EventReceipt{}, err
 	}
@@ -574,10 +584,10 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 	// being part of the ledger).
 	var sealedSegments []domain.Segment
 	committedEvent := event
-	if s.Store.HotCold() {
+	if s.Store.HotCold(ctx) {
 		committedEvent, receipt, sealedSegments, err = s.ingestTenant(ctx, tenantHint, principal, tenantID, event, inputDigest)
 	} else {
-		err = s.Store.Update(func(data *store.Snapshot) error {
+		err = s.Store.Update(commitCtx, func(data *store.Snapshot) error {
 			sealedSegments = sealedSegments[:0]
 			commitTenant, accessErr := resolveIngestTenantFromData(data, tenantHint, principal.ClientID, event.SourceSystem)
 			if accessErr != nil || commitTenant != tenantID {
@@ -688,7 +698,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			}
 		}
 		if len(archiveErrors) == 0 {
-			updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusArchived, true)
+			updated, err := s.transitionReceipt(commitCtx, tenantID, event.EventID, domain.StatusArchived, true)
 			if err != nil {
 				// Durability boundary (store.go Update): the status write is
 				// save-or-nothing, so a failed transition must not be reported.
@@ -701,7 +711,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			}
 			receipt = updated
 		} else {
-			updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusIndexed, false)
+			updated, err := s.transitionReceipt(commitCtx, tenantID, event.EventID, domain.StatusIndexed, false)
 			if err != nil {
 				return receipt, err
 			}
@@ -711,7 +721,7 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, principal domain.
 			}
 		}
 	} else {
-		updated, err := s.transitionReceipt(tenantID, event.EventID, domain.StatusIndexed, false)
+		updated, err := s.transitionReceipt(commitCtx, tenantID, event.EventID, domain.StatusIndexed, false)
 		if err != nil {
 			return receipt, err
 		}
@@ -753,12 +763,12 @@ func conflictReceipt(tenantID string, event domain.Event) domain.EventReceipt {
 	}
 }
 
-func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventReceipt, error) {
+func (s *Service) GetReceipt(ctx context.Context, tenantID, actor, eventID string) (domain.EventReceipt, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.EventReceipt{}, err
 	}
 	var receipt domain.EventReceipt
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		value, ok := data.Receipts[store.EventKey(tenantID, eventID)]
 		if !ok {
 			return domain.ErrNotFound
@@ -773,18 +783,18 @@ func (s *Service) GetReceipt(tenantID, actor, eventID string) (domain.EventRecei
 	// appends one audit.event.read fact in the service layer (no transport
 	// can bypass it); a failed append fails the read closed, mirroring
 	// GetEvent/QueryEvents.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
 		return domain.EventReceipt{}, err
 	}
 	return receipt, nil
 }
 
-func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error) {
+func (s *Service) GetEvent(ctx context.Context, tenantID, actor, eventID string) (domain.Event, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.Event{}, err
 	}
 	var event domain.Event
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
 		event, resolveErr = s.eventFromSnapshot(context.Background(), data, tenantID, eventID)
 		return resolveErr
@@ -795,7 +805,7 @@ func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error
 	// Read self-audit (F-06): every event read is a governance fact appended
 	// to the append-only admin trail. The append happens in the service layer
 	// so no transport can bypass it; a failed append fails the read closed.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
 		return domain.Event{}, err
 	}
 	return event, nil
@@ -808,14 +818,14 @@ func (s *Service) GetEvent(tenantID, actor, eventID string) (domain.Event, error
 // facts never rewrite the control-plane snapshot (the direction's core
 // defect); the trail is append-only with no Store.mu, so reads stop blocking
 // ingests (design F-2).
-func (s *Service) recordReadAction(tenantID, actor, action, targetType, targetID, detail string) error {
+func (s *Service) recordReadAction(ctx context.Context, tenantID, actor, action, targetType, targetID, detail string) error {
 	if actor == "" {
 		return nil
 	}
-	return s.Store.AppendAdminFact(s.adminAction(tenantID, actor, action, targetType, targetID, detail), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
+	return s.Store.AppendAdminFact(ctx, s.adminAction(tenantID, actor, action, targetType, targetID, detail), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
 }
 
-func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
+func (s *Service) QueryEvents(ctx context.Context, tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
@@ -836,7 +846,7 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 	}
 	var events []domain.Event
 	schemas := map[string]domain.EventSchema{}
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
 		}
@@ -880,20 +890,20 @@ func (s *Service) QueryEvents(tenantID, actor string, query domain.Query) (domai
 	// Read self-audit (F-06): the query itself is a governance fact. The
 	// append happens in the service layer (every transport shares this
 	// method); a failed append fails the query closed.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "query", "", fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
 }
 
-func (s *Service) Operation(tenantID, actor, operationID string) (domain.OperationSummary, error) {
+func (s *Service) Operation(ctx context.Context, tenantID, actor, operationID string) (domain.OperationSummary, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.OperationSummary{}, err
 	}
 	if operationID == "" {
 		return domain.OperationSummary{}, fmt.Errorf("%w: operation_id is required", domain.ErrInvalid)
 	}
-	events, err := s.eventsFor(tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
 	if err != nil {
 		return domain.OperationSummary{}, err
 	}
@@ -914,32 +924,32 @@ func (s *Service) Operation(tenantID, actor, operationID string) (domain.Operati
 	// it appends one audit.event.read fact in the service layer (no transport
 	// can bypass it), fail-closed like GetEvent/QueryEvents. Encoding matches
 	// the sibling operation facts: (operation, id, timeline|replay|summary).
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "summary"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "summary"); err != nil {
 		return domain.OperationSummary{}, err
 	}
 	return domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[len(events)-1].OccurredAt, Outcomes: outcomes}, nil
 }
 
-func (s *Service) ReplayOperation(tenantID, actor, operationID string) (domain.ReplayResult, error) {
+func (s *Service) ReplayOperation(ctx context.Context, tenantID, actor, operationID string) (domain.ReplayResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ReplayResult{}, err
 	}
-	events, err := s.operationTimelineNoAudit(tenantID, operationID)
+	events, err := s.operationTimelineNoAudit(ctx, tenantID, operationID)
 	if err != nil {
 		return domain.ReplayResult{}, err
 	}
 	result := replay(events, tenantID, operationID, "")
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "replay"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "replay"); err != nil {
 		return domain.ReplayResult{}, err
 	}
 	return result, nil
 }
 
-func (s *Service) ReplayAggregate(tenantID, actor, aggregateType, aggregateID string) (domain.ReplayResult, error) {
+func (s *Service) ReplayAggregate(ctx context.Context, tenantID, actor, aggregateType, aggregateID string) (domain.ReplayResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ReplayResult{}, err
 	}
-	events, err := s.aggregateTimelineNoAudit(tenantID, aggregateType, aggregateID)
+	events, err := s.aggregateTimelineNoAudit(ctx, tenantID, aggregateType, aggregateID)
 	if err != nil {
 		return domain.ReplayResult{}, err
 	}
@@ -947,15 +957,15 @@ func (s *Service) ReplayAggregate(tenantID, actor, aggregateType, aggregateID st
 	// D-ReplayAggregate: zero production callers today; appends exactly one
 	// fact so the "every event-content read leaves exactly one fact"
 	// invariant holds for this method too (pinned by T-D1).
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, "replay"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, "replay"); err != nil {
 		return domain.ReplayResult{}, err
 	}
 	return result, nil
 }
 
-func (s *Service) checkTenantAndQuota(tenantID string) error {
+func (s *Service) checkTenantAndQuota(ctx context.Context, tenantID string) error {
 	var tenant domain.Tenant
-	if err := s.Store.ReadControl(func(data *store.Snapshot) error {
+	if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 		var ok bool
 		tenant, ok = data.Tenants[tenantID]
 		if !ok || !tenant.Active {

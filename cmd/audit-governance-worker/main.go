@@ -191,14 +191,14 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		logger.Printf("store_not_ready=%v", err)
 		return
 	}
-	tenants, listErr := svc.ListTenants()
+	tenants, listErr := svc.ListTenants(ctx)
 	if listErr != nil {
 		logger.Printf("list tenants: %v", listErr)
 		return
 	}
 	archiveReady := probeArchiveReady(svc.Config.Archive, logger) == nil
 	for _, tenant := range tenants {
-		if resumed, resumeErr := svc.ResumePendingExports(tenant.ID); resumeErr != nil {
+		if resumed, resumeErr := svc.ResumePendingExports(ctx, tenant.ID); resumeErr != nil {
 			logger.Printf("tenant=%s pending_export_resume_error=%v", tenant.ID, resumeErr)
 		} else {
 			logger.Printf("tenant=%s pending_exports_resumed=%d", tenant.ID, resumed)
@@ -207,7 +207,7 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		// it performs no archive I/O, so it behaves identically whether or not
 		// the readiness probe passed. The line is emitted unconditionally on
 		// success (including =0) so operators can confirm the step ran.
-		if recovered, recErr := svc.RecoverStuckExports(tenant.ID); recErr != nil {
+		if recovered, recErr := svc.RecoverStuckExports(ctx, tenant.ID); recErr != nil {
 			logger.Printf("tenant=%s export_recovery_error=%v", tenant.ID, recErr)
 		} else {
 			logger.Printf("tenant=%s stuck_exports_recovered=%d", tenant.ID, recovered)
@@ -221,15 +221,15 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		if !archiveReady {
 			logger.Printf("tenant=%s archive_skipped=ready_probe_failed", tenant.ID)
 		} else if archived, archiveErr := svc.ArchivePending(ctx, tenant.ID); archiveErr != nil {
-			handleArchiveError(logger, svc, tenant.ID, archived, archiveErr)
+			handleArchiveError(ctx, logger, svc, tenant.ID, archived, archiveErr)
 		} else {
 			// Dead-lettered objects are a handled outcome, not a pass error:
 			// log the outstanding count so operators see the FM-1/F-2 state
 			// on the normal success line (ListDeadLetters lists them).
-			deadLetters, _ := svc.ListDeadLetters(tenant.ID)
+			deadLetters, _ := svc.ListDeadLetters(ctx, tenant.ID)
 			logger.Printf("tenant=%s archived=%d dead_lettered=%d", tenant.ID, archived, len(deadLetters))
 		}
-		report, reportErr := svc.EvaluateRetention(tenant.ID, time.Time{})
+		report, reportErr := svc.EvaluateRetention(ctx, tenant.ID, time.Time{})
 		if reportErr != nil {
 			logger.Printf("tenant=%s retention_error=%v", tenant.ID, reportErr)
 		} else {
@@ -276,13 +276,13 @@ func probeArchiveReady(store archive.Store, logger *log.Logger) error {
 // logged separately and never masks the pass error) so the exhaustion
 // survives restarts and is queryable after the fact; the next successful
 // pass resets it inside its atomic batch commit.
-func handleArchiveError(logger *log.Logger, svc *service.Service, tenantID string, archived int, archiveErr error) {
+func handleArchiveError(ctx context.Context, logger *log.Logger, svc *service.Service, tenantID string, archived int, archiveErr error) {
 	if errors.Is(archiveErr, store.ErrSnapshotConflict) {
-		if recErr := svc.RecordArchivePassConflict(tenantID); recErr != nil {
+		if recErr := svc.RecordArchivePassConflict(ctx, tenantID); recErr != nil {
 			logger.Printf("tenant=%s archive_conflict_record_error=%v", tenantID, recErr)
 		}
 	}
-	failures, _ := svc.ArchivePassConflictFailures(tenantID)
+	failures, _ := svc.ArchivePassConflictFailures(ctx, tenantID)
 	logger.Printf("tenant=%s archive_error=%v archived=%d conflict_failures=%d", tenantID, archiveErr, archived, failures)
 }
 
@@ -301,13 +301,26 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 		if err != nil {
 			return nil, err
 		}
+		// Unset pool knobs make no setter call, so the shipped pool is
+		// unchanged unless an operator asks for one. Same helper, same
+		// variables as audit-api (internal/runtimeconfig/postgres_pool.go).
+		if err := runtimeconfig.ApplyPostgresPoolConfigFromEnv(db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := db.PingContext(ctx); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
-		st, err := store.OpenPostgres(db)
+		operationTimeout, err := runtimeconfig.ResolveStoreOperationTimeout(store.DefaultOperationTimeout)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		logger.Printf("store_operation_timeout=%s", operationTimeout)
+		st, err := store.OpenPostgresWithOptions(db, store.Options{OperationTimeout: operationTimeout})
 		if err != nil {
 			_ = db.Close()
 			return nil, err
@@ -322,7 +335,12 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 		return st, nil
 	}
 	logger.Printf("state_backend=file path=%s", statePath)
-	return store.Open(statePath)
+	operationTimeout, err := runtimeconfig.ResolveStoreOperationTimeout(store.DefaultOperationTimeout)
+	if err != nil {
+		return nil, err
+	}
+	logger.Printf("store_operation_timeout=%s", operationTimeout)
+	return store.OpenWithOptions(statePath, store.Options{OperationTimeout: operationTimeout})
 }
 
 func envOr(name, fallback string) string {

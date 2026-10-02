@@ -106,19 +106,19 @@ func (b *switchableBackend) setPanicOnSave(v bool) {
 	b.panicOnSave = v
 }
 
-func (b *switchableBackend) Load() (*store.Snapshot, error) {
+func (b *switchableBackend) Load(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return cloneSnapshot(b.snapshot), nil
 }
 
-func (b *switchableBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *switchableBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return cloneSnapshot(b.snapshot), nil
 }
 
-func (b *switchableBackend) Save(data *store.Snapshot) error {
+func (b *switchableBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.panicOnSave {
@@ -180,13 +180,13 @@ func TestRecoveryEndToEndStoreBackendPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, listener := newProductionHarness(t, logger, func(srv *grpc.Server) {

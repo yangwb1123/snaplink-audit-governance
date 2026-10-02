@@ -20,7 +20,7 @@ func TestIngestRejectsOutOfRangeOccurredAtMutationFree(t *testing.T) {
 	at := time.Unix(1_700_000_010, 0).UTC()
 	counts := func() (events, receipts, streams, segments, checkpoints, actions int) {
 		t.Helper()
-		if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 			events = len(data.Events)
 			receipts = len(data.Receipts)
 			streams = len(data.Streams)

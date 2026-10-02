@@ -51,16 +51,16 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "erp", Name: "ERP", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "erp", Name: "ERP", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	listener := bufconn.Listen(1024 * 1024)
@@ -98,7 +98,7 @@ func TestWriteAndBatchOverGRPC(t *testing.T) {
 	if aggregateReceipt.GetStreamId() != "tenant-a:aggregate:invoice:inv-1" {
 		t.Fatalf("aggregate-derived stream mismatch: %+v", aggregateReceipt)
 	}
-	ledgered, err := svc.GetEvent("tenant-a", "test", "grpc-evt-1")
+	ledgered, err := svc.GetEvent(testCtx, "tenant-a", "test", "grpc-evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestGRPCWriteBatchNilActor(t *testing.T) {
 		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
 	assertNoFramedKeys(t, st, nilActor.GetEventId(), validC.GetEventId())
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", validA.GetEventId())]; !exists {
 			t.Fatal("valid batch prefix was not persisted")
 		}
@@ -221,7 +221,7 @@ func TestGRPCWriteStreamNilActor(t *testing.T) {
 		t.Fatalf("WriteStream code=%v, want InvalidArgument termination", status.Code(err))
 	}
 	assertNoFramedKeys(t, st, nilActor.GetEventId())
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
 			t.Fatal("valid stream event was not persisted")
 		}
@@ -312,13 +312,13 @@ func newGRPCJWTHarness(t *testing.T) (*store.Store, auditv1.IngestClient) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	listener := bufconn.Listen(1024 * 1024)
@@ -493,13 +493,13 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	// plane, and writing them through a fault-injecting backend would consume
 	// the very Save calls the fixture asserts on.
 	if !opts.seeded {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -526,7 +526,7 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 // event/source ids were never persisted.
 func assertNoFramedKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for name, keys := range map[string][]string{
 			"Events":         keysOf(data.Events),
 			"Streams":        keysOf(data.Streams),
@@ -658,7 +658,7 @@ func TestGRPCRejectedConversionDoesNotMutatePersistence(t *testing.T) {
 	}
 	assertNoFramedKeys(t, st, rejected...)
 
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, id := range []string{
 			witness.GetEventId(),
 			prefix.GetEventId(),
@@ -750,7 +750,7 @@ func TestGRPCRejectsKeyFramingEventInvalidArgument(t *testing.T) {
 	// The valid prefix from the aborted batch IS in the ledger (committed
 	// before the invalid tail aborted the loop) — partial acceptance, same
 	// as HTTP's partial-status semantics.
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-ok-1")]; !exists {
 			t.Fatal("valid batch prefix was not ledgered before the abort")
 		}
@@ -775,13 +775,13 @@ func TestWriteRedactsStoreFailureEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	// Make every v2 persistence tier unwritable: a hot/cold UpdateTenant may
@@ -923,7 +923,7 @@ func TestGRPCRejectsTrailingJSONPayload(t *testing.T) {
 	if receipt.GetEventId() != "grpc-trail-ok" {
 		t.Fatalf("negative control receipt: %+v", receipt)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-trail-ok")]; !exists {
 			t.Fatal("negative control event was not ledgered")
 		}
@@ -948,13 +948,13 @@ func newHTTPIngestLeg(t *testing.T) (*httptest.Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(httpapi.NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
@@ -991,7 +991,7 @@ func parityHTTPEvent(eventID string, payload map[string]any) domain.Event {
 func storedDigest(t *testing.T, st *store.Store, eventID string) string {
 	t.Helper()
 	var digest string
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		event, exists := data.Events[store.EventKey("tenant-a", eventID)]
 		if !exists {
 			t.Fatalf("event %q was never ledgered", eventID)
@@ -1176,7 +1176,7 @@ func TestFromProtoRejectsOversizedEnvelope(t *testing.T) {
 	if receipt.GetEventId() != "grpc-boundary-max" {
 		t.Fatalf("boundary receipt: %+v", receipt)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-boundary-max")]; !exists {
 			t.Fatal("boundary event was not ledgered")
 		}
@@ -1209,7 +1209,7 @@ func TestGRPCRejectsOverCapBatch(t *testing.T) {
 	if len(response.GetReceipts()) != 0 {
 		t.Fatalf("wire receipts=%d, want 0", len(response.GetReceipts()))
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for i := 0; i < MaxBatchEvents+1; i++ {
 			if _, exists := data.Events[store.EventKey("tenant-a", fmt.Sprintf("grpc-over-batch-%d", i))]; exists {
 				t.Fatalf("over-cap batch event %d was persisted (partial commit)", i)
@@ -1235,7 +1235,7 @@ func TestGRPCRejectsOverCapBatch(t *testing.T) {
 	for i, outcome := range response.GetOutcomes() {
 		assertBatchOutcome(t, outcome, i, fmt.Sprintf("grpc-max-batch-%d", i), auditv1.WriteBatchOutcome_COMMITTED, "", true)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for i := 0; i < MaxBatchEvents; i++ {
 			if _, exists := data.Events[store.EventKey("tenant-a", fmt.Sprintf("grpc-max-batch-%d", i))]; !exists {
 				t.Fatalf("boundary batch event %d missing", i)
@@ -1299,7 +1299,7 @@ func TestGRPCWriteStreamOverCapContinues(t *testing.T) {
 		t.Fatalf("accepted message logged as rejection: %q", logged.String())
 	}
 
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-stream-over-"+strings.Repeat("e", 80))]; exists {
 			t.Fatal("over-cap stream event was persisted")
 		}
@@ -1339,7 +1339,7 @@ func TestGRPCWriteStreamOverCapNilLogger(t *testing.T) {
 	if _, err := stream.Recv(); err != io.EOF {
 		t.Fatalf("close err=%v, want io.EOF", err)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-nolog-over")]; exists {
 			t.Fatal("over-cap stream event was persisted")
 		}
@@ -1374,7 +1374,7 @@ func TestGRPCWriteStreamSkipThenNonSizeTerminates(t *testing.T) {
 	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("stream termination code=%v, want InvalidArgument (skip must not swallow non-size errors)", status.Code(err))
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-skip-then-bad")]; exists {
 			t.Fatal("over-cap stream event was persisted")
 		}
@@ -1448,7 +1448,7 @@ func TestGRPCBatchOverCapMemberPartialCommit(t *testing.T) {
 	if response.GetOutcomes()[1].GetStatus() != auditv1.WriteBatchOutcome_REJECTED || response.GetOutcomes()[1].GetRejectionCode() != "invalid_argument" || response.GetOutcomes()[2].GetStatus() != auditv1.WriteBatchOutcome_NOT_ATTEMPTED {
 		t.Fatalf("unexpected batch outcomes: %v", response.GetOutcomes())
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-partial-a")]; !exists {
 			t.Fatal("valid batch prefix was not ledgered before the abort")
 		}

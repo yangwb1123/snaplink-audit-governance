@@ -44,16 +44,16 @@ SET snapshot = $1::jsonb, version = version + 1, updated_at = now()
 WHERE id = 1 AND version = $2`
 )
 
-func (p *postgresBackend) Load() (*Snapshot, error) {
-	data, _, err := p.load()
+func (p *postgresBackend) Load(ctx context.Context) (*Snapshot, error) {
+	data, _, err := p.load(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return data, nil
 	}
 	return data, err
 }
 
-func (p *postgresBackend) LoadForUpdate() (*Snapshot, error) {
-	data, version, err := p.load()
+func (p *postgresBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
+	data, version, err := p.load(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// No row: keep the previous baseline, exactly like the pre-split
@@ -71,11 +71,11 @@ func (p *postgresBackend) LoadForUpdate() (*Snapshot, error) {
 // load reads the snapshot row without touching any backend state. A missing
 // row yields an empty snapshot plus sql.ErrNoRows so each caller decides
 // whether the optimistic-lock baseline changes.
-func (p *postgresBackend) load() (*Snapshot, int64, error) {
+func (p *postgresBackend) load(ctx context.Context) (*Snapshot, int64, error) {
 	data := NewSnapshot()
 	var encoded []byte
 	var version int64
-	err := p.db.QueryRow(snapshotLoadQuery).Scan(&encoded, &version)
+	err := p.db.QueryRowContext(ctx, snapshotLoadQuery).Scan(&encoded, &version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return data, 0, err
@@ -164,7 +164,7 @@ func (p *postgresBackend) Ready(ctx context.Context) error {
 	return nil
 }
 
-func (p *postgresBackend) Save(data *Snapshot) error {
+func (p *postgresBackend) Save(ctx context.Context, data *Snapshot) error {
 	copyData, err := cloneSnapshot(data)
 	if err != nil {
 		return err
@@ -177,7 +177,7 @@ func (p *postgresBackend) Save(data *Snapshot) error {
 		// Row does not exist yet from our point of view. Creating it is only
 		// safe if we win the insert; a concurrent initializer means our
 		// empty-state snapshot must not overwrite its data.
-		result, err := p.db.Exec(snapshotInsertQuery)
+		result, err := p.db.ExecContext(ctx, snapshotInsertQuery)
 		if err != nil {
 			return fmt.Errorf("ensure state snapshot row: %w", err)
 		}
@@ -190,7 +190,7 @@ func (p *postgresBackend) Save(data *Snapshot) error {
 		}
 		p.lastVersion = 1
 	}
-	result, err := p.db.Exec(snapshotUpdateQuery, string(encoded), p.lastVersion)
+	result, err := p.db.ExecContext(ctx, snapshotUpdateQuery, string(encoded), p.lastVersion)
 	if err != nil {
 		return fmt.Errorf("save state snapshot: %w", err)
 	}

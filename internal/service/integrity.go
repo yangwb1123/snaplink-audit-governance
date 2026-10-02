@@ -21,7 +21,7 @@ func (s *Service) CreateAggregateCheckpoint(ctx context.Context, tenantID string
 		return err
 	}
 	now := s.Now()
-	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+	return s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
 		refs, err := aggregateCheckpointRefs(data, tenantID)
 		if err != nil {
 			return false, err
@@ -73,6 +73,23 @@ func isInterrupted(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// verificationInterrupted narrows isInterrupted to "the verification never
+// reached a verdict" for the two store-backed steps of VerifyIntegrity.
+//
+// A store operation that exhausted its OWN deadline (store.ErrOperationDeadline,
+// which wraps context.DeadlineExceeded) is deliberately excluded: that is the
+// retryable store_timeout class, and turning it into a quiet Valid=false
+// report would hide the very saturation this direction makes observable. Only
+// a caller-side cancellation — the caller withdrew, so there is no result to
+// report — is reported as an interrupted verification, preserving REQ-3:
+// fail-closed Valid=false, no signature-mismatch fact, and no endpoint error.
+func verificationInterrupted(err error) bool {
+	if errors.Is(err, store.ErrOperationDeadline) {
+		return false
+	}
+	return isInterrupted(err)
+}
+
 func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID string) (IntegrityResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return IntegrityResult{}, err
@@ -100,7 +117,7 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	var aggregateCheckpoints []domain.AggregateCheckpoint
 	var checkpoints map[string][]domain.Checkpoint
 	schemas := map[string]domain.EventSchema{}
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
 		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
 			return streamID == "" || event.StreamID == streamID
@@ -131,6 +148,11 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 		return nil
 	})
 	if err != nil {
+		if verificationInterrupted(err) {
+			result.Valid = false
+			result.Errors = append(result.Errors, "verification interrupted")
+			return result, nil
+		}
 		return result, err
 	}
 	result.EventCount = len(events)
@@ -223,7 +245,15 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	// Read self-audit (F-06): the verification itself is a governance fact.
 	// It is appended regardless of result.Valid — the fact documents the
 	// read, not the verdict (FM-6). A failed append fails the verify closed.
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "integrity", streamID, "verify"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "integrity", streamID, "verify"); err != nil {
+		// A caller that withdrew mid-verification cannot be reported to, so
+		// the read fact is not lost silently: the interruption is recorded as
+		// such. A store deadline is NOT swallowed (see verificationInterrupted).
+		if verificationInterrupted(err) {
+			result.Valid = false
+			result.Errors = append(result.Errors, "verification interrupted")
+			return result, nil
+		}
 		return result, err
 	}
 	return result, nil

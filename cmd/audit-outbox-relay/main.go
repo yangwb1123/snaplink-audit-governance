@@ -17,6 +17,7 @@ import (
 
 	"github.com/snaplink/audit-governance/internal/kafka"
 	"github.com/snaplink/audit-governance/internal/outbox"
+	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 )
 
 func main() {
@@ -42,6 +43,11 @@ func main() {
 		logger.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
+	// The same operator-configured pool knobs as the API and the worker
+	// (internal/runtimeconfig/postgres_pool.go); unset means no setter call.
+	if err := runtimeconfig.ApplyPostgresPoolConfigFromEnv(db); err != nil {
+		logger.Fatalf("database pool: %v", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := db.PingContext(ctx); err != nil {

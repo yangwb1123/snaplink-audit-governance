@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,11 +39,11 @@ func TestTrailAppendReadRoundTrip(t *testing.T) {
 	}
 	facts := trailFacts(3)
 	for _, fact := range facts {
-		if err := st.AppendAdminFact(fact, 100, 100); err != nil {
+		if err := st.AppendAdminFact(testCtx, fact, 100, 100); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	got, err := st.ReadAdminTrail()
+	got, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +90,11 @@ func TestTrailCompactionKeepsNewest(t *testing.T) {
 		}
 		facts := trailFacts(7)
 		for _, fact := range facts {
-			if err := st.AppendAdminFact(fact, 100, 3); err != nil {
+			if err := st.AppendAdminFact(testCtx, fact, 100, 3); err != nil {
 				t.Fatalf("append: %v", err)
 			}
 		}
-		got, err := st.ReadAdminTrail()
+		got, err := st.ReadAdminTrail(testCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +115,7 @@ func TestTrailCompactionKeepsNewest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got2, err := st2.ReadAdminTrail()
+		got2, err := st2.ReadAdminTrail(testCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,11 +130,11 @@ func TestTrailCompactionKeepsNewest(t *testing.T) {
 		}
 		facts := trailFacts(7)
 		for _, fact := range facts {
-			if err := st.AppendAdminFact(fact, 100, 3); err != nil {
+			if err := st.AppendAdminFact(testCtx, fact, 100, 3); err != nil {
 				t.Fatalf("append: %v", err)
 			}
 		}
-		got, err := st.ReadAdminTrail()
+		got, err := st.ReadAdminTrail(testCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +155,7 @@ func TestTrailReadFailsClosedOnCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, fact := range trailFacts(2) {
-		if err := st.AppendAdminFact(fact, 100, 100); err != nil {
+		if err := st.AppendAdminFact(testCtx, fact, 100, 100); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -172,7 +173,7 @@ func TestTrailReadFailsClosedOnCorruption(t *testing.T) {
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
-		got, err := st.ReadAdminTrail()
+		got, err := st.ReadAdminTrail(testCtx)
 		if err != nil {
 			t.Fatalf("truncated final line must be tolerated, got %v", err)
 		}
@@ -195,7 +196,7 @@ func TestTrailReadFailsClosedOnCorruption(t *testing.T) {
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.ReadAdminTrail(); err == nil {
+		if _, err := st.ReadAdminTrail(testCtx); err == nil {
 			t.Fatal("malformed non-final line must fail the read")
 		}
 	})
@@ -215,18 +216,18 @@ type countingTrailBackend struct {
 	appendErr error
 }
 
-func (b *countingTrailBackend) Load() (*Snapshot, error) { return b.snap, nil }
-func (b *countingTrailBackend) LoadForUpdate() (*Snapshot, error) {
+func (b *countingTrailBackend) Load(ctx context.Context) (*Snapshot, error) { return b.snap, nil }
+func (b *countingTrailBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
 	return cloneSnapshot(b.snap)
 }
-func (b *countingTrailBackend) Save(data *Snapshot) error {
+func (b *countingTrailBackend) Save(ctx context.Context, data *Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.saves++
 	b.snap = data
 	return nil
 }
-func (b *countingTrailBackend) AppendAdminFact(fact domain.AdminAction, _ int) error {
+func (b *countingTrailBackend) AppendAdminFact(ctx context.Context, fact domain.AdminAction, _ int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.appendErr != nil {
@@ -236,7 +237,7 @@ func (b *countingTrailBackend) AppendAdminFact(fact domain.AdminAction, _ int) e
 	b.trail = append(b.trail, fact)
 	return nil
 }
-func (b *countingTrailBackend) ReadAdminTrail() ([]domain.AdminAction, error) {
+func (b *countingTrailBackend) ReadAdminTrail(ctx context.Context) ([]domain.AdminAction, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]domain.AdminAction, len(b.trail))
@@ -251,7 +252,7 @@ func TestAppendAdminFactIsolation(t *testing.T) {
 	st := NewWithBackend(backend)
 	facts := trailFacts(5)
 	for _, fact := range facts {
-		if err := st.AppendAdminFact(fact, 100, 100); err != nil {
+		if err := st.AppendAdminFact(testCtx, fact, 100, 100); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -271,11 +272,11 @@ func TestAppendAdminFactIsolation(t *testing.T) {
 func TestTrailAppendFailClosesRead(t *testing.T) {
 	backend := &countingTrailBackend{snap: NewSnapshot(), appendErr: errors.New("trail full")}
 	st := NewWithBackend(backend)
-	err := st.AppendAdminFact(trailFact("x"), 100, 100)
+	err := st.AppendAdminFact(testCtx, trailFact("x"), 100, 100)
 	if !errors.Is(err, backend.appendErr) {
 		t.Fatalf("append err=%v, want %v", err, backend.appendErr)
 	}
-	trail, err := st.ReadAdminTrail()
+	trail, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,13 +297,13 @@ type scriptedFallbackBackend struct {
 	saveErr   error
 }
 
-func (b *scriptedFallbackBackend) Load() (*Snapshot, error) { return b.data, nil }
+func (b *scriptedFallbackBackend) Load(ctx context.Context) (*Snapshot, error) { return b.data, nil }
 
-func (b *scriptedFallbackBackend) LoadForUpdate() (*Snapshot, error) {
+func (b *scriptedFallbackBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
 	return cloneSnapshot(b.data)
 }
 
-func (b *scriptedFallbackBackend) Save(data *Snapshot) error {
+func (b *scriptedFallbackBackend) Save(ctx context.Context, data *Snapshot) error {
 	b.saves++
 	if b.saveErr != nil {
 		return b.saveErr
@@ -322,7 +323,7 @@ func TestAppendAdminFactFallbackPreservesConflictRetries(t *testing.T) {
 	backend := &scriptedFallbackBackend{data: NewSnapshot(), conflicts: 2}
 	st := NewWithBackend(backend)
 	fact := trailFact("conflict")
-	if err := st.AppendAdminFact(fact, 100, 100); err != nil {
+	if err := st.AppendAdminFact(testCtx, fact, 100, 100); err != nil {
 		t.Fatalf("fallback append = %v, want nil", err)
 	}
 	if backend.saves != 3 {
@@ -339,7 +340,7 @@ func TestAppendAdminFactFallbackPreservesConflictRetries(t *testing.T) {
 func TestAppendAdminFactFallbackSurfacesSaveErr(t *testing.T) {
 	backend := &scriptedFallbackBackend{data: NewSnapshot(), saveErr: errors.New("storage unavailable")}
 	st := NewWithBackend(backend)
-	err := st.AppendAdminFact(trailFact("fail"), 100, 100)
+	err := st.AppendAdminFact(testCtx, trailFact("fail"), 100, 100)
 	if !errors.Is(err, backend.saveErr) {
 		t.Fatalf("fallback err=%v, want %v", err, backend.saveErr)
 	}
@@ -359,7 +360,7 @@ func TestAppendAdminFactFallbackBoundedBySnapshotCap(t *testing.T) {
 	st := NewWithBackend(backend)
 	facts := trailFacts(7)
 	for _, fact := range facts {
-		if err := st.AppendAdminFact(fact, 3, 100); err != nil {
+		if err := st.AppendAdminFact(testCtx, fact, 3, 100); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -384,11 +385,11 @@ func TestAppendAdminFactDoesNotHoldStoreLock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 20; i++ {
-			_ = st.AppendAdminFact(trailFact("x"), 100, 100)
+			_ = st.AppendAdminFact(testCtx, trailFact("x"), 100, 100)
 		}
 		close(done)
 	}()
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return nil
 	}); err != nil {
@@ -407,7 +408,7 @@ func TestAppendAdminFactDoesNotHoldStoreLock(t *testing.T) {
 func TestReadAdminTrailEmptyWhenCapabilityAbsent(t *testing.T) {
 	backend := &scriptedFallbackBackend{data: NewSnapshot()}
 	st := NewWithBackend(backend)
-	trail, err := st.ReadAdminTrail()
+	trail, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +428,7 @@ func TestPostgresTrailAppendDoesNotBumpSnapshotVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT version FROM audit_state_snapshot WHERE id = 1`).Scan(&versionBefore); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AppendAdminFact(trailFact("pg-1"), 100, 100); err != nil {
+	if err := st.AppendAdminFact(testCtx, trailFact("pg-1"), 100, 100); err != nil {
 		t.Fatalf("trail append: %v", err)
 	}
 	versionAfter := 0
@@ -444,7 +445,7 @@ func TestPostgresTrailAppendDoesNotBumpSnapshotVersion(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("trail rows=%d, want 1", rows)
 	}
-	got, err := st.ReadAdminTrail()
+	got, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +460,7 @@ func TestPostgresTrailCompactionWatermark(t *testing.T) {
 	db := newPostgresTestDB(t)
 	st := seedTenant(t, db)
 	for _, fact := range trailFacts(7) {
-		if err := st.AppendAdminFact(fact, 100, 3); err != nil {
+		if err := st.AppendAdminFact(testCtx, fact, 100, 3); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -470,7 +471,7 @@ func TestPostgresTrailCompactionWatermark(t *testing.T) {
 	if rows != 3 {
 		t.Fatalf("trail rows=%d, want 3 (compacted)", rows)
 	}
-	got, err := st.ReadAdminTrail()
+	got, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

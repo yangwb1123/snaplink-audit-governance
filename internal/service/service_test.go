@@ -57,13 +57,13 @@ func testService(t *testing.T, archive bool) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc
@@ -177,7 +177,7 @@ func TestIngestBindsSourceToAuthenticatedClient(t *testing.T) {
 
 func TestUpdateSourceReplacesClientAllowList(t *testing.T) {
 	svc := testService(t, false)
-	updated, err := svc.UpdateSource("test", domain.SourceSystem{
+	updated, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{
 		TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true,
 		AllowedClientIDs: []string{"relay-b", "relay-a"},
 	})
@@ -198,16 +198,16 @@ func TestUpdateSourceReplacesClientAllowList(t *testing.T) {
 
 func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{
 		TenantID: "tenant-b", ID: "crm", Name: "CRM B", Active: true,
 		AllowedClientIDs: []string{"tenant-b-relay"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	event := testEvent("derived-tenant", "derive-op", time.Unix(1_700_000_010, 0).UTC())
@@ -232,7 +232,7 @@ func TestIngestDerivesTenantFromUniqueServerSideSourceBinding(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-b", crmPrincipal, crossTenant, domain.StatusLedgered); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("signed tenant hint escaped source binding: %v", err)
 	}
-	if _, err := svc.UpdateSource("test", domain.SourceSystem{
+	if _, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{
 		TenantID: "tenant-b", ID: "crm", Name: "CRM B", Active: true,
 		AllowedClientIDs: []string{"crm", "tenant-b-relay"},
 	}); err != nil {
@@ -256,29 +256,29 @@ func TestQueryReplayAndExport(t *testing.T) {
 		}
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(10 * time.Second), PageSize: 2}
-	page, err := svc.QueryEvents("tenant-a", "test", query)
+	page, err := svc.QueryEvents(testCtx, "tenant-a", "test", query)
 	if err != nil || len(page.Items) != 2 || page.NextCursor == "" {
 		t.Fatalf("unexpected first page: %+v %v", page, err)
 	}
 	query.Cursor = page.NextCursor
-	page2, err := svc.QueryEvents("tenant-a", "test", query)
+	page2, err := svc.QueryEvents(testCtx, "tenant-a", "test", query)
 	if err != nil || len(page2.Items) != 1 {
 		t.Fatalf("unexpected second page: %+v %v", page2, err)
 	}
-	replay, err := svc.ReplayOperation("tenant-a", "", "op-query")
+	replay, err := svc.ReplayOperation(testCtx, "tenant-a", "", "op-query")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replay.State["status"] != "closed" {
 		t.Fatalf("unexpected replay state: %+v", replay.State)
 	}
-	job, err := svc.CreateExport("tenant-a", "user-1", domain.Query{From: at.Add(-time.Second), To: at.Add(10 * time.Second), PageSize: 1})
+	job, err := svc.CreateExport(testCtx, "tenant-a", "user-1", domain.Query{From: at.Add(-time.Second), To: at.Add(10 * time.Second), PageSize: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		job, err = svc.GetExport("tenant-a", job.ID)
+		job, err = svc.GetExport(testCtx, "tenant-a", job.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -300,10 +300,10 @@ func TestQueryReplayAndExport(t *testing.T) {
 func TestCreateExportRequiresTenantScope(t *testing.T) {
 	svc := testService(t, false)
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_010, 0).UTC()}
-	if _, err := svc.CreateExport("", "platform-admin", query); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.CreateExport(testCtx, "", "platform-admin", query); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("CreateExport(\"\") err=%v, want domain.ErrInvalid", err)
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.Exports) != 0 {
 			t.Fatalf("empty-scope export persisted %d job(s), want 0", len(data.Exports))
 		}
@@ -326,7 +326,7 @@ func TestQueryEventsChronologicalAcrossStreams(t *testing.T) {
 	t0 := time.Unix(1_700_000_200, 0).UTC()
 	seedChronologyFixture(t, svc, t0)
 	query := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second)}
-	result, err := svc.QueryEvents("tenant-a", "test", query)
+	result, err := svc.QueryEvents(testCtx, "tenant-a", "test", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestQueryEventsChronologicalAcrossStreams(t *testing.T) {
 	}
 	// Positive control: the same query restricted to one stream keeps the
 	// chronological order.
-	filtered, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: query.From, To: query.To, StreamID: "tenant-a:aggregate:invoice:agg-1"})
+	filtered, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: query.From, To: query.To, StreamID: "tenant-a:aggregate:invoice:agg-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestQueryEventsCursorReproducesSet(t *testing.T) {
 	t0 := time.Unix(1_700_000_200, 0).UTC()
 	seedChronologyFixture(t, svc, t0)
 	base := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second)}
-	reference, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, PageSize: 1000})
+	reference, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: base.From, To: base.To, PageSize: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestQueryEventsCursorReproducesSet(t *testing.T) {
 	walk := domain.Query{From: base.From, To: base.To, PageSize: 2}
 	var collected []string
 	for pages := 0; pages < 100; pages++ {
-		page, err := svc.QueryEvents("tenant-a", "test", walk)
+		page, err := svc.QueryEvents(testCtx, "tenant-a", "test", walk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -417,12 +417,12 @@ func TestQueryEventsCursorReproducesSet(t *testing.T) {
 	legacyCursor := domain.EncodeCursor(domain.Cursor{Sequence: 1, EventID: "evt-x", Legacy: true})
 	bad := walk
 	bad.Cursor = legacyCursor
-	if _, err := svc.QueryEvents("tenant-a", "test", bad); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "predates chronological ordering") {
+	if _, err := svc.QueryEvents(testCtx, "tenant-a", "test", bad); !errors.Is(err, domain.ErrInvalid) || !strings.Contains(err.Error(), "predates chronological ordering") {
 		t.Fatalf("legacy cursor must fail closed, got %v", err)
 	}
 	garbage := walk
 	garbage.Cursor = "not-a-cursor"
-	if _, err := svc.QueryEvents("tenant-a", "test", garbage); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.QueryEvents(testCtx, "tenant-a", "test", garbage); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("garbage cursor must fail closed, got %v", err)
 	}
 }
@@ -432,14 +432,14 @@ func TestTimelinePagesReproduceOperationAndAggregateOrder(t *testing.T) {
 	t0 := time.Unix(1_700_000_200, 0).UTC()
 	seedChronologyFixture(t, svc, t0)
 
-	operationPage, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", 1, "")
+	operationPage, err := svc.OperationTimelinePage(testCtx, "tenant-a", "", "op-agg-1", 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if operationPage.Count != 2 || len(operationPage.Items) != 1 || operationPage.Items[0].EventID != "A1" || operationPage.NextCursor == "" {
 		t.Fatalf("unexpected operation page: %+v", operationPage)
 	}
-	operationNext, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", 1, operationPage.NextCursor)
+	operationNext, err := svc.OperationTimelinePage(testCtx, "tenant-a", "", "op-agg-1", 1, operationPage.NextCursor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,24 +447,24 @@ func TestTimelinePagesReproduceOperationAndAggregateOrder(t *testing.T) {
 		t.Fatalf("unexpected operation continuation: %+v", operationNext)
 	}
 
-	aggregatePage, err := svc.AggregateTimelinePage("tenant-a", "", "invoice", "agg-1", 1, "")
+	aggregatePage, err := svc.AggregateTimelinePage(testCtx, "tenant-a", "", "invoice", "agg-1", 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if aggregatePage.Count != 2 || len(aggregatePage.Items) != 1 || aggregatePage.Items[0].EventID != "A1" || aggregatePage.NextCursor == "" {
 		t.Fatalf("unexpected aggregate page: %+v", aggregatePage)
 	}
-	aggregateNext, err := svc.AggregateTimelinePage("tenant-a", "", "invoice", "agg-1", 1, aggregatePage.NextCursor)
+	aggregateNext, err := svc.AggregateTimelinePage(testCtx, "tenant-a", "", "invoice", "agg-1", 1, aggregatePage.NextCursor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(aggregateNext.Items) != 1 || aggregateNext.Items[0].EventID != "A2" || aggregateNext.NextCursor != "" {
 		t.Fatalf("unexpected aggregate continuation: %+v", aggregateNext)
 	}
-	if _, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-2", 1, operationPage.NextCursor); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.OperationTimelinePage(testCtx, "tenant-a", "", "op-agg-2", 1, operationPage.NextCursor); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("operation cursor reused across scopes must fail closed: %v", err)
 	}
-	if _, err := svc.OperationTimelinePage("tenant-a", "", "op-agg-1", domain.MaxPageSize+1, ""); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.OperationTimelinePage(testCtx, "tenant-a", "", "op-agg-1", domain.MaxPageSize+1, ""); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("oversized timeline page must fail closed: %v", err)
 	}
 }
@@ -478,14 +478,14 @@ func TestExportMatchesQueryEventsOrder(t *testing.T) {
 	t0 := time.Unix(1_700_000_200, 0).UTC()
 	seedChronologyFixture(t, svc, t0)
 	query := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second), PageSize: 3}
-	page1, err := svc.QueryEvents("tenant-a", "test", query)
+	page1, err := svc.QueryEvents(testCtx, "tenant-a", "test", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page1.Items) != 3 || page1.NextCursor == "" {
 		t.Fatalf("page1=%+v", page1)
 	}
-	job, err := svc.CreateExport("tenant-a", "user-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "user-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestExportMatchesQueryEventsOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reference, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: query.From, To: query.To, PageSize: 1000})
+	reference, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: query.From, To: query.To, PageSize: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestSensitivePayloadRejected(t *testing.T) {
 
 func TestRetentionReportRespectsLegalHold(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.SetRetentionPolicy("test", domain.RetentionPolicy{TenantID: "tenant-a", ArchiveDays: 1, RetentionClass: "standard"}); err != nil {
+	if err := svc.SetRetentionPolicy(testCtx, "test", domain.RetentionPolicy{TenantID: "tenant-a", ArchiveDays: 1, RetentionClass: "standard"}); err != nil {
 		t.Fatal(err)
 	}
 	event := testEvent("evt-old", "op-old", time.Now().Add(-72*time.Hour).UTC())
@@ -564,11 +564,11 @@ func TestRetentionReportRespectsLegalHold(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, securityEvent, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation"})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := svc.EvaluateRetention("tenant-a", time.Now().UTC())
+	report, err := svc.EvaluateRetention(testCtx, "tenant-a", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestRetentionReportRespectsLegalHold(t *testing.T) {
 
 func TestRetentionPolicyRequiresAClass(t *testing.T) {
 	svc := testService(t, false)
-	err := svc.SetRetentionPolicy("test", domain.RetentionPolicy{TenantID: "tenant-a", ArchiveDays: 30})
+	err := svc.SetRetentionPolicy(testCtx, "test", domain.RetentionPolicy{TenantID: "tenant-a", ArchiveDays: 30})
 	if !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("empty retention class error=%v", err)
 	}
@@ -596,13 +596,13 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("persisted", "op-persisted", time.Unix(1_700_000_010, 0).UTC()), domain.StatusLedgered); err != nil {
@@ -622,7 +622,7 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := reopenedService.GetEvent("tenant-a", "test", "persisted")
+	event, err := reopenedService.GetEvent(testCtx, "tenant-a", "test", "persisted")
 	if err != nil || event.Hash == "" {
 		t.Fatalf("persisted event missing: %+v %v", event, err)
 	}
@@ -630,7 +630,7 @@ func TestStateSurvivesStoreReopen(t *testing.T) {
 
 func TestSchemaCompatibilityRejectsRemovedRequiredField(t *testing.T) {
 	svc := testService(t, false)
-	err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"different"}})
+	err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"different"}})
 	if err == nil || !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("expected incompatible schema rejection, got %v", err)
 	}
@@ -638,7 +638,7 @@ func TestSchemaCompatibilityRejectsRemovedRequiredField(t *testing.T) {
 
 func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email"}, EncryptedFields: []string{"email"}, SearchableFields: []string{"email"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email"}, EncryptedFields: []string{"email"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
 	event := testEvent("evt-encrypted", "op-encrypted", time.Now().UTC())
@@ -648,7 +648,7 @@ func TestSensitiveFieldsAreEncryptedWithoutBreakingIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "test", "evt-encrypted")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "evt-encrypted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +732,7 @@ func TestIngestStripsClientStreamID(t *testing.T) {
 			if receipt.StreamID != tc.expected {
 				t.Fatalf("receipt stream=%q want %q", receipt.StreamID, tc.expected)
 			}
-			stored, err := svc.GetEvent("tenant-a", "crm", "evt-1")
+			stored, err := svc.GetEvent(testCtx, "tenant-a", "crm", "evt-1")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -793,7 +793,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +810,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 	}
 	var prevHash string
 	for i := 0; i < n; i++ {
-		stored, err := svc.GetEvent("tenant-a", "crm", fmt.Sprintf("evt-%d", i))
+		stored, err := svc.GetEvent(testCtx, "tenant-a", "crm", fmt.Sprintf("evt-%d", i))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -872,7 +872,7 @@ func TestIngestDuplicateWithCraftedStreamID(t *testing.T) {
 	if receipt.StreamID != "tenant-a:aggregate:invoice:inv-1" {
 		t.Fatalf("receipt stream=%q want derived tenant-a:aggregate:invoice:inv-1", receipt.StreamID)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +894,7 @@ func TestIngestTenantMismatchPrecedesStreamStrip(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, e, domain.StatusLedgered); !errors.Is(err, domain.ErrTenantMismatch) {
 		t.Fatalf("expected ErrTenantMismatch, got %v", err)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,11 +914,11 @@ func TestArchivePendingRetriesIndexedEvents(t *testing.T) {
 	// against the default unconfigured FileStore, so the receipt is
 	// StatusIndexed and ArchivePending must retry it.
 	svc.Config.Archive = &archive.FileStore{Dir: filepath.Join(t.TempDir(), "archive")}
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
+	receipt, err := svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}
@@ -965,11 +965,11 @@ func TestIngestArchiveMismatchStaysIndexedAndRetries(t *testing.T) {
 	if err := os.Remove(archivePath); err != nil {
 		t.Fatal(err)
 	}
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err = svc.GetReceipt("tenant-a", "", event.EventID)
+	receipt, err = svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived after retry: %+v %v", receipt, err)
 	}
@@ -1019,11 +1019,11 @@ func TestArchivePendingWithS3OnlyConfig(t *testing.T) {
 		t.Fatalf("ingest with failing archive must stay indexed: %+v", receipt)
 	}
 	archiveStub.fail = false
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("pending archive failed: count=%d err=%v", count, err)
 	}
-	receipt, err = svc.GetReceipt("tenant-a", "", event.EventID)
+	receipt, err = svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived {
 		t.Fatalf("receipt was not archived: %+v %v", receipt, err)
 	}
@@ -1035,7 +1035,7 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-restore", "op-restore", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "user error"}, "requester-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "user error"}, "requester-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1044,14 +1044,14 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 	}
 
 	// 分离职责：创建者不能审批或拒绝自己的请求。
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("same actor approve err=%v, want forbidden", err)
 	}
-	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.RejectRestore(testCtx, "tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("same actor reject err=%v, want forbidden", err)
 	}
 
-	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
+	approved, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "approver-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1060,25 +1060,25 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 	}
 
 	// 已批准后重复审批或拒绝都是状态冲突。
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("double approve err=%v, want conflict", err)
 	}
-	if _, err := svc.RejectRestore("tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
+	if _, err := svc.RejectRestore(testCtx, "tenant-a", run.ID, "approver-2"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("reject after approve err=%v, want conflict", err)
 	}
 	// 已决 run 上创建者审批 → 409 优先于 403（Conflict 支配 Forbidden）。
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrConflict) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("same actor approve on decided run err=%v, want conflict", err)
 	}
 
-	run2, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "duplicate entry"}, "requester-2")
+	run2, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "duplicate entry"}, "requester-2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RejectRestore("tenant-a", run2.ID, "requester-2"); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.RejectRestore(testCtx, "tenant-a", run2.ID, "requester-2"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("same actor reject err=%v, want forbidden", err)
 	}
-	rejected, err := svc.RejectRestore("tenant-a", run2.ID, "approver-3")
+	rejected, err := svc.RejectRestore(testCtx, "tenant-a", run2.ID, "approver-3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1088,13 +1088,13 @@ func TestRestoreApprovalWorkflow(t *testing.T) {
 
 	// 租户边界与缺失目标都关闭为 not found；跨租户的创建者审批同样
 	// 被 404 掩盖（NotFound 优先于 Forbidden）。
-	if _, err := svc.ApproveRestore("tenant-b", run.ID, "approver-1"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-b", run.ID, "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross tenant approve err=%v, want not found", err)
 	}
-	if _, err := svc.ApproveRestore("tenant-b", run.ID, "requester-1"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-b", run.ID, "requester-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross tenant same actor approve err=%v, want not found", err)
 	}
-	if _, err := svc.ApproveRestore("tenant-a", "restore-nope", "approver-1"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", "restore-nope", "approver-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing run err=%v, want not found", err)
 	}
 }
@@ -1107,28 +1107,28 @@ func TestRestoreApprovalSeparationOfDutiesRefusalIsAtomic(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-sod", "op-sod", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-sod", Reason: "rollback"}, "requester-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-sod", Reason: "rollback"}, "requester-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := svc.ListAdminActions("tenant-a", false, 100)
+	before, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("same actor approve err=%v, want forbidden", err)
 	}
-	if _, err := svc.RejectRestore("tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.RejectRestore(testCtx, "tenant-a", run.ID, "requester-1"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("same actor reject err=%v, want forbidden", err)
 	}
-	after, err := svc.ListAdminActions("tenant-a", false, 100)
+	after, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(after) != len(before) {
 		t.Fatalf("refused decision wrote admin action: %d → %d", len(before), len(after))
 	}
-	approved, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1")
+	approved, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "approver-1")
 	if err != nil {
 		t.Fatalf("distinct actor approve after refusal failed: %v", err)
 	}
@@ -1145,7 +1145,7 @@ func TestRestoreApprovalConcurrentDistinctActors(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-race", "op-race", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race", Reason: "rollback"}, "requester-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-race", Reason: "rollback"}, "requester-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1153,7 +1153,7 @@ func TestRestoreApprovalConcurrentDistinctActors(t *testing.T) {
 	errs := make(chan error, 2)
 	decide := func(actor string) {
 		<-start
-		_, err := svc.ApproveRestore("tenant-a", run.ID, actor)
+		_, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, actor)
 		errs <- err
 	}
 	go decide("approver-1")
@@ -1183,7 +1183,7 @@ func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-race2", "op-race2", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-race2", Reason: "rollback"}, "requester-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-race2", Reason: "rollback"}, "requester-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1192,7 +1192,7 @@ func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		go func() {
 			<-start
-			_, err := svc.ApproveRestore("tenant-a", run.ID, "requester-1")
+			_, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "requester-1")
 			errs <- err
 		}()
 	}
@@ -1202,7 +1202,7 @@ func TestRestoreApprovalConcurrentSameActor(t *testing.T) {
 			t.Fatalf("same-actor race error = %v, want forbidden", err)
 		}
 	}
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1"); err != nil {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "approver-1"); err != nil {
 		t.Fatalf("distinct actor after same-actor race failed: %v", err)
 	}
 }
@@ -1230,14 +1230,14 @@ func TestQueryCorrelationDimensions(t *testing.T) {
 	}
 
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
-	byCorrelation, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, CorrelationID: "corr-outer", PageSize: 100})
+	byCorrelation, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: base.From, To: base.To, CorrelationID: "corr-outer", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if byCorrelation.Count != 2 {
 		t.Fatalf("correlation query count=%d, want 2", byCorrelation.Count)
 	}
-	byCausation, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, CausationID: "corr-evt-1", PageSize: 100})
+	byCausation, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: base.From, To: base.To, CausationID: "corr-evt-1", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1248,7 +1248,7 @@ func TestQueryCorrelationDimensions(t *testing.T) {
 
 func TestAdminActionSelfAudit(t *testing.T) {
 	svc := testService(t, false)
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1257,18 +1257,18 @@ func TestAdminActionSelfAudit(t *testing.T) {
 		t.Fatalf("initial admin actions=%d, want 3", len(actions))
 	}
 
-	if err := svc.SetRetentionPolicy("admin-1", domain.RetentionPolicy{TenantID: "tenant-a", HotDays: 30, WarmDays: 90, ArchiveDays: 365, RetentionClass: "standard"}); err != nil {
+	if err := svc.SetRetentionPolicy(testCtx, "admin-1", domain.RetentionPolicy{TenantID: "tenant-a", HotDays: 30, WarmDays: 90, ArchiveDays: 365, RetentionClass: "standard"}); err != nil {
 		t.Fatal(err)
 	}
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "litigation", CreatedBy: "compliance-1"})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "litigation", CreatedBy: "compliance-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ReleaseLegalHold("tenant-a", hold.ID, "compliance-2"); err != nil {
+	if _, err := svc.ReleaseLegalHold(testCtx, "tenant-a", hold.ID, "compliance-2"); err != nil {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	exportJob, err := svc.CreateExport("tenant-a", "compliance-3", query)
+	exportJob, err := svc.CreateExport(testCtx, "tenant-a", "compliance-3", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1279,15 +1279,15 @@ func TestAdminActionSelfAudit(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("audit-evt", "op-audit", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-audit", Reason: "rollback"}, "requester-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-audit", Reason: "rollback"}, "requester-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ApproveRestore("tenant-a", run.ID, "approver-1"); err != nil {
+	if _, err := svc.ApproveRestore(testCtx, "tenant-a", run.ID, "approver-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	actions, err = svc.ListAdminActions("tenant-a", false, 100)
+	actions, err = svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1307,7 +1307,7 @@ func TestAdminActionSelfAudit(t *testing.T) {
 	}
 
 	// 租户边界：tenant-b 看不到 tenant-a 的动作。
-	other, err := svc.ListAdminActions("tenant-b", false, 100)
+	other, err := svc.ListAdminActions(testCtx, "tenant-b", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1315,7 +1315,7 @@ func TestAdminActionSelfAudit(t *testing.T) {
 		t.Fatalf("cross tenant actions leaked: %d", len(other))
 	}
 	// 平台视角可见全部（含 audit 事件写入不产生管理动作，Ingest 无自审计）。
-	platform, err := svc.ListAdminActions("", true, 100)
+	platform, err := svc.ListAdminActions(testCtx, "", true, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1334,10 +1334,10 @@ func TestSourceAccessFailClosedSameError(t *testing.T) {
 		return event
 	}
 	// 停用来源：先创建再禁用（AddSource 强制启用，UpdateSource 可停用）。
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: false}); err != nil {
+	if _, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "disabled", Name: "Disabled", Active: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1377,7 +1377,7 @@ func TestQueryStreamIDFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC(), PageSize: 100}
-	filtered, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: base.From, To: base.To, StreamID: "tenant-a:aggregate:invoice:inv-9", PageSize: 100})
+	filtered, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: base.From, To: base.To, StreamID: "tenant-a:aggregate:invoice:inv-9", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1393,14 +1393,14 @@ func TestExportEncryptedAndDecryptable(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 等待异步导出完成。
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		current, getErr := svc.GetExport("tenant-a", job.ID)
+		current, getErr := svc.GetExport(testCtx, "tenant-a", job.ID)
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -1446,7 +1446,7 @@ func waitExportCompleted(t *testing.T, svc *Service, jobID string) domain.Export
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		current, getErr := svc.GetExport("tenant-a", jobID)
+		current, getErr := svc.GetExport(testCtx, "tenant-a", jobID)
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -1476,11 +1476,11 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	jobA, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	jobA, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	jobB, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1500,7 +1500,7 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 
 	// Happy path: the job's own blob verifies, and the returned plaintext is
 	// the full decrypted slice (single full-buffer compare, AC-2 ordering).
-	plainA, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedA)
+	plainA, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, sealedA)
 	if err != nil {
 		t.Fatalf("legit verify failed: %v", err)
 	}
@@ -1511,13 +1511,13 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 	// Tampered ciphertext (F9): flip a byte inside the sealed body.
 	tampered := append([]byte(nil), sealedA...)
 	tampered[len(tampered)/2] ^= 0x01
-	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, tampered); err == nil {
+	if plain, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, tampered); err == nil {
 		t.Fatalf("tampered blob must fail, got plaintext %q", plain)
 	}
 
 	// v2 swap (F8): job B's blob is sealed under B's binding — opening it
 	// against job A must fail GCM authentication.
-	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedB); err == nil {
+	if plain, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, sealedB); err == nil {
 		t.Fatalf("swapped v2 blob must fail, got plaintext %q", plain)
 	}
 
@@ -1527,7 +1527,7 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, v1Swap); err == nil {
+	if plain, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, v1Swap); err == nil {
 		t.Fatalf("swapped v1 blob must fail, got plaintext %q", plain)
 	}
 
@@ -1537,12 +1537,12 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, resealed); err == nil {
+	if plain, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, resealed); err == nil {
 		t.Fatalf("digest mismatch must fail, got plaintext %q", plain)
 	}
 
 	// Empty/malformed stored digest (F11): fail-closed format check.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		job := data.Exports[jobA.ID]
 		job.Digest = ""
 		data.Exports[jobA.ID] = job
@@ -1550,7 +1550,7 @@ func TestVerifyExportDownloadRejectsTamperedAndSwapped(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := svc.VerifyExportDownload(jobA.TenantID, jobA.ID, sealedA); err == nil {
+	if plain, err := svc.VerifyExportDownload(testCtx, jobA.TenantID, jobA.ID, sealedA); err == nil {
 		t.Fatalf("empty stored digest must fail, got plaintext %q", plain)
 	}
 }
@@ -1567,7 +1567,7 @@ func TestVerifyExportDownloadRecordsRejectionFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1579,19 +1579,19 @@ func TestVerifyExportDownloadRecordsRejectionFact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.VerifyExportDownload(job.TenantID, job.ID, sealed); err != nil {
+	if _, err := svc.VerifyExportDownload(testCtx, job.TenantID, job.ID, sealed); err != nil {
 		t.Fatalf("legit verify failed: %v", err)
 	}
 	// Tampered attempt: expect exactly one rejection fact.
 	tampered := append([]byte(nil), sealed...)
 	tampered[len(tampered)/2] ^= 0x01
-	if _, err := svc.VerifyExportDownload(job.TenantID, job.ID, tampered); err == nil {
+	if _, err := svc.VerifyExportDownload(testCtx, job.TenantID, job.ID, tampered); err == nil {
 		t.Fatal("tampered blob must fail")
 	}
 	// The rejection fact is a read-path fact: it lands in the separate read
 	// self-audit trail, never in Snapshot.AdminActions, and is visible
 	// through the merged governance view (ListAdminActions).
-	actions, err := svc.ListAdminActions(job.TenantID, false, 100)
+	actions, err := svc.ListAdminActions(testCtx, job.TenantID, false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1642,7 +1642,7 @@ func TestAggregateCheckpointCreatedAndVerified(t *testing.T) {
 	}
 
 	// 篡改聚合记录（换一个 root）必须导致验证失败。
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		items := data.AggregateCheckpoints
 		items[len(items)-1].Root = "0000000000000000000000000000000000000000000000000000000000000000"
 		data.AggregateCheckpoints = items
@@ -1681,7 +1681,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 	}
 	// 查询按业务时间排序（occurred_at, sequence, event_id）：earlier 在前，
 	// 与写入序/账本序解耦。
-	result, err := svc.QueryEvents("tenant-a", "test", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
+	result, err := svc.QueryEvents(testCtx, "tenant-a", "test", domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_200, 0).UTC(), OperationID: "op-ooo", PageSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1689,7 +1689,7 @@ func TestOutOfOrderOccurredAtEvents(t *testing.T) {
 		t.Fatalf("event query must order chronologically: %+v", result.Items)
 	}
 	// 操作时间线按业务时间排序：earlier 在前（与账本序解耦）。
-	timeline, err := svc.OperationTimeline("tenant-a", "", "op-ooo")
+	timeline, err := svc.OperationTimeline(testCtx, "tenant-a", "", "op-ooo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1741,7 +1741,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	overlongEvent.TenantID = "tenant-a" // testEvent leaves it empty; ingest stamps it
 	overlongEvent.StreamID = "tenant-a:aggregate:invoice:inv-1"
 	overlongEvent.Sequence = 4
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", overlong)
 		data.Events[key] = overlongEvent
 		data.Receipts[key] = domain.EventReceipt{EventID: overlong, TenantID: "tenant-a", Status: domain.StatusIndexed, StreamID: overlongEvent.StreamID, Sequence: overlongEvent.Sequence}
@@ -1751,7 +1751,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	}
 	// Phase 3: one pass must archive the healthy backlog and dead-letter the
 	// doomed object — not abort on it and not return a pass error.
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
 	}
@@ -1759,7 +1759,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 		t.Fatalf("ArchivePending archived %d, want 3 (healthy backlog converged despite the doomed object)", count)
 	}
 	for i := 1; i <= 3; i++ {
-		got, gErr := svc.GetReceipt("tenant-a", "", fmt.Sprintf("evt-ok-%d", i))
+		got, gErr := svc.GetReceipt(testCtx, "tenant-a", "", fmt.Sprintf("evt-ok-%d", i))
 		if gErr != nil {
 			t.Fatal(gErr)
 		}
@@ -1769,7 +1769,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	}
 	// The doomed event is dead-lettered: receipt stays StatusIndexed with a
 	// typed error code, and the persisted record carries the reason.
-	got, err := svc.GetReceipt("tenant-a", "", overlong)
+	got, err := svc.GetReceipt(testCtx, "tenant-a", "", overlong)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1779,7 +1779,7 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	if got.ErrorCode != "archive_dead_letter" {
 		t.Fatalf("overlong receipt ErrorCode=%q, want archive_dead_letter", got.ErrorCode)
 	}
-	deadLetters, err := svc.ListDeadLetters("tenant-a")
+	deadLetters, err := svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1806,11 +1806,11 @@ func TestArchivePendingIsolatesOverlongEvent(t *testing.T) {
 	}
 	// A second pass excludes the dead-lettered event: nothing to archive, no
 	// new dead letters, no error.
-	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count2, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil (dead-lettered event excluded from retry)", count2, err)
 	}
-	deadLetters, err = svc.ListDeadLetters("tenant-a")
+	deadLetters, err = svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1849,10 +1849,10 @@ func TestArchiveStoreBoundaryCatchesCapBoundaryEvent(t *testing.T) {
 		t.Fatalf("stream dir must stay empty, got %d entries", len(entries))
 	}
 	// The next pass dead-letters the event with the typed reason.
-	if _, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil {
+	if _, err := svc.ArchivePending(testCtx, "tenant-a"); err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-letter is a handled outcome)", err)
 	}
-	dead, err := svc.ListDeadLetters("tenant-a")
+	dead, err := svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1861,14 +1861,14 @@ func TestArchiveStoreBoundaryCatchesCapBoundaryEvent(t *testing.T) {
 	}
 	// The receipt records the typed error, and a second pass does not retry
 	// the doomed event.
-	got, err := svc.GetReceipt("tenant-a", "", eventID)
+	got, err := svc.GetReceipt(testCtx, "tenant-a", "", eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != domain.StatusIndexed || got.ErrorCode != "archive_dead_letter" {
 		t.Fatalf("receipt = %+v, want StatusIndexed + archive_dead_letter", got)
 	}
-	if count, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil || count != 0 {
+	if count, err := svc.ArchivePending(testCtx, "tenant-a"); err != nil || count != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count, err)
 	}
 }
@@ -1897,13 +1897,13 @@ func seedInjectiveCollisionFixture(t *testing.T, svc *Service) []domain.EventRec
 		if err := store.ValidTenantID(tenantID); err != nil {
 			t.Fatalf("fixture tenant %q must be ValidTenantID-valid: %v", tenantID, err)
 		}
-		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: "T " + tenantID, Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: tenantID, Name: "T " + tenantID, Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 			t.Fatal(err)
 		}
 		for i := 1; i <= 2; i++ {
@@ -2059,7 +2059,7 @@ func TestArchivePendingConvergesAfterInjectiveFix(t *testing.T) {
 	}
 	before := archiveListing()
 	for _, tenantID := range append(crossTenantCollisionPair(), "tenant-a") {
-		if _, err := svc.ArchivePending(context.Background(), tenantID); err != nil {
+		if _, err := svc.ArchivePending(testCtx, tenantID); err != nil {
 			t.Fatalf("ArchivePending(%q) failed: %v", tenantID, err)
 		}
 	}
@@ -2074,7 +2074,7 @@ func TestArchivePendingConvergesAfterInjectiveFix(t *testing.T) {
 	}
 	// No receipt regressed: every seeded receipt is still StatusArchived.
 	for _, r := range receipts {
-		got, err := svc.GetReceipt(r.TenantID, "", r.EventID)
+		got, err := svc.GetReceipt(testCtx, r.TenantID, "", r.EventID)
 		if err != nil {
 			t.Fatalf("GetReceipt(%q, %q) failed: %v", r.TenantID, r.EventID, err)
 		}
@@ -2108,7 +2108,7 @@ func TestIngestRejectsOversizedIdentifierAtBoundary(t *testing.T) {
 	}
 	// Nothing reached the ledger or the archive: no receipts, no events, no
 	// objects (the rejections happened before any write).
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2166,7 +2166,7 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	bigEvent.TenantID = "tenant-a" // testEvent leaves it empty; ingest stamps it
 	bigEvent.StreamID = "tenant-a:aggregate:invoice:inv-1"
 	bigEvent.Sequence = healthy + 1
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", oversized)
 		data.Events[key] = bigEvent
 		data.Receipts[key] = domain.EventReceipt{EventID: oversized, TenantID: "tenant-a", Status: domain.StatusIndexed, StreamID: bigEvent.StreamID, Sequence: bigEvent.Sequence}
@@ -2177,14 +2177,14 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	// One pass with the real store: 100 healthy receipts reach
 	// StatusArchived, the oversized event is dead-lettered (no error).
 	svc.Config.Archive = realStore
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil (dead-lettered objects are a handled outcome)", err)
 	}
 	if count != healthy {
 		t.Fatalf("ArchivePending archived %d, want %d", count, healthy)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2202,7 +2202,7 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	if bigReceipt.ErrorCode != "archive_dead_letter" {
 		t.Fatalf("oversized receipt ErrorCode=%q, want archive_dead_letter", bigReceipt.ErrorCode)
 	}
-	deadLetters, err := svc.ListDeadLetters("tenant-a")
+	deadLetters, err := svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2217,11 +2217,11 @@ func TestArchivePendingDeadLettersOversizedWhileHealthyArchive(t *testing.T) {
 	}
 	// A second pass excludes the dead-lettered event from the retry set and
 	// does not re-dead-letter anything.
-	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count2, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
 	}
-	deadLetters, err = svc.ListDeadLetters("tenant-a")
+	deadLetters, err = svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2246,13 +2246,13 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 	// receipts land StatusIndexed with no object on disk yet.
 	stub := &recordingArchive{fail: true}
 	svc.Config.Archive = stub
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "a_b", Name: "T a_b", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "a_b", Name: "T a_b", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "a_b", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "a_b", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "a_b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "a_b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Unix(1_700_000_010, 0).UTC()
@@ -2290,20 +2290,20 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 	}
 	// One pass: the healthy event archives, the collision is dead-lettered —
 	// the pass completes with no error.
-	count, err := svc.ArchivePending(context.Background(), "a_b")
+	count, err := svc.ArchivePending(testCtx, "a_b")
 	if err != nil {
 		t.Fatalf("ArchivePending err=%v, want nil", err)
 	}
 	if count != 1 {
 		t.Fatalf("archived=%d, want 1 (only evt-2 archives)", count)
 	}
-	got2, err := svc.GetReceipt("a_b", "", "evt-2")
+	got2, err := svc.GetReceipt(testCtx, "a_b", "", "evt-2")
 	if err != nil || got2.Status != domain.StatusArchived {
 		t.Fatalf("evt-2 receipt=%+v err=%v, want StatusArchived (wedge fixed)", got2, err)
 	}
 	// The collided event: receipt stays StatusIndexed with the typed error;
 	// ListDeadLetters flags exactly this state (the detection surface).
-	got, err := svc.GetReceipt("a_b", "", "evt-1")
+	got, err := svc.GetReceipt(testCtx, "a_b", "", "evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2313,7 +2313,7 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 	if got.ErrorCode != "archive_dead_letter" {
 		t.Fatalf("evt-1 ErrorCode=%q, want archive_dead_letter", got.ErrorCode)
 	}
-	deadLetters, err := svc.ListDeadLetters("a_b")
+	deadLetters, err := svc.ListDeadLetters(testCtx, "a_b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2330,20 +2330,20 @@ func TestArchiveLegacyCollisionDeadLetterDetectable(t *testing.T) {
 		t.Fatalf("legacy object at %s was modified: got %q want %q", key, stored, legacyBytes)
 	}
 	// A second pass excludes the dead-lettered event from the retry set.
-	count2, err := svc.ArchivePending(context.Background(), "a_b")
+	count2, err := svc.ArchivePending(testCtx, "a_b")
 	if err != nil || count2 != 0 {
 		t.Fatalf("second pass = %d, %v; want 0, nil", count2, err)
 	}
 	// Operator remediation cycle: clearing forces a retry, which re-detects
 	// the persistent conflict and re-dead-letters — the loop stays bounded.
-	if err := svc.ClearDeadLetter("a_b", "evt-1"); err != nil {
+	if err := svc.ClearDeadLetter(testCtx, "a_b", "evt-1"); err != nil {
 		t.Fatal(err)
 	}
-	count3, err := svc.ArchivePending(context.Background(), "a_b")
+	count3, err := svc.ArchivePending(testCtx, "a_b")
 	if err != nil || count3 != 0 {
 		t.Fatalf("post-clear pass = %d, %v; want 0, nil", count3, err)
 	}
-	deadLetters, err = svc.ListDeadLetters("a_b")
+	deadLetters, err = svc.ListDeadLetters(testCtx, "a_b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2367,7 +2367,7 @@ func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
 	// seeded directly: ArchivePending is the first writer of a manifest only
 	// in the injective world, and here the conflicting object predates it.
 	segment := domain.Segment{TenantID: "tenant-a", StreamID: "tenant-a:aggregate:invoice:inv-1", FirstSequence: 1, LastSequence: 2, EventCount: 2}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Segments[store.StreamKey("tenant-a", segment.StreamID)] = []domain.Segment{segment}
 		return nil
 	}); err != nil {
@@ -2387,11 +2387,11 @@ func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
 	}
 	// Pass 1: the segment is dead-lettered; the pass completes with no error
 	// (nothing else is pending).
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 0 {
 		t.Fatalf("pass 1 = %d, %v; want 0, nil", count, err)
 	}
-	dead, err := svc.ListDeadLetters("tenant-a")
+	dead, err := svc.ListDeadLetters(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2413,7 +2413,7 @@ func TestArchivePendingExcludesDeadLetteredSegment(t *testing.T) {
 	// abort on the first (non-permanent) store failure.
 	stub := &recordingArchive{fail: true}
 	svc.Config.Archive = stub
-	count2, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count2, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count2 != 0 {
 		t.Fatalf("pass 2 (failing store) = %d, %v; want 0, nil — the dead-lettered segment must not be re-attempted", count2, err)
 	}

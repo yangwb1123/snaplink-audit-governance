@@ -27,7 +27,7 @@ func wideExportQuery() domain.Query {
 
 func countBlockedFacts(t *testing.T, svc *Service, holdID, actor string) int {
 	t.Helper()
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,11 +47,11 @@ func countBlockedFacts(t *testing.T, svc *Service, holdID, actor string) int {
 func TestCreateExportBlockedByActiveLegalHold(t *testing.T) {
 	svc := testService(t, true)
 	t0 := ingestHeldEvent(t, svc)
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation pending", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation pending", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := svc.CreateExport("tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("want ErrForbidden, got %v", err)
 	}
@@ -61,10 +61,10 @@ func TestCreateExportBlockedByActiveLegalHold(t *testing.T) {
 	if job != (domain.ExportJob{}) {
 		t.Fatalf("blocked create must return the zero job, got %+v", job)
 	}
-	if _, err := svc.GetExport("tenant-a", "export-never-created"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", "export-never-created"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("no job may exist after a blocked create, err=%v", err)
 	}
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,41 +98,41 @@ func TestCreateExportBlockedByActiveLegalHold(t *testing.T) {
 func TestExportAccessBlockedByHoldCreatedAfterCompletion(t *testing.T) {
 	svc := testService(t, true)
 	t0 := ingestHeldEvent(t, svc)
-	job, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", wideExportQuery())
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
-	current, err := svc.GetExport("tenant-a", job.ID)
+	current, err := svc.GetExport(testCtx, "tenant-a", job.ID)
 	if err != nil || current.Status != "completed" || current.ObjectPath == "" {
 		t.Fatalf("export must complete and be accessible before the hold: status=%s path=%q err=%v", current.Status, current.ObjectPath, err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); err != nil {
 		t.Fatalf("download must succeed before the hold: %v", err)
 	}
 
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-2", Reason: "litigation hold", Filter: wideExportQuery()})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-2", Reason: "litigation hold", Filter: wideExportQuery()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport after hold: want ErrForbidden, got %v", err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload after hold: want ErrForbidden, got %v", err)
 	}
 
 	// Control: an export whose window selects no events is never blocked,
 	// even while the same hold is active.
-	control, err := svc.CreateExport("tenant-a", "test", domain.Query{From: t0.Add(2 * time.Hour), To: t0.Add(2*time.Hour + time.Second)})
+	control, err := svc.CreateExport(testCtx, "tenant-a", "test", domain.Query{From: t0.Add(2 * time.Hour), To: t0.Add(2*time.Hour + time.Second)})
 	if err != nil {
 		t.Fatalf("control export creation must succeed under hold: %v", err)
 	}
 	waitExport(t, svc, control.ID)
-	if _, err := svc.GetExport("tenant-a", control.ID); err != nil {
+	if _, err := svc.GetExport(testCtx, "tenant-a", control.ID); err != nil {
 		t.Fatalf("control export must stay listable: %v", err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", control.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", control.ID); err != nil {
 		t.Fatalf("control download must stay allowed: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestExportAccessBlockedByHoldCreatedAfterCompletion(t *testing.T) {
 	}
 	// AC-4 download leg: the denial fact must carry the same hold reason in
 	// Detail, not just the hold ID and actor.
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,30 +159,30 @@ func TestExportAccessBlockedByHoldCreatedAfterCompletion(t *testing.T) {
 func TestExportUnblockedAfterHoldRelease(t *testing.T) {
 	svc := testService(t, true)
 	_ = ingestHeldEvent(t, svc)
-	job, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", wideExportQuery())
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-3", Reason: "temporary hold", Filter: wideExportQuery()})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-3", Reason: "temporary hold", Filter: wideExportQuery()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("precondition: GetExport must be blocked, got %v", err)
 	}
-	released, err := svc.ReleaseLegalHold("tenant-a", hold.ID, "test")
+	released, err := svc.ReleaseLegalHold(testCtx, "tenant-a", hold.ID, "test")
 	if err != nil || released.ReleasedAt == nil {
 		t.Fatalf("release failed: %+v %v", released, err)
 	}
-	current, err := svc.GetExport("tenant-a", job.ID)
+	current, err := svc.GetExport(testCtx, "tenant-a", job.ID)
 	if err != nil || current.Status != "completed" {
 		t.Fatalf("GetExport after release: %+v %v", current, err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); err != nil {
 		t.Fatalf("download after release: %v", err)
 	}
-	fresh, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
+	fresh, err := svc.CreateExport(testCtx, "tenant-a", "test", wideExportQuery())
 	if err != nil {
 		t.Fatalf("fresh export after release: %v", err)
 	}
@@ -196,20 +196,20 @@ func TestExportUnblockedAfterHoldRelease(t *testing.T) {
 func TestRunExportFailsClosedOnActiveHold(t *testing.T) {
 	svc := testService(t, true)
 	t0 := ingestHeldEvent(t, svc)
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-race", Reason: "worker race hold", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-race", Reason: "worker race hold", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	jobID := "export-race"
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[jobID] = domain.ExportJob{ID: jobID, TenantID: "tenant-a", RequestedBy: "test", Query: wideExportQuery(), Status: "pending", CreatedAt: svc.Now()}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	svc.runExport(jobID)
+	svc.runExport(testCtx, jobID)
 
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,22 +249,22 @@ func TestAdminActionExportBlockedConstantDistinct(t *testing.T) {
 func TestRecoverStuckExportsNeverUnblocksHeldExport(t *testing.T) {
 	svc := testService(t, true)
 	_ = ingestHeldEvent(t, svc)
-	if _, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-stuck", Reason: "stuck under hold", Filter: wideExportQuery()}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-stuck", Reason: "stuck under hold", Filter: wideExportQuery()}); err != nil {
 		t.Fatal(err)
 	}
 	svc.Config.StuckExportAge = 24 * time.Hour
 	jobID := "export-stuck"
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[jobID] = domain.ExportJob{ID: jobID, TenantID: "tenant-a", RequestedBy: "test", Query: wideExportQuery(), Status: "running", CreatedAt: svc.Now().Add(-25 * time.Hour)}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil || recovered != 1 {
 		t.Fatalf("recover: recovered=%d err=%v", recovered, err)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,10 +279,10 @@ func TestRecoverStuckExportsNeverUnblocksHeldExport(t *testing.T) {
 	if err != nil || len(sealed) != 0 {
 		t.Fatalf("recovery must not write archive objects, found %v (err=%v)", sealed, err)
 	}
-	if _, err := svc.GetExport("tenant-a", jobID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", jobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport after recovery must stay blocked by the hold, got %v", err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", jobID); !errors.Is(err, domain.ErrForbidden) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", jobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("download after recovery must stay blocked, got %v", err)
 	}
 }
@@ -295,12 +295,12 @@ func TestSealedObjectRetainedWhileHoldActive(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-worm", "op-1", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	job, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", wideExportQuery())
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
-	current, err := svc.GetExport("tenant-a", job.ID)
+	current, err := svc.GetExport(testCtx, "tenant-a", job.ID)
 	if err != nil || current.ObjectPath == "" {
 		t.Fatalf("completed export needs an object path: %+v %v", current, err)
 	}
@@ -309,11 +309,11 @@ func TestSealedObjectRetainedWhileHoldActive(t *testing.T) {
 	if err != nil || len(before) == 0 {
 		t.Fatalf("sealed object missing before hold: %v", err)
 	}
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-worm", Reason: "preserve evidence", Filter: wideExportQuery()})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-worm", Reason: "preserve evidence", Filter: wideExportQuery()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("precondition: access must be blocked, got %v", err)
 	}
 	after, err := os.ReadFile(objectPath)
@@ -323,10 +323,10 @@ func TestSealedObjectRetainedWhileHoldActive(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("sealed object bytes must be unchanged (WORM) while the hold is active")
 	}
-	if _, err := svc.ReleaseLegalHold("tenant-a", hold.ID, "test"); err != nil {
+	if _, err := svc.ReleaseLegalHold(testCtx, "tenant-a", hold.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); err != nil {
 		t.Fatalf("download after release must succeed: %v", err)
 	}
 }
@@ -337,13 +337,13 @@ func TestSealedObjectRetainedWhileHoldActive(t *testing.T) {
 // caller's own hold ID — nothing from any other tenant.
 func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	svc := testService(t, true)
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-b", ID: "crm", Name: "CRM-B", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-b", ID: "crm", Name: "CRM-B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -351,12 +351,12 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-a", "op-a", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	jobA, err := svc.CreateExport("tenant-a", "test", wideExportQuery())
+	jobA, err := svc.CreateExport(testCtx, "tenant-a", "test", wideExportQuery())
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, jobA.ID)
-	holdA, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-a", Reason: "hold A", Filter: wideExportQuery()})
+	holdA, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-a", Reason: "hold A", Filter: wideExportQuery()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,13 +365,13 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-b", crmPrincipal, testEvent("evt-b", "op-b", t0), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := svc.CreateExport("tenant-b", "test", wideExportQuery())
+	jobB, err := svc.CreateExport(testCtx, "tenant-b", "test", wideExportQuery())
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		current, err := svc.GetExport("tenant-b", jobB.ID)
+		current, err := svc.GetExport(testCtx, "tenant-b", jobB.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,21 +383,21 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	holdB, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-b", Name: "case-b", Reason: "hold B", Filter: wideExportQuery()})
+	holdB, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-b", Name: "case-b", Reason: "hold B", Filter: wideExportQuery()})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// tenant-b probing tenant-a's job: 404 before any hold check.
-	if _, err := svc.GetExport("tenant-b", jobA.ID); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.GetExport(testCtx, "tenant-b", jobA.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross-tenant GetExport must be ErrNotFound, got %v", err)
 	}
-	if err := svc.RecordExportDownload("tenant-b", "test", jobA.ID); !errors.Is(err, domain.ErrNotFound) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-b", "test", jobA.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross-tenant download must be ErrNotFound, got %v", err)
 	}
 
 	// Each tenant's 403 text is exact and carries only its own hold ID.
-	_, errA := svc.GetExport("tenant-a", jobA.ID)
+	_, errA := svc.GetExport(testCtx, "tenant-a", jobA.ID)
 	if !errors.Is(errA, domain.ErrForbidden) {
 		t.Fatalf("tenant-a access: want ErrForbidden, got %v", errA)
 	}
@@ -407,7 +407,7 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	if strings.Contains(errA.Error(), holdB.ID) {
 		t.Fatal("tenant-a error must not carry tenant-b's hold ID")
 	}
-	_, errB := svc.GetExport("tenant-b", jobB.ID)
+	_, errB := svc.GetExport(testCtx, "tenant-b", jobB.ID)
 	if !errors.Is(errB, domain.ErrForbidden) {
 		t.Fatalf("tenant-b access: want ErrForbidden, got %v", errB)
 	}
@@ -423,7 +423,7 @@ func TestExportHoldGateLeaksNothingCrossTenant(t *testing.T) {
 	if got := countBlockedFacts(t, svc, holdA.ID, "test"); got != 0 {
 		t.Fatalf("GetExport denials must record no fact, found %d", got)
 	}
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,22 +445,22 @@ func TestRestoreAndVerifyPathsUnaffectedByHeldExport(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("evt-2", "op-restore", t0.Add(time.Second)), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-verify", Reason: "hold while verifying", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-verify", Reason: "hold while verifying", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.VerifyIntegrity(testCtx, "tenant-a", "", "")
 	if err != nil || !result.Valid {
 		t.Fatalf("integrity must stay valid under an active hold: %+v %v", result, err)
 	}
-	preview, err := svc.PreviewRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "dr"})
+	preview, err := svc.PreviewRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "dr"})
 	if err != nil || preview.TenantID != "tenant-a" {
 		t.Fatalf("restore preview must work under an active hold: %+v %v", preview, err)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "dr"}, "user-a")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-restore", Reason: "dr"}, "user-a")
 	if err != nil {
 		t.Fatalf("restore creation must work under an active hold: %v", err)
 	}
-	if _, err := svc.GetRestore("tenant-a", run.ID); err != nil {
+	if _, err := svc.GetRestore(testCtx, "tenant-a", run.ID); err != nil {
 		t.Fatalf("GetRestore must work under an active hold: %v", err)
 	}
 	sealed, err := filepath.Glob(filepath.Join(svc.Config.ArchiveDir, "exports", "*"))

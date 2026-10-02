@@ -72,13 +72,13 @@ func TestHTTPIngestClientDisconnectKeepsEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	signer := &blockingHTTPsigner{
@@ -150,7 +150,7 @@ func TestHTTPIngestClientDisconnectKeepsEvent(t *testing.T) {
 	// The event must be durably ledgered despite the lost response.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		snap, snapErr := st.Snapshot()
+		snap, snapErr := st.Snapshot(testCtx)
 		if snapErr != nil {
 			t.Fatal(snapErr)
 		}

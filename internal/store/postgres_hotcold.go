@@ -14,14 +14,21 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 )
 
 type postgresSplitStore struct {
-	backend      *postgresBackend
-	once         sync.Once
+	backend *postgresBackend
+
+	// probeMu guards the memoized hot/cold catalog verdict. It replaces the
+	// former sync.Once because enabled() now runs under a caller-bounded
+	// context: a probe aborted by that context must NOT be memoized, or one
+	// transient deadline on the very first call would permanently fail every
+	// store operation in the process. Schema verdicts (absent/incomplete/
+	// incompatible/complete) and genuine errors stay sticky, exactly as before.
+	probeMu      sync.Mutex
+	probed       bool
 	catalogErr   error
 	catalogState string
 
@@ -36,8 +43,8 @@ func newPostgresSplitStore(backend *postgresBackend) *postgresSplitStore {
 	return &postgresSplitStore{backend: backend}
 }
 
-func (p *postgresSplitStore) loadControl() (*Snapshot, int64, error) {
-	data, version, err := p.backend.load()
+func (p *postgresSplitStore) loadControl(ctx context.Context) (*Snapshot, int64, error) {
+	data, version, err := p.backend.load(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		data.LayoutVersion = hotColdLayoutVersion
 		control, cloneErr := controlSnapshot(data)
@@ -67,17 +74,17 @@ func hasLedgerData(data *Snapshot) bool {
 	return len(data.Events) > 0 || len(data.Receipts) > 0 || len(data.Streams) > 0 || len(data.Segments) > 0 || len(data.Checkpoints) > 0
 }
 
-func (p *postgresSplitStore) readControl(fn func(*Snapshot) error) error {
-	control, _, err := p.loadControl()
+func (p *postgresSplitStore) readControl(ctx context.Context, fn func(*Snapshot) error) error {
+	control, _, err := p.loadControl(ctx)
 	if err != nil {
 		return err
 	}
 	return fn(control)
 }
 
-func (p *postgresSplitStore) updateControl(fn func(*Snapshot) error) error {
+func (p *postgresSplitStore) updateControl(ctx context.Context, fn func(*Snapshot) error) error {
 	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
-		control, version, err := p.loadControl()
+		control, version, err := p.loadControl(ctx)
 		if err != nil {
 			return err
 		}
@@ -88,9 +95,11 @@ func (p *postgresSplitStore) updateControl(fn func(*Snapshot) error) error {
 		if err != nil {
 			return err
 		}
-		if err := p.saveControl(retained, version); err != nil {
+		if err := p.saveControl(ctx, retained, version); err != nil {
 			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
-				time.Sleep(snapshotConflictBackoff(attempt))
+				if err := sleepBackoff(ctx, attempt); err != nil {
+					return err
+				}
 				continue
 			}
 			return err
@@ -100,7 +109,7 @@ func (p *postgresSplitStore) updateControl(fn func(*Snapshot) error) error {
 	return ErrSnapshotConflict
 }
 
-func (p *postgresSplitStore) saveControl(control *Snapshot, version int64) error {
+func (p *postgresSplitStore) saveControl(ctx context.Context, control *Snapshot, version int64) error {
 	if p.saveControlHook != nil {
 		if err := p.saveControlHook(); err != nil {
 			return err
@@ -108,18 +117,18 @@ func (p *postgresSplitStore) saveControl(control *Snapshot, version int64) error
 	}
 	control.LayoutVersion = hotColdLayoutVersion
 	if version == 0 {
-		return p.saveInitialControl(control)
+		return p.saveInitialControl(ctx, control)
 	}
 	p.backend.lastVersion = version
-	return p.backend.Save(control)
+	return p.backend.Save(ctx, control)
 }
 
 // saveInitialControl establishes the zero-data baseline in the same
 // transaction as the first v2 control row. A complete migration-006 catalog
 // may exist before either row does; allowing the normal write path to create
 // only the marker would make the next readiness check unverifiable.
-func (p *postgresSplitStore) saveInitialControl(control *Snapshot) error {
-	tx, err := p.backend.db.Begin()
+func (p *postgresSplitStore) saveInitialControl(ctx context.Context, control *Snapshot) error {
+	tx, err := p.backend.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -129,19 +138,19 @@ func (p *postgresSplitStore) saveInitialControl(control *Snapshot) error {
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, postgresHotColdMigrationLockKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, postgresHotColdMigrationLockKey); err != nil {
 		return fmt.Errorf("acquire hot/cold migration lock: %w", err)
 	}
 	var encodedExisting []byte
 	var existingVersion int64
-	err = tx.QueryRow(`SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encodedExisting, &existingVersion)
+	err = tx.QueryRowContext(ctx, `SELECT snapshot, version FROM audit_state_snapshot WHERE id = 1 FOR UPDATE`).Scan(&encodedExisting, &existingVersion)
 	if err == nil {
 		return ErrSnapshotConflict
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err := verifyPostgresHotColdTargetsEmpty(context.Background(), tx); err != nil {
+	if err := verifyPostgresHotColdTargetsEmpty(ctx, tx); err != nil {
 		return err
 	}
 	copyControl, err := cloneSnapshot(control)
@@ -152,10 +161,10 @@ func (p *postgresSplitStore) saveInitialControl(control *Snapshot) error {
 	if err != nil {
 		return err
 	}
-	if err := writePostgresHotColdZeroBaseline(tx); err != nil {
+	if err := writePostgresHotColdZeroBaseline(ctx, tx); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -166,8 +175,8 @@ func (p *postgresSplitStore) saveInitialControl(control *Snapshot) error {
 	return nil
 }
 
-func (p *postgresSplitStore) tenantIDs() ([]string, error) {
-	rows, err := p.backend.db.Query(`SELECT tenant_id FROM audit_tenant UNION SELECT tenant_id FROM audit_ledger ORDER BY tenant_id`)
+func (p *postgresSplitStore) tenantIDs(ctx context.Context) ([]string, error) {
+	rows, err := p.backend.db.QueryContext(ctx, `SELECT tenant_id FROM audit_tenant UNION SELECT tenant_id FROM audit_ledger ORDER BY tenant_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -183,11 +192,11 @@ func (p *postgresSplitStore) tenantIDs() ([]string, error) {
 	return ids, rows.Err()
 }
 
-func (p *postgresSplitStore) loadTenantHot(tenantID string) (*Snapshot, int64, error) {
+func (p *postgresSplitStore) loadTenantHot(ctx context.Context, tenantID string) (*Snapshot, int64, error) {
 	hot := emptyTenantHot(tenantID)
 	var encoded []byte
 	var version int64
-	err := p.backend.db.QueryRow(postgresTenantLoadQuery, tenantID).Scan(&encoded, &version)
+	err := p.backend.db.QueryRowContext(ctx, postgresTenantLoadQuery, tenantID).Scan(&encoded, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return hot, 0, nil
 	}
@@ -207,13 +216,13 @@ func (p *postgresSplitStore) loadTenantHot(tenantID string) (*Snapshot, int64, e
 	return hot, version, nil
 }
 
-func (p *postgresSplitStore) saveTenantHot(tenantID string, hot *Snapshot, version int64) error {
+func (p *postgresSplitStore) saveTenantHot(ctx context.Context, tenantID string, hot *Snapshot, version int64) error {
 	disk := tenantHotSnapshot{TenantID: tenantID, Version: version + 1, Events: hot.Events, Streams: hot.Streams}
 	encoded, err := json.Marshal(disk)
 	if err != nil {
 		return err
 	}
-	result, err := p.backend.db.Exec(postgresTenantSaveQuery, tenantID, string(encoded), version)
+	result, err := p.backend.db.ExecContext(ctx, postgresTenantSaveQuery, tenantID, string(encoded), version)
 	if err != nil {
 		return fmt.Errorf("save tenant %s: %w", tenantID, err)
 	}
@@ -227,12 +236,12 @@ func (p *postgresSplitStore) saveTenantHot(tenantID string, hot *Snapshot, versi
 	return nil
 }
 
-func (p *postgresSplitStore) readTenant(tenantID string, fn func(*TenantView) error) error {
-	hot, _, err := p.loadTenantHot(tenantID)
+func (p *postgresSplitStore) readTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
+	hot, _, err := p.loadTenantHot(ctx, tenantID)
 	if err != nil {
 		return err
 	}
-	control, _, err := p.loadControl()
+	control, _, err := p.loadControl(ctx)
 	if err != nil {
 		return err
 	}
@@ -244,7 +253,7 @@ func (p *postgresSplitStore) readTenant(tenantID string, fn func(*TenantView) er
 	if err != nil {
 		return err
 	}
-	ledger := newTenantLedgerWithReader(tenantID, &postgresLedgerReader{db: p.backend.db, tenantID: tenantID})
+	ledger := newTenantLedgerWithReader(tenantID, &postgresLedgerReader{ctx: ctx, db: p.backend.db, tenantID: tenantID})
 	view := &TenantView{Hot: viewHot, Ledger: ledger, Global: viewControl}
 	if err := fn(view); err != nil {
 		return err
@@ -252,23 +261,25 @@ func (p *postgresSplitStore) readTenant(tenantID string, fn func(*TenantView) er
 	return ledger.Err()
 }
 
-func (p *postgresSplitStore) updateTenant(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+func (p *postgresSplitStore) updateTenant(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) error {
 	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
-		err := p.updateTenantOnce(tenantID, order, fn)
+		err := p.updateTenantOnce(ctx, tenantID, order, fn)
 		if !errors.Is(err, ErrSnapshotConflict) || attempt == snapshotConflictRetries {
 			return err
 		}
-		time.Sleep(snapshotConflictBackoff(attempt))
+		if err := sleepBackoff(ctx, attempt); err != nil {
+			return err
+		}
 	}
 	return ErrSnapshotConflict
 }
 
-func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
-	hot, version, err := p.loadTenantHot(tenantID)
+func (p *postgresSplitStore) updateTenantOnce(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+	hot, version, err := p.loadTenantHot(ctx, tenantID)
 	if err != nil {
 		return err
 	}
-	control, _, err := p.loadControl()
+	control, _, err := p.loadControl(ctx)
 	if err != nil {
 		return err
 	}
@@ -276,7 +287,7 @@ func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder
 	if err != nil {
 		return err
 	}
-	ledger := newTenantLedgerWithReader(tenantID, &postgresLedgerReader{db: p.backend.db, tenantID: tenantID})
+	ledger := newTenantLedgerWithReader(tenantID, &postgresLedgerReader{ctx: ctx, db: p.backend.db, tenantID: tenantID})
 	view := &TenantView{Hot: hot, Ledger: ledger, Global: control}
 	if err := fn(view); err != nil {
 		return err
@@ -295,22 +306,22 @@ func (p *postgresSplitStore) updateTenantOnce(tenantID string, order CommitOrder
 	pending := ledger.pendingRecords()
 	globalChanged := !reflect.DeepEqual(retainedControl, baselineControl)
 	if order == ColdFirst {
-		if err := p.appendLedger(pending); err != nil {
+		if err := p.appendLedger(ctx, pending); err != nil {
 			return err
 		}
-		if err := p.saveTenantHot(tenantID, retainedHot, version); err != nil {
+		if err := p.saveTenantHot(ctx, tenantID, retainedHot, version); err != nil {
 			return err
 		}
 	} else {
-		if err := p.saveTenantHot(tenantID, retainedHot, version); err != nil {
+		if err := p.saveTenantHot(ctx, tenantID, retainedHot, version); err != nil {
 			return err
 		}
-		if err := p.appendLedger(pending); err != nil {
+		if err := p.appendLedger(ctx, pending); err != nil {
 			return err
 		}
 	}
 	if globalChanged {
-		if err := p.updateControl(func(current *Snapshot) error {
+		if err := p.updateControl(ctx, func(current *Snapshot) error {
 			mergeControlDelta(current, baselineControl, retainedControl)
 			return nil
 		}); err != nil {
@@ -400,7 +411,7 @@ func unionControlSlice[T any](current, mutated []T) []T {
 	return union
 }
 
-func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
+func (p *postgresSplitStore) appendLedger(ctx context.Context, records []LedgerRecord) error {
 	for _, record := range records {
 		if err := validateLedgerRecord(record); err != nil {
 			return err
@@ -409,7 +420,7 @@ func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
 		if err != nil {
 			return err
 		}
-		result, err := p.backend.db.Exec(postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt)
+		result, err := p.backend.db.ExecContext(ctx, postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt)
 		if err != nil {
 			return fmt.Errorf("append tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
 		}
@@ -423,7 +434,7 @@ func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
 		var sqlTenant, sqlType, sqlKey string
 		var sqlVersion int
 		var existingEncoded []byte
-		err = p.backend.db.QueryRow(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4`, record.TenantID, record.RecordType, record.Key, record.Version).Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &existingEncoded)
+		err = p.backend.db.QueryRowContext(ctx, `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4`, record.TenantID, record.RecordType, record.Key, record.Version).Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &existingEncoded)
 		if err != nil {
 			return fmt.Errorf("inspect existing tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
 		}
@@ -441,8 +452,8 @@ func (p *postgresSplitStore) appendLedger(records []LedgerRecord) error {
 	return nil
 }
 
-func (p *postgresSplitStore) ledgerScan(tenantID string, fn func(LedgerRecord) error) error {
-	reader := &postgresLedgerReader{db: p.backend.db, tenantID: tenantID}
+func (p *postgresSplitStore) ledgerScan(ctx context.Context, tenantID string, fn func(LedgerRecord) error) error {
+	reader := &postgresLedgerReader{ctx: ctx, db: p.backend.db, tenantID: tenantID}
 	records, err := reader.records()
 	if err != nil {
 		return err
@@ -456,12 +467,12 @@ func (p *postgresSplitStore) ledgerScan(tenantID string, fn func(LedgerRecord) e
 	return nil
 }
 
-func (p *postgresSplitStore) materialize() (*Snapshot, error) {
-	control, _, err := p.loadControl()
+func (p *postgresSplitStore) materialize(ctx context.Context) (*Snapshot, error) {
+	control, _, err := p.loadControl(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ids, err := p.tenantIDs()
+	ids, err := p.tenantIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +481,7 @@ func (p *postgresSplitStore) materialize() (*Snapshot, error) {
 		return nil, err
 	}
 	for _, tenantID := range ids {
-		hot, _, err := p.loadTenantHot(tenantID)
+		hot, _, err := p.loadTenantHot(ctx, tenantID)
 		if err != nil {
 			return nil, err
 		}
@@ -484,7 +495,7 @@ func (p *postgresSplitStore) materialize() (*Snapshot, error) {
 		for key, stream := range copyHot.Streams {
 			result.Streams[key] = stream
 		}
-		records, err := (&postgresLedgerReader{db: p.backend.db, tenantID: tenantID}).records()
+		records, err := (&postgresLedgerReader{ctx: ctx, db: p.backend.db, tenantID: tenantID}).records()
 		if err != nil {
 			return nil, err
 		}
@@ -504,16 +515,16 @@ func (p *postgresSplitStore) materialize() (*Snapshot, error) {
 	return result, nil
 }
 
-func (p *postgresSplitStore) read(fn func(*Snapshot) error) error {
-	data, err := p.materialize()
+func (p *postgresSplitStore) read(ctx context.Context, fn func(*Snapshot) error) error {
+	data, err := p.materialize(ctx)
 	if err != nil {
 		return err
 	}
 	return fn(data)
 }
 
-func (p *postgresSplitStore) update(fn func(*Snapshot) error) error {
-	return p.updateChecked(func(data *Snapshot) (bool, error) {
+func (p *postgresSplitStore) update(ctx context.Context, fn func(*Snapshot) error) error {
+	return p.updateChecked(ctx, func(data *Snapshot) (bool, error) {
 		if err := fn(data); err != nil {
 			return false, err
 		}
@@ -521,8 +532,8 @@ func (p *postgresSplitStore) update(fn func(*Snapshot) error) error {
 	})
 }
 
-func (p *postgresSplitStore) updateChecked(fn func(*Snapshot) (bool, error)) error {
-	before, err := p.materialize()
+func (p *postgresSplitStore) updateChecked(ctx context.Context, fn func(*Snapshot) (bool, error)) error {
+	before, err := p.materialize(ctx)
 	if err != nil {
 		return err
 	}
@@ -535,7 +546,7 @@ func (p *postgresSplitStore) updateChecked(fn func(*Snapshot) (bool, error)) err
 		return err
 	}
 	if tenantDataEqual(before, working) {
-		return p.updateControl(func(control *Snapshot) error {
+		return p.updateControl(ctx, func(control *Snapshot) error {
 			copyControl, err := controlSnapshot(working)
 			if err != nil {
 				return err
@@ -544,19 +555,19 @@ func (p *postgresSplitStore) updateChecked(fn func(*Snapshot) (bool, error)) err
 			return nil
 		})
 	}
-	return p.replaceSnapshot(working)
+	return p.replaceSnapshot(ctx, working)
 }
 
 func tenantDataEqual(left, right *Snapshot) bool {
 	return reflect.DeepEqual(left.Events, right.Events) && reflect.DeepEqual(left.Receipts, right.Receipts) && reflect.DeepEqual(left.Streams, right.Streams) && reflect.DeepEqual(left.Segments, right.Segments) && reflect.DeepEqual(left.Checkpoints, right.Checkpoints)
 }
 
-func (p *postgresSplitStore) replaceSnapshot(data *Snapshot) error {
+func (p *postgresSplitStore) replaceSnapshot(ctx context.Context, data *Snapshot) error {
 	prepared, err := splitSnapshot(data)
 	if err != nil {
 		return err
 	}
-	ids, err := p.tenantIDs()
+	ids, err := p.tenantIDs(ctx)
 	if err != nil {
 		return err
 	}
@@ -567,25 +578,28 @@ func (p *postgresSplitStore) replaceSnapshot(data *Snapshot) error {
 	for id, state := range prepared.tenant {
 		version := int64(0)
 		if _, ok := known[id]; ok {
-			_, version, err = p.loadTenantHot(id)
+			_, version, err = p.loadTenantHot(ctx, id)
 			if err != nil {
 				return err
 			}
 		}
-		if err := p.saveTenantHot(id, state.hot, version); err != nil {
+		if err := p.saveTenantHot(ctx, id, state.hot, version); err != nil {
 			return err
 		}
-		if err := p.appendLedger(state.ledger.committedRecords()); err != nil {
+		if err := p.appendLedger(ctx, state.ledger.committedRecords()); err != nil {
 			return err
 		}
 	}
-	return p.updateControl(func(control *Snapshot) error {
+	return p.updateControl(ctx, func(control *Snapshot) error {
 		*control = *prepared.control
 		return nil
 	})
 }
 
 type postgresLedgerReader struct {
+	// ctx is the store operation context the reader was created under; every
+	// statement it issues is bounded by it.
+	ctx      context.Context
 	db       *sql.DB
 	tenantID string
 }
@@ -603,7 +617,7 @@ func (r *postgresLedgerReader) oneReceipt(filter, key string) (domain.EventRecei
 	var sqlTenant, sqlType, sqlKey string
 	var version int
 	var encoded []byte
-	err := r.db.QueryRow(query, r.tenantID, key).Scan(&sqlTenant, &sqlType, &sqlKey, &version, &encoded)
+	err := r.db.QueryRowContext(r.ctx, query, r.tenantID, key).Scan(&sqlTenant, &sqlType, &sqlKey, &version, &encoded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.EventReceipt{}, 0, false, nil
 	}
@@ -659,7 +673,7 @@ func (r *postgresLedgerReader) checkpoints(streamKey string) ([]domain.Checkpoin
 }
 
 func (r *postgresLedgerReader) recordsByType(kind LedgerRecordType) ([]LedgerRecord, error) {
-	rows, err := r.db.Query(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 ORDER BY version, key`, r.tenantID, kind)
+	rows, err := r.db.QueryContext(r.ctx, `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 ORDER BY version, key`, r.tenantID, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +699,7 @@ func (r *postgresLedgerReader) recordsByType(kind LedgerRecordType) ([]LedgerRec
 }
 
 func (r *postgresLedgerReader) records() ([]LedgerRecord, error) {
-	rows, err := r.db.Query(`SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 ORDER BY id`, r.tenantID)
+	rows, err := r.db.QueryContext(r.ctx, `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 ORDER BY id`, r.tenantID)
 	if err != nil {
 		return nil, err
 	}

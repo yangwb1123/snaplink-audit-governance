@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,7 +42,7 @@ func testSegment(tenantID, streamID string, seq int64) domain.Segment {
 func TestCreateAggregateCheckpointExactTenantScoping(t *testing.T) {
 	svc := testService(t, false)
 	leakedRoot := "root-leaked"
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("a", "s1")] = []domain.Checkpoint{testCheckpoint("a", "s1", "root-s1")}
 		data.Checkpoints[store.StreamKey("a", "s2")] = []domain.Checkpoint{testCheckpoint("a", "s2", "root-s2")}
 		data.Checkpoints[store.StreamKey("a", "")] = []domain.Checkpoint{testCheckpoint("a", "", "root-empty")}
@@ -58,7 +57,7 @@ func TestCreateAggregateCheckpointExactTenantScoping(t *testing.T) {
 		t.Fatal(err)
 	}
 	var agg domain.AggregateCheckpoint
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		items := data.AggregateCheckpoints
 		if len(items) == 0 {
 			t.Fatal("no aggregate checkpoint was created")
@@ -85,7 +84,7 @@ func TestCreateAggregateCheckpointExactTenantScoping(t *testing.T) {
 // checks, so assertions target selection counts, not result.Valid.
 func TestVerifyIntegrityExactTenantAndStreamScoping(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Segments[store.StreamKey("a", "s1")] = []domain.Segment{testSegment("a", "s1", 1)}
 		data.Segments["a\x1fb\x1fs"] = []domain.Segment{testSegment("a\x1fb", "s", 2)}
 		data.Segments[store.StreamKey("b", "s1")] = []domain.Segment{testSegment("b", "s1", 3)}
@@ -126,7 +125,7 @@ func TestVerifyIntegrityExactTenantAndStreamScoping(t *testing.T) {
 // TenantID "a\x1fb", StreamID "s") must not be archived at all.
 func TestArchivePendingExactTenantScoping(t *testing.T) {
 	svc := testService(t, true)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Segments[store.StreamKey("a", "s1")] = []domain.Segment{testSegment("a", "s1", 1)}
 		data.Segments[store.StreamKey("b", "s1")] = []domain.Segment{testSegment("b", "s1", 2)}
 		data.Segments["a\x1fb\x1fs"] = []domain.Segment{testSegment("a\x1fb", "s", 3)}
@@ -134,7 +133,7 @@ func TestArchivePendingExactTenantScoping(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ArchivePending(context.Background(), "a"); err != nil {
+	if _, err := svc.ArchivePending(testCtx, "a"); err != nil {
 		t.Fatal(err)
 	}
 	archiveRoot := svc.Config.ArchiveDir

@@ -50,13 +50,13 @@ func TestHTTPArchivedIngestMasksArchiveFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{
 		TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true,
 		RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"},
 	}); err != nil {
@@ -99,7 +99,7 @@ func TestHTTPArchivedIngestMasksArchiveFailure(t *testing.T) {
 	if archiveStore.puts != 1 {
 		t.Fatalf("archive puts=%d, want one attempted write", archiveStore.puts)
 	}
-	receipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
+	receipt, err := svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 	if err != nil {
 		t.Fatal(err)
 	}

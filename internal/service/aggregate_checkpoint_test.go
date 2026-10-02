@@ -39,7 +39,7 @@ func (e erroringSigner) Sign(context.Context, []byte) (string, error) {
 // holds for the tenant.
 func tenantAggregateCount(t *testing.T, svc *Service, tenantID string) int {
 	t.Helper()
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	snap, err = svc.Store.Snapshot()
+	snap, err = svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 	}
 
 	// Isolation leg: tenant-b appends while tenant-a is unchanged.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-b", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-b", "s1", "root-b1")}
 		return nil
 	}); err != nil {
@@ -162,7 +162,7 @@ func TestCreateAggregateCheckpointDedupNoLedgerChange(t *testing.T) {
 func TestCreateAggregateCheckpointNoSaveWhenIdle(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s1", "root-s1")}
 		return nil
 	}); err != nil {
@@ -218,7 +218,7 @@ func TestSealPendingSegmentsNoWriteWhenQuiet(t *testing.T) {
 	if backend.saves != 1 {
 		t.Fatalf("seal pass with pending hashes issued %d Saves, want 1", backend.saves)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestSealPendingSegmentsNoWriteWhenQuiet(t *testing.T) {
 // aggregate_checkpoint_error) and commits nothing.
 func TestCreateAggregateCheckpointSignerFailureSurfaces(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s1", "root-s1")}
 		return nil
 	}); err != nil {
@@ -270,7 +270,7 @@ func TestCreateAggregateCheckpointSignerFailureSurfaces(t *testing.T) {
 func TestCreateAggregateCheckpointDedupSurvivesConflictRetry(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s1", "root-s1")}
 		data.Checkpoints[store.StreamKey("tenant-a", "s2")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s2", "root-s2")}
 		return nil
@@ -282,7 +282,7 @@ func TestCreateAggregateCheckpointDedupSurvivesConflictRetry(t *testing.T) {
 	}
 	// Change one stream's root: the next candidate differs from the last
 	// record, so the append must survive one forced conflict retry.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "s2")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s2", "root-s2-new")}
 		return nil
 	}); err != nil {
@@ -310,9 +310,11 @@ type stagedConflictBackend struct {
 	saves int
 }
 
-func (b *stagedConflictBackend) Load() (*store.Snapshot, error) { return b.loads[0], nil }
+func (b *stagedConflictBackend) Load(ctx context.Context) (*store.Snapshot, error) {
+	return b.loads[0], nil
+}
 
-func (b *stagedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *stagedConflictBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	if len(b.loads) > 1 {
 		data := b.loads[0]
 		b.loads = b.loads[1:]
@@ -321,7 +323,7 @@ func (b *stagedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
 	return cloneTestSnapshot(b.loads[0])
 }
 
-func (b *stagedConflictBackend) Save(*store.Snapshot) error {
+func (b *stagedConflictBackend) Save(ctx context.Context, _ *store.Snapshot) error {
 	b.saves++
 	return store.ErrSnapshotConflict
 }
@@ -426,7 +428,7 @@ func ids(items []domain.AggregateCheckpoint) []string {
 func boundAggregateFixture(t *testing.T) (*Service, domain.AggregateCheckpoint) {
 	t.Helper()
 	svc := testService(t, false)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "stream-a")] = []domain.Checkpoint{testCheckpoint("tenant-a", "stream-a", "root-a")}
 		data.Checkpoints[store.StreamKey("tenant-a", "stream-b")] = []domain.Checkpoint{testCheckpoint("tenant-a", "stream-b", "root-b")}
 		return nil
@@ -436,7 +438,7 @@ func boundAggregateFixture(t *testing.T) (*Service, domain.AggregateCheckpoint) 
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +474,7 @@ func TestAggregateAttestationBoundFields(t *testing.T) {
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
 			svc, _ := boundAggregateFixture(t)
-			if err := svc.Store.Update(func(data *store.Snapshot) error {
+			if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 				mutation.mutate(&data.AggregateCheckpoints[0])
 				return nil
 			}); err != nil {
@@ -504,7 +506,7 @@ func TestAggregateAttestationRejectsChangedCheckpoint(t *testing.T) {
 		t.Run(mutation.name, func(t *testing.T) {
 			svc, aggregate := boundAggregateFixture(t)
 			key := store.StreamKey("tenant-a", aggregate.CheckpointRefs[0].StreamID)
-			if err := svc.Store.Update(func(data *store.Snapshot) error {
+			if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 				mutation.mutate(&data.Checkpoints[key][0])
 				return nil
 			}); err != nil {
@@ -523,7 +525,7 @@ func TestAggregateAttestationRejectsChangedCheckpoint(t *testing.T) {
 
 func TestAggregateAttestationRejectsCrossTenantRelabel(t *testing.T) {
 	svc, aggregate := boundAggregateFixture(t)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		// Give the target tenant the same roots and checkpoint identities. A
 		// root-only verifier would accept the copied record after relabeling.
 		for _, ref := range aggregate.CheckpointRefs {
@@ -555,7 +557,7 @@ func TestLegacyAggregateIsInvalidCompatibilityEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.AggregateCheckpoints = []domain.AggregateCheckpoint{{
 			ID: "legacy", TenantID: "tenant-a", StreamCount: 1, Root: root,
 			Signature: signature, Algorithm: svc.Config.Signer.Algorithm(),
@@ -586,7 +588,7 @@ func TestMalformedBoundAggregateWithoutReferencesIsInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	aggregate.Signature = signature
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.AggregateCheckpoints = []domain.AggregateCheckpoint{aggregate}
 		return nil
 	}); err != nil {
@@ -608,7 +610,7 @@ func TestAggregateAttestationRetainsHistoricalCheckpoint(t *testing.T) {
 	newer.ID = "checkpoint-new"
 	newer.Sequence = old.Sequence + 1
 	newer.MerkleRoot = "root-new"
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "stream-a")] = []domain.Checkpoint{old}
 		return nil
 	}); err != nil {
@@ -617,7 +619,7 @@ func TestAggregateAttestationRetainsHistoricalCheckpoint(t *testing.T) {
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.StreamKey("tenant-a", "stream-a")
 		data.Checkpoints[key] = []domain.Checkpoint{old, newer}
 		return nil
@@ -628,7 +630,7 @@ func TestAggregateAttestationRetainsHistoricalCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +658,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	svc := testService(t, false)
 	svc.Config.AggregateCheckpointRetention = 5
 	// One live checkpoint drives the next candidate record.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Checkpoints[store.StreamKey("tenant-a", "s1")] = []domain.Checkpoint{testCheckpoint("tenant-a", "s1", "live-root-1")}
 		return nil
 	}); err != nil {
@@ -666,7 +668,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	// all reference the retained live checkpoint, so VerifyIntegrity can
 	// prove each exact lineage record after trimming.
 	const legacy = 55
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		checkpoint := data.Checkpoints[store.StreamKey("tenant-a", "s1")][0]
 		refs := []domain.CheckpointRef{{StreamID: checkpoint.StreamID, CheckpointID: checkpoint.ID, Sequence: checkpoint.Sequence, MerkleRoot: checkpoint.MerkleRoot}}
 		roots := aggregateRoots(refs)
@@ -696,7 +698,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 	if got := tenantAggregateCount(t, svc, "tenant-a"); got != 5 {
 		t.Fatalf("records after trim=%d, want 5 (cap)", got)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +725,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 
 	// Tamper a retained record: verification must fail (C4/FR-5 — no
 	// weakening of tamper evidence for retained records).
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		for i := range data.AggregateCheckpoints {
 			if data.AggregateCheckpoints[i].TenantID == "tenant-a" {
 				data.AggregateCheckpoints[i].Root = "0000000000000000000000000000000000000000000000000000000000000000"

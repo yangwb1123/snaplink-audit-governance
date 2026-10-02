@@ -42,7 +42,7 @@ func TestRecoverStuckExportsFailsStuckRunningJob(t *testing.T) {
 	seedExportJob(backend, stuckJob("export-1", "tenant-a", pinnedNow.Add(-25*time.Hour)))
 	savesBefore := backend.saves
 
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestRecoverStuckExportsFailsStuckRunningJob(t *testing.T) {
 		t.Fatalf("saves=%d, want %d (one atomic window)", backend.saves, savesBefore+1)
 	}
 
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestRecoverStuckExportsBoundary(t *testing.T) {
 	seedExportJob(backend, stuckJob("fresh", "tenant-a", pinnedNow))
 	savesBefore := backend.saves
 
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +112,14 @@ func TestRecoverStuckExportsBoundary(t *testing.T) {
 
 	// Advance the clock past the threshold: only at-threshold qualifies.
 	svc.Config.Now = func() time.Time { return pinnedNow.Add(2 * time.Hour) }
-	recovered, err = svc.RecoverStuckExports("tenant-a")
+	recovered, err = svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recovered != 1 {
 		t.Fatalf("recovered=%d, want 1 after clock advance", recovered)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestRecoverStuckExportsNeverTouchesTerminalOrFresh(t *testing.T) {
 	savesBefore := backend.saves
 
 	for i := 0; i < 2; i++ {
-		recovered, err := svc.RecoverStuckExports("tenant-a")
+		recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestRecoverStuckExportsNeverTouchesTerminalOrFresh(t *testing.T) {
 		t.Fatalf("saves=%d, want %d (no terminal regression, no idle rewrite)", backend.saves, savesBefore)
 	}
 
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestRecoverStuckExportsConflictRetry(t *testing.T) {
 	savesBefore := backend.saves
 	loadsBefore := backend.loads
 
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestRecoverStuckExportsConflictRetry(t *testing.T) {
 	if backend.loads != loadsBefore+2 {
 		t.Fatalf("loads=%d, want %d (closure re-ran on the fresh snapshot)", backend.loads, loadsBefore+2)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestRecoverStuckExportsTenantScoping(t *testing.T) {
 	archiveStub := &recordingArchive{}
 	svc.Config.Archive = archiveStub
 
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestRecoverStuckExportsTenantScoping(t *testing.T) {
 		t.Fatalf("puts=%v, want zero archive writes from the fail path", archiveStub.puts)
 	}
 
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +292,13 @@ func TestResumePendingExportsClaimsAndCompletesOnce(t *testing.T) {
 	}
 	jobID := "resume-export-job"
 	job := domain.ExportJob{ID: jobID, TenantID: "tenant-a", RequestedBy: "worker", Query: domain.Query{From: t0.Add(-time.Second), To: t0.Add(time.Second)}, Status: "pending", CreatedAt: t0}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[jobID] = job
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := svc.ResumePendingExports("tenant-a")
+	resumed, err := svc.ResumePendingExports(testCtx, "tenant-a")
 	if err != nil || resumed != 1 {
 		t.Fatalf("resumed=%d err=%v, want one scheduled job", resumed, err)
 	}
@@ -306,7 +306,7 @@ func TestResumePendingExportsClaimsAndCompletesOnce(t *testing.T) {
 	if completed.Status != "completed" || completed.EventCount != 1 {
 		t.Fatalf("resumed export=%+v, want completed one-event export", completed)
 	}
-	resumed, err = svc.ResumePendingExports("tenant-a")
+	resumed, err = svc.ResumePendingExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,13 +25,13 @@ func measureFileHotColdSize(t *testing.T, count, payloadSize int) fileHotColdSiz
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		for i := 0; i < count; i++ {
 			eventID := fmt.Sprintf("capacity-%05d", i)
 			receipt := domain.EventReceipt{EventID: eventID, TenantID: "tenant-a", IdempotencyKey: "idem-" + eventID, Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: int64(i + 1), Hash: "hash-" + eventID}

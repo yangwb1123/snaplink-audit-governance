@@ -26,13 +26,13 @@ func adminTrailTestService(t *testing.T, dir string, maxActions, maxTrail int) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc, statePath
@@ -63,7 +63,7 @@ func TestReadsDoNotRewriteSnapshotFile(t *testing.T) {
 
 	const reads = 10_000
 	for i := 0; i < reads; i++ {
-		if _, err := svc.GetEvent("tenant-a", "auditor-1", "trail-evt"); err != nil {
+		if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor-1", "trail-evt"); err != nil {
 			t.Fatalf("read %d: %v", i, err)
 		}
 	}
@@ -75,7 +75,7 @@ func TestReadsDoNotRewriteSnapshotFile(t *testing.T) {
 	if after.Size() != sizeBefore || !after.ModTime().Equal(mtimeBefore) {
 		t.Fatalf("state.json rewritten by reads: size %d->%d mtime %v->%v", sizeBefore, after.Size(), mtimeBefore, after.ModTime())
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestReadsDoNotRewriteSnapshotFile(t *testing.T) {
 		t.Fatalf("trail lines=%d, want 1..100 (bounded by MaxAdminTrailActions)", lines)
 	}
 	// The governance surface sees the read facts (merged view).
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestListAdminActionsNewestAfterCap(t *testing.T) {
 	seedTrailEvent(t, svc, "cap-evt")
 	const reads = 20
 	for i := 0; i < reads; i++ {
-		if _, err := svc.GetEvent("tenant-a", "auditor-1", "cap-evt"); err != nil {
+		if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor-1", "cap-evt"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -137,7 +137,7 @@ func TestListAdminActionsNewestAfterCap(t *testing.T) {
 		}
 		return out
 	}
-	all, err := svc.ListAdminActions("tenant-a", false, 100)
+	all, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestListAdminActionsNewestAfterCap(t *testing.T) {
 		}
 	}
 	// limit=3 returns exactly the 3 newest.
-	limited, err := svc.ListAdminActions("tenant-a", false, 3)
+	limited, err := svc.ListAdminActions(testCtx, "tenant-a", false, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestListAdminActionsNewestAfterCap(t *testing.T) {
 		}
 	}
 	// AC-1 bound holds simultaneously: the snapshot never grew past the cap.
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +197,11 @@ func TestMutationAppendsTrimOldest(t *testing.T) {
 	svc, _ := adminTrailTestService(t, t.TempDir(), 5, 0)
 	for i := 1; i <= 7; i++ {
 		id := fmt.Sprintf("tenant-%d", i)
-		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: id, Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: id, Name: id, Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

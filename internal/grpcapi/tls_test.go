@@ -161,13 +161,13 @@ func newGRPCTLSHarness(t *testing.T) (*store.Store, *service.Service, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -208,7 +208,7 @@ func TestGRPCTLSWriteEndToEnd(t *testing.T) {
 	if receipt.GetTenantId() != "tenant-a" || receipt.GetSequence() != 1 || receipt.GetHash() == "" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
-	ledgered, err := svc.GetEvent("tenant-a", "test", "grpc-tls-evt-1")
+	ledgered, err := svc.GetEvent(testCtx, "tenant-a", "test", "grpc-tls-evt-1")
 	if err != nil {
 		t.Fatalf("event must be in the store snapshot: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestGRPCTLSRejectsPlaintextClient(t *testing.T) {
 	if code := status.Code(writeErr); code != codes.Unavailable {
 		t.Fatalf("plaintext failure code=%v, want transport-level codes.Unavailable (got %v)", code, writeErr)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", "grpc-tls-plaintext-rejected")]; exists {
 			t.Error("plaintext attempt was ledgered against a TLS listener")
 		}

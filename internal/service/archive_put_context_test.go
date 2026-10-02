@@ -57,7 +57,7 @@ func TestArchivePendingPutReceivesPerObjectDeadline(t *testing.T) {
 	recorder := &archivePutRecorder{}
 	svc.Config.Archive = recorder
 
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 2 {
 		t.Fatalf("ArchivePending count=%d err=%v, want 2,nil", count, err)
 	}
@@ -206,7 +206,7 @@ func TestArchivePendingSegmentPutReceivesPerObjectDeadline(t *testing.T) {
 	recorder := &archivePutRecorder{}
 	svc.Config.Archive = recorder
 
-	if count, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil || count != 0 {
+	if count, err := svc.ArchivePending(testCtx, "tenant-a"); err != nil || count != 0 {
 		t.Fatalf("ArchivePending count=%d err=%v, want 0,nil for a segment-only pass", count, err)
 	}
 	if len(recorder.puts) != 1 {

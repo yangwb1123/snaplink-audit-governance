@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -43,11 +44,15 @@ func newFailSaveBackend() *failSaveBackend {
 	return &failSaveBackend{data: store.NewSnapshot()}
 }
 
-func (b *failSaveBackend) Load() (*store.Snapshot, error) { return cloneTestSnapshot(b.data) }
+func (b *failSaveBackend) Load(ctx context.Context) (*store.Snapshot, error) {
+	return cloneTestSnapshot(b.data)
+}
 
-func (b *failSaveBackend) LoadForUpdate() (*store.Snapshot, error) { return cloneTestSnapshot(b.data) }
+func (b *failSaveBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
+	return cloneTestSnapshot(b.data)
+}
 
-func (b *failSaveBackend) Save(data *store.Snapshot) error {
+func (b *failSaveBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.saves++
@@ -110,7 +115,7 @@ func durabilityTestService(t *testing.T, archive bool, st *store.Store) *Service
 func persistedReceipt(t *testing.T, svc *Service, tenantID, eventID string) domain.EventReceipt {
 	t.Helper()
 	var got domain.EventReceipt
-	err := svc.Store.Read(func(data *store.Snapshot) error {
+	err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Receipts[store.EventKey(tenantID, eventID)]
 		return nil
 	})
@@ -204,7 +209,7 @@ func TestGetReceiptAfterFailedStatusWriteReportsLedgeredAndRetryIsTruthful(t *te
 	}
 	// actor "" keeps recordReadAction a no-op so save accounting stays
 	// deterministic (the read itself must not fault anything).
-	receipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
+	receipt, err := svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 	if err != nil {
 		t.Fatalf("GetReceipt: %v", err)
 	}

@@ -40,7 +40,7 @@ func TestIdempotencyConflictKeepsOwnerReceiptClean(t *testing.T) {
 			}
 
 			// AC2 — owner receipt is untouched when re-read.
-			storedOwner, gerr := svc.GetReceipt("tenant-a", "", owner.EventID)
+			storedOwner, gerr := svc.GetReceipt(testCtx, "tenant-a", "", owner.EventID)
 			if gerr != nil {
 				t.Fatalf("AC2: GetReceipt(owner) failed: %v", gerr)
 			}
@@ -88,7 +88,7 @@ func TestIdempotencyConflictKeepsArchivedOwnerReceiptClean(t *testing.T) {
 		t.Fatalf("expected archived idempotency conflict: receipt=%+v err=%v", receipt, err)
 	}
 
-	storedOwner, gerr := svc.GetReceipt("tenant-a", "", owner.EventID)
+	storedOwner, gerr := svc.GetReceipt(testCtx, "tenant-a", "", owner.EventID)
 	if gerr != nil {
 		t.Fatalf("GetReceipt(archived owner) failed: %v", gerr)
 	}
@@ -107,7 +107,7 @@ func assertOwnerReceiptClean(t *testing.T, svc *Service, hot bool, ownerEventID 
 	t.Helper()
 	key := store.EventKey("tenant-a", ownerEventID)
 	if hot {
-		err := svc.Store.ReadTenant("tenant-a", func(view *store.TenantView) error {
+		err := svc.Store.ReadTenant(testCtx, "tenant-a", func(view *store.TenantView) error {
 			r, ok := view.Ledger.Receipt(key)
 			if !ok {
 				return fmt.Errorf("owner receipt missing from tenant ledger")
@@ -122,7 +122,7 @@ func assertOwnerReceiptClean(t *testing.T, svc *Service, hot bool, ownerEventID 
 		}
 		return
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

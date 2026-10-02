@@ -39,9 +39,11 @@ type scriptedConflictBackend struct {
 	readyErr  error
 }
 
-func (b *scriptedConflictBackend) Load() (*store.Snapshot, error) { return b.data, nil }
+func (b *scriptedConflictBackend) Load(ctx context.Context) (*store.Snapshot, error) {
+	return b.data, nil
+}
 
-func (b *scriptedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *scriptedConflictBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	encoded, err := json.Marshal(b.data)
 	if err != nil {
 		return nil, err
@@ -53,7 +55,7 @@ func (b *scriptedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
 	return copyData, nil
 }
 
-func (b *scriptedConflictBackend) Save(data *store.Snapshot) error {
+func (b *scriptedConflictBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.saves++
 	if b.conflicts > 0 {
 		b.conflicts--
@@ -105,12 +107,12 @@ func TestHandleArchiveErrorPersistsExhaustedConflict(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	handleArchiveError(logger, svc, "tenant-a", 0, store.ErrSnapshotConflict)
+	handleArchiveError(testCtx, logger, svc, "tenant-a", 0, store.ErrSnapshotConflict)
 
 	if backend.saves != 1 {
 		t.Fatalf("Save calls=%d, want 1 (one counter-increment window)", backend.saves)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 1 {
 		t.Fatalf("counter=%d, %v; want 1", n, err)
 	}
 	out := buf.String()
@@ -127,12 +129,12 @@ func TestHandleArchiveErrorSkipsNonConflictErrors(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	handleArchiveError(logger, svc, "tenant-a", 3, domain.ErrInvalid)
+	handleArchiveError(testCtx, logger, svc, "tenant-a", 3, domain.ErrInvalid)
 
 	if backend.saves != 0 {
 		t.Fatalf("Save calls=%d, want 0 (no counter write for a non-conflict error)", backend.saves)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("counter=%d, %v; want 0 untouched", n, err)
 	}
 	out := buf.String()
@@ -154,9 +156,9 @@ func TestHandleArchiveErrorCounterWriteFailureDoesNotMaskPassError(t *testing.T)
 	logger := log.New(&buf, "", 0)
 
 	backend.conflicts = 100 // the increment write itself can never commit
-	handleArchiveError(logger, svc, "tenant-a", 0, store.ErrSnapshotConflict)
+	handleArchiveError(testCtx, logger, svc, "tenant-a", 0, store.ErrSnapshotConflict)
 
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("counter=%d, %v; want 0 (increment failed atomically)", n, err)
 	}
 	out := buf.String()
@@ -522,7 +524,7 @@ func TestRunEvaluatePassRecoversStuckExports(t *testing.T) {
 	if !strings.Contains(buf.String(), "tenant=tenant-a stuck_exports_recovered=1") {
 		t.Fatalf("log must report stuck_exports_recovered=1, got: %q", buf.String())
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +590,7 @@ func TestRunEvaluatePassRecoveryProbeIndependent(t *testing.T) {
 	if len(archiveStub.puts) != 0 {
 		t.Fatalf("puts=%v, want zero archive writes (recovery does no archive I/O)", archiveStub.puts)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +633,7 @@ func TestRunEvaluatePassRecoveryNoopForCompleted(t *testing.T) {
 	if backend.saves != savesBefore {
 		t.Fatalf("saves=%d, want %d (idle recovery must not rewrite the snapshot)", backend.saves, savesBefore)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +684,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 	svc.Config.Archive = archiveStub
 	// Pre-set the conflict counter through the real service path (one
 	// deliberate Save before the pass; the pass must not open any more).
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	savesBefore := backend.saves
@@ -691,7 +693,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 
 	runEvaluatePass(context.Background(), logger, svc)
 
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +709,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 	if backend.saves != savesBefore {
 		t.Fatalf("saves=%d, want %d (no Store.Update window on a failed probe)", backend.saves, savesBefore)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 1 {
 		t.Fatalf("conflict counter=%d, %v; want 1 (not reset)", n, err)
 	}
 	if !strings.Contains(buf.String(), "tenant=tenant-a archive_skipped=ready_probe_failed") {
@@ -718,7 +720,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 	archiveStub.readyErr = nil
 	runEvaluatePass(context.Background(), logger, svc)
 
-	snap, err = svc.Store.Snapshot()
+	snap, err = svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +736,7 @@ func TestRunEvaluatePassGatesArchivingOnProbe(t *testing.T) {
 	if backend.saves != savesBefore+1 {
 		t.Fatalf("saves=%d, want %d (one atomic batch window)", backend.saves, savesBefore+1)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("conflict counter=%d, %v; want 0 after the healed pass", n, err)
 	}
 }
@@ -774,7 +776,7 @@ func TestRunEvaluatePassSurfacesProbeFailurePerPass(t *testing.T) {
 	if strings.Contains(out, "archive_skipped=ready_probe_failed") {
 		t.Fatalf("healed pass must not log skip lines, got: %q", out)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +877,7 @@ func TestRunEvaluatePassAbortsWithinDeadlineOnBlockedPut(t *testing.T) {
 	if !strings.Contains(out, "pass_aborted=") {
 		t.Fatalf("log must contain the pass abort line, got: %q", out)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +928,7 @@ func TestRunEvaluatePassCancelledCtxAbortsInflightPut(t *testing.T) {
 	if !strings.Contains(out, "tenant=tenant-a archive_error=") || !strings.Contains(out, "context canceled") {
 		t.Fatalf("log must surface the cancellation archive error, got: %q", out)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

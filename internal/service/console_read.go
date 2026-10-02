@@ -10,14 +10,14 @@ import (
 
 // QueryConsoleEvents returns a newest-first page for the interactive Console.
 // QueryEvents remains chronological for reconstruction, replay, and export.
-func (s *Service) QueryConsoleEvents(tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
+func (s *Service) QueryConsoleEvents(ctx context.Context, tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
 	if err := requireOptionalTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
 	if err := validateConsoleReadQuery(query); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.consoleEvents(tenantID, query)
+	events, err := s.consoleEvents(ctx, tenantID, query)
 	if err != nil {
 		return domain.QueryResult{}, err
 	}
@@ -30,7 +30,7 @@ func (s *Service) QueryConsoleEvents(tenantID, actor string, query domain.Query)
 		}
 	}
 	result := consoleEventPage(events, query.PageSize)
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "query", "", "snaplink-console"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", "snaplink-console"); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
@@ -40,7 +40,7 @@ func (s *Service) QueryConsoleEvents(tenantID, actor string, query domain.Query)
 // single audited store read. SourceSystem is the governance-owned equivalent
 // of the legacy Console client column; provider has no trusted counterpart in
 // the canonical event envelope and therefore remains an empty map.
-func (s *Service) QueryEventFacets(tenantID, actor string, query domain.Query) (domain.EventFacets, error) {
+func (s *Service) QueryEventFacets(ctx context.Context, tenantID, actor string, query domain.Query) (domain.EventFacets, error) {
 	if err := requireOptionalTenantScope(tenantID); err != nil {
 		return domain.EventFacets{}, err
 	}
@@ -51,7 +51,7 @@ func (s *Service) QueryEventFacets(tenantID, actor string, query domain.Query) (
 		Outcomes: map[string]int{}, Types: map[string]int{},
 		Clients: map[string]int{}, Providers: map[string]int{},
 	}
-	events, err := s.consoleEvents(tenantID, query)
+	events, err := s.consoleEvents(ctx, tenantID, query)
 	if err == nil {
 		result.Total = len(events)
 		for _, event := range events {
@@ -65,7 +65,7 @@ func (s *Service) QueryEventFacets(tenantID, actor string, query domain.Query) (
 	if err != nil {
 		return domain.EventFacets{}, err
 	}
-	if err := s.recordReadAction(tenantID, actor, domain.AdminActionEventRead, "query", "", "facets"); err != nil {
+	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", "facets"); err != nil {
 		return domain.EventFacets{}, err
 	}
 	return result, nil
@@ -87,9 +87,9 @@ func validateConsoleReadQuery(query domain.Query) error {
 	return nil
 }
 
-func (s *Service) consoleEvents(tenantID string, query domain.Query) ([]domain.Event, error) {
+func (s *Service) consoleEvents(ctx context.Context, tenantID string, query domain.Query) ([]domain.Event, error) {
 	var events []domain.Event
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		schemas := make(map[string]domain.EventSchema, len(data.Schemas))
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
@@ -150,9 +150,9 @@ func consoleEventPage(events []domain.Event, limit int) domain.QueryResult {
 // GetEventAcrossTenants resolves a globally unique event id for a platform
 // reader. A duplicate id across tenants is intentionally ambiguous and fails
 // closed rather than selecting a tenant by map iteration order.
-func (s *Service) GetEventAcrossTenants(actor, eventID string) (domain.Event, error) {
+func (s *Service) GetEventAcrossTenants(ctx context.Context, actor, eventID string) (domain.Event, error) {
 	var matches []domain.Event
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, event := range data.Events {
 			if event.EventID != eventID {
 				continue
@@ -192,15 +192,15 @@ func (s *Service) GetEventAcrossTenants(actor, eventID string) (domain.Event, er
 		return domain.Event{}, fmt.Errorf("%w: event id is ambiguous across tenants", domain.ErrConflict)
 	}
 	event := matches[0]
-	if err := s.recordReadAction(event.TenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
+	if err := s.recordReadAction(ctx, event.TenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
 		return domain.Event{}, err
 	}
 	return event, nil
 }
 
-func (s *Service) GetReceiptAcrossTenants(actor, eventID string) (domain.EventReceipt, error) {
+func (s *Service) GetReceiptAcrossTenants(ctx context.Context, actor, eventID string) (domain.EventReceipt, error) {
 	var matches []domain.EventReceipt
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, receipt := range data.Receipts {
 			if receipt.EventID == eventID {
 				matches = append(matches, receipt)
@@ -218,7 +218,7 @@ func (s *Service) GetReceiptAcrossTenants(actor, eventID string) (domain.EventRe
 		return domain.EventReceipt{}, fmt.Errorf("%w: event id is ambiguous across tenants", domain.ErrConflict)
 	}
 	receipt := matches[0]
-	if err := s.recordReadAction(receipt.TenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
+	if err := s.recordReadAction(ctx, receipt.TenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
 		return domain.EventReceipt{}, err
 	}
 	return receipt, nil

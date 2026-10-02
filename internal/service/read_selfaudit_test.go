@@ -21,17 +21,17 @@ func TestReadSelfAuditOnQueryAndGet(t *testing.T) {
 	}
 	// Empty actor (system-internal read) records nothing.
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
-	if _, err := svc.QueryEvents("tenant-a", "", query); err != nil {
+	if _, err := svc.QueryEvents(testCtx, "tenant-a", "", query); err != nil {
 		t.Fatal(err)
 	}
 	// Actor-bearing reads record one audit.event.read each.
-	if _, err := svc.QueryEvents("tenant-a", "auditor-1", query); err != nil {
+	if _, err := svc.QueryEvents(testCtx, "tenant-a", "auditor-1", query); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetEvent("tenant-a", "auditor-1", "selfaudit-evt"); err != nil {
+	if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor-1", "selfaudit-evt"); err != nil {
 		t.Fatal(err)
 	}
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +64,11 @@ func TestReadSelfAuditOnQueryAndGet(t *testing.T) {
 // SP-2 pins newest-first ordering and count == len(items).
 func TestListAdminActionsPlatformTenantFilter(t *testing.T) {
 	svc := testService(t, false)
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
 
-	all, err := svc.ListAdminActions("", true, 100)
+	all, err := svc.ListAdminActions(testCtx, "", true, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestListAdminActionsPlatformTenantFilter(t *testing.T) {
 		t.Fatalf("oldest entry=%v, want tenant-a tenant.created", last)
 	}
 
-	filtered, err := svc.ListAdminActions("tenant-a", true, 100)
+	filtered, err := svc.ListAdminActions(testCtx, "tenant-a", true, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestListAdminActionsPlatformTenantFilter(t *testing.T) {
 		}
 	}
 
-	scoped, err := svc.ListAdminActions("tenant-a", false, 100)
+	scoped, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestListAdminActionsPlatformTenantFilter(t *testing.T) {
 
 	// F2: filter applies before the cap — limit=1 must return the newest of
 	// tenant-a's 3 actions (schema.created), not a cross-tenant item.
-	capped, err := svc.ListAdminActions("tenant-a", true, 1)
+	capped, err := svc.ListAdminActions(testCtx, "tenant-a", true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +134,10 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 	// 仍在进行（race 模式下更容易触发）。
 	// runExport 是异步 goroutine：等待收敛，避免其写入与 TempDir 清理竞争。
 	waitExport(t, svc, job.ID)
-	if err := svc.RecordExportDownload("tenant-a", "compliance-1", job.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "compliance-1", job.ID); err != nil {
 		t.Fatal(err)
 	}
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 		t.Fatalf("audit.event.export rows=%d, want 1", exports)
 	}
 	// Empty actor: download recording is skipped (system-internal path).
-	if err := svc.RecordExportDownload("tenant-a", "", job.ID); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "", job.ID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -176,7 +176,7 @@ func TestReadSelfAuditFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
-	if _, err := svc.QueryEvents("tenant-a", "auditor-1", query); err != nil {
+	if _, err := svc.QueryEvents(testCtx, "tenant-a", "auditor-1", query); err != nil {
 		t.Fatalf("healthy read must succeed: %v", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestReadSelfAuditFailClosed(t *testing.T) {
 // service appends in call order; ListAdminActions walks the slice backwards).
 func readFacts(t *testing.T, svc *Service) []domain.AdminAction {
 	t.Helper()
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,16 +207,16 @@ func TestReadSelfAuditOnTimelineReplayReceiptVerify(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("selfaudit-evt", "op-sa", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.OperationTimeline("tenant-a", "auditor-1", "op-sa"); err != nil {
+	if _, err := svc.OperationTimeline(testCtx, "tenant-a", "auditor-1", "op-sa"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-sa"); err != nil {
+	if _, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor-1", "op-sa"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AggregateTimeline("tenant-a", "auditor-1", "invoice", "inv-1"); err != nil {
+	if _, err := svc.AggregateTimeline(testCtx, "tenant-a", "auditor-1", "invoice", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetReceipt("tenant-a", "auditor-1", "selfaudit-evt"); err != nil {
+	if _, err := svc.GetReceipt(testCtx, "tenant-a", "auditor-1", "selfaudit-evt"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); err != nil {
@@ -261,7 +261,7 @@ func TestReadSelfAuditNoDoubleAppendOnReplay(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("dbl-evt", "op-dbl", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-dbl"); err != nil {
+	if _, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor-1", "op-dbl"); err != nil {
 		t.Fatal(err)
 	}
 	reads := readFacts(t, svc)
@@ -273,10 +273,10 @@ func TestReadSelfAuditNoDoubleAppendOnReplay(t *testing.T) {
 	}
 	// A replay plus a direct timeline on the same operation stays one fact
 	// per call: 2 more rows, details replay + timeline.
-	if _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-dbl"); err != nil {
+	if _, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor-1", "op-dbl"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.OperationTimeline("tenant-a", "auditor-1", "op-dbl"); err != nil {
+	if _, err := svc.OperationTimeline(testCtx, "tenant-a", "auditor-1", "op-dbl"); err != nil {
 		t.Fatal(err)
 	}
 	reads = readFacts(t, svc)
@@ -304,14 +304,14 @@ func TestReadSelfAuditRestoreFlowRecordsNothing(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("restore-evt", "op-res", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	preview, err := svc.PreviewRestore("tenant-a", domain.RestoreRequest{OperationID: "op-res"})
+	preview, err := svc.PreviewRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-res"})
 	if err != nil {
 		t.Fatalf("PreviewRestore: %v", err)
 	}
 	if preview.OperationID != "op-res" || preview.ProposedState == nil {
 		t.Fatalf("preview=%+v, want op-res with replayed state", preview)
 	}
-	run, err := svc.CreateRestore("tenant-a", domain.RestoreRequest{OperationID: "op-res", Reason: "compliance review"}, "restorer-1")
+	run, err := svc.CreateRestore(testCtx, "tenant-a", domain.RestoreRequest{OperationID: "op-res", Reason: "compliance review"}, "restorer-1")
 	if err != nil {
 		t.Fatalf("CreateRestore: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestReadSelfAuditRestoreFlowRecordsNothing(t *testing.T) {
 	if reads := readFacts(t, svc); len(reads) != 0 {
 		t.Fatalf("audit.event.read rows=%d, want 0 (restore flows stay silent by design); %+v", len(reads), reads)
 	}
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,16 +350,16 @@ func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("scope-evt", "op-scope", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Operation("tenant-a", "auditor-1", "op-scope"); err != nil {
+	if _, err := svc.Operation(testCtx, "tenant-a", "auditor-1", "op-scope"); err != nil {
 		t.Fatalf("Operation: %v", err)
 	}
 	query := domain.Query{From: at.Add(-time.Second), To: at.Add(time.Second), PageSize: 100}
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
-	if _, err := svc.GetExport("tenant-a", job.ID); err != nil {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); err != nil {
 		t.Fatalf("GetExport: %v", err)
 	}
 	// Two read facts are expected: the operation summary (auditor-1) and the
@@ -391,7 +391,7 @@ func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 // the handler path tests.
 func TestReadSelfAuditOperationInvalidAppendsNothing(t *testing.T) {
 	svc := testService(t, false)
-	if _, err := svc.Operation("tenant-a", "auditor-1", ""); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.Operation(testCtx, "tenant-a", "auditor-1", ""); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("Operation(empty id) err=%v, want ErrInvalid", err)
 	}
 	if reads := readFacts(t, svc); len(reads) != 0 {
@@ -418,10 +418,13 @@ func TestReadSelfAuditFailClosedTimelineReplayReceiptVerify(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"timeline", func() error { _, err := svc.OperationTimeline("tenant-a", "auditor-1", "op-fail"); return err }()},
-		{"replay", func() error { _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-fail"); return err }()},
-		{"aggregate timeline", func() error { _, err := svc.AggregateTimeline("tenant-a", "auditor-1", "invoice", "inv-1"); return err }()},
-		{"receipt", func() error { _, err := svc.GetReceipt("tenant-a", "auditor-1", "fail-evt"); return err }()},
+		{"timeline", func() error { _, err := svc.OperationTimeline(testCtx, "tenant-a", "auditor-1", "op-fail"); return err }()},
+		{"replay", func() error { _, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor-1", "op-fail"); return err }()},
+		{"aggregate timeline", func() error {
+			_, err := svc.AggregateTimeline(testCtx, "tenant-a", "auditor-1", "invoice", "inv-1")
+			return err
+		}()},
+		{"receipt", func() error { _, err := svc.GetReceipt(testCtx, "tenant-a", "auditor-1", "fail-evt"); return err }()},
 		{"verify", func() error { _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); return err }()},
 	}
 	for _, check := range checks {
@@ -451,10 +454,13 @@ func TestReadSelfAuditConflictExhaustionFailsReads(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"timeline", func() error { _, err := svc.OperationTimeline("tenant-a", "auditor-1", "op-conf"); return err }()},
-		{"replay", func() error { _, err := svc.ReplayOperation("tenant-a", "auditor-1", "op-conf"); return err }()},
-		{"aggregate timeline", func() error { _, err := svc.AggregateTimeline("tenant-a", "auditor-1", "invoice", "inv-1"); return err }()},
-		{"receipt", func() error { _, err := svc.GetReceipt("tenant-a", "auditor-1", "conf-evt"); return err }()},
+		{"timeline", func() error { _, err := svc.OperationTimeline(testCtx, "tenant-a", "auditor-1", "op-conf"); return err }()},
+		{"replay", func() error { _, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor-1", "op-conf"); return err }()},
+		{"aggregate timeline", func() error {
+			_, err := svc.AggregateTimeline(testCtx, "tenant-a", "auditor-1", "invoice", "inv-1")
+			return err
+		}()},
+		{"receipt", func() error { _, err := svc.GetReceipt(testCtx, "tenant-a", "auditor-1", "conf-evt"); return err }()},
 		{"verify", func() error { _, err := svc.VerifyIntegrity(testCtx, "tenant-a", "auditor-1", ""); return err }()},
 	}
 	for _, check := range checks {
@@ -525,7 +531,7 @@ func TestReadSelfAuditReplayAggregateSingleFact(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("agg-evt", "op-agg", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.ReplayAggregate("tenant-a", "auditor-1", "invoice", "inv-1")
+	result, err := svc.ReplayAggregate(testCtx, "tenant-a", "auditor-1", "invoice", "inv-1")
 	if err != nil {
 		t.Fatalf("ReplayAggregate: %v", err)
 	}
@@ -554,11 +560,11 @@ func TestVerifyIntegrityDoesNotAttestAdminTrail(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("f4-evt", "op-f4", at), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetEvent("tenant-a", "auditor-1", "f4-evt"); err != nil {
+	if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor-1", "f4-evt"); err != nil {
 		t.Fatal(err)
 	}
 	// Tamper with the trail in the snapshot (DB-level insider, capability e).
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		for i := range data.AdminActions {
 			data.AdminActions[i].Actor = "forged-actor"
 		}
@@ -582,7 +588,7 @@ func waitExport(t *testing.T, svc *Service, jobID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		current, err := svc.GetExport("tenant-a", jobID)
+		current, err := svc.GetExport(testCtx, "tenant-a", jobID)
 		if err != nil {
 			t.Fatal(err)
 		}

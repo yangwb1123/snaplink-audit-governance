@@ -15,7 +15,7 @@ paths:
       x-runtime-handler: querySnaplinkAuditEvents
       x-required-permission: audit:event:read
       x-allow-tenantless-console: true
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
@@ -46,7 +46,7 @@ paths:
       operationId: getSnaplinkConsoleAuditEvent
       x-runtime-handler: getEvent
       x-required-permission: audit:event:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
@@ -67,7 +67,7 @@ paths:
       x-runtime-handler: querySnaplinkAuditFacets
       x-required-permission: audit:event:read
       x-allow-tenantless-console: true
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: approved all-tenant Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
@@ -96,7 +96,7 @@ paths:
       operationId: writeEvent
       x-runtime-handler: postEvent
       x-required-permission: audit:event:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       x-tenant-scope: { policy: scoped, selector: body, selector_path: tenant_id, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       description: 'Tenant scope: body-selected write; platform credentials must provide a non-empty Event.tenant_id; tenant credentials use the signed tenant and reject a mismatch. The server derives OAuth client identity from signed client_id (or compatible azp). When no tenant claim exists, tenant_id is uniquely resolved from server-side (client_id, source_system) registration. A non-empty body stream_id is stripped on ingest; the server derives the stream from tenant + aggregate/operation/source and stamps it. stream_id is a read/query filter only. sub is never used as client identity. Runtime caps are authoritative: applicable persisted strings are limited to 8192 UTF-8 bytes, not characters.'
       parameters:
@@ -117,7 +117,7 @@ paths:
       operationId: queryEvents
       x-runtime-handler: queryEvents
       x-required-permission: audit:event:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id). next_cursor resumes at exactly that position; a page walk reproduces the unpaginated result with no duplicates and no drops. Cursors issued before chronological ordering are rejected with 400; re-run the query to obtain a fresh cursor. Archived events are read from the configured WORM archive and remain visible after hot-payload eviction.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -156,7 +156,7 @@ paths:
       operationId: getEvent
       x-runtime-handler: getEvent
       x-required-permission: audit:event:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Archived event payloads are read from the configured WORM archive and verified against the retained receipt hash before being returned.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
@@ -176,7 +176,7 @@ paths:
       operationId: getReceipt
       x-runtime-handler: getReceipt
       x-required-permission: audit:event:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/eventId' }, { $ref: '#/components/parameters/tenantId' }]
@@ -196,7 +196,7 @@ paths:
       operationId: writeBatch
       x-runtime-handler: postBatch
       x-required-permission: audit:event:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: body-selected write; every platform batch member must provide a non-empty Event.tenant_id, tenant credentials use the signed tenant, and selector failures are rejected before any member is ingested.'
       x-tenant-scope: { policy: scoped, selector: body, selector_path: 'events[*].tenant_id', platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [events], properties: { events: { type: array, maxItems: 500, description: 'An over-count batch is rejected before any member is ingested.', items: { $ref: '#/components/schemas/EventInput' } }, wait_for: { type: string } } } } } }
@@ -216,7 +216,7 @@ paths:
       operationId: getOperation
       x-runtime-handler: getOperation
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
@@ -236,7 +236,7 @@ paths:
       operationId: getOperationTimeline
       x-runtime-handler: getOperationTimeline
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (occurred_at, sequence, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -260,7 +260,7 @@ paths:
       operationId: replayOperation
       x-runtime-handler: replayOperation
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/operationId' }, { $ref: '#/components/parameters/tenantId' }]
@@ -280,7 +280,7 @@ paths:
       operationId: getAggregateTimeline
       x-runtime-handler: getAggregateTimeline
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Items are ordered by (aggregate_version, event_id); next_cursor is bound to this operation and resumes after the last item; count is the total matching event count.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -305,7 +305,7 @@ paths:
       operationId: createExport
       x-runtime-handler: createExport
       x-required-permission: audit:export:create
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before an export job or audit fact is created.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -326,7 +326,7 @@ paths:
       operationId: getExport
       x-runtime-handler: getExport
       x-required-permission: audit:export:create
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -346,7 +346,7 @@ paths:
       operationId: downloadExport
       x-runtime-handler: downloadExport
       x-required-permission: audit:export:create
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before export bytes are read.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: jobId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -366,7 +366,7 @@ paths:
       operationId: verifyIntegrity
       x-runtime-handler: verifyIntegrity
       x-required-permission: audit:integrity:verify
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before integrity work or its audit fact.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -387,7 +387,7 @@ paths:
       operationId: createLegalHold
       x-runtime-handler: createLegalHold
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -407,7 +407,7 @@ paths:
       operationId: listLegalHolds
       x-runtime-handler: listLegalHolds
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -427,7 +427,7 @@ paths:
       operationId: releaseLegalHold
       x-runtime-handler: releaseLegalHold
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: holdId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -447,7 +447,7 @@ paths:
       operationId: previewRestore
       x-runtime-handler: previewRestore
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before restore preview.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -468,7 +468,7 @@ paths:
       operationId: createRestore
       x-runtime-handler: createRestore
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected before a restore run is created.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -489,7 +489,7 @@ paths:
       operationId: getRestore
       x-runtime-handler: getRestore
       x-required-permission: audit:operation:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -509,7 +509,7 @@ paths:
       operationId: approveRestore
       x-runtime-handler: approveRestore
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. The approval decision is recorded without executing business calls.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -529,7 +529,7 @@ paths:
       operationId: rejectRestore
       x-runtime-handler: rejectRestore
       x-required-permission: audit:legal_hold:manage
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ name: runId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/tenantId' }]
@@ -550,7 +550,7 @@ paths:
       x-runtime-handler: listAdminActions
       x-required-permission: audit:policy:read
       x-allow-tenantless-console: true
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: approved all-tenant platform or tenantless Console read; omitted or empty tenant_id means all tenants, while a supplied filter narrows the result and signed tenant claims remain authoritative.'
       x-tenant-scope: { policy: all-tenants, selector: optional-query-filter, platform_selector_required: false, tenant_token_source: signed-claim, empty_platform_behavior: all-tenants }
       parameters:
@@ -572,7 +572,7 @@ paths:
       operationId: createTenant
       x-runtime-handler: createTenant
       x-required-permission: audit:platform:cross_tenant
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Platform management: Tenant.id is the new resource identity, not an implicit tenant scope selector.'
       x-platform-management: { enabled: true }
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TenantInput' } } } }
@@ -591,7 +591,7 @@ paths:
       operationId: listTenants
       x-runtime-handler: listTenants
       x-required-permission: audit:platform:cross_tenant
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Platform management: this explicitly lists tenants and has no tenant_id scope selector.'
       x-platform-management: { enabled: true }
       responses:
@@ -610,7 +610,7 @@ paths:
       operationId: createSource
       x-runtime-handler: createSource
       x-required-permission: audit:policy:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -630,7 +630,7 @@ paths:
       operationId: listSources
       x-runtime-handler: listSources
       x-required-permission: audit:policy:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -651,7 +651,7 @@ paths:
       operationId: updateSource
       x-runtime-handler: updateSource
       x-required-permission: audit:policy:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; tenant_id in the query selects the source tenant for platform credentials, body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -674,7 +674,7 @@ paths:
       operationId: createSchema
       x-runtime-handler: createSchema
       x-required-permission: audit:policy:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -694,7 +694,7 @@ paths:
       operationId: listSchemas
       x-runtime-handler: listSchemas
       x-required-permission: audit:policy:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters:
@@ -715,7 +715,7 @@ paths:
       operationId: setRetentionPolicy
       x-runtime-handler: setRetention
       x-required-permission: audit:policy:write
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped write; the tenant_id query selector is authoritative for platform credentials, an optional body tenant_id is consistency-only, and omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -735,7 +735,7 @@ paths:
       operationId: getRetentionPolicy
       x-runtime-handler: getRetention
       x-required-permission: audit:policy:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -755,7 +755,7 @@ paths:
       operationId: evaluateRetention
       x-runtime-handler: evaluateRetention
       x-required-permission: audit:policy:read
-      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }]
+      x-error-mappings: [{ code: invalid_request, status: 400 }, { code: unauthorized, status: 401 }, { code: forbidden, status: 403 }, { code: not_found, status: 404 }, { code: conflict, status: 409 }, { code: occurred_at_out_of_range, status: 422 }, { code: schema_not_found, status: 422 }, { code: tenant_mismatch, status: 422 }, { code: quota_exceeded, status: 429 }, { code: internal_error, status: 500 }, { code: snapshot_conflict, status: 503 }, { code: store_timeout, status: 503 }]
       description: 'Tenant scope: scoped read; tenant credentials use the signed tenant and platform credentials must supply a non-empty tenant_id query selector. Omitted or empty platform scope is rejected. Immutable ledger events are never deleted by this endpoint.'
       x-tenant-scope: { policy: scoped, selector: query, platform_selector_required: true, tenant_token_source: signed-claim, empty_platform_behavior: reject }
       parameters: [{ $ref: '#/components/parameters/tenantId' }]
@@ -817,6 +817,6 @@ components:
     RetentionPolicyInput: { type: object, required: [hot_days, warm_days, archive_days, retention_class], description: 'tenant_id is an optional consistency assertion; query tenant_id selects the tenant.', properties: { tenant_id: { type: string, description: 'Consistency assertion only; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: 'Exact event retention class evaluated by this policy; other compliance classes are unaffected.' } } }
     RetentionPolicy: { type: object, required: [tenant_id, hot_days, warm_days, archive_days, retention_class], description: 'tenant_id in a response is required ownership output; for writes query tenant_id selects the tenant and the body value is only a consistency assertion.', properties: { tenant_id: { type: string, description: 'Ownership output or consistency assertion; never a platform selector.' }, hot_days: { type: integer, minimum: 0 }, warm_days: { type: integer, minimum: 0 }, archive_days: { type: integer, minimum: 0 }, retention_class: { type: string, minLength: 1, description: 'Exact event retention class evaluated by this policy; other compliance classes are unaffected.' } } }
     RetentionReport: { type: object, required: [tenant_id, evaluated_at, policy, eligible_events, protected_events, action], properties: { tenant_id: { type: string }, evaluated_at: { type: string, format: date-time }, policy: { $ref: '#/components/schemas/RetentionPolicy' }, eligible_events: { type: integer }, protected_events: { type: integer }, hold_ids: { type: array, items: { type: string } }, action: { type: string } } }
-    Error: { type: object, required: [error], description: 'Standard error envelope. code is one of invalid_request, unauthorized, forbidden, not_found, conflict, occurred_at_out_of_range, schema_not_found, tenant_mismatch, quota_exceeded, snapshot_conflict, internal_error. A 400 internal_error may surface when a raw body-decoding failure precedes error classification; message is redacted to internal server error on any 5xx.', properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, description: 'Machine-readable classification code.' }, message: { type: string }, request_id: { type: string } } } } }
+    Error: { type: object, required: [error], description: 'Standard error envelope. code is one of invalid_request, unauthorized, forbidden, not_found, conflict, occurred_at_out_of_range, schema_not_found, tenant_mismatch, quota_exceeded, snapshot_conflict, store_timeout, internal_error. A 400 internal_error may surface when a raw body-decoding failure precedes error classification; message is redacted to internal server error on any 5xx.', properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, description: 'Machine-readable classification code.' }, message: { type: string }, request_id: { type: string } } } } }
     AdminActionList: { type: object, required: [items, count], properties: { items: { type: array, items: { $ref: '#/components/schemas/AdminAction' } }, count: { type: integer } } }
     AdminAction: { type: object, required: [id, actor, action, created_at], properties: { id: { type: string }, tenant_id: { type: string }, actor: { type: string }, action: { type: string }, target_type: { type: string }, target_id: { type: string }, detail: { type: string }, created_at: { type: string, format: date-time } } }

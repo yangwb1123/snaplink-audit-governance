@@ -21,7 +21,7 @@ func TestFileBackendPersistAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Update(func(data *Snapshot) error {
+	if err := first.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["demo"] = domain.Tenant{ID: "demo", Name: "Demo", Active: true}
 		data.AdminActions = append(data.AdminActions, domain.AdminAction{ID: "a1", Actor: "test", Action: "tenant.created", TargetType: "tenant", TargetID: "demo"})
 		return nil
@@ -42,7 +42,7 @@ func TestFileBackendPersistAndReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tenant domain.Tenant
-	if err := second.Read(func(data *Snapshot) error {
+	if err := second.Read(testCtx, func(data *Snapshot) error {
 		var ok bool
 		tenant, ok = data.Tenants["demo"]
 		if !ok {
@@ -73,7 +73,7 @@ func TestEventCanonicalIdentitySurvivesFileReload(t *testing.T) {
 		"collections": {Before: map[string]any{}, After: []any{}},
 		"nulls":       {Before: nil, After: nil},
 	}, Payload: map[string]any{"nil_map": nilMap, "nil_slice": nilSlice, "empty_map": map[string]any{}, "empty_slice": []any{}, "amount": json.Number("9007199254740992.1")}}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Events[EventKey(event.TenantID, event.EventID)] = event
 		return nil
 	}); err != nil {
@@ -81,7 +81,7 @@ func TestEventCanonicalIdentitySurvivesFileReload(t *testing.T) {
 	}
 	var beforeBytes []byte
 	var beforeDigest string
-	if err := st.Read(func(data *Snapshot) error {
+	if err := st.Read(testCtx, func(data *Snapshot) error {
 		stored := data.Events[EventKey(event.TenantID, event.EventID)]
 		beforeBytes, err = domain.CanonicalJSON(stored)
 		if err != nil {
@@ -100,7 +100,7 @@ func TestEventCanonicalIdentitySurvivesFileReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if err := reopened.Read(func(data *Snapshot) error {
+	if err := reopened.Read(testCtx, func(data *Snapshot) error {
 		stored := data.Events[EventKey(event.TenantID, event.EventID)]
 		afterBytes, err := domain.CanonicalJSON(stored)
 		if err != nil {
@@ -160,7 +160,7 @@ func TestLedgeredOutboxPersistsAndLegacySnapshotsNormalize(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := domain.Event{EventID: "outbox-event-1", TenantID: "tenant-a", Sequence: 7, Hash: "hash-7"}
-	if err := first.Update(func(data *Snapshot) error {
+	if err := first.Update(testCtx, func(data *Snapshot) error {
 		data.LedgeredOutbox[EventKey(event.TenantID, event.EventID)] = event
 		return nil
 	}); err != nil {
@@ -173,7 +173,7 @@ func TestLedgeredOutboxPersistsAndLegacySnapshotsNormalize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reloaded.Read(func(data *Snapshot) error {
+	if err := reloaded.Read(testCtx, func(data *Snapshot) error {
 		if got := data.LedgeredOutbox[EventKey(event.TenantID, event.EventID)]; got.EventID != event.EventID || got.Hash != event.Hash {
 			t.Fatalf("outbox event did not round-trip: %+v", got)
 		}
@@ -194,7 +194,7 @@ func TestLedgeredOutboxPersistsAndLegacySnapshotsNormalize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer legacy.Close()
-	if err := legacy.Read(func(data *Snapshot) error {
+	if err := legacy.Read(testCtx, func(data *Snapshot) error {
 		if data.LedgeredOutbox == nil {
 			t.Fatal("legacy snapshot outbox was not normalized")
 		}
@@ -210,21 +210,21 @@ func TestFileBackendUpdateRollbackOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["keep"] = domain.Tenant{ID: "keep", Name: "Keep", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// 闭包报错时，内存与磁盘都必须保持原状。
-	err = st.Update(func(data *Snapshot) error {
+	err = st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["ghost"] = domain.Tenant{ID: "ghost", Name: "Ghost", Active: true}
 		return errors.New("boom")
 	})
 	if err == nil {
 		t.Fatal("expected update error")
 	}
-	if err := st.Read(func(data *Snapshot) error {
+	if err := st.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["ghost"]; ok {
 			t.Fatal("failed update leaked into snapshot")
 		}
@@ -240,7 +240,7 @@ func TestFileBackendUpdateRollbackOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Read(func(data *Snapshot) error {
+	if err := reopened.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["ghost"]; ok {
 			t.Fatal("failed update leaked to disk")
 		}
@@ -255,7 +255,7 @@ func TestMemoryStoreNeverPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["mem"] = domain.Tenant{ID: "mem", Name: "Mem", Active: true}
 		return nil
 	}); err != nil {
@@ -269,7 +269,7 @@ func TestMemoryStoreNeverPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Read(func(data *Snapshot) error {
+	if err := reopened.Read(testCtx, func(data *Snapshot) error {
 		if len(data.Tenants) != 0 {
 			t.Fatal("memory store leaked between instances")
 		}
@@ -289,7 +289,7 @@ func TestSnapshotDeadLettersRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dead := domain.DeadLetter{TenantID: "tenant-a", EventID: "evt-x", StreamID: "tenant-a:aggregate:invoice:inv-1", Sequence: 4, Reason: "archive_key_too_long", ErrorMessage: "archive key exceeds the destination length limit", At: time.Unix(1_700_000_000, 0).UTC()}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.DeadLetters[EventKey("tenant-a", "evt-x")] = dead
 		return nil
 	}); err != nil {
@@ -302,7 +302,7 @@ func TestSnapshotDeadLettersRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Read(func(data *Snapshot) error {
+	if err := reopened.Read(testCtx, func(data *Snapshot) error {
 		got, ok := data.DeadLetters[EventKey("tenant-a", "evt-x")]
 		if !ok || got.Reason != dead.Reason || got.ErrorMessage != dead.ErrorMessage || !got.At.Equal(dead.At) {
 			t.Fatalf("dead letter after reload = %+v, want %+v", got, dead)
@@ -320,7 +320,7 @@ func TestSnapshotDeadLettersRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := legacyStore.Read(func(data *Snapshot) error {
+	if err := legacyStore.Read(testCtx, func(data *Snapshot) error {
 		if data.DeadLetters == nil {
 			t.Fatal("normalize did not fill DeadLetters")
 		}
@@ -341,7 +341,7 @@ func TestSnapshotNormalizeLegacyJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Read(func(data *Snapshot) error {
+	if err := st.Read(testCtx, func(data *Snapshot) error {
 		if data.AdminActions == nil || data.RestoreRuns == nil || data.Streams == nil {
 			t.Fatal("normalize did not fill missing collections")
 		}
@@ -387,7 +387,7 @@ func TestKeySeparatorRoundTrip(t *testing.T) {
 }
 
 func (s *Store) MustSnapshot() *Snapshot {
-	snapshot, err := s.Snapshot()
+	snapshot, err := s.Snapshot(testCtx)
 	if err != nil {
 		panic(err)
 	}
@@ -529,7 +529,7 @@ func TestFileBackendSaveSyncsParentDirectoryChain(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
 		rec := &syncRecorder{}
 		f := &fileBackend{data: NewSnapshot(), path: path, syncDir: rec.record}
-		if err := f.Save(NewSnapshot()); err != nil {
+		if err := f.Save(testCtx, NewSnapshot()); err != nil {
 			t.Fatal(err)
 		}
 		want := []string{filepath.Dir(path)}
@@ -543,7 +543,7 @@ func TestFileBackendSaveSyncsParentDirectoryChain(t *testing.T) {
 		path := filepath.Join(base, "ledger", "state.json")
 		rec := &syncRecorder{}
 		f := &fileBackend{data: NewSnapshot(), path: path, syncDir: rec.record}
-		if err := f.Save(NewSnapshot()); err != nil {
+		if err := f.Save(testCtx, NewSnapshot()); err != nil {
 			t.Fatal(err)
 		}
 		want := []string{filepath.Join(base, "ledger"), base}
@@ -557,11 +557,11 @@ func TestFileBackendSaveSyncsParentDirectoryChain(t *testing.T) {
 		path := filepath.Join(base, "ledger", "state.json")
 		rec := &syncRecorder{}
 		f := &fileBackend{data: NewSnapshot(), path: path, syncDir: rec.record}
-		if err := f.Save(NewSnapshot()); err != nil {
+		if err := f.Save(testCtx, NewSnapshot()); err != nil {
 			t.Fatal(err)
 		}
 		rec.syncs = nil
-		if err := f.Save(NewSnapshot()); err != nil {
+		if err := f.Save(testCtx, NewSnapshot()); err != nil {
 			t.Fatal(err)
 		}
 		want := []string{filepath.Join(base, "ledger")}
@@ -583,14 +583,14 @@ func TestFileBackendSaveSyncsParentDirectoryChain(t *testing.T) {
 		f := &fileBackend{data: NewSnapshot(), path: path, syncDir: hook}
 		data := NewSnapshot()
 		data.Tenants["demo"] = domain.Tenant{ID: "demo", Name: "Demo", Active: true}
-		if err := f.Save(data); err != nil {
+		if err := f.Save(testCtx, data); err != nil {
 			t.Fatal(err)
 		}
 		if !renamedAtSync {
 			t.Fatal("chain sync did not run after the rename")
 		}
 		// The in-memory authority is the committed snapshot.
-		loaded, err := f.Load()
+		loaded, err := f.Load(testCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -624,7 +624,7 @@ func TestFileBackendSaveDirSyncFailureKeepsPreviousAuthoritative(t *testing.T) {
 
 	seed := NewSnapshot()
 	seed.Tenants["keep"] = domain.Tenant{ID: "keep", Name: "Keep", Active: true}
-	if err := f.Save(seed); err != nil {
+	if err := f.Save(testCtx, seed); err != nil {
 		t.Fatal(err)
 	}
 	// Non-vacuity: the seed recorded the leaf (immediate parent) first.
@@ -636,7 +636,7 @@ func TestFileBackendSaveDirSyncFailureKeepsPreviousAuthoritative(t *testing.T) {
 	mutated := NewSnapshot()
 	mutated.Tenants["keep"] = domain.Tenant{ID: "keep", Name: "Keep", Active: true}
 	mutated.Tenants["ghost"] = domain.Tenant{ID: "ghost", Name: "Ghost", Active: true}
-	err := f.Save(mutated)
+	err := f.Save(testCtx, mutated)
 	if err == nil {
 		t.Fatal("Save must fail when the parent-directory chain cannot be synced")
 	}
@@ -647,7 +647,7 @@ func TestFileBackendSaveDirSyncFailureKeepsPreviousAuthoritative(t *testing.T) {
 		t.Fatalf("error %v must name the chain-sync step", err)
 	}
 	// In-memory authority: the previous snapshot stays authoritative.
-	loaded, err := f.Load()
+	loaded, err := f.Load(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestFileBackendSaveDirSyncFailureKeepsPreviousAuthoritative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Read(func(data *Snapshot) error {
+	if err := reopened.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["keep"]; !ok {
 			t.Fatal("previous snapshot lost on disk after failed save")
 		}
@@ -717,7 +717,7 @@ func TestFileBackendSaveSurvivesSimulatedCrash(t *testing.T) {
 		f := &fileBackend{data: NewSnapshot(), path: path, syncDir: rec.record}
 		data := NewSnapshot()
 		data.Events[EventKey("t", "evt-1")] = domain.Event{TenantID: "t", EventID: "evt-1"}
-		if err := f.Save(data); err != nil {
+		if err := f.Save(testCtx, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -735,7 +735,7 @@ func TestFileBackendSaveSurvivesSimulatedCrash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := reopened.Read(func(data *Snapshot) error {
+		if err := reopened.Read(testCtx, func(data *Snapshot) error {
 			if _, ok := data.Events[EventKey("t", "evt-1")]; !ok {
 				t.Fatal("committed event lost after simulated crash")
 			}
@@ -766,7 +766,7 @@ func TestFileBackendSaveSurvivesSimulatedCrash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := reopened.Read(func(data *Snapshot) error {
+		if err := reopened.Read(testCtx, func(data *Snapshot) error {
 			if len(data.Events) != 0 {
 				t.Fatal("committed event must be gone after the simulated crash")
 			}

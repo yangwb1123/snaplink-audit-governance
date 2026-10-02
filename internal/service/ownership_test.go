@@ -44,7 +44,7 @@ func mutateServiceEvent(event *domain.Event) {
 
 func assertStoredEventEqual(t *testing.T, svc *Service, eventID string, want domain.Event) {
 	t.Helper()
-	got, err := svc.GetEvent("tenant-a", "auditor", eventID)
+	got, err := svc.GetEvent(testCtx, "tenant-a", "auditor", eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestIngestClonesMutableEventGraph(t *testing.T) {
 	}
 	mutateServiceEvent(&event)
 
-	got, err := svc.GetEvent("tenant-a", "auditor", receipt.EventID)
+	got, err := svc.GetEvent(testCtx, "tenant-a", "auditor", receipt.EventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestEventReadMethodsReturnOwnedCopies(t *testing.T) {
 			if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, mode.waitFor); err != nil {
 				t.Fatal(err)
 			}
-			baseline, err := svc.GetEvent("tenant-a", "auditor", event.EventID)
+			baseline, err := svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,24 +129,28 @@ func TestEventReadMethodsReturnOwnedCopies(t *testing.T) {
 				read func() ([]domain.Event, error)
 			}{
 				{name: "GetEvent", read: func() ([]domain.Event, error) {
-					return readResultItems(svc.GetEvent("tenant-a", "auditor", event.EventID))
+					return readResultItems(svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID))
 				}},
 				{name: "GetEventAcrossTenants", read: func() ([]domain.Event, error) {
-					return readResultItems(svc.GetEventAcrossTenants("auditor", event.EventID))
+					return readResultItems(svc.GetEventAcrossTenants(testCtx, "auditor", event.EventID))
 				}},
-				{name: "QueryEvents", read: func() ([]domain.Event, error) { return queryResultItems(svc.QueryEvents("tenant-a", "auditor", query)) }},
+				{name: "QueryEvents", read: func() ([]domain.Event, error) {
+					return queryResultItems(svc.QueryEvents(testCtx, "tenant-a", "auditor", query))
+				}},
 				{name: "QueryConsoleEvents", read: func() ([]domain.Event, error) {
-					return queryResultItems(svc.QueryConsoleEvents("tenant-a", "auditor", query))
+					return queryResultItems(svc.QueryConsoleEvents(testCtx, "tenant-a", "auditor", query))
 				}},
-				{name: "OperationTimeline", read: func() ([]domain.Event, error) { return svc.OperationTimeline("tenant-a", "auditor", event.OperationID) }},
+				{name: "OperationTimeline", read: func() ([]domain.Event, error) {
+					return svc.OperationTimeline(testCtx, "tenant-a", "auditor", event.OperationID)
+				}},
 				{name: "AggregateTimeline", read: func() ([]domain.Event, error) {
-					return svc.AggregateTimeline("tenant-a", "auditor", event.AggregateType, event.AggregateID)
+					return svc.AggregateTimeline(testCtx, "tenant-a", "auditor", event.AggregateType, event.AggregateID)
 				}},
 				{name: "OperationTimelinePage", read: func() ([]domain.Event, error) {
-					return queryResultItems(svc.OperationTimelinePage("tenant-a", "auditor", event.OperationID, 10, ""))
+					return queryResultItems(svc.OperationTimelinePage(testCtx, "tenant-a", "auditor", event.OperationID, 10, ""))
 				}},
 				{name: "AggregateTimelinePage", read: func() ([]domain.Event, error) {
-					return queryResultItems(svc.AggregateTimelinePage("tenant-a", "auditor", event.AggregateType, event.AggregateID, 10, ""))
+					return queryResultItems(svc.AggregateTimelinePage(testCtx, "tenant-a", "auditor", event.AggregateType, event.AggregateID, 10, ""))
 				}},
 			}
 			for _, tc := range cases {
@@ -193,7 +197,7 @@ func TestPublisherMutationDoesNotAffectLedgerOrOutbox(t *testing.T) {
 	}
 
 	publisher.err = nil
-	flushed, err := svc.FlushLedgeredOutbox(context.Background(), 10)
+	flushed, err := svc.FlushLedgeredOutbox(testCtx, 10)
 	if err != nil || flushed != 1 {
 		t.Fatalf("FlushLedgeredOutbox flushed=%d err=%v, want 1 nil", flushed, err)
 	}
@@ -219,7 +223,7 @@ func TestPublishLedgeredNowCloneFailureReturnsFalse(t *testing.T) {
 
 func mustGetEvent(t *testing.T, svc *Service, eventID string) domain.Event {
 	t.Helper()
-	event, err := svc.GetEvent("tenant-a", "auditor", eventID)
+	event, err := svc.GetEvent(testCtx, "tenant-a", "auditor", eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +241,7 @@ func TestIngestRejectsUnsupportedEventGraphWithoutSideEffects(t *testing.T) {
 	if receipt != (domain.EventReceipt{}) {
 		t.Fatalf("receipt=%+v, want zero receipt on clone failure", receipt)
 	}
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

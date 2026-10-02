@@ -260,7 +260,7 @@ func TestGRPCAmbiguousAuthorizationRejectedBeforeIngest(t *testing.T) {
 	if events, receipts := snapshotCounts(t, st); events != 1 || receipts != 1 {
 		t.Fatalf("single credential counts: events=%d receipts=%d, want one each", events, receipts)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.LedgeredOutbox) != 1 {
 			t.Fatalf("single credential outbox=%d, want one", len(data.LedgeredOutbox))
 		}
@@ -286,7 +286,7 @@ func assertGRPCStoreEmpty(t *testing.T, st *store.Store) {
 	if events, receipts := snapshotCounts(t, st); events != 0 || receipts != 0 {
 		t.Fatalf("ambiguous credentials changed persistence: events=%d receipts=%d", events, receipts)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.LedgeredOutbox) != 0 {
 			t.Fatalf("ambiguous credentials changed ledgered outbox: %d", len(data.LedgeredOutbox))
 		}
@@ -299,7 +299,7 @@ func assertGRPCStoreEmpty(t *testing.T, st *store.Store) {
 func snapshotCounts(t *testing.T, st *store.Store) (int, int) {
 	t.Helper()
 	var events, receipts int
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		events = len(data.Events)
 		receipts = len(data.Receipts)
 		return nil

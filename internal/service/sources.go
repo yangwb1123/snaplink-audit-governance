@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
+func (s *Service) AddSource(ctx context.Context, actor string, source domain.SourceSystem) error {
 	if err := requireTenantScope(source.TenantID); err != nil {
 		return err
 	}
@@ -24,7 +25,7 @@ func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
 	if !source.Active {
 		source.Active = true
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[source.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -38,7 +39,7 @@ func (s *Service) AddSource(actor string, source domain.SourceSystem) error {
 	})
 }
 
-func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain.SourceSystem, error) {
+func (s *Service) UpdateSource(ctx context.Context, actor string, source domain.SourceSystem) (domain.SourceSystem, error) {
 	if err := requireTenantScope(source.TenantID); err != nil {
 		return domain.SourceSystem{}, err
 	}
@@ -47,7 +48,7 @@ func (s *Service) UpdateSource(actor string, source domain.SourceSystem) (domain
 	if err != nil {
 		return domain.SourceSystem{}, err
 	}
-	err = s.Store.Update(func(data *store.Snapshot) error {
+	err = s.Store.Update(ctx, func(data *store.Snapshot) error {
 		// Defense-in-depth (mirrors AddSource): the source key can only be
 		// reached for an existing tenant; a source row without its tenant
 		// record (hand-edited snapshot) must never be reachable by key
@@ -110,12 +111,12 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 	return source, nil
 }
 
-func (s *Service) ListSources(tenantID string) ([]domain.SourceSystem, error) {
+func (s *Service) ListSources(ctx context.Context, tenantID string) ([]domain.SourceSystem, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
 	var result []domain.SourceSystem
-	err := s.Store.ReadControl(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 		for _, source := range data.Sources {
 			if source.TenantID == tenantID {
 				result = append(result, source)
@@ -127,9 +128,9 @@ func (s *Service) ListSources(tenantID string) ([]domain.SourceSystem, error) {
 	return result, err
 }
 
-func (s *Service) resolveIngestTenant(tenantHint, clientID, sourceID string) (string, error) {
+func (s *Service) resolveIngestTenant(ctx context.Context, tenantHint, clientID, sourceID string) (string, error) {
 	var resolved string
-	err := s.Store.ReadControl(func(data *store.Snapshot) error {
+	err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
 		resolved, resolveErr = resolveIngestTenantFromData(data, tenantHint, clientID, sourceID)
 		return resolveErr

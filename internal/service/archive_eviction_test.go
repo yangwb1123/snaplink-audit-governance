@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -26,7 +25,7 @@ func TestArchivedEventEvictionKeepsReadSemantics(t *testing.T) {
 	if receipt.Status != domain.StatusArchived || receipt.IdempotencyKey != original.IdempotencyKey {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +37,7 @@ func TestArchivedEventEvictionKeepsReadSemantics(t *testing.T) {
 		t.Fatalf("receipt status=%q, want archived", snapshot.Receipts[key].Status)
 	}
 
-	got, err := svc.GetEvent("tenant-a", "auditor", original.EventID)
+	got, err := svc.GetEvent(testCtx, "tenant-a", "auditor", original.EventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,24 +48,24 @@ func TestArchivedEventEvictionKeepsReadSemantics(t *testing.T) {
 	if err != nil || !result.Valid || result.EventCount != 1 {
 		t.Fatalf("archived integrity result=%+v err=%v", result, err)
 	}
-	operationReplay, err := svc.ReplayOperation("tenant-a", "auditor", "evicted-operation")
+	operationReplay, err := svc.ReplayOperation(testCtx, "tenant-a", "auditor", "evicted-operation")
 	if err != nil || operationReplay.EventCount != 1 {
 		t.Fatalf("archived operation replay=%+v err=%v", operationReplay, err)
 	}
-	aggregateReplay, err := svc.ReplayAggregate("tenant-a", "auditor", "invoice", "inv-1")
+	aggregateReplay, err := svc.ReplayAggregate(testCtx, "tenant-a", "auditor", "invoice", "inv-1")
 	if err != nil || aggregateReplay.EventCount != 1 {
 		t.Fatalf("archived aggregate replay=%+v err=%v", aggregateReplay, err)
 	}
-	timeline, err := svc.OperationTimeline("tenant-a", "auditor", "evicted-operation")
+	timeline, err := svc.OperationTimeline(testCtx, "tenant-a", "auditor", "evicted-operation")
 	if err != nil || len(timeline) != 1 || timeline[0].EventID != original.EventID {
 		t.Fatalf("archived timeline=%+v err=%v", timeline, err)
 	}
 	query := domain.Query{From: at.Add(-time.Minute), To: at.Add(time.Minute)}
-	queryResult, err := svc.QueryEvents("tenant-a", "auditor", query)
+	queryResult, err := svc.QueryEvents(testCtx, "tenant-a", "auditor", query)
 	if err != nil || queryResult.Count != 1 {
 		t.Fatalf("archive-inclusive query=%+v err=%v", queryResult, err)
 	}
-	job, err := svc.CreateExport("tenant-a", "auditor", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "auditor", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +103,7 @@ func TestArchivedEventEvictionSurvivesFileRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetEvent("tenant-a", "auditor", event.EventID); err != nil {
+	if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {
@@ -119,11 +118,11 @@ func TestArchivedEventEvictionSurvivesFileRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := restarted.GetEvent("tenant-a", "auditor", event.EventID)
+	got, err := restarted.GetEvent(testCtx, "tenant-a", "auditor", event.EventID)
 	if err != nil || got.EventID != event.EventID || got.Hash != before.Hash {
 		t.Fatalf("restarted archive event=%+v err=%v, want hash %s", got, err, before.Hash)
 	}
-	receipt, err := restarted.GetReceipt("tenant-a", "auditor", event.EventID)
+	receipt, err := restarted.GetReceipt(testCtx, "tenant-a", "auditor", event.EventID)
 	if err != nil || receipt.Status != domain.StatusArchived || receipt.Hash != before.Hash {
 		t.Fatalf("restarted receipt=%+v err=%v, want archived hash %s", receipt, err, before.Hash)
 	}
@@ -143,7 +142,7 @@ func TestArchivedExportDigestMatchesHotExport(t *testing.T) {
 	}
 	svc.Config.Archive = &archive.FileStore{Dir: archiveDir}
 	query := domain.Query{From: event.OccurredAt.Add(-time.Minute), To: event.OccurredAt.Add(time.Minute)}
-	beforeJob, err := svc.CreateExport("tenant-a", "auditor", query)
+	beforeJob, err := svc.CreateExport(testCtx, "tenant-a", "auditor", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,10 +150,10 @@ func TestArchivedExportDigestMatchesHotExport(t *testing.T) {
 	if beforeJob.Status != "completed" || beforeJob.EventCount != 1 {
 		t.Fatalf("hot export=%+v", beforeJob)
 	}
-	if count, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil || count != 1 {
+	if count, err := svc.ArchivePending(testCtx, "tenant-a"); err != nil || count != 1 {
 		t.Fatalf("archive pending count=%d err=%v", count, err)
 	}
-	afterJob, err := svc.CreateExport("tenant-a", "auditor", query)
+	afterJob, err := svc.CreateExport(testCtx, "tenant-a", "auditor", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,18 +187,18 @@ func TestArchivePendingEvictsAfterRetry(t *testing.T) {
 	}
 	archiveDir := filepath.Join(t.TempDir(), "archive")
 	svc.Config.Archive = &archive.FileStore{Dir: archiveDir}
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 1 {
 		t.Fatalf("ArchivePending count=%d err=%v", count, err)
 	}
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := snapshot.Events[store.EventKey("tenant-a", event.EventID)]; ok {
 		t.Fatal("retry-archived event remains in hot snapshot")
 	}
-	if _, err := svc.GetEvent("tenant-a", "auditor", event.EventID); err != nil {
+	if _, err := svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID); err != nil {
 		t.Fatalf("retry archive fallback: %v", err)
 	}
 }
@@ -211,7 +210,7 @@ func TestArchivePendingCleansLegacyArchivedHotBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		receipt := data.Receipts[key]
 		if receipt.Status != domain.StatusArchived {
 			return errors.New("test receipt is not archived")
@@ -224,11 +223,11 @@ func TestArchivePendingCleansLegacyArchivedHotBody(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 0 {
 		t.Fatalf("cleanup count=%d err=%v, want zero newly archived events", count, err)
 	}
-	snapshot, err := svc.Store.Snapshot()
+	snapshot, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,85 +7,108 @@ package store
 // the split ones instead of behind a separate type.
 
 import (
+	"context"
+
 	"github.com/snaplink/audit-governance/internal/domain"
 )
 
 // HotCold reports whether this Store uses the v2 tenant/cold-ledger layout.
 // It is intentionally read-only; callers use it to select a mutation path
 // without inspecting backend implementation details.
-func (s *Store) HotCold() bool {
+func (s *Store) HotCold(ctx context.Context) bool {
 	if s.split != nil {
 		return true
 	}
 	if s.pgSplit == nil {
 		return false
 	}
-	enabled, _ := s.pgSplit.enabled()
+	enabled, _ := s.pgSplit.enabled(ctx)
 	return enabled
 }
 
 // ReadTenant executes fn against one tenant without materializing other
 // tenants or the cold ledger into a global snapshot.
-func (s *Store) ReadTenant(tenantID string, fn func(*TenantView) error) error {
+func (s *Store) ReadTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.readTenant(op.ctx, tenantID, fn)
+}
+
+// readTenant is ReadTenant's body; see Store.read for the nesting rule.
+func (s *Store) readTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
-			enabled, err := s.pgSplit.enabled()
+			enabled, err := s.pgSplit.enabled(ctx)
 			if err != nil {
 				return err
 			}
 			if enabled {
 				s.mu.RLock()
 				defer s.mu.RUnlock()
-				return s.pgSplit.readTenant(tenantID, fn)
+				return s.pgSplit.readTenant(ctx, tenantID, fn)
 			}
 		}
-		return s.readLegacyTenant(tenantID, fn)
+		return s.readLegacyTenant(ctx, tenantID, fn)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.split.readTenant(tenantID, fn)
+	return s.split.readTenant(ctx, tenantID, fn)
 }
 
 // UpdateTenant executes a per-tenant hot/cold mutation. The private closure
 // is retried by callers when a commit fails; cold appends and hot writes are
 // idempotent so a half-completed two-phase pass converges safely.
-func (s *Store) UpdateTenant(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+func (s *Store) UpdateTenant(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.updateTenant(op.ctx, tenantID, order, fn)
+}
+
+// updateTenant is UpdateTenant's body; see Store.read for the nesting rule.
+func (s *Store) updateTenant(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
-			enabled, err := s.pgSplit.enabled()
+			enabled, err := s.pgSplit.enabled(ctx)
 			if err != nil {
 				return err
 			}
 			if enabled {
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				return s.pgSplit.updateTenant(tenantID, order, fn)
+				return s.pgSplit.updateTenant(ctx, tenantID, order, fn)
 			}
 		}
-		return s.updateLegacyTenant(tenantID, fn)
+		return s.updateLegacyTenant(ctx, tenantID, fn)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.split.updateTenant(tenantID, order, fn)
+	return s.split.updateTenant(ctx, tenantID, order, fn)
 }
 
 // LedgerScan invokes fn for every committed cold record belonging to a
 // tenant. Records are copied and sorted by family/key/version so callers get
 // deterministic migration, integrity and export scans.
-func (s *Store) LedgerScan(tenantID string, fn func(LedgerRecord) error) error {
+func (s *Store) LedgerScan(ctx context.Context, tenantID string, fn func(LedgerRecord) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.ledgerScan(op.ctx, tenantID, fn)
+}
+
+// ledgerScan is LedgerScan's body; see Store.read for the nesting rule.
+func (s *Store) ledgerScan(ctx context.Context, tenantID string, fn func(LedgerRecord) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
-			enabled, err := s.pgSplit.enabled()
+			enabled, err := s.pgSplit.enabled(ctx)
 			if err != nil {
 				return err
 			}
 			if enabled {
 				s.mu.RLock()
 				defer s.mu.RUnlock()
-				return s.pgSplit.ledgerScan(tenantID, fn)
+				return s.pgSplit.ledgerScan(ctx, tenantID, fn)
 			}
 		}
-		return s.scanLegacyLedger(tenantID, fn)
+		return s.scanLegacyLedger(ctx, tenantID, fn)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -107,20 +130,27 @@ func (s *Store) LedgerScan(tenantID string, fn func(LedgerRecord) error) error {
 // only. It never materializes tenant hot documents or cold receipts, segments,
 // checkpoints or archived events, so a control-plane reader cannot widen its
 // own working set by accident.
-func (s *Store) ReadControl(fn func(*Snapshot) error) error {
+func (s *Store) ReadControl(ctx context.Context, fn func(*Snapshot) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.readControl(op.ctx, fn)
+}
+
+// readControl is ReadControl's body; see Store.read for the nesting rule.
+func (s *Store) readControl(ctx context.Context, fn func(*Snapshot) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
-			enabled, err := s.pgSplit.enabled()
+			enabled, err := s.pgSplit.enabled(ctx)
 			if err != nil {
 				return err
 			}
 			if enabled {
 				s.mu.RLock()
 				defer s.mu.RUnlock()
-				return s.pgSplit.readControl(fn)
+				return s.pgSplit.readControl(ctx, fn)
 			}
 		}
-		return s.Read(fn)
+		return s.read(ctx, fn)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -139,20 +169,27 @@ func (s *Store) ReadControl(fn func(*Snapshot) error) error {
 // owns control-plane state as part of a tenant commit — the ingest publication
 // intent, for example — must set that state on view.Global inside the
 // UpdateTenant closure instead, so one store operation carries both.
-func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
+func (s *Store) UpdateControl(ctx context.Context, fn func(*Snapshot) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.updateControl(op.ctx, fn)
+}
+
+// updateControl is UpdateControl's body; see Store.read for the nesting rule.
+func (s *Store) updateControl(ctx context.Context, fn func(*Snapshot) error) error {
 	if s.split == nil {
 		if s.pgSplit != nil {
-			enabled, err := s.pgSplit.enabled()
+			enabled, err := s.pgSplit.enabled(ctx)
 			if err != nil {
 				return err
 			}
 			if enabled {
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				return s.pgSplit.updateControl(fn)
+				return s.pgSplit.updateControl(ctx, fn)
 			}
 		}
-		return s.Update(fn)
+		return s.update(ctx, fn)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,8 +218,8 @@ func (s *Store) UpdateControl(fn func(*Snapshot) error) error {
 	return nil
 }
 
-func (s *Store) readLegacyTenant(tenantID string, fn func(*TenantView) error) error {
-	return s.Read(func(data *Snapshot) error {
+func (s *Store) readLegacyTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
+	return s.read(ctx, func(data *Snapshot) error {
 		view, err := legacyTenantView(data, tenantID)
 		if err != nil {
 			return err
@@ -191,8 +228,8 @@ func (s *Store) readLegacyTenant(tenantID string, fn func(*TenantView) error) er
 	})
 }
 
-func (s *Store) updateLegacyTenant(tenantID string, fn func(*TenantView) error) error {
-	return s.Update(func(data *Snapshot) error {
+func (s *Store) updateLegacyTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
+	return s.update(ctx, func(data *Snapshot) error {
 		view, err := legacyTenantView(data, tenantID)
 		if err != nil {
 			return err
@@ -205,8 +242,8 @@ func (s *Store) updateLegacyTenant(tenantID string, fn func(*TenantView) error) 
 	})
 }
 
-func (s *Store) scanLegacyLedger(tenantID string, fn func(LedgerRecord) error) error {
-	return s.Read(func(data *Snapshot) error {
+func (s *Store) scanLegacyLedger(ctx context.Context, tenantID string, fn func(LedgerRecord) error) error {
+	return s.read(ctx, func(data *Snapshot) error {
 		state, err := splitTenantSnapshot(data, tenantID)
 		if err != nil {
 			return err

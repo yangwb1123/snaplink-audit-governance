@@ -9,6 +9,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -329,7 +330,10 @@ func (s *splitStore) tenantIDs() []string {
 	return ids
 }
 
-func (s *splitStore) materialize() (*Snapshot, error) {
+func (s *splitStore) materialize(ctx context.Context) (*Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result, err := cloneSnapshot(s.control)
 	if err != nil {
 		return nil, err
@@ -363,16 +367,16 @@ func (s *splitStore) materialize() (*Snapshot, error) {
 	return result, nil
 }
 
-func (s *splitStore) read(fn func(*Snapshot) error) error {
-	data, err := s.materialize()
+func (s *splitStore) read(ctx context.Context, fn func(*Snapshot) error) error {
+	data, err := s.materialize(ctx)
 	if err != nil {
 		return err
 	}
 	return fn(data)
 }
 
-func (s *splitStore) update(fn func(*Snapshot) error) error {
-	before, err := s.materialize()
+func (s *splitStore) update(ctx context.Context, fn func(*Snapshot) error) error {
+	before, err := s.materialize(ctx)
 	if err != nil {
 		return err
 	}
@@ -386,8 +390,8 @@ func (s *splitStore) update(fn func(*Snapshot) error) error {
 	return s.replaceFromSnapshot(working)
 }
 
-func (s *splitStore) updateChecked(fn func(*Snapshot) (bool, error)) error {
-	before, err := s.materialize()
+func (s *splitStore) updateChecked(ctx context.Context, fn func(*Snapshot) (bool, error)) error {
+	before, err := s.materialize(ctx)
 	if err != nil {
 		return err
 	}

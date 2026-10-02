@@ -163,7 +163,13 @@ func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*
 //	internal             reachable (toStatus default)
 //	unavailable          reachable (store.ErrSnapshotConflict — an exhausted
 //	                              optimistic-lock retry, i.e. a transient
-//	                              concurrent-writer outcome)
+//	                              concurrent-writer outcome; and
+//	                              store.ErrOperationDeadline — a store
+//	                              operation that exhausted its deadline,
+//	                              i.e. an interrupted statement with an
+//	                              unknown outcome. Both are transient and
+//	                              idempotently retryable, which is why they
+//	                              share one code.)
 //	aborted              reserved (no sentinel maps to it yet)
 //	canceled             reserved
 //	deadline_exceeded    reserved
@@ -465,6 +471,14 @@ func toStatus(err error) error {
 		// at-least-once gRPC policy while codes.Internal is not, and the
 		// ingest request is idempotent, so a retry is safe.
 		return status.Error(codes.Unavailable, snapshotConflictMessage)
+	case errors.Is(err, store.ErrOperationDeadline):
+		// The store operation exhausted its deadline, so the in-flight
+		// statement was interrupted with an unknown outcome. That is the same
+		// transient, idempotently-retryable class as an exhausted
+		// optimistic-lock retry, and the HTTP boundary maps the same sentinel
+		// to 503 store_timeout, so gRPC uses codes.Unavailable and a fixed
+		// message instead of codes.Internal.
+		return status.Error(codes.Unavailable, storeDeadlineMessage)
 	default:
 		// Internal errors never carry the underlying text (filesystem paths,
 		// errno strings, Vault/pgx details): the detail is logged server-side
@@ -481,6 +495,14 @@ func toStatus(err error) error {
 // the condition is transient and the ingest request is idempotent.
 const snapshotConflictMessage = "state snapshot changed concurrently; retry the request"
 
+// storeDeadlineMessage is the fixed client-facing text for a store operation
+// that exhausted its configured deadline. Like snapshotConflictMessage it is a
+// constant and never err.Error(): the wrapped cause can carry a DSN, a
+// pgx detail or a state path, none of which may cross the boundary. The text
+// is retry-guiding because the ingest request is idempotent and an idempotent
+// retry converges the half-completed commit.
+const storeDeadlineMessage = "store operation deadline exceeded; retry the request"
+
 // statusError converts err for the client and logs the full detail of
 // internal errors server-side before the redacted status is returned.
 // An exhausted optimistic-lock conflict keeps its own log prefix: the detail
@@ -494,6 +516,8 @@ func (s *Server) statusError(err error) error {
 	switch {
 	case errors.Is(err, store.ErrSnapshotConflict):
 		s.Logger.Printf("grpc snapshot conflict: %v", err)
+	case errors.Is(err, store.ErrOperationDeadline):
+		s.Logger.Printf("grpc store deadline: %v", err)
 	case status.Code(converted) == codes.Internal:
 		s.Logger.Printf("grpc internal error: %v", err)
 	}

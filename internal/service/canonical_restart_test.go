@@ -32,13 +32,13 @@ func reloadService(t *testing.T, st *store.Store, bootstrap bool) *Service {
 	if !bootstrap {
 		return svc
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc
@@ -61,7 +61,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func assertFileReloadVerifies(t *testing.T, path string) {
 	if !result.Valid || len(result.Errors) != 0 {
 		t.Fatalf("verify after reload failed: %+v", result)
 	}
-	after, err := svc2.GetEvent("tenant-a", "test", "big-int")
+	after, err := svc2.GetEvent(testCtx, "tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, bigIntEvent(), domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "test", "big-int")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestCanonicalDigestSurvivesPostgresReload(t *testing.T) {
 	if !result.Valid || len(result.Errors) != 0 {
 		t.Fatalf("verify after postgres reload failed: %+v", result)
 	}
-	after, err := svc2.GetEvent("tenant-a", "test", "big-int")
+	after, err := svc2.GetEvent(testCtx, "tenant-a", "test", "big-int")
 	if err != nil {
 		t.Fatal(err)
 	}

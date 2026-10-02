@@ -135,13 +135,13 @@ func measurePostgresHotColdSize(t *testing.T, db *sql.DB, count int) postgresHot
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateControl(func(data *Snapshot) error {
+	if err := st.UpdateControl(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		for i := 0; i < count; i++ {
 			eventID := fmt.Sprintf("pg-capacity-%05d", i)
 			view.Ledger.SetReceipt(domain.EventReceipt{EventID: eventID, TenantID: "tenant-a", IdempotencyKey: "pg-idem-" + eventID, Status: domain.StatusArchived, StreamID: "tenant-a:source:crm", Sequence: int64(i + 1), Hash: "hash-" + eventID})
@@ -208,7 +208,7 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("MigratePostgresSnapshot: %v", err)
 	}
 	var layout string
@@ -231,7 +231,7 @@ func TestZPostgresHotColdMigrationHelper(t *testing.T) {
 	if tenants != 2 || records != 4 || backups != 1 {
 		t.Fatalf("migration counts tenants=%d records=%d backups=%d, want 2/4/1", tenants, records, backups)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("idempotent multi-family migration: %v", err)
 	}
 	st, err := OpenPostgres(db)
@@ -257,7 +257,7 @@ func TestZPostgresMigrationIdempotencePreservesEvidence(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("initial migration: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestZPostgresMigrationIdempotencePreservesEvidence(t *testing.T) {
 	}
 	targetsBefore := postgresHotColdTargetState(t, db)
 
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("idempotent migration: %v", err)
 	}
 	var markerAfter, backupAfter string
@@ -295,7 +295,7 @@ func TestZPostgresMigrationRejectsAbsentTargetSchema(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE audit_ledger, audit_tenant`); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "006") {
+	if err := MigratePostgresSnapshot(testCtx, db); err == nil || !strings.Contains(err.Error(), "006") {
 		t.Fatalf("migration error=%v, want migration 006 schema error", err)
 	}
 	var snapshots int
@@ -326,10 +326,10 @@ func TestZPostgresStoreRejectsIncompleteCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Snapshot(); err == nil || !strings.Contains(err.Error(), "incomplete") {
+	if _, err := st.Snapshot(testCtx); err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("split store accepted incomplete catalog: %v", err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.LayoutVersion = hotColdLayoutVersion
 		return nil
 	}); err == nil || !strings.Contains(err.Error(), "incomplete") {
@@ -378,7 +378,7 @@ INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{
 	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&before, &sourceVersion); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), "incompatible") {
+	if err := MigratePostgresSnapshot(testCtx, db); err == nil || !strings.Contains(err.Error(), "incompatible") {
 		t.Fatalf("migration error=%v, want incompatible schema error", err)
 	}
 	var after string
@@ -404,14 +404,14 @@ INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, '{"events":{
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Snapshot(); err == nil || !strings.Contains(err.Error(), "incompatible") {
+	if _, err := st.Snapshot(testCtx); err == nil || !strings.Contains(err.Error(), "incompatible") {
 		t.Fatalf("split store accepted incompatible catalog: %v", err)
 	}
 }
 
 func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("fresh MigratePostgresSnapshot: %v", err)
 	}
 	var layout string
@@ -428,7 +428,7 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	if baselineVersion != postgresHotColdZeroBaselineVersion {
 		t.Fatalf("zero-data baseline version=%d, want %d", baselineVersion, postgresHotColdZeroBaselineVersion)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("fresh idempotent migration: %v", err)
 	}
 	st, err := OpenPostgres(db)
@@ -441,7 +441,7 @@ func TestZPostgresMigrationFreshCutoverReady(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE audit_state_snapshot_v1_backup`); err != nil {
 		t.Fatal(err)
 	}
-	requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
+	requireHotColdInconsistency(t, MigratePostgresSnapshot(testCtx, db))
 	requireHotColdInconsistency(t, st.Ready(context.Background()))
 }
 
@@ -451,7 +451,7 @@ func TestZPostgresFirstControlWriteEstablishesBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateControl(func(data *Snapshot) error {
+	if err := st.UpdateControl(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
@@ -486,7 +486,7 @@ VALUES ('orphan-tenant', 'receipt', 'orphan-key', 1,
         '{"tenant_id":"orphan-tenant","record_type":"receipt","key":"orphan-key","version":1}'::jsonb)`); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); !errors.Is(err, ErrHotColdDataInconsistency) {
+	if err := MigratePostgresSnapshot(testCtx, db); !errors.Is(err, ErrHotColdDataInconsistency) {
 		t.Fatalf("fresh migration error=%v, want ErrHotColdDataInconsistency", err)
 	}
 
@@ -539,7 +539,7 @@ func TestZPostgresFreshMigrationConcurrentIsIdempotent(t *testing.T) {
 		go func(connection *sql.DB) {
 			defer group.Done()
 			<-start
-			results <- MigratePostgresSnapshot(connection)
+			results <- MigratePostgresSnapshot(testCtx, connection)
 		}(connection)
 	}
 	close(start)
@@ -571,7 +571,7 @@ func TestZPostgresFreshMigrationConcurrentIsIdempotent(t *testing.T) {
 
 func TestZPostgresMigrationAllowsPostCutoverRows(t *testing.T) {
 	db := newHotColdPostgresTestDB(t)
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("initial migration: %v", err)
 	}
 	st, err := OpenPostgres(db)
@@ -579,7 +579,7 @@ func TestZPostgresMigrationAllowsPostCutoverRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := EventKey("tenant-a", "post-cutover-event")
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[key] = domain.Event{
 			EventID: "post-cutover-event", TenantID: "tenant-a",
 			StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "post-cutover-hash",
@@ -593,7 +593,7 @@ func TestZPostgresMigrationAllowsPostCutoverRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("post-cutover write: %v", err)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatalf("idempotent migration with post-cutover rows: %v", err)
 	}
 	if err := st.Ready(context.Background()); err != nil {
@@ -647,7 +647,7 @@ FOR EACH ROW EXECUTE FUNCTION snaplink_test_fail_hotcold_ledger()`); err != nil 
 	if err := db.QueryRow(`SELECT snapshot::text, version FROM audit_state_snapshot WHERE id = 1`).Scan(&before, &beforeVersion); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil || !strings.Contains(err.Error(), functionName) {
+	if err := MigratePostgresSnapshot(testCtx, db); err == nil || !strings.Contains(err.Error(), functionName) {
 		t.Fatalf("migration error=%v, want rollback trigger failure", err)
 	}
 	var after string
@@ -685,7 +685,7 @@ func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err != nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 		t.Fatal(err)
 	}
 	var beforeSnapshot, beforeBackup string
@@ -700,7 +700,7 @@ func TestZPostgresMigrationRejectsEmptyTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	targetsBeforeFailure := postgresHotColdTargetState(t, db)
-	requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
+	requireHotColdInconsistency(t, MigratePostgresSnapshot(testCtx, db))
 	st, err := OpenPostgres(db)
 	if err != nil {
 		t.Fatal(err)
@@ -750,7 +750,7 @@ func TestZPostgresMigrationRejectsPartialTargets(t *testing.T) {
 			if _, err := db.Exec(`INSERT INTO audit_state_snapshot (id, snapshot, version) VALUES (1, $1::jsonb, 1)`, string(encoded)); err != nil {
 				t.Fatal(err)
 			}
-			if err := MigratePostgresSnapshot(db); err != nil {
+			if err := MigratePostgresSnapshot(testCtx, db); err != nil {
 				t.Fatal(err)
 			}
 			var before string
@@ -762,7 +762,7 @@ func TestZPostgresMigrationRejectsPartialTargets(t *testing.T) {
 				t.Fatal(err)
 			}
 			targetsBeforeFailure := postgresHotColdTargetState(t, db)
-			requireHotColdInconsistency(t, MigratePostgresSnapshot(db))
+			requireHotColdInconsistency(t, MigratePostgresSnapshot(testCtx, db))
 			st, err := OpenPostgres(db)
 			if err != nil {
 				t.Fatal(err)
@@ -795,7 +795,7 @@ func TestZPostgresMigrationRejectsInvalidV2Marker(t *testing.T) {
 	if err := db.QueryRow(`SELECT snapshot::text FROM audit_state_snapshot WHERE id = 1`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigratePostgresSnapshot(db); err == nil {
+	if err := MigratePostgresSnapshot(testCtx, db); err == nil {
 		t.Fatal("invalid v2 marker migration unexpectedly succeeded")
 	}
 	var after string
@@ -820,7 +820,7 @@ func TestZPostgresTenantCASNoCrossTenantConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seed.UpdateControl(func(data *Snapshot) error {
+	if err := seed.UpdateControl(testCtx, func(data *Snapshot) error {
 		for _, tenantID := range []string{"tenant-a", "tenant-b", "tenant-c", "tenant-d"} {
 			data.Tenants[tenantID] = domain.Tenant{ID: tenantID, Name: tenantID, Active: true}
 		}
@@ -853,7 +853,7 @@ func TestZPostgresTenantCASNoCrossTenantConflicts(t *testing.T) {
 			}
 			for round := 0; round < rounds; round++ {
 				key := EventKey(tenantID, fmt.Sprintf("cross-%d-%d", worker, round))
-				if updateErr := st.UpdateTenant(tenantID, HotFirst, func(view *TenantView) error {
+				if updateErr := st.UpdateTenant(testCtx, tenantID, HotFirst, func(view *TenantView) error {
 					view.Hot.Events[key] = domain.Event{EventID: fmt.Sprintf("cross-%d-%d", worker, round), TenantID: tenantID, StreamID: tenantID + ":source:crm", Sequence: int64(round + 1), Hash: fmt.Sprintf("hash-%d-%d", worker, round)}
 					return nil
 				}); updateErr != nil {
@@ -1099,7 +1099,7 @@ func TestITCtrl01CrossTenantConcurrentArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seed.UpdateControl(func(d *Snapshot) error {
+	if err := seed.UpdateControl(testCtx, func(d *Snapshot) error {
 		d.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Active: true}
 		d.Tenants["tenant-b"] = domain.Tenant{ID: "tenant-b", Active: true}
 		return nil
@@ -1115,13 +1115,13 @@ func TestITCtrl01CrossTenantConcurrentArchive(t *testing.T) {
 		wg.Add(2)
 		go func(r int) {
 			defer wg.Done()
-			if err := st1.UpdateTenant("tenant-a", ColdFirst, deadLetterClosure("tenant-a", fmt.Sprintf("e-a-%d", r))); err != nil {
+			if err := st1.UpdateTenant(testCtx, "tenant-a", ColdFirst, deadLetterClosure("tenant-a", fmt.Sprintf("e-a-%d", r))); err != nil {
 				t.Errorf("tenant-a update: %v", err)
 			}
 		}(r)
 		go func(r int) {
 			defer wg.Done()
-			if err := st2.UpdateTenant("tenant-b", ColdFirst, deadLetterClosure("tenant-b", fmt.Sprintf("e-b-%d", r))); err != nil {
+			if err := st2.UpdateTenant(testCtx, "tenant-b", ColdFirst, deadLetterClosure("tenant-b", fmt.Sprintf("e-b-%d", r))); err != nil {
 				t.Errorf("tenant-b update: %v", err)
 			}
 		}(r)
@@ -1153,7 +1153,7 @@ func TestITCtrl02SameTenantTwoEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seed.UpdateControl(func(d *Snapshot) error {
+	if err := seed.UpdateControl(testCtx, func(d *Snapshot) error {
 		d.Tenants["tenant-x"] = domain.Tenant{ID: "tenant-x", Active: true}
 		return nil
 	}); err != nil {
@@ -1168,13 +1168,13 @@ func TestITCtrl02SameTenantTwoEvents(t *testing.T) {
 		wg.Add(2)
 		go func(r int) {
 			defer wg.Done()
-			if err := st1.UpdateTenant("tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e1-%d", r))); err != nil {
+			if err := st1.UpdateTenant(testCtx, "tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e1-%d", r))); err != nil {
 				t.Errorf("e1 update: %v", err)
 			}
 		}(r)
 		go func(r int) {
 			defer wg.Done()
-			if err := st2.UpdateTenant("tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e2-%d", r))); err != nil {
+			if err := st2.UpdateTenant(testCtx, "tenant-x", ColdFirst, deadLetterClosure("tenant-x", fmt.Sprintf("e2-%d", r))); err != nil {
 				t.Errorf("e2 update: %v", err)
 			}
 		}(r)
@@ -1207,7 +1207,7 @@ func TestITCtrl04ConflictRetryNoLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seed.UpdateControl(func(d *Snapshot) error {
+	if err := seed.UpdateControl(testCtx, func(d *Snapshot) error {
 		d.Tenants["tenant-c"] = domain.Tenant{ID: "tenant-c", Active: true}
 		return nil
 	}); err != nil {
@@ -1231,13 +1231,13 @@ func TestITCtrl04ConflictRetryNoLoss(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := st1.UpdateTenant("tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e1")); err != nil {
+		if err := st1.UpdateTenant(testCtx, "tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e1")); err != nil {
 			t.Errorf("st1 update: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := st2.UpdateTenant("tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e2")); err != nil {
+		if err := st2.UpdateTenant(testCtx, "tenant-c", ColdFirst, deadLetterClosure("tenant-c", "e2")); err != nil {
 			t.Errorf("st2 update: %v", err)
 		}
 	}()

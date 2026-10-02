@@ -19,9 +19,9 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) eventsFor(tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
+func (s *Service) eventsFor(ctx context.Context, tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
 	var events []domain.Event
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
 		events, resolveErr = s.eventsFromSnapshot(context.Background(), data, tenantID, predicate)
 		return resolveErr

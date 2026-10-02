@@ -65,7 +65,7 @@ func TestFileBackendSaveCopiesInputAndLoadReturnsIndependentGraph(t *testing.T) 
 	event := ownershipEvent("evt-backend")
 	source.Events[key] = event
 	source.LedgeredOutbox[key] = event
-	if err := backend.Save(source); err != nil {
+	if err := backend.Save(testCtx, source); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,14 +83,14 @@ func TestFileBackendSaveCopiesInputAndLoadReturnsIndependentGraph(t *testing.T) 
 	assertEventEqual(t, backend.data.Events[key], ownershipEvent("evt-backend"))
 	assertEventEqual(t, backend.data.LedgeredOutbox[key], ownershipEvent("evt-backend"))
 
-	loaded, err := backend.Load()
+	loaded, err := backend.Load(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	loadedEvent := loaded.Events[key]
 	mutateOwnedEvent(&loadedEvent)
 	loaded.Events[key] = loadedEvent
-	fresh, err := backend.Load()
+	fresh, err := backend.Load(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestFileBackendSaveClonesEventsAndOutboxIndependently(t *testing.T) {
 	event := ownershipEvent("evt-independent")
 	source.Events[key] = event
 	source.LedgeredOutbox[key] = event
-	if err := backend.Save(source); err != nil {
+	if err := backend.Save(testCtx, source); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,7 +128,7 @@ func TestSplitStoreUpdateTenantClonesRetainedEventsAndOutbox(t *testing.T) {
 	}
 	key := EventKey("tenant-a", "evt-split")
 	shared := ownershipEvent("evt-split")
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[key] = shared
 		view.Global.LedgeredOutbox[key] = shared
 		return nil
@@ -155,7 +155,7 @@ func TestSplitStoreCloneFailuresPreserveState(t *testing.T) {
 	}
 	goodKey := EventKey("tenant-a", "evt-good")
 	good := ownershipEvent("evt-good")
-	if err := st.UpdateControl(func(data *Snapshot) error {
+	if err := st.UpdateControl(testCtx, func(data *Snapshot) error {
 		data.LedgeredOutbox[goodKey] = good
 		return nil
 	}); err != nil {
@@ -165,7 +165,7 @@ func TestSplitStoreCloneFailuresPreserveState(t *testing.T) {
 	bad := ownershipEvent("evt-bad")
 	bad.Payload["bad"] = func() {}
 	badKey := EventKey("tenant-a", "evt-bad")
-	if err := st.UpdateControl(func(data *Snapshot) error {
+	if err := st.UpdateControl(testCtx, func(data *Snapshot) error {
 		data.LedgeredOutbox[badKey] = bad
 		return nil
 	}); !errors.Is(err, domain.ErrEventClone) {
@@ -192,7 +192,7 @@ func TestLegacyUpdateTenantCloneFailurePreservesState(t *testing.T) {
 	st := NewWithBackend(backend)
 	goodKey := EventKey("tenant-a", "evt-legacy")
 	good := ownershipEvent("evt-legacy")
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Events[goodKey] = good
 		return nil
 	}); err != nil {
@@ -202,13 +202,13 @@ func TestLegacyUpdateTenantCloneFailurePreservesState(t *testing.T) {
 	bad := ownershipEvent("evt-legacy-bad")
 	bad.Payload["bad"] = func() {}
 	badKey := EventKey("tenant-a", "evt-legacy-bad")
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[badKey] = bad
 		return nil
 	}); !errors.Is(err, domain.ErrEventClone) {
 		t.Fatalf("UpdateTenant error=%v, want ErrEventClone", err)
 	}
-	snap, err := st.Snapshot()
+	snap, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

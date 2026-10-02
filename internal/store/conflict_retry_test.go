@@ -21,14 +21,14 @@ type conflictBackend struct {
 	loads     int
 }
 
-func (b *conflictBackend) Load() (*Snapshot, error) { return NewSnapshot(), nil }
+func (b *conflictBackend) Load(ctx context.Context) (*Snapshot, error) { return NewSnapshot(), nil }
 
-func (b *conflictBackend) LoadForUpdate() (*Snapshot, error) {
+func (b *conflictBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
 	b.loads++
 	return NewSnapshot(), nil
 }
 
-func (b *conflictBackend) Save(data *Snapshot) error {
+func (b *conflictBackend) Save(ctx context.Context, data *Snapshot) error {
 	b.saves++
 	if b.conflicts > 0 {
 		b.conflicts--
@@ -46,7 +46,7 @@ func TestUpdateRetriesSnapshotConflictWithBoundedBackoff(t *testing.T) {
 	s := &Store{backend: backend}
 	var runs int
 	started := time.Now()
-	err := s.Update(func(data *Snapshot) error {
+	err := s.Update(testCtx, func(data *Snapshot) error {
 		runs++
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return nil
@@ -71,7 +71,7 @@ func TestUpdateRetriesSnapshotConflictWithBoundedBackoff(t *testing.T) {
 func TestUpdateConflictExhaustionReturnsErrSnapshotConflict(t *testing.T) {
 	backend := &conflictBackend{conflicts: snapshotConflictRetries + 5}
 	s := &Store{backend: backend}
-	err := s.Update(func(data *Snapshot) error {
+	err := s.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return nil
 	})
@@ -92,7 +92,7 @@ func TestUpdateDoesNotRetryClosureErrors(t *testing.T) {
 	s := &Store{backend: backend}
 	sentinel := errors.New("closure failed")
 	var runs int
-	err := s.Update(func(data *Snapshot) error {
+	err := s.Update(testCtx, func(data *Snapshot) error {
 		runs++
 		return sentinel
 	})
@@ -110,7 +110,7 @@ func TestUpdateDoesNotRetryClosureErrors(t *testing.T) {
 func TestUpdateCheckedNoSaveOnCleanClosure(t *testing.T) {
 	backend := &conflictBackend{}
 	s := &Store{backend: backend}
-	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+	if err := s.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true} // must be discarded
 		return false, nil
 	}); err != nil {
@@ -129,7 +129,7 @@ func TestUpdateCheckedNoSaveOnCleanClosure(t *testing.T) {
 func TestUpdateCheckedSavesOnMutation(t *testing.T) {
 	backend := &conflictBackend{}
 	s := &Store{backend: backend}
-	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+	if err := s.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return true, nil
 	}); err != nil {
@@ -147,7 +147,7 @@ func TestUpdateCheckedRetriesConflicts(t *testing.T) {
 	backend := &conflictBackend{conflicts: 2}
 	s := &Store{backend: backend}
 	var runs int
-	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+	if err := s.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		runs++
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return true, nil
@@ -167,7 +167,7 @@ func TestUpdateCheckedCommittingRunDecidesPersistence(t *testing.T) {
 	backend := &conflictBackend{conflicts: 1}
 	s := &Store{backend: backend}
 	var runs int
-	if err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+	if err := s.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		runs++
 		data.Tenants["t1"] = domain.Tenant{ID: "t1", Name: "T1", Active: true}
 		return runs == 1, nil // first attempt mutates, retry reports a no-op
@@ -189,7 +189,7 @@ func TestUpdateCheckedDoesNotRetryClosureErrors(t *testing.T) {
 	s := &Store{backend: backend}
 	sentinel := errors.New("closure failed")
 	var runs int
-	err := s.UpdateChecked(func(data *Snapshot) (bool, error) {
+	err := s.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		runs++
 		return false, sentinel
 	})
@@ -248,7 +248,7 @@ func TestFileBackendSaveFsyncAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.Save(NewSnapshot()); err != nil {
+	if err := backend.Save(testCtx, NewSnapshot()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -265,7 +265,7 @@ func TestFileBackendSaveFsyncAtomicity(t *testing.T) {
 		t.Fatalf("state file mode=%o, want 640", got)
 	}
 	// A subsequent Save replaces the file atomically (same inode path).
-	if err := backend.Save(NewSnapshot()); err != nil {
+	if err := backend.Save(testCtx, NewSnapshot()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {

@@ -139,7 +139,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	event, err := s.Service.GetEvent(scope.TenantID, claims.Subject, r.PathValue("eventID"))
+	event, err := s.Service.GetEvent(r.Context(), scope.TenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -167,7 +167,7 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	receipt, err := s.Service.GetReceipt(scope.TenantID, claims.Subject, r.PathValue("eventID"))
+	receipt, err := s.Service.GetReceipt(r.Context(), scope.TenantID, claims.Subject, r.PathValue("eventID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -192,7 +192,7 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.QueryEvents(scope.TenantID, claims.Subject, query)
+	result, err := s.Service.QueryEvents(r.Context(), scope.TenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -215,7 +215,7 @@ func (s *Server) querySnaplinkAuditEvents(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.queryCount.Add(1)
-	result, err := s.Service.QueryConsoleEvents(tenantID, claims.Subject, query)
+	result, err := s.Service.QueryConsoleEvents(r.Context(), tenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -239,7 +239,7 @@ func (s *Server) querySnaplinkAuditFacets(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.queryCount.Add(1)
-	result, err := s.Service.QueryEventFacets(tenantID, claims.Subject, query)
+	result, err := s.Service.QueryEventFacets(r.Context(), tenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -258,7 +258,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.Operation(scope.TenantID, claims.Subject, r.PathValue("operationID"))
+	result, err := s.Service.Operation(r.Context(), scope.TenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -282,7 +282,7 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.OperationTimelinePage(scope.TenantID, claims.Subject, r.PathValue("operationID"), pageSize, cursor)
+	result, err := s.Service.OperationTimelinePage(r.Context(), scope.TenantID, claims.Subject, r.PathValue("operationID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -311,7 +311,7 @@ func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ReplayOperation(scope.TenantID, claims.Subject, r.PathValue("operationID"))
+	result, err := s.Service.ReplayOperation(r.Context(), scope.TenantID, claims.Subject, r.PathValue("operationID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -335,7 +335,7 @@ func (s *Server) getAggregateTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	result, err := s.Service.AggregateTimelinePage(scope.TenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"), pageSize, cursor)
+	result, err := s.Service.AggregateTimelinePage(r.Context(), scope.TenantID, claims.Subject, r.PathValue("aggregateType"), r.PathValue("aggregateID"), pageSize, cursor)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return

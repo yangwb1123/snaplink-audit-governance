@@ -82,7 +82,7 @@ func seedTenant(t *testing.T, db *sql.DB) *Store {
 	if err != nil {
 		t.Fatalf("seed OpenPostgres: %v", err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["demo"] = domain.Tenant{ID: "demo", Name: "Demo", Active: true}
 		return nil
 	}); err != nil {
@@ -105,7 +105,7 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("second OpenPostgres: %v", err)
 	}
 	var tenant domain.Tenant
-	if err := second.Read(func(data *Snapshot) error {
+	if err := second.Read(testCtx, func(data *Snapshot) error {
 		var ok bool
 		tenant, ok = data.Tenants["demo"]
 		if !ok {
@@ -123,24 +123,24 @@ func TestPostgresBackend(t *testing.T) {
 	// second must fail instead of overwriting.
 	firstBackend := &postgresBackend{db: db}
 	secondBackend := &postgresBackend{db: db}
-	stale, err := secondBackend.LoadForUpdate()
+	stale, err := secondBackend.LoadForUpdate(testCtx)
 	if err != nil {
 		t.Fatalf("stale load: %v", err)
 	}
-	fresh, err := firstBackend.LoadForUpdate()
+	fresh, err := firstBackend.LoadForUpdate(testCtx)
 	if err != nil {
 		t.Fatalf("fresh load: %v", err)
 	}
-	if err := firstBackend.Save(fresh); err != nil {
+	if err := firstBackend.Save(testCtx, fresh); err != nil {
 		t.Fatalf("fresh save: %v", err)
 	}
-	if err := secondBackend.Save(stale); !errors.Is(err, ErrSnapshotConflict) {
+	if err := secondBackend.Save(testCtx, stale); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("stale save error=%v, want ErrSnapshotConflict", err)
 	}
 
 	// Conflict must not corrupt the row: newest state still readable.
 	var count int
-	if err := second.Read(func(data *Snapshot) error {
+	if err := second.Read(testCtx, func(data *Snapshot) error {
 		count = len(data.Tenants)
 		return nil
 	}); err != nil {
@@ -176,11 +176,11 @@ func TestPostgresBackendConcurrentReadsRace(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for j := 0; j < iterations; j++ {
-				if err := st.Read(func(*Snapshot) error { return nil }); err != nil {
+				if err := st.Read(testCtx, func(*Snapshot) error { return nil }); err != nil {
 					errs <- err
 					return
 				}
-				if _, err := st.Snapshot(); err != nil {
+				if _, err := st.Snapshot(testCtx); err != nil {
 					errs <- err
 					return
 				}
@@ -193,7 +193,7 @@ func TestPostgresBackendConcurrentReadsRace(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for j := 0; j < iterations; j++ {
-				if err := st.Update(func(data *Snapshot) error {
+				if err := st.Update(testCtx, func(data *Snapshot) error {
 					data.AdminActions = append(data.AdminActions, domain.AdminAction{
 						ID: fmt.Sprintf("t1-%d-%d", id, j), Actor: "test",
 						Action: "tenant.created", TargetType: "tenant", TargetID: "demo",
@@ -226,7 +226,7 @@ func TestPostgresBackendLoadIsSideEffectFree(t *testing.T) {
 	if b.lastVersion != 0 {
 		t.Fatalf("backend must be unprimed, lastVersion=%d", b.lastVersion)
 	}
-	data, err := b.Load()
+	data, err := b.Load(testCtx)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -248,10 +248,10 @@ func TestPostgresBackendReadBetweenUpdatesNoConflict(t *testing.T) {
 		t.Fatalf("OpenPostgres: %v", err)
 	}
 	for i := 0; i < 50; i++ {
-		if err := st.Read(func(*Snapshot) error { return nil }); err != nil {
+		if err := st.Read(testCtx, func(*Snapshot) error { return nil }); err != nil {
 			t.Fatalf("Read %d: %v", i, err)
 		}
-		if err := st.Update(func(data *Snapshot) error {
+		if err := st.Update(testCtx, func(data *Snapshot) error {
 			data.Tenants["demo"] = domain.Tenant{ID: "demo", Name: "Demo", Active: true}
 			return nil
 		}); err != nil {
@@ -268,11 +268,11 @@ func TestPostgresBackendSaveWithoutPrime(t *testing.T) {
 	seed := seedTenant(t, db)
 
 	b := &postgresBackend{db: db}
-	if err := b.Save(NewSnapshot()); !errors.Is(err, ErrSnapshotConflict) {
+	if err := b.Save(testCtx, NewSnapshot()); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("Save without prime error=%v, want ErrSnapshotConflict", err)
 	}
 	var tenants int
-	if err := seed.Read(func(data *Snapshot) error {
+	if err := seed.Read(testCtx, func(data *Snapshot) error {
 		tenants = len(data.Tenants)
 		return nil
 	}); err != nil {
@@ -290,11 +290,11 @@ func TestPostgresBackendFailedUpdateRecovers(t *testing.T) {
 	st := seedTenant(t, db)
 
 	wantErr := errors.New("closure failed")
-	if err := st.Update(func(*Snapshot) error { return wantErr }); !errors.Is(err, wantErr) {
+	if err := st.Update(testCtx, func(*Snapshot) error { return wantErr }); !errors.Is(err, wantErr) {
 		t.Fatalf("failing Update error=%v, want %v", err, wantErr)
 	}
 	var tenants int
-	if err := st.Read(func(data *Snapshot) error {
+	if err := st.Read(testCtx, func(data *Snapshot) error {
 		tenants = len(data.Tenants)
 		return nil
 	}); err != nil {
@@ -303,14 +303,14 @@ func TestPostgresBackendFailedUpdateRecovers(t *testing.T) {
 	if tenants != 1 {
 		t.Fatalf("tenants=%d after failed Update, want 1", tenants)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["second"] = domain.Tenant{ID: "second", Name: "Second", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatalf("Update after recovery: %v", err)
 	}
 	var count int
-	if err := st.Read(func(data *Snapshot) error {
+	if err := st.Read(testCtx, func(data *Snapshot) error {
 		count = len(data.Tenants)
 		return nil
 	}); err != nil {
@@ -330,7 +330,7 @@ func TestPostgresBackendDeletedRowKeepsBaseline(t *testing.T) {
 	seedTenant(t, db)
 
 	b := &postgresBackend{db: db}
-	data, err := b.LoadForUpdate()
+	data, err := b.LoadForUpdate(testCtx)
 	if err != nil {
 		t.Fatalf("LoadForUpdate: %v", err)
 	}
@@ -340,13 +340,13 @@ func TestPostgresBackendDeletedRowKeepsBaseline(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `DELETE FROM audit_state_snapshot`); err != nil {
 		t.Fatalf("delete row: %v", err)
 	}
-	if _, err := b.LoadForUpdate(); err != nil {
+	if _, err := b.LoadForUpdate(testCtx); err != nil {
 		t.Fatalf("LoadForUpdate after delete: %v", err)
 	}
 	if b.lastVersion != 2 {
 		t.Fatalf("LoadForUpdate reset lastVersion to %d, want 2 kept", b.lastVersion)
 	}
-	if err := b.Save(data); !errors.Is(err, ErrSnapshotConflict) {
+	if err := b.Save(testCtx, data); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("Save after delete error=%v, want ErrSnapshotConflict", err)
 	}
 }
@@ -374,14 +374,14 @@ func TestPostgresBackendConcurrentUpdateConverges(t *testing.T) {
 	errs := make(chan error, 2)
 	go func() {
 		<-start
-		errs <- firstStore.Update(func(data *Snapshot) error {
+		errs <- firstStore.Update(testCtx, func(data *Snapshot) error {
 			data.Tenants["tenant-x"] = domain.Tenant{ID: "tenant-x", Name: "X", Active: true}
 			return nil
 		})
 	}()
 	go func() {
 		<-start
-		errs <- secondStore.Update(func(data *Snapshot) error {
+		errs <- secondStore.Update(testCtx, func(data *Snapshot) error {
 			data.Tenants["tenant-y"] = domain.Tenant{ID: "tenant-y", Name: "Y", Active: true}
 			return nil
 		})
@@ -392,7 +392,7 @@ func TestPostgresBackendConcurrentUpdateConverges(t *testing.T) {
 			t.Fatalf("concurrent Update must converge: %v", err)
 		}
 	}
-	if err := firstStore.Read(func(data *Snapshot) error {
+	if err := firstStore.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["tenant-x"]; !ok {
 			t.Fatal("tenant-x missing after concurrent updates")
 		}
@@ -442,7 +442,7 @@ func TestPostgresUpdateCheckedNoWriteOnCleanClosure(t *testing.T) {
 
 	version, updatedAt, size := rowMetrics(t, db)
 	for i := 0; i < 10; i++ {
-		if err := st.UpdateChecked(func(data *Snapshot) (bool, error) {
+		if err := st.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 			data.Tenants["ghost"] = domain.Tenant{ID: "ghost", Name: "Ghost", Active: true}
 			return false, nil
 		}); err != nil {
@@ -455,7 +455,7 @@ func TestPostgresUpdateCheckedNoWriteOnCleanClosure(t *testing.T) {
 	}
 
 	// A mutating closure still writes exactly once.
-	if err := st.UpdateChecked(func(data *Snapshot) (bool, error) {
+	if err := st.UpdateChecked(testCtx, func(data *Snapshot) (bool, error) {
 		data.Tenants["real"] = domain.Tenant{ID: "real", Name: "Real", Active: true}
 		return true, nil
 	}); err != nil {

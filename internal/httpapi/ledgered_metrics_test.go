@@ -137,16 +137,16 @@ func newLedgeredGateFixture(t *testing.T, blockedID string) *ledgeredGateFixture
 	}
 	for _, setup := range []func() error{
 		func() error {
-			return svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true})
+			return svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true})
 		},
 		func() error {
-			return svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true})
+			return svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true})
 		},
 		func() error {
-			return svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true})
+			return svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true})
 		},
 		func() error {
-			return svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true})
+			return svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true})
 		},
 	} {
 		if err := setup(); err != nil {
@@ -158,7 +158,7 @@ func newLedgeredGateFixture(t *testing.T, blockedID string) *ledgeredGateFixture
 	seeded := httpReadSeedEvent()
 	seeded.EventID = blockedID
 	seeded.TenantID = "tenant-a"
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		data.LedgeredOutbox[store.EventKey(seeded.TenantID, seeded.EventID)] = seeded
 		return nil
 	}); err != nil {
@@ -174,7 +174,7 @@ func newLedgeredGateFixture(t *testing.T, blockedID string) *ledgeredGateFixture
 	}
 	go func() {
 		defer close(fixture.stopped)
-		if _, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil {
+		if _, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil {
 			t.Errorf("flush round failed: %v", err)
 		}
 	}()

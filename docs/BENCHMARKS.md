@@ -239,3 +239,94 @@ G2 验收“容量 envelope 记录；高容量类 cutover 门禁”的落点；`
 - 并发写 + 并发查混合场景（`-cpu` 矩阵）。
 - `VerifyIntegrity` 按流验证与全量验证的成本对比；`DecryptJSON` 一致性改造后的
   大整数敏感字段回归（`TestVerifyIntegrityLargeIntSensitiveField` 哨兵）。
+
+## PostgreSQL control-plane pool decision gate (2026-08-21)
+
+**Status: no numeric pool default is approved by this change.** This section
+records the knobs that now exist, the measurement that is possible today, and
+the criteria an operator must satisfy before choosing a value. The
+reference-implementation disclaimer at the top of this file remains in force:
+nothing below is a production SLO.
+
+### Verification table
+
+| Claim | Evidence | Result |
+|---|---|---|
+| Every serving binary resolves the pool from one implementation | `internal/runtimeconfig/postgres_pool.go`; called by `cmd/audit-api`, `cmd/audit-governance-worker`, `cmd/audit-outbox-relay`, `cmd/audit-pg-migrate` | verified |
+| An UNSET knob applies no setter at all | `TestPoolConfigFromEnv/unset-means-no-setter` asserts `db.Stats().MaxOpenConnections == 0` after applying a fully unset config | verified |
+| A SET knob is validated and read back | `TestPoolConfigFromEnv/every-knob-applied`, `TestApplyPoolConfig` semantics | verified |
+| An invalid value fails closed naming the variable | `TestPoolConfigFromEnv/invalid/*`, `TestOpenStoreAppliesTheSharedPoolConfiguration`, `TestWorkerOpenStoreAppliesTheSharedPoolConfiguration` | verified |
+| The pool shape is observable without a statement | `TestMetricsExposesPoolStatsAndDeadlineCounter` (`/metrics`, no labels) | verified |
+
+### Reproduction metadata
+
+- **Revision:** the worktree commit that adds `internal/runtimeconfig/postgres_pool.go`.
+- **Date:** 2026-08-21 UTC.
+- **Host/container:** local host; **not** a production container, a replica set,
+  or a saturated PostgreSQL.
+- **Runtime:** Go as pinned in `go.mod`.
+- **Store:** PostgreSQL `postgres:17-alpine` from `deploy/docker-compose.verify.yml`.
+
+### Operator knobs
+
+| Variable | Effect when set | Unset behaviour |
+|---|---|---|
+| `AUDIT_POSTGRES_MAX_OPEN_CONNS` | `db.SetMaxOpenConns(n)` | no setter call; `database/sql` default (unlimited) |
+| `AUDIT_POSTGRES_MAX_IDLE_CONNS` | `db.SetMaxIdleConns(n)` | no setter call; `database/sql` default (2) |
+| `AUDIT_POSTGRES_CONN_MAX_LIFETIME` | `db.SetConnMaxLifetime(d)` | no setter call; connections live forever |
+| `AUDIT_POSTGRES_CONN_MAX_IDLE_TIME` | `db.SetConnMaxIdleTime(d)` | no setter call; idle connections are closed immediately |
+| `AUDIT_STORE_OPERATION_TIMEOUT` | per-store-operation deadline (`store.Options.OperationTimeout`) | `store.DefaultOperationTimeout` (10s) |
+
+`AUDIT_STORE_OPERATION_TIMEOUT` must be **strictly below** audit-api's 30s HTTP
+`WriteTimeout`; the binary refuses to start otherwise, because the retryable
+`503 store_timeout` could not otherwise reach the client.
+
+### Effective-default table (the shipped shape)
+
+| Metric | Shipped value | Meaning |
+|---|---:|---|
+| `audit_store_pg_pool_max_open` | `0` | unlimited open connections — no operator limit |
+| `audit_store_pg_pool_idle` | database/sql default | 2 retained idle connections |
+| `audit_store_pg_pool_wait_count_total` | monotonically increasing | how often a caller had to wait for a connection |
+
+### Measurement recipe
+
+Against the verify stack (a real `postgres:17-alpine`, no pool knobs set):
+
+```sh
+docker compose -f deploy/docker-compose.verify.yml up -d
+curl -s http://127.0.0.1:19089/metrics | grep '^audit_store_pg_pool'
+```
+
+To evaluate a candidate value, set the four variables, restart the three
+services, drive the ingest load, and re-read the same five lines.
+
+### Saturation decision criteria
+
+1. `audit_store_pg_pool_wait_count_total` rising per operation while
+   `audit_store_pg_pool_in_use` sits at `max_open` ⇒ the pool is the
+   bottleneck; the candidate value is too low.
+2. `audit_store_pg_pool_in_use` well below `max_open` with a non-zero wait
+   count ⇒ the bottleneck is PostgreSQL, not the client-side pool; raising
+   `max_open` will not help.
+3. `audit_store_operation_deadline_exceeded_total` non-zero ⇒ statements are
+   already being aborted at the store deadline; a larger pool makes the
+   database slower, not the process faster.
+
+### Observation actually run
+
+Only the static shape was verified in this change: the unset configuration
+applies no setter, the metrics lines appear verbatim with no labels, and the
+gate is green. **No saturated-load measurement was run**, so no pool value is
+recommended.
+
+### Limitations and decision gate
+
+This is a local, single-node, single-replica observation with no load
+generator and no PostgreSQL saturation. It does not model production TLS,
+network hops, `max_connections` on the server, replica fan-out, or a real
+traffic mix. **This change approves no numeric pool default**: `unset`
+remains the shipped configuration, and choosing a value requires operator
+evidence from a production-relevant environment plus the published raw
+metrics. Re-measure and record the result here before treating any number as
+approved.

@@ -27,7 +27,7 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 	// claimed outside the closure because a failed commit must not consume the
 	// key — that would suppress the retry that actually re-creates the intent.
 	var repaired bool
-	err := s.Store.UpdateTenant(tenantID, store.HotFirst, func(view *store.TenantView) error {
+	err := s.Store.UpdateTenant(ctx, tenantID, store.HotFirst, func(view *store.TenantView) error {
 		sealed = sealed[:0]
 		repaired = false
 		if view.Global == nil {
@@ -188,14 +188,14 @@ func receiptFromEvent(event domain.Event) domain.EventReceipt {
 	}
 }
 
-func (s *Service) transitionTenantReceipt(tenantID, eventID, status string, evict bool) (domain.EventReceipt, error) {
+func (s *Service) transitionTenantReceipt(ctx context.Context, tenantID, eventID, status string, evict bool) (domain.EventReceipt, error) {
 	var result domain.EventReceipt
 	now := s.Now()
 	order := store.HotFirst
 	if evict {
 		order = store.ColdFirst
 	}
-	err := s.Store.UpdateTenant(tenantID, order, func(view *store.TenantView) error {
+	err := s.Store.UpdateTenant(ctx, tenantID, order, func(view *store.TenantView) error {
 		key := store.EventKey(tenantID, eventID)
 		receipt, ok := view.Ledger.Receipt(key)
 		if !ok {
@@ -220,13 +220,13 @@ func (s *Service) transitionTenantReceipt(tenantID, eventID, status string, evic
 	return result, err
 }
 
-func (s *Service) transitionReceipt(tenantID, eventID, status string, evict bool) (domain.EventReceipt, error) {
-	if s.Store.HotCold() {
-		return s.transitionTenantReceipt(tenantID, eventID, status, evict)
+func (s *Service) transitionReceipt(ctx context.Context, tenantID, eventID, status string, evict bool) (domain.EventReceipt, error) {
+	if s.Store.HotCold(ctx) {
+		return s.transitionTenantReceipt(ctx, tenantID, eventID, status, evict)
 	}
 	var result domain.EventReceipt
 	now := s.Now()
-	err := s.Store.Update(func(data *store.Snapshot) error {
+	err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		key := store.EventKey(tenantID, eventID)
 		receipt, ok := data.Receipts[key]
 		if !ok {

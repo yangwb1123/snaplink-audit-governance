@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -103,7 +104,7 @@ func mergeAdminActions(snapshot, trail []domain.AdminAction, tenantID string, pl
 	}
 	return result
 }
-func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([]domain.AdminAction, error) {
+func (s *Service) ListAdminActions(ctx context.Context, tenantID string, platform bool, limit int) ([]domain.AdminAction, error) {
 	if tenantID == "" && !platform {
 		return nil, fmt.Errorf("%w: tenant_id is required", domain.ErrInvalid)
 	}
@@ -116,14 +117,14 @@ func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([
 	// Read the trail BEFORE the snapshot so a corrupt trail fails closed
 	// without masking the snapshot read, and so the fast path never opens an
 	// RLock inside Store.Read (lock-order safety with Store.mu writers).
-	trail, err := s.Store.ReadAdminTrail()
+	trail, err := s.Store.ReadAdminTrail(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var result []domain.AdminAction
 	if len(trail) == 0 {
 		// Fast path — no read facts: the verbatim pre-trail loop.
-		err = s.Store.Read(func(data *store.Snapshot) error {
+		err = s.Store.Read(ctx, func(data *store.Snapshot) error {
 			for i := len(data.AdminActions) - 1; i >= 0 && len(result) < limit; i-- {
 				action := data.AdminActions[i]
 				if (platform && tenantID == "") || action.TenantID == tenantID {
@@ -137,7 +138,7 @@ func (s *Service) ListAdminActions(tenantID string, platform bool, limit int) ([
 	// Merge path: snapshot mutation facts ∪ read trail, newest-first
 	// (equal CreatedAt ⇒ trail first, then reverse-append within source).
 	var snapshot []domain.AdminAction
-	err = s.Store.Read(func(data *store.Snapshot) error {
+	err = s.Store.Read(ctx, func(data *store.Snapshot) error {
 		snapshot = data.AdminActions
 		return nil
 	})

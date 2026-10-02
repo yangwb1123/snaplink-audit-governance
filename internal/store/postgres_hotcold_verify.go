@@ -285,21 +285,21 @@ func postgresLedgerIdentity(record LedgerRecord) string {
 	return fmt.Sprintf("%q/%q/%q/%d", record.TenantID, record.RecordType, record.Key, record.Version)
 }
 
-func createPostgresHotColdBaselineTable(tx *sql.Tx) error {
-	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS audit_state_snapshot_v1_backup (id INTEGER PRIMARY KEY, snapshot JSONB NOT NULL, version BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`)
+func createPostgresHotColdBaselineTable(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS audit_state_snapshot_v1_backup (id INTEGER PRIMARY KEY, snapshot JSONB NOT NULL, version BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`)
 	return err
 }
 
-func writePostgresHotColdZeroBaseline(tx *sql.Tx) error {
+func writePostgresHotColdZeroBaseline(ctx context.Context, tx *sql.Tx) error {
 	baseline := NewSnapshot()
 	baseline.LayoutVersion = hotColdLayoutVersion
 	encoded, err := json.Marshal(baseline)
 	if err != nil {
 		return err
 	}
-	if err := createPostgresHotColdBaselineTable(tx); err != nil {
+	if err := createPostgresHotColdBaselineTable(ctx, tx); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO audit_state_snapshot_v1_backup (id, snapshot, version, updated_at) VALUES (1, $1::jsonb, $2, now())`, string(encoded), postgresHotColdZeroBaselineVersion)
+	_, err = tx.ExecContext(ctx, `INSERT INTO audit_state_snapshot_v1_backup (id, snapshot, version, updated_at) VALUES (1, $1::jsonb, $2, now())`, string(encoded), postgresHotColdZeroBaselineVersion)
 	return err
 }

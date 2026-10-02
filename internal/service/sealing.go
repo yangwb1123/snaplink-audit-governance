@@ -28,11 +28,11 @@ func (s *Service) SealPendingSegments(ctx context.Context, tenantID string) erro
 	if err := requireTenantScope(tenantID); err != nil {
 		return err
 	}
-	if s.Store.HotCold() {
+	if s.Store.HotCold(ctx) {
 		return s.sealPendingTenant(ctx, tenantID)
 	}
 	now := s.Now()
-	return s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+	return s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
 		mutated := false
 		for key, stream := range data.Streams {
 			if stream.TenantID != tenantID || len(stream.PendingHashes) == 0 {
@@ -66,13 +66,13 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 	if !archive.Configured(s.Config.Archive) {
 		return 0, fmt.Errorf("%w: archive directory is not configured", domain.ErrInvalid)
 	}
-	if s.Store.HotCold() {
+	if s.Store.HotCold(ctx) {
 		return s.archivePendingTenant(ctx, tenantID)
 	}
 	var events []domain.Event
 	var evictedKeys []string
 	var segments []domain.Segment
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for key, event := range data.Events {
 			if event.TenantID != tenantID {
 				continue
@@ -151,7 +151,7 @@ func (s *Service) ArchivePending(ctx context.Context, tenantID string) (int, err
 	// a failed Save commits nothing, so re-runs apply the same mutations.
 	// The reset of the tenant's conflict counter rides in the same atomic
 	// write as the receipt marking (no extra window).
-	if err := s.Store.Update(func(data *store.Snapshot) error {
+	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		for _, key := range evictedKeys {
 			if receipt, ok := data.Receipts[key]; ok && receipt.Status == domain.StatusArchived {
 				delete(data.Events, key)
@@ -245,12 +245,12 @@ func isSegmentDeadLetter(dead domain.DeadLetter) bool {
 // id. This is the operator detection surface: entries whose receipt carries
 // ErrorCode "archive_dead_letter" exactly flag the state that will never
 // converge without operator action.
-func (s *Service) ListDeadLetters(tenantID string) ([]domain.DeadLetter, error) {
+func (s *Service) ListDeadLetters(ctx context.Context, tenantID string) ([]domain.DeadLetter, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
 	var out []domain.DeadLetter
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for _, dead := range data.DeadLetters {
 			if dead.TenantID == tenantID {
 				out = append(out, dead)
@@ -272,11 +272,11 @@ func (s *Service) ListDeadLetters(tenantID string) ([]domain.DeadLetter, error) 
 // operator remediation after the root cause is resolved; the retry
 // re-dead-letters the event if the conflict persists, keeping the loop
 // bounded.
-func (s *Service) ClearDeadLetter(tenantID, eventID string) error {
+func (s *Service) ClearDeadLetter(ctx context.Context, tenantID, eventID string) error {
 	if err := requireTenantScope(tenantID); err != nil {
 		return err
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		key := store.EventKey(tenantID, eventID)
 		delete(data.DeadLetters, key)
 		receipt, ok := data.Receipts[key]
@@ -296,11 +296,11 @@ func (s *Service) ClearDeadLetter(tenantID, eventID string) error {
 // closure is conflict-safe by construction: Store.Update re-runs it on the
 // fresh snapshot, and a failed Save commits nothing, so each committed
 // attempt applies exactly one increment.
-func (s *Service) RecordArchivePassConflict(tenantID string) error {
+func (s *Service) RecordArchivePassConflict(ctx context.Context, tenantID string) error {
 	if err := requireTenantScope(tenantID); err != nil {
 		return err
 	}
-	return s.Store.Update(func(data *store.Snapshot) error {
+	return s.Store.Update(ctx, func(data *store.Snapshot) error {
 		data.ArchiveConflictFailures[tenantID]++
 		return nil
 	})
@@ -308,12 +308,12 @@ func (s *Service) RecordArchivePassConflict(tenantID string) error {
 
 // ArchivePassConflictFailures returns the tenant's persisted archive-pass
 // conflict counter, for the worker's log line and for tests.
-func (s *Service) ArchivePassConflictFailures(tenantID string) (int, error) {
+func (s *Service) ArchivePassConflictFailures(ctx context.Context, tenantID string) (int, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return 0, err
 	}
 	var count int
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		count = data.ArchiveConflictFailures[tenantID]
 		return nil
 	})

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -34,10 +33,10 @@ func TestHotColdArchivePendingUsesTenantLedger(t *testing.T) {
 	dir := t.TempDir()
 	svc.Config.ArchiveDir = dir
 	svc.Config.Archive = &archive.FileStore{Dir: dir}
-	if count, err := svc.ArchivePending(context.Background(), "tenant-a"); err != nil || count != 1 {
+	if count, err := svc.ArchivePending(testCtx, "tenant-a"); err != nil || count != 1 {
 		t.Fatalf("ArchivePending count=%d err=%v, want 1,nil", count, err)
 	}
-	snapshot, err := st.Snapshot()
+	snapshot, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +48,7 @@ func TestHotColdArchivePendingUsesTenantLedger(t *testing.T) {
 		t.Fatalf("receipt status=%s, want archived", got.Status)
 	}
 	var records []store.LedgerRecord
-	if err := st.LedgerScan("tenant-a", func(record store.LedgerRecord) error {
+	if err := st.LedgerScan(testCtx, "tenant-a", func(record store.LedgerRecord) error {
 		records = append(records, record)
 		return nil
 	}); err != nil {
@@ -58,7 +57,7 @@ func TestHotColdArchivePendingUsesTenantLedger(t *testing.T) {
 	if len(records) < 2 {
 		t.Fatalf("ledger records=%d, want receipt v1 and archived v2", len(records))
 	}
-	loaded, err := svc.GetEvent("tenant-a", "auditor", event.EventID)
+	loaded, err := svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID)
 	if err != nil {
 		t.Fatalf("GetEvent after tenant eviction: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestHotColdSealPendingSegmentsUsesColdFirst(t *testing.T) {
 	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err != nil {
 		t.Fatalf("SealPendingSegments: %v", err)
 	}
-	snapshot, err := st.Snapshot()
+	snapshot, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

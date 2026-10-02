@@ -660,7 +660,7 @@ func TestOpenStoreFileBackend(t *testing.T) {
 	if !strings.Contains(buf.String(), "state_backend=file") {
 		t.Fatalf("log must report the file backend, got: %q", buf.String())
 	}
-	if _, err := st.Snapshot(); err != nil {
+	if _, err := st.Snapshot(testCtx); err != nil {
 		t.Fatalf("opened store must be usable: %v", err)
 	}
 }
@@ -699,11 +699,11 @@ func TestBootstrapCreatesTenantAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := bootstrap(svc, "demo"); err != nil {
+		if err := bootstrap(testCtx, svc, "demo"); err != nil {
 			t.Fatalf("bootstrap pass %d: %v", i, err)
 		}
 	}
-	if err := bootstrap(svc, "  "); err != nil {
+	if err := bootstrap(testCtx, svc, "  "); err != nil {
 		t.Fatalf("blank tenant bootstrap must be a no-op: %v", err)
 	}
 	foundTenant := false
@@ -715,17 +715,17 @@ func TestBootstrapCreatesTenantAndIsIdempotent(t *testing.T) {
 	if !foundTenant {
 		t.Fatal("bootstrap tenant missing after bootstrap")
 	}
-	if schemas, err := svc.ListSchemas("demo"); err != nil || len(schemas) != 1 {
+	if schemas, err := svc.ListSchemas(testCtx, "demo"); err != nil || len(schemas) != 1 {
 		t.Fatalf("schemas=%d err=%v, want exactly 1", len(schemas), err)
 	}
-	if sources, err := svc.ListSources("demo"); err != nil || len(sources) != 1 {
+	if sources, err := svc.ListSources(testCtx, "demo"); err != nil || len(sources) != 1 {
 		t.Fatalf("sources=%d err=%v, want exactly 1", len(sources), err)
 	}
 }
 
 func mustList(t *testing.T, svc *service.Service) []domain.Tenant {
 	t.Helper()
-	tenants, err := svc.ListTenants()
+	tenants, err := svc.ListTenants(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

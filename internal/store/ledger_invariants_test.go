@@ -102,13 +102,13 @@ func TestUpdateTenantRejectsLedgerMutationWithoutPersistingHotState(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	mutationErr := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	mutationErr := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[EventKey("tenant-a", "should-not-persist")] = domain.Event{EventID: "should-not-persist", TenantID: "tenant-a"}
 		return view.Ledger.SetReceipt(domain.EventReceipt{EventID: "bad", TenantID: "tenant-b"})
 	})
@@ -129,7 +129,7 @@ func TestUpdateTenantRejectsLedgerMutationWithoutPersistingHotState(t *testing.T
 
 func assertTenantMutationRolledBack(t *testing.T, st *Store) {
 	t.Helper()
-	if err := st.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := st.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if len(view.Hot.Events) != 0 || len(view.Ledger.Records()) != 0 {
 			return errors.New("rejected tenant mutation changed durable state")
 		}
@@ -155,7 +155,7 @@ func TestLedgerFileAndPostgresDecodeRejectCanonicalMismatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
@@ -217,25 +217,25 @@ func TestZPostgresLedgerImmutableConflictParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateControl(func(data *Snapshot) error {
+	if err := st.UpdateControl(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	segment := domain.Segment{TenantID: "tenant-a", StreamID: "stream-1", FirstSequence: 1, LastSequence: 1, EventCount: 1}
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		return view.Ledger.AppendSegment(segment)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		return view.Ledger.AppendSegment(segment)
 	}); err != nil {
 		t.Fatalf("exact PostgreSQL duplicate: %v", err)
 	}
 	segment.LastHash = "different"
-	err = st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	err = st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		return view.Ledger.AppendSegment(segment)
 	})
 	if !errors.Is(err, ErrLedgerRecordConflict) {

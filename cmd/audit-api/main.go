@@ -40,6 +40,13 @@ const envDevAuth = "AUDIT_ALLOW_DEV_AUTH"
 
 const envGRPCRequireMTLS = "AUDIT_GRPC_REQUIRE_MTLS"
 
+// httpWriteTimeout bounds the HTTP socket. It is a named constant because the
+// store operation deadline must provably be shorter than it: the retryable
+// 503 a store timeout classifies as can only be written while the connection
+// is still alive, so a store deadline at or above this value would turn a
+// documented retry into an opaque transport error.
+const httpWriteTimeout = 30 * time.Second
+
 func main() {
 	// Register the termination handler before opening the state store. The
 	// file-lock contract exposes the lock as soon as openStore succeeds; a
@@ -149,7 +156,7 @@ func main() {
 	if err := probeArchiveReady(svc.Config.Archive, logger); err != nil {
 		logger.Fatalf("archive ready: %v", err)
 	}
-	if err := bootstrap(svc, *bootstrapTenant); err != nil {
+	if err := bootstrap(context.Background(), svc, *bootstrapTenant); err != nil {
 		logger.Fatalf("bootstrap: %v", err)
 	}
 	server, tracer, err := prepareServer(logger, svc, authenticator, *otlpEndpoint, *listen)
@@ -309,6 +316,11 @@ func prepareServer(logger *log.Logger, svc *service.Service, authenticator auth.
 	if err := validateAuthConfig(authenticator, svc.Config); err != nil {
 		return nil, nil, fmt.Errorf("invalid authentication configuration: %w", err)
 	}
+	if svc.Store != nil {
+		if err := runtimeconfig.ValidateStoreOperationTimeoutBelow(svc.Store.OperationTimeout(), httpWriteTimeout); err != nil {
+			return nil, nil, err
+		}
+	}
 	if authenticator.AllowDev && !devAuthAllowlisted() {
 		return nil, nil, fmt.Errorf("invalid authentication configuration: development auth (-allow-dev-auth) requires AUDIT_ALLOW_DEV_AUTH=true in the environment (flag-only dev auth is not allowed)")
 	}
@@ -320,7 +332,7 @@ func prepareServer(logger *log.Logger, svc *service.Service, authenticator auth.
 	if tracer != nil {
 		logger.Printf("tracing=otlp endpoint=%s", otlpEndpoint)
 	}
-	server := &http.Server{Addr: listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Addr: listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: httpWriteTimeout, WriteTimeout: httpWriteTimeout, IdleTimeout: 60 * time.Second}
 	return server, tracer, nil
 }
 
@@ -339,13 +351,31 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 		if err != nil {
 			return nil, err
 		}
+		// Pool parameters are operator-configured and unset means "no setter
+		// call", so the shipped pool is unchanged unless asked for. See
+		// internal/runtimeconfig/postgres_pool.go and docs/BENCHMARKS.md.
+		if err := runtimeconfig.ApplyPostgresPoolConfigFromEnv(db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		logger.Printf("state_pool=%s", poolLogValue())
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := db.PingContext(ctx); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
-		st, err := store.OpenPostgres(db)
+		operationTimeout, err := runtimeconfig.ResolveStoreOperationTimeout(store.DefaultOperationTimeout)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		if err := runtimeconfig.ValidateStoreOperationTimeoutBelow(operationTimeout, httpWriteTimeout); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		logger.Printf("store_operation_timeout=%s", operationTimeout)
+		st, err := store.OpenPostgresWithOptions(db, store.Options{OperationTimeout: operationTimeout})
 		if err != nil {
 			_ = db.Close()
 			return nil, err
@@ -360,14 +390,33 @@ func openStore(statePath, postgresDSN string, logger *log.Logger) (*store.Store,
 		return st, nil
 	}
 	logger.Printf("state_backend=file path=%s", statePath)
-	return store.Open(statePath)
+	operationTimeout, err := runtimeconfig.ResolveStoreOperationTimeout(store.DefaultOperationTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := runtimeconfig.ValidateStoreOperationTimeoutBelow(operationTimeout, httpWriteTimeout); err != nil {
+		return nil, err
+	}
+	return store.OpenWithOptions(statePath, store.Options{OperationTimeout: operationTimeout})
 }
 
-func bootstrap(svc *service.Service, tenantID string) error {
+// poolLogValue reports the resolved pool shape without inventing a default:
+// "operator-configured" when any knob is set, "database/sql-default" when
+// none is (unlimited open connections), which is what /metrics then reports
+// as audit_store_pg_pool_max_open 0.
+func poolLogValue() string {
+	cfg, err := runtimeconfig.PostgresPoolConfigFromEnv()
+	if err != nil || cfg.Set() == 0 {
+		return "database/sql-default"
+	}
+	return fmt.Sprintf("operator-configured(knobs=%d)", cfg.Set())
+}
+
+func bootstrap(ctx context.Context, svc *service.Service, tenantID string) error {
 	if strings.TrimSpace(tenantID) == "" {
 		return nil
 	}
-	items, err := svc.ListTenants()
+	items, err := svc.ListTenants(ctx)
 	if err != nil {
 		return err
 	}
@@ -379,21 +428,21 @@ func bootstrap(svc *service.Service, tenantID string) error {
 		}
 	}
 	if !found {
-		if err := svc.CreateTenant("bootstrap", domain.Tenant{ID: tenantID, Name: "Local development tenant", HomeRegion: "local", DataRegion: "local", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+		if err := svc.CreateTenant(ctx, "bootstrap", domain.Tenant{ID: tenantID, Name: "Local development tenant", HomeRegion: "local", DataRegion: "local", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 			return err
 		}
 	}
-	if schemas, err := svc.ListSchemas(tenantID); err != nil {
+	if schemas, err := svc.ListSchemas(ctx, tenantID); err != nil {
 		return err
 	} else if len(schemas) == 0 {
-		if err := svc.RegisterSchema("bootstrap", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Classification: "internal", Active: true}); err != nil {
+		if err := svc.RegisterSchema(ctx, "bootstrap", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Classification: "internal", Active: true}); err != nil {
 			return err
 		}
 	}
-	if sources, err := svc.ListSources(tenantID); err != nil {
+	if sources, err := svc.ListSources(ctx, tenantID); err != nil {
 		return err
 	} else if len(sources) == 0 {
-		if err := svc.AddSource("bootstrap", domain.SourceSystem{TenantID: tenantID, ID: "demo", Name: "Local development source", Active: true}); err != nil {
+		if err := svc.AddSource(ctx, "bootstrap", domain.SourceSystem{TenantID: tenantID, ID: "demo", Name: "Local development source", Active: true}); err != nil {
 			return err
 		}
 	}

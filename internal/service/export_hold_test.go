@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,7 @@ type holdGateBackend struct {
 	injectHold   domain.LegalHold
 }
 
-func (b *holdGateBackend) Load() (*store.Snapshot, error) {
+func (b *holdGateBackend) Load(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.loads++
@@ -54,7 +55,7 @@ func (b *holdGateBackend) Load() (*store.Snapshot, error) {
 	return b.data, nil
 }
 
-func (b *holdGateBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *holdGateBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.loadFors++
@@ -68,7 +69,7 @@ func (b *holdGateBackend) LoadForUpdate() (*store.Snapshot, error) {
 	return cloneTestSnapshot(b.data)
 }
 
-func (b *holdGateBackend) Save(data *store.Snapshot) error {
+func (b *holdGateBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.saves++
@@ -137,7 +138,7 @@ func ingestHeldEvent(t *testing.T, svc *Service) time.Time {
 // activeWindowedHold creates an active legal hold over [t0-10s, t0+10s).
 func activeWindowedHold(t *testing.T, svc *Service, t0 time.Time) domain.LegalHold {
 	t.Helper()
-	hold, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation pending", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
+	hold, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "case-1", Reason: "investigation pending", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func seedCompletedJobAndHold(t *testing.T, svc *Service, t0 time.Time) {
 	t.Helper()
 	job := domain.ExportJob{ID: "export-1", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, Status: "completed", CreatedAt: t0, FinishedAt: &t0, ObjectPath: "exports/export-1.jsonl", Digest: "digest", EventCount: 1}
 	hold := domain.LegalHold{ID: "hold-1", TenantID: "tenant-a", Name: "case-1", Reason: "investigation pending", Filter: domain.Query{From: t0.Add(-10 * time.Second), To: t0.Add(10 * time.Second)}, CreatedBy: "test", CreatedAt: t0}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		data.LegalHolds[hold.ID] = hold
 		return nil
@@ -163,7 +164,7 @@ func seedCompletedJobAndHold(t *testing.T, svc *Service, t0 time.Time) {
 // (platform view: every tenant).
 func countAdminActions(t *testing.T, svc *Service, match func(domain.AdminAction) bool) int {
 	t.Helper()
-	actions, err := svc.ListAdminActions("", true, 100)
+	actions, err := svc.ListAdminActions(testCtx, "", true, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,14 +186,14 @@ func TestCreateExportBlockFactUpdateFailure(t *testing.T) {
 	activeWindowedHold(t, svc, t0)
 	// CreateExport's Saves: #1 query-read fact, #2 block fact. Fail #2.
 	backend.armSaveFailure(2)
-	_, err := svc.CreateExport("tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
+	_, err := svc.CreateExport(testCtx, "tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
 	if err == nil || errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("CreateExport error=%v, want a raw store error, not a 403", err)
 	}
 	if !strings.Contains(err.Error(), "storage write unavailable") {
 		t.Fatalf("CreateExport error=%q, want the store error surfaced", err.Error())
 	}
-	if _, gerr := svc.GetExport("tenant-a", "anything"); !errors.Is(gerr, domain.ErrNotFound) {
+	if _, gerr := svc.GetExport(testCtx, "tenant-a", "anything"); !errors.Is(gerr, domain.ErrNotFound) {
 		t.Fatalf("job created despite failed block fact: GetExport error=%v, want ErrNotFound", gerr)
 	}
 	if n := countAdminActions(t, svc, func(a domain.AdminAction) bool {
@@ -211,7 +212,7 @@ func TestRecordExportDownloadBlockFactUpdateFailure(t *testing.T) {
 	seedCompletedJobAndHold(t, svc, t0)
 	// The block-fact append is the only Save this call performs.
 	backend.armSaveFailure(1)
-	err := svc.RecordExportDownload("tenant-a", "test", "export-1")
+	err := svc.RecordExportDownload(testCtx, "tenant-a", "test", "export-1")
 	if err == nil || errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload error=%v, want a raw store error (download aborted)", err)
 	}
@@ -237,7 +238,7 @@ func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	t0 := ingestHeldEvent(t, svc)
 	hold := activeWindowedHold(t, svc, t0)
 	job := domain.ExportJob{ID: "export-race", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)}, Status: "pending", CreatedAt: svc.Now()}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -246,9 +247,9 @@ func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	// runExport Saves: #1 "running" stamp, #2 failExportBlocked. Fail #2 only:
 	// the bounded retry converges on the next Save and commits the transition.
 	backend.armSaveFailure(2)
-	svc.runExport(job.ID)
+	svc.runExport(testCtx, job.ID)
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports[job.ID]
 		return nil
 	}); err != nil {
@@ -264,7 +265,7 @@ func TestRunExportBlockFactUpdateFailure(t *testing.T) {
 	}); n != 1 {
 		t.Fatalf("export.blocked facts=%d, want 1 (committed atomically with the transition)", n)
 	}
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden (R4 gate still authoritative)", err)
 	}
 	_ = hold
@@ -280,11 +281,11 @@ func TestCreateExportStoreReadErrorPropagates(t *testing.T) {
 	// Store.Read calls): the next Load is QueryEvents' read, the one after
 	// is the R2 gate read. Fail the gate read.
 	backend.armLoadFailure(2)
-	_, err := svc.CreateExport("tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
+	_, err := svc.CreateExport(testCtx, "tenant-a", "test", domain.Query{From: t0.Add(-110 * time.Second), To: t0.Add(90 * time.Second)})
 	if err == nil || !strings.Contains(err.Error(), "storage read unavailable") {
 		t.Fatalf("CreateExport error=%v, want the store read error propagated", err)
 	}
-	if _, gerr := svc.GetExport("tenant-a", "anything"); !errors.Is(gerr, domain.ErrNotFound) {
+	if _, gerr := svc.GetExport(testCtx, "tenant-a", "anything"); !errors.Is(gerr, domain.ErrNotFound) {
 		t.Fatalf("job created despite gate read failure: GetExport error=%v, want ErrNotFound", gerr)
 	}
 	if n := countAdminActions(t, svc, func(a domain.AdminAction) bool {
@@ -300,7 +301,7 @@ func TestGetExportStoreReadErrorPropagates(t *testing.T) {
 	backend, svc := holdGateService(t)
 	t0 := time.Unix(1_700_000_010, 0).UTC()
 	job := domain.ExportJob{ID: "export-1", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, Status: "completed", CreatedAt: t0, FinishedAt: &t0, ObjectPath: "exports/export-1.jsonl", Digest: "digest", EventCount: 1}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -308,7 +309,7 @@ func TestGetExportStoreReadErrorPropagates(t *testing.T) {
 	}
 	// No Store.Read happened during this setup: the next Load is GetExport's.
 	backend.armLoadFailure(1)
-	got, err := svc.GetExport("tenant-a", "export-1")
+	got, err := svc.GetExport(testCtx, "tenant-a", "export-1")
 	if err == nil || !strings.Contains(err.Error(), "storage read unavailable") {
 		t.Fatalf("GetExport error=%v, want the store read error propagated", err)
 	}
@@ -326,7 +327,7 @@ func TestRecordExportDownloadStoreReadErrorPropagates(t *testing.T) {
 	// Relative to the reads already consumed by seeding: fail the download
 	// gate's own read.
 	backend.armLoadFailure(1)
-	err := svc.RecordExportDownload("tenant-a", "test", "export-1")
+	err := svc.RecordExportDownload(testCtx, "tenant-a", "test", "export-1")
 	if err == nil || !strings.Contains(err.Error(), "storage read unavailable") {
 		t.Fatalf("RecordExportDownload error=%v, want the store read error propagated", err)
 	}
@@ -347,45 +348,45 @@ func TestBlankFilterHoldBlocksAllTenantExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}
-	job, err := svc.CreateExport("tenant-a", "compliance", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
-	if _, err := svc.GetExport("tenant-a", job.ID); err != nil {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); err != nil {
 		t.Fatalf("GetExport before hold: %v", err)
 	}
 	// A blank hold in another tenant never touches tenant-a.
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-b", Name: "blank-b", Reason: "tenant-b blanket", Filter: domain.Query{}}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-b", Name: "blank-b", Reason: "tenant-b blanket", Filter: domain.Query{}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateExport("tenant-a", "compliance", query); err != nil {
+	if _, err := svc.CreateExport(testCtx, "tenant-a", "compliance", query); err != nil {
 		t.Fatalf("tenant-a export blocked by tenant-b hold: %v", err)
 	}
 	// tenant-a's own blank hold blocks create and access paths.
-	if _, err := svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "blank-a", Reason: "blanket investigation", Filter: domain.Query{}}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "blank-a", Reason: "blanket investigation", Filter: domain.Query{}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateExport("tenant-a", "test", query); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.CreateExport(testCtx, "tenant-a", "test", query); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("create under blank hold error=%v, want ErrForbidden", err)
 	}
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport under blank hold error=%v, want ErrForbidden", err)
 	}
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("download under blank hold error=%v, want ErrForbidden", err)
 	}
 	// Zero-event export query is never blocked.
 	empty := domain.Query{From: t0.Add(time.Hour + time.Second), To: t0.Add(time.Hour + 2*time.Second)}
-	emptyJob, err := svc.CreateExport("tenant-a", "test", empty)
+	emptyJob, err := svc.CreateExport(testCtx, "tenant-a", "test", empty)
 	if err != nil {
 		t.Fatalf("zero-event export under blank hold: %v", err)
 	}
 	waitExport(t, svc, emptyJob.ID)
-	if _, err := svc.GetExport("tenant-a", emptyJob.ID); err != nil {
+	if _, err := svc.GetExport(testCtx, "tenant-a", emptyJob.ID); err != nil {
 		t.Fatalf("GetExport zero-event under blank hold: %v", err)
 	}
 }
@@ -401,19 +402,19 @@ func TestHoldReleasedBetweenCreateGateAndFactAppend(t *testing.T) {
 	// Release the hold inside the block-fact append's LoadForUpdate
 	// (LoadForUpdate #1 of CreateExport is the query-read fact append).
 	backend.armReleaseOnLoadFor(2, hold.ID)
-	job, err := svc.CreateExport("tenant-a", "test", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", query)
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("CreateExport error=%v, want ErrForbidden (denial follows the gate snapshot)", err)
 	}
 	if job != (domain.ExportJob{}) {
 		t.Fatalf("blocked CreateExport returned job %+v, want zero value", job)
 	}
-	if _, err := svc.GetExport("tenant-a", "anything"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", "anything"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("GetExport error=%v, want ErrNotFound (job never created)", err)
 	}
 	blocked := 0
 	var fact *domain.AdminAction
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +428,7 @@ func TestHoldReleasedBetweenCreateGateAndFactAppend(t *testing.T) {
 		t.Fatalf("export.blocked facts=%d fact=%+v, want 1 naming hold %s actor test", blocked, fact, hold.ID)
 	}
 	var current domain.LegalHold
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		current = data.LegalHolds[hold.ID]
 		return nil
 	}); err != nil {
@@ -436,7 +437,7 @@ func TestHoldReleasedBetweenCreateGateAndFactAppend(t *testing.T) {
 	if current.ReleasedAt == nil {
 		t.Fatal("hold not released in the live snapshot")
 	}
-	fresh, err := svc.CreateExport("tenant-a", "test", query)
+	fresh, err := svc.CreateExport(testCtx, "tenant-a", "test", query)
 	if err != nil {
 		t.Fatalf("fresh create after release: %v", err)
 	}
@@ -454,31 +455,31 @@ func TestMultipleHoldsReportLowestID(t *testing.T) {
 	svc := testService(t, true)
 	_ = ingestHeldEvent(t, svc)
 	query := wideExportQuery()
-	job, err := svc.CreateExport("tenant-a", "test", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "test", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
 	// Create the higher-ID hold first: the reported blocker must still be the
 	// lexically-lowest ID (hold-aaa < hold-zzz), never creation order.
-	if _, err := svc.CreateLegalHold(domain.LegalHold{ID: "hold-zzz", TenantID: "tenant-a", Name: "case-z", Reason: "higher id", Filter: query}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{ID: "hold-zzz", TenantID: "tenant-a", Name: "case-z", Reason: "higher id", Filter: query}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateLegalHold(domain.LegalHold{ID: "hold-aaa", TenantID: "tenant-a", Name: "case-a", Reason: "lowest id", Filter: query}); err != nil {
+	if _, err := svc.CreateLegalHold(testCtx, domain.LegalHold{ID: "hold-aaa", TenantID: "tenant-a", Name: "case-a", Reason: "lowest id", Filter: query}); err != nil {
 		t.Fatal(err)
 	}
 	// Access gate (read-only denial): error names the lowest-ID hold.
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden", err)
 	} else if msg := err.Error(); msg != "export blocked by active legal hold hold-aaa" {
 		t.Fatalf("GetExport error=%q, want the lowest-ID hold reported", msg)
 	}
 	// Download denial: fact names the same lowest-ID hold.
-	if err := svc.RecordExportDownload("tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload error=%v, want ErrForbidden", err)
 	}
 	// Create gate: same report.
-	if _, err := svc.CreateExport("tenant-a", "test", query); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.CreateExport(testCtx, "tenant-a", "test", query); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("CreateExport error=%v, want ErrForbidden", err)
 	} else if msg := err.Error(); msg != "export blocked by active legal hold hold-aaa" {
 		t.Fatalf("CreateExport error=%q, want the lowest-ID hold reported", msg)
@@ -486,7 +487,7 @@ func TestMultipleHoldsReportLowestID(t *testing.T) {
 	// GetExport denies are read-only, so exactly one download fact plus one
 	// create fact exist, both naming hold-aaa.
 	facts, wrongHold := 0, 0
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +516,7 @@ func TestRunExportSelectionReadErrorFailsClosed(t *testing.T) {
 	svc.Config.ArchiveDir = t.TempDir()
 	svc.Config.Archive = &archive.FileStore{Dir: svc.Config.ArchiveDir}
 	job := domain.ExportJob{ID: "export-readerr", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, Status: "pending", CreatedAt: svc.Now()}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -524,9 +525,9 @@ func TestRunExportSelectionReadErrorFailsClosed(t *testing.T) {
 	// runExport Loads: #1 job lookup, #2 selection read. Fail #2 (the R3
 	// gate read), which happens after the "running" stamp (a LoadForUpdate).
 	backend.armLoadFailure(2)
-	svc.runExport(job.ID)
+	svc.runExport(testCtx, job.ID)
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports[job.ID]
 		return nil
 	}); err != nil {
@@ -562,7 +563,7 @@ func TestRunExportBlocksHoldCreatedAfterJobPersisted(t *testing.T) {
 	svc.Config.Archive = &archive.FileStore{Dir: svc.Config.ArchiveDir}
 	t0 := ingestHeldEvent(t, svc)
 	job := domain.ExportJob{ID: "export-late-hold", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, Status: "pending", CreatedAt: svc.Now()}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -572,9 +573,9 @@ func TestRunExportBlocksHoldCreatedAfterJobPersisted(t *testing.T) {
 	// runExport Loads: #1 job lookup, #2 R3 selection read. The hold appears
 	// on Load #2 — between the running stamp and the selection scan.
 	backend.armInjectHoldOnLoad(2, hold)
-	svc.runExport(job.ID)
+	svc.runExport(testCtx, job.ID)
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports[job.ID]
 		return nil
 	}); err != nil {
@@ -597,7 +598,7 @@ func TestRunExportBlocksHoldCreatedAfterJobPersisted(t *testing.T) {
 		t.Fatalf("want one governance-worker export.blocked fact, found %d", got)
 	}
 	// The injected hold is a real committed hold now: R4 stays authoritative.
-	if _, err := svc.GetExport("tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden after the late hold commits", err)
 	}
 }
@@ -611,20 +612,20 @@ func TestRunExportJobDeletedIsSilent(t *testing.T) {
 	svc.Config.ArchiveDir = t.TempDir()
 	svc.Config.Archive = &archive.FileStore{Dir: svc.Config.ArchiveDir}
 	job := domain.ExportJob{ID: "export-gone", TenantID: "tenant-a", RequestedBy: "test", Query: domain.Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, Status: "pending", CreatedAt: svc.Now()}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		delete(data.Exports, job.ID)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	svc.runExport(job.ID)
-	snap, err := svc.Store.Snapshot()
+	svc.runExport(testCtx, job.ID)
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,12 +653,12 @@ func TestHoldReleasedBetweenDownloadGateAndFactAppend(t *testing.T) {
 	seedCompletedJobAndHold(t, svc, t0)
 	// The block-fact append is the first LoadForUpdate of this call.
 	backend.armReleaseOnLoadFor(1, "hold-1")
-	if err := svc.RecordExportDownload("tenant-a", "test", "export-1"); !errors.Is(err, domain.ErrForbidden) {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", "export-1"); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload error=%v, want ErrForbidden", err)
 	}
 	blocked, exported := 0, 0
 	var fact *domain.AdminAction
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,11 +678,11 @@ func TestHoldReleasedBetweenDownloadGateAndFactAppend(t *testing.T) {
 		t.Fatalf("audit.event.export facts=%d, want 0 (the block fact replaces it)", exported)
 	}
 	// Live snapshot: the release committed, so a retry now succeeds.
-	if err := svc.RecordExportDownload("tenant-a", "test", "export-1"); err != nil {
+	if err := svc.RecordExportDownload(testCtx, "tenant-a", "test", "export-1"); err != nil {
 		t.Fatalf("retry download after release: %v", err)
 	}
 	exported = 0
-	actions, err = svc.ListAdminActions("tenant-a", false, 100)
+	actions, err = svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

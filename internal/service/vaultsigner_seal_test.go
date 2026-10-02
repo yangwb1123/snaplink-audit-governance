@@ -61,7 +61,7 @@ func TestIngestSealSignerFailureCommitsNothingAndArchivesNothing(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, testEvent("seal-a2", "op-a", at.Add(time.Second)), domain.StatusLedgered); err == nil {
 		t.Fatal("Ingest must surface the seal signer failure")
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSealPendingSegmentsSignerFailureCommitsNothingAndArchivesNothing(t *tes
 	if err := svc.SealPendingSegments(testCtx, "tenant-a"); err == nil {
 		t.Fatal("SealPendingSegments must surface the signer failure")
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestIngestCancelledContextAbortsPromptlyAndRecordsNothing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Ingest did not abort promptly on a cancelled context")
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

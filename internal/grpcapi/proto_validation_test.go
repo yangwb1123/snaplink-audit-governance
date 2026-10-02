@@ -243,7 +243,7 @@ func TestGRPCRejectsDuplicateChangedFields(t *testing.T) {
 	}
 
 	assertNoFramedKeys(t, st, duplicate.GetEventId(), batchDuplicate.GetEventId(), later.GetEventId(), streamDuplicate.GetEventId())
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", prefix.GetEventId())]; !exists {
 			t.Fatal("valid batch prefix was not committed")
 		}
@@ -346,7 +346,7 @@ func TestUnknownFieldsOutsideSupportedScopeRemainAccepted(t *testing.T) {
 		t.Fatalf("unknown WriteRequest/Timestamp in stream rejected: %v", err)
 	}
 
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, id := range []string{"grpc-unknown-wrapper", "grpc-unknown-batch-wrapper", "grpc-unknown-stream-wrapper"} {
 			if _, exists := data.Events[store.EventKey("tenant-a", id)]; !exists {
 				t.Fatalf("accepted out-of-scope unknown event %q was not persisted", id)

@@ -109,13 +109,13 @@ func gateCostServer(t *testing.T) (*httptest.Server, *service.Service, *store.St
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
@@ -254,7 +254,7 @@ func TestHTTPExportStatusStillBlocksOnIntersectingHold(t *testing.T) {
 	// Audit facts unchanged (B-7): at the HTTP boundary the denial happens in
 	// the read-only GetExport, so neither route appends an export.blocked fact
 	// and no sealed bytes are ever streamed.
-	snap, err := st.Snapshot()
+	snap, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestHTTPExportCreateStillFailsClosedOnUnreadableArchivedObject(t *testing.T
 	gateSeedEvictedTenant(t, server.URL)
 	svc.Config.Archive = newGateHTTPArchive(archiveDirOf(t, svc), true)
 
-	before, err := st.Snapshot()
+	before, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestHTTPExportCreateStillFailsClosedOnUnreadableArchivedObject(t *testing.T
 	if response.StatusCode < 400 {
 		t.Fatalf("create status=%d, want a non-2xx failure", response.StatusCode)
 	}
-	after, err := st.Snapshot()
+	after, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

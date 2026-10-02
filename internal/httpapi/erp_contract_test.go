@@ -41,15 +41,15 @@ func erpTestHTTPServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "sverp-web", Name: "SVERP Web", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "sverp-web", Name: "SVERP Web", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	// ERP schema 注册（sverpweb 侧"每 event_type 一条"模式的契约样例）。
 	for _, eventType := range []string{"purchase_request.created.v1", "purchase_request.approved.v1"} {
-		if err := svc.RegisterSchema("test", domain.EventSchema{
+		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{
 			TenantID: "tenant-a", SchemaID: "sverp." + eventType, Version: 1,
 			EventType: eventType, Active: true,
 		}); err != nil {

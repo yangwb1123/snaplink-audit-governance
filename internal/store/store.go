@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -25,6 +26,42 @@ import (
 // prevents lost updates when multiple audit-api replicas share one
 // PostgreSQL snapshot row.
 var ErrSnapshotConflict = errors.New("state snapshot changed concurrently")
+
+// ErrOperationDeadline is returned when a store operation exhausted the
+// deadline it was started with (Options.OperationTimeout, or the caller
+// context's own earlier deadline). The error wraps context.DeadlineExceeded,
+// so errors.Is matches both this sentinel and the standard context error.
+//
+// It is the "result unknown" class, not a fault class: a statement that was
+// aborted mid-flight may or may not have committed, so callers must treat it
+// exactly like ErrSnapshotConflict and let the idempotent retry converge. It
+// is deliberately distinct from context.Canceled, which propagates unchanged
+// because a cancelled caller has nothing to report.
+var ErrOperationDeadline = errors.New("store operation deadline exceeded")
+
+// DefaultOperationTimeout is the shipped per-operation bound when
+// Options.OperationTimeout is zero. It is a starting default, not an
+// operator-mandated value: every serving binary can override it
+// (AUDIT_STORE_OPERATION_TIMEOUT).
+//
+// The bound is per store operation — one tenant's bounded write set, or one
+// control-plane document — not per request, and it is deliberately far larger
+// than a PostgreSQL round trip (BenchmarkIngest is ~1.3 ms in-process). It is
+// also strictly below the 30s HTTP WriteTimeout of audit-api so that the
+// retryable 503 classification can still be written to the client; the
+// binary validates that relationship at startup.
+const DefaultOperationTimeout = 10 * time.Second
+
+// Options carries the operational knobs a Store needs at construction. The
+// zero value is the shipped default, so Options{} keeps the pre-existing
+// behaviour and no setter exists (see OpenWithControlWriteFault for the same
+// constructor-parameter seam).
+type Options struct {
+	// OperationTimeout bounds every store operation. Zero selects
+	// DefaultOperationTimeout; a negative value is rejected by the
+	// constructors rather than silently disabling the bound.
+	OperationTimeout time.Duration
+}
 
 type StreamState struct {
 	TenantID        string   `json:"tenant_id"`
@@ -163,17 +200,18 @@ func (s *Snapshot) normalize() {
 type Backend interface {
 	// Load returns an independent caller-owned snapshot for read-only access.
 	// Load must not mutate backend state: concurrent readers share one
-	// backend.
-	Load() (*Snapshot, error)
+	// backend. ctx is the store operation context: a backend must abandon the
+	// statement and return ctx.Err() once it ends.
+	Load(ctx context.Context) (*Snapshot, error)
 	// LoadForUpdate returns a private copy for a read-modify-write cycle so
 	// a failing closure can never corrupt the shared state; the copy is only
 	// committed through Save. It also establishes the optimistic-lock
 	// baseline for the subsequent Save; callers must not retain the
 	// returned snapshot.
-	LoadForUpdate() (*Snapshot, error)
+	LoadForUpdate(ctx context.Context) (*Snapshot, error)
 	// Save atomically persists a copy of data. A nil return means the rename
 	// is durable (parent-directory chain fsynced after rename).
-	Save(data *Snapshot) error
+	Save(ctx context.Context, data *Snapshot) error
 }
 
 type Store struct {
@@ -181,11 +219,29 @@ type Store struct {
 	backend Backend
 	split   *splitStore
 	pgSplit *postgresSplitStore
+
+	// opts holds the resolved operation timeout (see Options). pool is the
+	// PostgreSQL handle for this store, or nil for file/in-memory stores;
+	// PoolStats is the only reader and it never takes mu.
+	opts Options
+	pool *sql.DB
+	// deadlineExhaustions is the unlabelled monotonic counter exported as
+	// audit_store_operation_deadline_exceeded_total. Atomic so /metrics can
+	// read it while an operation is in flight.
+	deadlineExhaustions atomic.Uint64
 }
 
 // Open returns a store backed by the local snapshot file. An empty path
 // keeps all state in memory only.
-func Open(path string) (*Store, error) {
+func Open(path string) (*Store, error) { return OpenWithOptions(path, Options{}) }
+
+// OpenWithOptions is Open with an explicit Options value. A negative
+// OperationTimeout is rejected: an operator misconfiguration must fail at
+// startup, not silently remove the interruptible bound.
+func OpenWithOptions(path string, opts Options) (*Store, error) {
+	if opts.OperationTimeout < 0 {
+		return nil, errors.New("store: operation timeout must not be negative")
+	}
 	backend, err := openFileBackend(path)
 	if err != nil {
 		return nil, err
@@ -195,7 +251,7 @@ func Open(path string) (*Store, error) {
 		_ = backend.Close()
 		return nil, err
 	}
-	return &Store{backend: backend, split: split}, nil
+	return &Store{backend: backend, split: split, opts: opts}, nil
 }
 
 // ControlWriteFault is consulted immediately before the v2 file store makes a
@@ -234,36 +290,58 @@ func OpenWithControlWriteFault(path string, fault ControlWriteFault) (*Store, er
 // audit_state_snapshot table. Multiple replicas can share the row; the
 // optimistic version check surfaces lost-update conflicts instead of
 // silently overwriting each other.
-func OpenPostgres(db *sql.DB) (*Store, error) {
+func OpenPostgres(db *sql.DB) (*Store, error) { return OpenPostgresWithOptions(db, Options{}) }
+
+// OpenPostgresWithOptions is OpenPostgres with an explicit Options value. The
+// *sql.DB is retained so /metrics can publish database/sql pool statistics
+// (PoolStats) without taking Store.mu or issuing a statement.
+func OpenPostgresWithOptions(db *sql.DB, opts Options) (*Store, error) {
+	if opts.OperationTimeout < 0 {
+		return nil, errors.New("store: operation timeout must not be negative")
+	}
 	backend := &postgresBackend{db: db}
-	return &Store{backend: backend, pgSplit: newPostgresSplitStore(backend)}, nil
+	return &Store{backend: backend, pgSplit: newPostgresSplitStore(backend), opts: opts, pool: db}, nil
 }
 
 // NewWithBackend builds a Store over an arbitrary Backend. It is a test
 // seam so service-level tests can script optimistic-lock conflict
 // sequences; production code uses Open or OpenPostgres.
-func NewWithBackend(b Backend) *Store { return &Store{backend: b} }
+func NewWithBackend(b Backend) *Store { return NewWithBackendOptions(b, Options{}) }
 
-func (s *Store) Read(fn func(*Snapshot) error) error {
+// NewWithBackendOptions is NewWithBackend with an explicit Options value.
+func NewWithBackendOptions(b Backend, opts Options) *Store {
+	return &Store{backend: b, opts: opts}
+}
+
+func (s *Store) Read(ctx context.Context, fn func(*Snapshot) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.read(op.ctx, fn)
+}
+
+// read is Read's body. It is the shared entry point for every nested store
+// call, so it must never re-derive the operation context: only the exported
+// operation boundary (Read/Update/…) classifies the deadline.
+func (s *Store) read(ctx context.Context, fn func(*Snapshot) error) error {
 	if s.split != nil {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.split.read(fn)
+		return s.split.read(ctx, fn)
 	}
 	if s.pgSplit != nil {
-		enabled, err := s.pgSplit.enabled()
+		enabled, err := s.pgSplit.enabled(ctx)
 		if err != nil {
 			return err
 		}
 		if enabled {
 			s.mu.RLock()
 			defer s.mu.RUnlock()
-			return s.pgSplit.read(fn)
+			return s.pgSplit.read(ctx, fn)
 		}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, err := s.backend.Load()
+	data, err := s.backend.Load(ctx)
 	if err != nil {
 		return err
 	}
@@ -302,46 +380,55 @@ func snapshotConflictBackoff(attempt int) time.Duration {
 // fn up to snapshotConflictRetries times with bounded jitter. Other errors
 // (including errors returned by fn itself) are returned immediately: they
 // are not conflicts and must not be retried.
-func (s *Store) Update(fn func(*Snapshot) error) error {
+func (s *Store) Update(ctx context.Context, fn func(*Snapshot) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.update(op.ctx, fn)
+}
+
+// update is Update's body; see read for the nesting rule.
+func (s *Store) update(ctx context.Context, fn func(*Snapshot) error) error {
 	if s.split != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.split.update(fn)
+		return s.split.update(ctx, fn)
 	}
 	if s.pgSplit != nil {
-		enabled, err := s.pgSplit.enabled()
+		enabled, err := s.pgSplit.enabled(ctx)
 		if err != nil {
 			return err
 		}
 		if enabled {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return s.pgSplit.update(fn)
+			return s.pgSplit.update(ctx, fn)
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateLocked(fn)
+	return s.updateLocked(ctx, fn)
 }
 
 // updateLocked is Update's retry loop without the lock; callers must hold
 // s.mu exclusively. It exists so AppendAdminFact's capability-less fallback
 // can reuse the exact optimistic-lock semantics without re-entering Update
 // and deadlocking on the same lock (F-1).
-func (s *Store) updateLocked(fn func(*Snapshot) error) error {
+func (s *Store) updateLocked(ctx context.Context, fn func(*Snapshot) error) error {
 	var lastErr error
 	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
-		data, err := s.backend.LoadForUpdate()
+		data, err := s.backend.LoadForUpdate(ctx)
 		if err != nil {
 			return err
 		}
 		if err := fn(data); err != nil {
 			return err
 		}
-		if err := s.backend.Save(data); err != nil {
+		if err := s.backend.Save(ctx, data); err != nil {
 			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
 				lastErr = err
-				time.Sleep(snapshotConflictBackoff(attempt))
+				if err := sleepBackoff(ctx, attempt); err != nil {
+					return err
+				}
 				continue
 			}
 			return err
@@ -361,28 +448,35 @@ func (s *Store) updateLocked(fn func(*Snapshot) error) error {
 // mutating silently discards the change. Intended for idempotent worker
 // passes that can cheaply prove a no-op (no writes on an idle tick);
 // ordinary mutations should keep using Update.
-func (s *Store) UpdateChecked(fn func(*Snapshot) (bool, error)) error {
+func (s *Store) UpdateChecked(ctx context.Context, fn func(*Snapshot) (bool, error)) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.updateChecked(op.ctx, fn)
+}
+
+// updateChecked is UpdateChecked's body; see read for the nesting rule.
+func (s *Store) updateChecked(ctx context.Context, fn func(*Snapshot) (bool, error)) error {
 	if s.split != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.split.updateChecked(fn)
+		return s.split.updateChecked(ctx, fn)
 	}
 	if s.pgSplit != nil {
-		enabled, err := s.pgSplit.enabled()
+		enabled, err := s.pgSplit.enabled(ctx)
 		if err != nil {
 			return err
 		}
 		if enabled {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return s.pgSplit.updateChecked(fn)
+			return s.pgSplit.updateChecked(ctx, fn)
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var lastErr error
 	for attempt := 0; attempt <= snapshotConflictRetries; attempt++ {
-		data, err := s.backend.LoadForUpdate()
+		data, err := s.backend.LoadForUpdate(ctx)
 		if err != nil {
 			return err
 		}
@@ -395,10 +489,12 @@ func (s *Store) UpdateChecked(fn func(*Snapshot) (bool, error)) error {
 			// change. An idle worker tick must not rewrite the snapshot row.
 			return nil
 		}
-		if err := s.backend.Save(data); err != nil {
+		if err := s.backend.Save(ctx, data); err != nil {
 			if errors.Is(err, ErrSnapshotConflict) && attempt < snapshotConflictRetries {
 				lastErr = err
-				time.Sleep(snapshotConflictBackoff(attempt))
+				if err := sleepBackoff(ctx, attempt); err != nil {
+					return err
+				}
 				continue
 			}
 			return err
@@ -432,26 +528,33 @@ func (s *Store) Close() error {
 }
 
 // Snapshot returns a deep copy of the current persisted state.
-func (s *Store) Snapshot() (*Snapshot, error) {
+func (s *Store) Snapshot(ctx context.Context) (_ *Snapshot, err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	return s.snapshot(op.ctx)
+}
+
+// snapshot is Snapshot's body; see read for the nesting rule.
+func (s *Store) snapshot(ctx context.Context) (*Snapshot, error) {
 	if s.split != nil {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.split.materialize()
+		return s.split.materialize(ctx)
 	}
 	if s.pgSplit != nil {
-		enabled, err := s.pgSplit.enabled()
+		enabled, err := s.pgSplit.enabled(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if enabled {
 			s.mu.RLock()
 			defer s.mu.RUnlock()
-			return s.pgSplit.materialize()
+			return s.pgSplit.materialize(ctx)
 		}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, err := s.backend.Load()
+	data, err := s.backend.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -578,19 +681,33 @@ func (f *fileBackend) Close() error {
 	return f.lock.Close()
 }
 
-func (f *fileBackend) Load() (*Snapshot, error) {
+func (f *fileBackend) Load(ctx context.Context) (*Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return cloneSnapshot(f.data)
 }
 
-func (f *fileBackend) LoadForUpdate() (*Snapshot, error) {
+func (f *fileBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return cloneSnapshot(f.data)
 }
 
-func (f *fileBackend) Save(data *Snapshot) error {
+func (f *fileBackend) Save(ctx context.Context, data *Snapshot) error {
+	// The file backend honours ctx exactly once, before the durability chain
+	// starts. Interrupting between write / fsync / rename / dir-chain fsync
+	// would be strictly worse than finishing: the "Save returned an error ⇒
+	// previous snapshot authoritative" invariant and the M-12 rename
+	// durability both depend on running that chain to completion.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	copyData, err := cloneSnapshot(data)
 	if err != nil {
 		return err

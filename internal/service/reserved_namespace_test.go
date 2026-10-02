@@ -19,7 +19,7 @@ import (
 // out of the picture.
 func registerReservedSchema(t *testing.T, svc *Service, schemaID string, allowed []string) {
 	t.Helper()
-	err := svc.RegisterSchema("test", domain.EventSchema{
+	err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{
 		TenantID: "tenant-a", SchemaID: schemaID, Version: 1, EventType: "audit.event",
 		Active: true, RequiredFields: []string{"resource"},
 		AllowedFields:    allowed,
@@ -41,7 +41,7 @@ func reservedEvent(id string, at time.Time, schemaID string, payload map[string]
 func snapshotAdminActionCount(t *testing.T, svc *Service) int {
 	t.Helper()
 	count := 0
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		count = len(data.AdminActions)
 		return nil
 	}); err != nil {
@@ -52,7 +52,7 @@ func snapshotAdminActionCount(t *testing.T, svc *Service) int {
 
 func assertNothingPersisted(t *testing.T, svc *Service, eventID string, baselineAdmin int) {
 	t.Helper()
-	err := svc.Store.Read(func(data *store.Snapshot) error {
+	err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", eventID)
 		if _, ok := data.Events[key]; ok {
 			t.Fatalf("rejected event %s must not be stored", eventID)
@@ -168,7 +168,7 @@ func TestVerifyIntegrityReportsLegacyCollisionDistinctly(t *testing.T) {
 	}
 	event.Hash = hash
 	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Events[key] = event
 		streamKey := store.StreamKey("tenant-a", event.StreamID)
 		data.Streams[streamKey] = store.StreamState{TenantID: "tenant-a", StreamID: event.StreamID, NextSequence: 2, HeadHash: hash}
@@ -226,7 +226,7 @@ func TestVerifyIntegrityTamperWithStoredDigestKeyReportsNeutralWording(t *testin
 	// the genuine digest key in place (reconstructAndDerive deletes the key
 	// and re-derives over the tampered payload → mismatch).
 	key := store.EventKey("tenant-a", healthy.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		ev := data.Events[key]
 		ev.Payload["email"] = "mallory@example.test"
 		data.Events[key] = ev
@@ -286,7 +286,7 @@ func TestVerifyIntegrityLegacyCollisionDeterministicKey(t *testing.T) {
 	}
 	event.Hash = hash
 	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Events[key] = event
 		streamKey := store.StreamKey("tenant-a", event.StreamID)
 		data.Streams[streamKey] = store.StreamState{TenantID: "tenant-a", StreamID: event.StreamID, NextSequence: 2, HeadHash: hash}

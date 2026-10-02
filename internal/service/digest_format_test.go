@@ -18,7 +18,7 @@ import (
 // numeric field (amount) so every dual-format matching path is exercised.
 func registerDigestSchemas(t *testing.T, svc *Service) {
 	t.Helper()
-	err := svc.RegisterSchema("test", domain.EventSchema{
+	err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{
 		TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event",
 		Active: true, RequiredFields: []string{"resource"},
 		// v2 must keep v1's allowed fields ("value") — version-rollback guard.
@@ -49,10 +49,10 @@ func openServiceAt(t *testing.T, path string) *Service {
 
 func bootstrapDigestService(t *testing.T, svc *Service) {
 	t.Helper()
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	registerDigestSchemas(t, svc)
@@ -104,7 +104,7 @@ func seedLegacyEvent(t *testing.T, svc *Service, base domain.Event, payload map[
 	event.Hash = hash
 	event.PrevHash = ""
 	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Events[key] = event
 		streamKey := store.StreamKey("tenant-a", event.StreamID)
 		data.Streams[streamKey] = store.StreamState{TenantID: "tenant-a", StreamID: event.StreamID, NextSequence: 2, HeadHash: hash}
@@ -194,7 +194,7 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 		{"v2 query vs v2 stored", bound},
 	}
 	for _, tc := range matrix {
-		result, err := svc.QueryEvents("tenant-a", "test", digestQuery(base, "email", tc.queryDigest))
+		result, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "email", tc.queryDigest))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -206,7 +206,7 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 		if security.IsBoundSearchDigest(tc.queryDigest) {
 			wrong = wrongBound
 		}
-		negative, err := svc.QueryEvents("tenant-a", "test", digestQuery(base, "email", wrong))
+		negative, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "email", wrong))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +218,7 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 	// Cross-tenant bound digest never matches the legacy event either
 	// (cross-format re-derivation binds tenant-a, so tenant-b's digest
 	// cannot collide).
-	foreign, err := svc.QueryEvents("tenant-a", "test", digestQuery(base, "email", foreignBound))
+	foreign, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "email", foreignBound))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,11 +262,11 @@ func TestEncryptedSearchableFieldLimitsCrossFormatMatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sameFormat, err := svc.QueryEvents("tenant-a", "test", digestQuery(base, "pii_email", bound))
+	sameFormat, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "pii_email", bound))
 	if err != nil || sameFormat.Count != 1 {
 		t.Fatalf("same-format bound query must match the encrypted field: count=%d err=%v", sameFormat.Count, err)
 	}
-	crossFormat, err := svc.QueryEvents("tenant-a", "test", digestQuery(base, "pii_email", unbound))
+	crossFormat, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "pii_email", unbound))
 	if err != nil || crossFormat.Count != 0 {
 		t.Fatalf("cross-format query on an encrypted field must fail closed: count=%d err=%v", crossFormat.Count, err)
 	}
@@ -321,7 +321,7 @@ func TestCrossFormatDigestLargeIntParityAfterRestart(t *testing.T) {
 		{"v1 query after restart", unbound},
 		{"v2 query after restart", bound},
 	} {
-		result, err := reloaded.QueryEvents("tenant-a", "test", digestQuery(base, "amount", tc.queryDigest))
+		result, err := reloaded.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "amount", tc.queryDigest))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +329,7 @@ func TestCrossFormatDigestLargeIntParityAfterRestart(t *testing.T) {
 			t.Fatalf("%s: exact-digit parity lost after restart: count=%d", tc.name, result.Count)
 		}
 	}
-	negative, err := reloaded.QueryEvents("tenant-a", "test", digestQuery(base, "amount", wrong))
+	negative, err := reloaded.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "amount", wrong))
 	if err != nil || negative.Count != 0 {
 		t.Fatalf("wrong digest must not match after restart: count=%d err=%v", negative.Count, err)
 	}
@@ -386,13 +386,13 @@ func TestExportJSONLStripsSearchDigests(t *testing.T) {
 	}
 
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		current, getErr := svc.GetExport("tenant-a", job.ID)
+		current, getErr := svc.GetExport(testCtx, "tenant-a", job.ID)
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -419,7 +419,7 @@ func TestExportJSONLStripsSearchDigests(t *testing.T) {
 
 	// Positive control: the store must keep the digest — stripping is
 	// response/export-only and never mutates the stored payload.
-	stored, err := svc.GetEvent("tenant-a", "test", "exp-strip-1")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "exp-strip-1")
 	if err != nil {
 		t.Fatal(err)
 	}

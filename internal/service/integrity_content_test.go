@@ -27,13 +27,13 @@ func largeSegmentService(t *testing.T) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc
@@ -44,7 +44,7 @@ func largeSegmentService(t *testing.T) *Service {
 func sensitiveTestService(t *testing.T) *Service {
 	t.Helper()
 	svc := testService(t, false)
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email", "amount"}, EncryptedFields: []string{"email", "amount"}, SearchableFields: []string{"email"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email", "amount"}, EncryptedFields: []string{"email", "amount"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc
@@ -74,7 +74,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 	t.Run("attacker-hash tamper", func(t *testing.T) {
 		svc := largeSegmentService(t)
 		ingestThree(t, svc)
-		if err := svc.Store.Update(func(data *store.Snapshot) error {
+		if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 			key := store.EventKey("tenant-a", "evt-2")
 			event := data.Events[key]
 			event.Payload = map[string]any{"resource": "invoice", "value": 999}
@@ -104,7 +104,7 @@ func TestVerifyIntegrityDetectsContentTampering(t *testing.T) {
 		svc := largeSegmentService(t)
 		ingestThree(t, svc)
 		// Payload-only tamper: SourceDigest and Hash are left stale.
-		if err := svc.Store.Update(func(data *store.Snapshot) error {
+		if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 			key := store.EventKey("tenant-a", "evt-2")
 			event := data.Events[key]
 			event.Payload = map[string]any{"resource": "invoice", "value": 999}
@@ -144,7 +144,7 @@ func TestEventContentDigestMatchesIngestDigest(t *testing.T) {
 		}
 	}
 	schemas := map[string]domain.EventSchema{}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
 		}
@@ -153,7 +153,7 @@ func TestEventContentDigestMatchesIngestDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, eventID := range []string{"evt-plain", "evt-sensitive"} {
-		stored, err := svc.GetEvent("tenant-a", "test", eventID)
+		stored, err := svc.GetEvent(testCtx, "tenant-a", "test", eventID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ func TestVerifyIntegrityAcceptsFrozenLegacyDigest(t *testing.T) {
 	}
 	event.Hash = hash
 	key := store.EventKey(event.TenantID, event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Events[key] = event
 		data.Streams[store.StreamKey(event.TenantID, event.StreamID)] = store.StreamState{TenantID: event.TenantID, StreamID: event.StreamID, NextSequence: 2, HeadHash: hash}
 		data.Receipts[key] = domain.EventReceipt{EventID: event.EventID, TenantID: event.TenantID, Status: domain.StatusIndexed, AcceptedAt: event.OccurredAt, LedgeredAt: event.OccurredAt, StreamID: event.StreamID, Sequence: 1, Hash: hash}
@@ -201,7 +201,7 @@ func TestVerifyIntegrityAcceptsFrozenLegacyDigest(t *testing.T) {
 	if !result.Valid || len(result.Errors) != 0 || result.EventCount != 2 {
 		t.Fatalf("legacy and new ledger must verify: %+v", result)
 	}
-	stored, err := svc.GetEvent("tenant-a", "test", event.EventID)
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", event.EventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestVerifyIntegrityAcceptsSensitiveEvents(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.GetEvent("tenant-a", "test", "evt-sensitive")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "evt-sensitive")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Attacker tampers the stored payload but leaves SourceDigest stale.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "evt-1")
 		event := data.Events[key]
 		event.Payload = map[string]any{"resource": "invoice", "value": 999}
@@ -267,7 +267,7 @@ func TestDedupeConflictsOnTamperedStoredContent(t *testing.T) {
 		t.Fatalf("re-ingest of original content over tampered state must conflict, got %v", err)
 	}
 	// Honest duplicate detection is unchanged.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "evt-1")
 		event := data.Events[key]
 		event.Payload = map[string]any{"resource": "invoice", "value": 10}
@@ -295,7 +295,7 @@ func TestDedupeFailsClosedWhenReconstructionUnavailable(t *testing.T) {
 	// Open/split stores use checkExistingTenantIngest. Removing the exact
 	// schema must return the reconstruction error, not trust SourceDigest and
 	// report Duplicate=true.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", event.EventID)
 		stored := data.Events[key]
 		stored.SchemaVersion = 99
@@ -312,7 +312,7 @@ func TestDedupeFailsClosedWhenReconstructionUnavailable(t *testing.T) {
 	// The legacy single-snapshot fallback has the same contract. Exercise it
 	// directly with a private snapshot so both dedupe implementations remain
 	// fail-closed even when the stored SourceDigest is present.
-	data, err := svc.Store.Snapshot()
+	data, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 	svc := testService(t, false)
 	ingestThree(t, svc)
 	// F4: an event without SourceDigest is unauthenticated and must fail closed.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "evt-1")
 		event := data.Events[key]
 		event.SourceDigest = ""
@@ -371,7 +371,7 @@ func TestVerifyIntegrityMissingSchemaAndDigest(t *testing.T) {
 		t.Fatalf("expected missing source_digest, got %+v", result)
 	}
 	// F2: the event's exact schema version is gone.
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "evt-1")
 		event := data.Events[key]
 		event.SourceDigest = "restored"
@@ -397,7 +397,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 	t.Run("hash tamper", func(t *testing.T) {
 		svc := testService(t, false)
 		ingestThree(t, svc)
-		if err := svc.Store.Update(func(data *store.Snapshot) error {
+		if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 			key := store.EventKey("tenant-a", "evt-2")
 			event := data.Events[key]
 			event.Hash = strings.Repeat("0", len(event.Hash))
@@ -417,7 +417,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 	t.Run("prev_hash tamper", func(t *testing.T) {
 		svc := testService(t, false)
 		ingestThree(t, svc)
-		if err := svc.Store.Update(func(data *store.Snapshot) error {
+		if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 			key := store.EventKey("tenant-a", "evt-3")
 			event := data.Events[key]
 			event.PrevHash = strings.Repeat("0", len(event.PrevHash))
@@ -439,7 +439,7 @@ func TestVerifyIntegrityDetectsChainTamper(t *testing.T) {
 		ingestThree(t, svc)
 		// Chain binds sequence: a rewritten Sequence without a matching Hash
 		// recomputation must surface as a hash mismatch.
-		if err := svc.Store.Update(func(data *store.Snapshot) error {
+		if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 			key := store.EventKey("tenant-a", "evt-2")
 			event := data.Events[key]
 			event.Sequence = 42
@@ -479,7 +479,7 @@ func TestVerifyIntegrityStreamFilter(t *testing.T) {
 	if !scoped.Valid || scoped.EventCount != 1 || scoped.StreamID != "tenant-a:aggregate:invoice:inv-1" {
 		t.Fatalf("scoped verify failed: %+v", scoped)
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "evt-b-1")
 		event := data.Events[key]
 		event.Payload = map[string]any{"resource": "invoice", "value": 424242}
@@ -533,7 +533,7 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 	}
 	legacy.Hash = hash
 	key := store.EventKey("tenant-a", legacy.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Events[key] = legacy
 		streamKey := store.StreamKey("tenant-a", legacy.StreamID)
 		data.Streams[streamKey] = store.StreamState{TenantID: "tenant-a", StreamID: legacy.StreamID, NextSequence: 2, HeadHash: hash}
@@ -549,7 +549,7 @@ func TestVerifyIntegrityMixedLegacyAndDerivedStreams(t *testing.T) {
 	if err != nil || !result.Valid || result.EventCount != 2 {
 		t.Fatalf("mixed-stream integrity failed: %+v %v", result, err)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +644,7 @@ func TestVerifyIntegrityLargeIntSensitiveField(t *testing.T) {
 // plain/sensitive ledger with sealed segments (design failure mode F7).
 func BenchmarkVerifyIntegrity(b *testing.B) {
 	svc := benchService(b)
-	if err := svc.RegisterSchema("bench", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email"}, EncryptedFields: []string{"email"}, SearchableFields: []string{"email"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "bench", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value", "email"}, EncryptedFields: []string{"email"}, SearchableFields: []string{"email"}}); err != nil {
 		b.Fatal(err)
 	}
 	base := time.Unix(1_700_000_010, 0).UTC()

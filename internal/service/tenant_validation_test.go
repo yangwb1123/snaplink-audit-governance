@@ -23,14 +23,14 @@ func TestCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 		strings.Repeat("界", 29),
 	}
 	for _, id := range rejected {
-		err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true})
+		err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: id, Name: "X", Active: true})
 		if !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("CreateTenant(id=%q) = %v, want ErrInvalid", id, err)
 		}
 	}
 	accepted := []string{"tenant-c", "a-b_c.d", "tëstant", "123", strings.Repeat("?", domain.MaxArchiveComponentBytes), strings.Repeat("界", 28)}
 	for _, id := range accepted {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: id, Name: "X", Active: true}); err != nil {
 			t.Errorf("CreateTenant(id=%q) = %v, want nil", id, err)
 		}
 	}
@@ -43,7 +43,7 @@ func TestCreateTenantRejectionSideEffectFree(t *testing.T) {
 	svc := testService(t, false)
 	readCounts := func() (tenants, adminActions int) {
 		t.Helper()
-		if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 			tenants = len(data.Tenants)
 			adminActions = len(data.AdminActions)
 			return nil
@@ -55,7 +55,7 @@ func TestCreateTenantRejectionSideEffectFree(t *testing.T) {
 	beforeTenants, beforeActions := readCounts()
 
 	for _, id := range []string{"a\x1fb", "a b", "a/b", "a:b"} {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("CreateTenant(id=%q) = %v, want ErrInvalid", id, err)
 		}
 	}
@@ -66,10 +66,10 @@ func TestCreateTenantRejectionSideEffectFree(t *testing.T) {
 	}
 
 	// A valid create after the rejections still succeeds (no wedged state).
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-c", Name: "Tenant C", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-c", Name: "Tenant C", Active: true}); err != nil {
 		t.Fatalf("valid create after rejections failed: %v", err)
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Tenants["tenant-c"]; !exists {
 			t.Fatal("tenant-c missing after valid create")
 		}

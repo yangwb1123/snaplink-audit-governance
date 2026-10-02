@@ -157,7 +157,7 @@ func gateIngest(t *testing.T, svc *Service, eventID string, at time.Time) {
 // update applies a snapshot mutation and fails the test on error.
 func (f *gateCostFixture) update(mutate func(data *store.Snapshot) error) {
 	f.t.Helper()
-	if err := f.svc.Store.Update(mutate); err != nil {
+	if err := f.svc.Store.Update(testCtx, mutate); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -199,7 +199,7 @@ func (f *gateCostFixture) seedHolds(holds ...domain.LegalHold) {
 func (f *gateCostFixture) job(jobID string) domain.ExportJob {
 	f.t.Helper()
 	var value domain.ExportJob
-	if err := f.svc.Store.Read(func(data *store.Snapshot) error {
+	if err := f.svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		value = data.Exports[jobID]
 		return nil
 	}); err != nil {
@@ -214,7 +214,7 @@ func (f *gateCostFixture) job(jobID string) domain.ExportJob {
 // that silently degraded to a single tier would make every count below vacuous.
 func (f *gateCostFixture) requireSplitTiers() {
 	f.t.Helper()
-	if err := f.svc.Store.Read(func(data *store.Snapshot) error {
+	if err := f.svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		hot, evicted := 0, 0
 		for _, event := range data.Events {
 			if event.TenantID == "tenant-a" {
@@ -240,7 +240,7 @@ func (f *gateCostFixture) requireSplitTiers() {
 	// Every evicted object must be readable, so a zero count below can only
 	// mean "not read", never "read and failed".
 	f.archive.reset()
-	events, err := f.svc.QueryEvents("tenant-a", "test", f.query)
+	events, err := f.svc.QueryEvents(testCtx, "tenant-a", "test", f.query)
 	if err != nil {
 		f.t.Fatalf("fixture must materialize cleanly: %v", err)
 	}
@@ -260,7 +260,7 @@ func (f *gateCostFixture) runGate() (domain.LegalHold, bool, error) {
 		blocked bool
 		gateErr error
 	)
-	err := f.svc.Store.Read(func(data *store.Snapshot) error {
+	err := f.svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		hold, blocked, gateErr = f.svc.holdBlockingExport(data, "tenant-a", f.query)
 		return gateErr
 	})
@@ -286,7 +286,7 @@ func (f *gateCostFixture) assertArchiveRead(surface string) {
 
 func (f *gateCostFixture) exportFactCount(action string) int {
 	f.t.Helper()
-	actions, err := f.svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := f.svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestHoldGateZeroActiveHoldsReadsNoEvents(t *testing.T) {
 	}
 	f.assertNoArchiveWork("white-box holdBlockingExport")
 
-	job, err := f.svc.GetExport("tenant-a", gateJobID)
+	job, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID)
 	if err != nil {
 		t.Fatalf("GetExport: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestHoldGateZeroActiveHoldsReadsNoEvents(t *testing.T) {
 		t.Fatalf("audit.event.export facts=%d, want 0 (a status read records none)", n)
 	}
 
-	if err := f.svc.RecordExportDownload("tenant-a", "test", gateJobID); err != nil {
+	if err := f.svc.RecordExportDownload(testCtx, "tenant-a", "test", gateJobID); err != nil {
 		t.Fatalf("RecordExportDownload: %v", err)
 	}
 	f.assertNoArchiveWork("RecordExportDownload")
@@ -371,7 +371,7 @@ func TestHoldGateDisjointWindowReadsNoEvents(t *testing.T) {
 				t.Fatalf("gate: hold=%+v blocked=%v err=%v, want (zero,false,nil)", hold, blocked, err)
 			}
 			f.assertNoArchiveWork("gate with a provably disjoint hold")
-			if _, err := f.svc.GetExport("tenant-a", gateJobID); err != nil {
+			if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); err != nil {
 				t.Fatalf("GetExport: %v", err)
 			}
 			f.assertNoArchiveWork("GetExport with a provably disjoint hold")
@@ -398,17 +398,17 @@ func TestHoldGateOneNanosecondOverlapStillBlocks(t *testing.T) {
 	f.assertArchiveRead("gate with a one-nanosecond overlap")
 
 	const want = "export blocked by active legal hold hold-ns"
-	if _, err := f.svc.GetExport("tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden", err)
 	} else if err.Error() != want {
 		t.Fatalf("GetExport error text=%q, want %q", err.Error(), want)
 	}
-	if err := f.svc.RecordExportDownload("tenant-a", "test", gateJobID); !errors.Is(err, domain.ErrForbidden) {
+	if err := f.svc.RecordExportDownload(testCtx, "tenant-a", "test", gateJobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload error=%v, want ErrForbidden", err)
 	} else if err.Error() != want {
 		t.Fatalf("download error text=%q, want %q", err.Error(), want)
 	}
-	if _, err := f.svc.CreateExport("tenant-a", "test", f.query); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := f.svc.CreateExport(testCtx, "tenant-a", "test", f.query); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("CreateExport error=%v, want ErrForbidden", err)
 	}
 	if n := f.exportFactCount(domain.AdminActionExportBlocked); n != 2 {
@@ -448,7 +448,7 @@ func TestHoldGateDropsDisjointHoldWithoutChangingReportedHold(t *testing.T) {
 	if hold.ID != "hold-mmm" {
 		t.Fatalf("reported hold=%q, want hold-mmm (the disjoint lowest-ID hold is dropped)", hold.ID)
 	}
-	if _, err := f.svc.GetExport("tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden", err)
 	} else if want := "export blocked by active legal hold hold-mmm"; err.Error() != want {
 		t.Fatalf("GetExport error text=%q, want %q", err.Error(), want)
@@ -460,7 +460,7 @@ func TestHoldGateDropsDisjointHoldWithoutChangingReportedHold(t *testing.T) {
 // run leg with the exact denial in job.Error and no sealed object.
 func TestHoldGateUnboundFilterRemainsFailClosed(t *testing.T) {
 	f := newGateCostFixture(t)
-	hold, err := f.svc.CreateLegalHold(domain.LegalHold{TenantID: "tenant-a", Name: "blank", Reason: "blanket investigation", Filter: domain.Query{}})
+	hold, err := f.svc.CreateLegalHold(testCtx, domain.LegalHold{TenantID: "tenant-a", Name: "blank", Reason: "blanket investigation", Filter: domain.Query{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,19 +469,19 @@ func TestHoldGateUnboundFilterRemainsFailClosed(t *testing.T) {
 	}
 	f.assertArchiveRead("gate with an unbound hold")
 
-	if _, err := f.svc.CreateExport("tenant-a", "test", f.query); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := f.svc.CreateExport(testCtx, "tenant-a", "test", f.query); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("CreateExport error=%v, want ErrForbidden", err)
 	}
-	if _, err := f.svc.GetExport("tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
+	if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("GetExport error=%v, want ErrForbidden", err)
 	}
-	if err := f.svc.RecordExportDownload("tenant-a", "test", gateJobID); !errors.Is(err, domain.ErrForbidden) {
+	if err := f.svc.RecordExportDownload(testCtx, "tenant-a", "test", gateJobID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("RecordExportDownload error=%v, want ErrForbidden", err)
 	}
 
 	// Run leg: the same hold fails the seal without writing an object.
 	f.seedPendingJob(gateRunJobID)
-	f.svc.runExport(gateRunJobID)
+	f.svc.runExport(testCtx, gateRunJobID)
 	job := f.job(gateRunJobID)
 	if job.Status != "failed" {
 		t.Fatalf("run status=%s, want failed", job.Status)
@@ -518,7 +518,7 @@ func TestHoldGateOneSidedFilterIsNotACandidate(t *testing.T) {
 				t.Fatalf("gate: hold=%+v blocked=%v err=%v, want (zero,false,nil)", hold, blocked, err)
 			}
 			f.assertNoArchiveWork("gate with a one-sided hold filter")
-			if _, err := f.svc.GetExport("tenant-a", gateJobID); err != nil {
+			if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); err != nil {
 				t.Fatalf("GetExport: %v", err)
 			}
 			f.assertNoArchiveWork("GetExport with a one-sided hold filter")
@@ -541,7 +541,7 @@ func TestHoldGateIgnoresReleasedAndForeignTenantHolds(t *testing.T) {
 		t.Fatalf("gate: hold=%+v blocked=%v err=%v, want (zero,false,nil)", hold, blocked, err)
 	}
 	f.assertNoArchiveWork("gate with only released/foreign holds")
-	if _, err := f.svc.GetExport("tenant-a", gateJobID); err != nil {
+	if _, err := f.svc.GetExport(testCtx, "tenant-a", gateJobID); err != nil {
 		t.Fatalf("GetExport: %v", err)
 	}
 	f.assertNoArchiveWork("GetExport with only released/foreign holds")
@@ -558,7 +558,7 @@ func TestRunExportStillFailsClosedOnUnreadableArchivedObject(t *testing.T) {
 	f := newGateCostFixture(t)
 	f.svc.Config.Archive = &failingEventArchive{inner: f.archive}
 	f.seedPendingJob(gateRunJobID)
-	f.svc.runExport(gateRunJobID)
+	f.svc.runExport(testCtx, gateRunJobID)
 
 	job := f.job(gateRunJobID)
 	if job.Status != "failed" {

@@ -27,13 +27,13 @@ func seedRunningJob(t *testing.T, svc *Service, jobID string) domain.ExportJob {
 		Status:      "pending",
 		CreatedAt:   terminalTestNow,
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, claimed, err := svc.claimPendingExport(job.ID); err != nil || !claimed {
+	if _, claimed, err := svc.claimPendingExport(testCtx, job.ID); err != nil || !claimed {
 		t.Fatalf("claimPendingExport: claimed=%v err=%v", claimed, err)
 	}
 	return job
@@ -52,10 +52,10 @@ func TestFinishExportRetriesTransientSaveFailure(t *testing.T) {
 	// Save succeeds and commits the transition.
 	backend.armSaveFailure(1)
 
-	svc.finishExport("export-t1", "completed", "exports/export-t1.jsonl", "digest-t1", 7, "")
+	svc.finishExport(testCtx, "export-t1", "completed", "exports/export-t1.jsonl", "digest-t1", 7, "")
 
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports["export-t1"]
 		return nil
 	}); err != nil {
@@ -83,10 +83,10 @@ func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 	// Fail every Save from here on so all terminal-write attempts exhaust.
 	backend.saveErr = errors.New("storage write unavailable")
 
-	svc.finishExport("export-t2", "completed", "exports/export-t2.jsonl", "digest-t2", 3, "")
+	svc.finishExport(testCtx, "export-t2", "completed", "exports/export-t2.jsonl", "digest-t2", 3, "")
 
 	var before domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		before = data.Exports["export-t2"]
 		return nil
 	}); err != nil {
@@ -99,7 +99,7 @@ func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 	// Recovery must converge the stuck job now that storage is healthy.
 	backend.saveErr = nil
 	svc.Config.Now = func() time.Time { return terminalTestNow.Add(48 * time.Hour) }
-	recovered, err := svc.RecoverStuckExports("tenant-a")
+	recovered, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 	}
 
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports["export-t2"]
 		return nil
 	}); err != nil {
@@ -128,7 +128,7 @@ func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 
 	// A second recovery pass finds no running job: zero mutations, zero Saves.
 	savesAfterFirst := backend.saves
-	recovered2, err := svc.RecoverStuckExports("tenant-a")
+	recovered2, err := svc.RecoverStuckExports(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,15 +152,15 @@ func TestLateCompletionAfterRecoveryNoOverwrite(t *testing.T) {
 	seedRunningJob(t, svc, "export-t3a")
 
 	svc.Config.Now = func() time.Time { return terminalTestNow.Add(48 * time.Hour) }
-	if _, err := svc.RecoverStuckExports("tenant-a"); err != nil {
+	if _, err := svc.RecoverStuckExports(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 
 	// A late finishExport(completed) must no-op: job stays "failed".
-	svc.finishExport("export-t3a", "completed", "exports/late.jsonl", "digest-late", 9, "")
+	svc.finishExport(testCtx, "export-t3a", "completed", "exports/late.jsonl", "digest-late", 9, "")
 
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports["export-t3a"]
 		return nil
 	}); err != nil {
@@ -194,7 +194,7 @@ func TestLateFailureAfterCompletionNoOverwrite(t *testing.T) {
 		Digest:      "digest-done",
 		EventCount:  4,
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -202,10 +202,10 @@ func TestLateFailureAfterCompletionNoOverwrite(t *testing.T) {
 	}
 
 	// A late finishExport(failed) must no-op: job stays "completed".
-	svc.finishExport("export-t3b", "failed", "", "", 0, "late failure")
+	svc.finishExport(testCtx, "export-t3b", "failed", "", "", 0, "late failure")
 
 	var got domain.ExportJob
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		got = data.Exports["export-t3b"]
 		return nil
 	}); err != nil {
@@ -242,7 +242,7 @@ func TestTerminalPersistenceFailureLogged(t *testing.T) {
 
 	rawErr := "disk I/O error at /mnt/audit/state.json: read-only"
 	backend.saveErr = errors.New(rawErr)
-	svc.finishExport("export-t5", "failed", "", "", 0, rawErr)
+	svc.finishExport(testCtx, "export-t5", "failed", "", "", 0, rawErr)
 
 	var failed, exhausted int
 	for _, l := range lines {

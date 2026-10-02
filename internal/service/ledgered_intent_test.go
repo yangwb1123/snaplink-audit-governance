@@ -57,13 +57,13 @@ func faultedLedgeredService(t *testing.T, publisher LedgeredPublisher, archive b
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	return svc, func(on bool) { armed.Store(on) }, writes
@@ -75,7 +75,7 @@ func durableReceipt(t *testing.T, svc *Service, tenantID, eventID string) domain
 	t.Helper()
 	key := store.EventKey(tenantID, eventID)
 	var receipt domain.EventReceipt
-	if err := svc.Store.ReadTenant(tenantID, func(view *store.TenantView) error {
+	if err := svc.Store.ReadTenant(testCtx, tenantID, func(view *store.TenantView) error {
 		found, ok := view.Ledger.Receipt(key)
 		if !ok {
 			return errors.New("no cold receipt for " + key)
@@ -95,7 +95,7 @@ func pendingIntent(t *testing.T, svc *Service, tenantID, eventID string) (domain
 		pending domain.Event
 		ok      bool
 	)
-	if err := svc.Store.ReadControl(func(data *store.Snapshot) error {
+	if err := svc.Store.ReadControl(testCtx, func(data *store.Snapshot) error {
 		pending, ok = data.LedgeredOutbox[key]
 		return nil
 	}); err != nil {
@@ -245,7 +245,7 @@ func TestTenantIngestRepairIsOneShotPerProcess(t *testing.T) {
 	// not advance it), so only the bounded repair set can stop a second
 	// re-creation.
 	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		delete(data.LedgeredOutbox, key)
 		return nil
 	}); err != nil {

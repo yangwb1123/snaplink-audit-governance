@@ -156,7 +156,7 @@ func (p *sequenceLedgeredPublisher) Publish(_ context.Context, event domain.Even
 func pendingLedgeredEvents(t *testing.T, svc *Service) map[string]domain.Event {
 	t.Helper()
 	var pending map[string]domain.Event
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		pending = make(map[string]domain.Event, len(data.LedgeredOutbox))
 		for key, event := range data.LedgeredOutbox {
 			pending[key] = event
@@ -218,7 +218,7 @@ func TestFlushLedgeredOutboxStopsAtFirstFailure(t *testing.T) {
 		events[index].Sequence = int64(index + 1)
 		events[index].Hash = fmt.Sprintf("hash-%d", index+1)
 	}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		for _, event := range events {
 			data.LedgeredOutbox[store.EventKey(event.TenantID, event.EventID)] = event
 		}
@@ -228,7 +228,7 @@ func TestFlushLedgeredOutboxStopsAtFirstFailure(t *testing.T) {
 	}
 	publisher := &sequenceLedgeredPublisher{failOn: 2}
 	svc.Config.LedgeredPublisher = publisher
-	flushed, err := svc.FlushLedgeredOutbox(context.Background(), 10)
+	flushed, err := svc.FlushLedgeredOutbox(testCtx, 10)
 	if err != nil || flushed != 1 {
 		t.Fatalf("flush=%d err=%v, want one publication before first failure", flushed, err)
 	}
@@ -237,7 +237,7 @@ func TestFlushLedgeredOutboxStopsAtFirstFailure(t *testing.T) {
 		t.Fatalf("pending=%v, want only second event retained", pending)
 	}
 	publisher.failOn = 0
-	flushed, err = svc.FlushLedgeredOutbox(context.Background(), 10)
+	flushed, err = svc.FlushLedgeredOutbox(testCtx, 10)
 	if err != nil || flushed != 1 {
 		t.Fatalf("recovery flush=%d err=%v, want retained event published", flushed, err)
 	}
@@ -284,7 +284,7 @@ func TestPublishFailureDoesNotFailIngest(t *testing.T) {
 		t.Fatalf("logs=%v, want bounded publication failure diagnostic", logs)
 	}
 	var pending int
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		pending = len(data.LedgeredOutbox)
 		return nil
 	}); err != nil {
@@ -295,14 +295,14 @@ func TestPublishFailureDoesNotFailIngest(t *testing.T) {
 	}
 
 	publisher.err = nil
-	flushed, err := svc.FlushLedgeredOutbox(context.Background(), 10)
+	flushed, err := svc.FlushLedgeredOutbox(testCtx, 10)
 	if err != nil || flushed != 1 {
 		t.Fatalf("flush=%d err=%v, want one recovered publication", flushed, err)
 	}
 	if len(publisher.events) != 1 || publisher.events[0].EventID != event.EventID {
 		t.Fatalf("recovered publications=%+v", publisher.events)
 	}
-	if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 10); err != nil || flushed != 0 {
+	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 10); err != nil || flushed != 0 {
 		t.Fatalf("second flush=%d err=%v, want empty queue", flushed, err)
 	}
 }

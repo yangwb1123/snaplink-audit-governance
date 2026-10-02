@@ -139,3 +139,41 @@ rpk topic create audit.events.projection.dlq.v1 --partitions 1 --replicas 1     
 死信只会得到无意义的 accepted 重投或永久 unresolvable 关闭。恢复动作是从 ledgered
 topic 重新驱动投影；把 `-dlq-topic` 指向投影 DLQ（或把 consumer/replay 指向摄入
 DLQ 以外的对端地址）会在启动时 fail closed 且不建立任何 Kafka 连接。
+
+## 存储操作超时与连接池（PostgreSQL 控制面）
+
+请求路径上的每一条 PostgreSQL 语句都在进程级 `Store.mu` 之下执行，因此每条语句都
+必须带上下文，并受**存储操作截止时间**约束：语句无法被取消时，一个黑洞连接会同时
+冻结本进程内所有租户的摄入与读取。四个 PostgreSQL 二进制（`audit-api`、
+`audit-governance-worker`、`audit-outbox-relay`、`audit-pg-migrate`）共用同一份解析与
+应用实现（`internal/runtimeconfig/postgres_pool.go`），因此同一套变量在四个进程上
+含义一致。
+
+| 变量 | 取值 | 未设置时的行为（发布默认） | 回滚 |
+|---|---|---|---|
+| `AUDIT_STORE_OPERATION_TIMEOUT` | Go duration，如 `10s`、`2m`；audit-api 下必须**严格小于** 30s HTTP `WriteTimeout` | `store.DefaultOperationTimeout` = 10s | 取消设置 |
+| `AUDIT_POSTGRES_MAX_OPEN_CONNS` | 正整数 | **不调用任何 setter**，`database/sql` 默认（无上限） | 取消设置 |
+| `AUDIT_POSTGRES_MAX_IDLE_CONNS` | 正整数 | 不调用 setter（默认保留 2 条） | 取消设置 |
+| `AUDIT_POSTGRES_CONN_MAX_LIFETIME` | Go duration | 不调用 setter（连接不回收） | 取消设置 |
+| `AUDIT_POSTGRES_CONN_MAX_IDLE_TIME` | Go duration | 不调用 setter | 取消设置 |
+
+要点：
+
+- **不发明默认值。** 未设置 = 完全不设置，与本次变更前的 `database/sql` 行为逐字节
+  一致；`/metrics` 的 `audit_store_pg_pool_max_open 0` 就是"无运维上限"，不是被隐藏
+  的数字。取值依据与决策门禁见 `docs/BENCHMARKS.md`「PostgreSQL control-plane pool
+  decision gate」。
+- **失败关闭。** 任一变量非法（无法解析、非正整数、非正 duration）时进程启动即退出并
+  指名变量；`AUDIT_STORE_OPERATION_TIMEOUT ≥ 30s` 在 `audit-api` 启动时同样拒绝——
+  否则可重试的 `503 store_timeout` 还没写出去连接就已经断了。
+- **观测。** `curl -s :19089/metrics | grep '^audit_store_pg_pool'` 输出 5 条无标签行，
+  外加 `audit_store_operation_deadline_exceeded_total`。该计数器非零即表示有语句在
+  截止时间处被中断（结果未知，按幂等语义重试，HTTP 返回 `503 store_timeout`，
+  gRPC 返回 `codes.Unavailable`）。
+- **升级/回滚顺序。** 上线：新二进制 + 变量全部不设置（连接池不变、截止时间 10s）。
+  回滚：回滚二进制；旧版本忽略全部五个变量，取消设置即可恢复到变更前的连接池。
+
+**`audit-pg-migrate` 的两处行为变化**（均有意的）：原先硬编码的
+`SetConnMaxLifetime(10m)` 已移除（一次性命令，等价物为 `AUDIT_POSTGRES_CONN_MAX_LIFETIME=10m`）；
+原先无界的 `db.Ping()` 改为带 10s 上限的探测，黑洞 DSN 会让命令失败而不是永久挂起。
+大规模切换可临时调高 `AUDIT_STORE_OPERATION_TIMEOUT`。

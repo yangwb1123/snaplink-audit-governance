@@ -137,7 +137,7 @@ func postHTTPBatch(t *testing.T, baseURL string, events []domain.Event) (int, ht
 
 func assertHTTPBatchEventsAbsent(t *testing.T, st *store.Store, events []domain.Event) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, event := range events {
 			key := store.EventKey("tenant-a", event.EventID)
 			if _, exists := data.Events[key]; exists {
@@ -155,7 +155,7 @@ func assertHTTPBatchEventsAbsent(t *testing.T, st *store.Store, events []domain.
 
 func assertHTTPBatchReceiptsPresent(t *testing.T, st *store.Store, events []domain.Event) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, event := range events {
 			if _, exists := data.Receipts[store.EventKey("tenant-a", event.EventID)]; !exists {
 				t.Fatalf("accepted receipt %q was not persisted", event.EventID)

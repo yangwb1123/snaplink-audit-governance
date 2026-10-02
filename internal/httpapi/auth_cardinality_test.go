@@ -62,7 +62,7 @@ func TestHTTPRejectsAmbiguousAuthorizationBeforeIngest(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("single credential status=%d, want 202", response.StatusCode)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, ok := data.Receipts[store.EventKey("tenant-a", "http-single-valid")]; !ok {
 			t.Fatal("single valid credential did not persist receipt")
 		}
@@ -93,7 +93,7 @@ func newHTTPIngestRequest(t *testing.T, baseURL, eventID string) *http.Request {
 
 func assertHTTPStoreEmpty(t *testing.T, st *store.Store) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.Events) != 0 || len(data.Receipts) != 0 || len(data.LedgeredOutbox) != 0 {
 			t.Fatalf("ambiguous credentials changed persistence: events=%d receipts=%d outbox=%d", len(data.Events), len(data.Receipts), len(data.LedgeredOutbox))
 		}

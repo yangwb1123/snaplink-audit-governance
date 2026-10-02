@@ -18,14 +18,14 @@ func seedHotColdTenant(t *testing.T, path string) (*Store, domain.EventReceipt) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	receipt := domain.EventReceipt{EventID: "fault-event", TenantID: "tenant-a", Status: domain.StatusLedgered, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "hash-1"}
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[EventKey("tenant-a", receipt.EventID)] = domain.Event{EventID: receipt.EventID, TenantID: receipt.TenantID, StreamID: receipt.StreamID, Sequence: receipt.Sequence, Hash: receipt.Hash, Payload: map[string]any{"value": 1}}
 		view.Ledger.SetReceipt(receipt)
 		return nil
@@ -43,7 +43,7 @@ func TestHotFirstColdFailureRetainsDurableHotState(t *testing.T) {
 	t.Cleanup(func() { appendLedgerFile = originalAppend })
 	updated := receipt
 	updated.Status = domain.StatusIndexed
-	err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		event := view.Hot.Events[EventKey("tenant-a", receipt.EventID)]
 		event.Payload = map[string]any{"value": 2}
 		view.Hot.Events[EventKey("tenant-a", receipt.EventID)] = event
@@ -53,7 +53,7 @@ func TestHotFirstColdFailureRetainsDurableHotState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected cold append failure") {
 		t.Fatalf("HotFirst cold failure=%v, want injected error", err)
 	}
-	if err := st.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := st.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if got := view.Hot.Events[EventKey("tenant-a", receipt.EventID)].Payload["value"]; fmt.Sprint(got) != "2" {
 			t.Fatalf("durable hot value=%v, want 2", got)
 		}
@@ -73,7 +73,7 @@ func TestHotFirstColdFailureRetainsDurableHotState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if err := reopened.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := reopened.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if got := view.Hot.Events[EventKey("tenant-a", receipt.EventID)].Payload["value"]; fmt.Sprint(got) != "2" {
 			t.Fatalf("reloaded hot value=%v, want 2", got)
 		}
@@ -98,7 +98,7 @@ func TestColdFirstHotFailureLeavesRecoverableArchivedState(t *testing.T) {
 		return originalWrite(target, data, mode)
 	}
 	t.Cleanup(func() { writeDurableFile = originalWrite })
-	err := st.UpdateTenant("tenant-a", ColdFirst, func(view *TenantView) error {
+	err := st.UpdateTenant(testCtx, "tenant-a", ColdFirst, func(view *TenantView) error {
 		archived := receipt
 		archived.Status = domain.StatusArchived
 		view.Ledger.SetReceipt(archived)
@@ -108,7 +108,7 @@ func TestColdFirstHotFailureLeavesRecoverableArchivedState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected hot save failure") {
 		t.Fatalf("ColdFirst hot failure=%v, want injected error", err)
 	}
-	if err := st.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := st.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if _, ok := view.Hot.Events[EventKey("tenant-a", receipt.EventID)]; !ok {
 			return errors.New("hot event was evicted before hot save committed")
 		}
@@ -123,7 +123,7 @@ func TestColdFirstHotFailureLeavesRecoverableArchivedState(t *testing.T) {
 	// Clear the fault and run the recovery half of the worker pass. The
 	// already-archived receipt makes this a pure safe eviction.
 	writeDurableFile = originalWrite
-	if err := st.UpdateTenant("tenant-a", ColdFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", ColdFirst, func(view *TenantView) error {
 		if receipt, ok := view.Ledger.Receipt(EventKey("tenant-a", "fault-event")); ok && receipt.Status == domain.StatusArchived {
 			delete(view.Hot.Events, EventKey("tenant-a", "fault-event"))
 		}
@@ -131,7 +131,7 @@ func TestColdFirstHotFailureLeavesRecoverableArchivedState(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := st.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if _, ok := view.Hot.Events[EventKey("tenant-a", "fault-event")]; ok {
 			return errors.New("recovery did not evict the already-archived hot event")
 		}
@@ -219,7 +219,7 @@ func TestOpenMigratesV1SnapshotIntoHotColdLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open migration: %v", err)
 	}
-	snapshot, err := st.Snapshot()
+	snapshot, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestOpenMigratesV1SnapshotIntoHotColdLayout(t *testing.T) {
 		t.Fatalf("reopen migrated layout: %v", err)
 	}
 	defer reopened.Close()
-	reloaded, err := reopened.Snapshot()
+	reloaded, err := reopened.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

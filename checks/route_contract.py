@@ -209,6 +209,10 @@ ERROR_CODE_BY_SENTINEL = {
     "ErrSchemaNotFound": "schema_not_found",
     "ErrTenantMismatch": "tenant_mismatch",
     "ErrSnapshotConflict": "snapshot_conflict",
+    # A store operation that exhausted its deadline: the in-flight statement
+    # was interrupted with an unknown outcome, which is the same retryable
+    # class as snapshot_conflict, so it shares the documented 503 status.
+    "ErrOperationDeadline": "store_timeout",
 }
 
 

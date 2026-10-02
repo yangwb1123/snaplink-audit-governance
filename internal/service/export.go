@@ -19,7 +19,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query) (domain.ExportJob, error) {
+func (s *Service) CreateExport(ctx context.Context, tenantID, requestedBy string, query domain.Query) (domain.ExportJob, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ExportJob{}, err
 	}
@@ -27,7 +27,7 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	// exists (same ordering discipline as the R2 legal-hold gate).
 	// The export reads events: run the query through the audited read path so
 	// the same actor's audit.event.read fact is recorded, then create the job.
-	if _, err := s.QueryEvents(tenantID, requestedBy, query); err != nil {
+	if _, err := s.QueryEvents(ctx, tenantID, requestedBy, query); err != nil {
 		return domain.ExportJob{}, err
 	}
 	// R2 (legal-hold gate): fail closed before any job exists. The check is a
@@ -37,7 +37,7 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 	// block path.
 	var hold domain.LegalHold
 	blocked := false
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var holdErr error
 		hold, blocked, holdErr = s.holdBlockingExport(data, tenantID, query)
 		return holdErr
@@ -45,7 +45,7 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 		return domain.ExportJob{}, err
 	}
 	if blocked {
-		if err := s.Store.Update(func(data *store.Snapshot) error {
+		if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 			s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
 			return nil
 		}); err != nil {
@@ -54,23 +54,29 @@ func (s *Service) CreateExport(tenantID, requestedBy string, query domain.Query)
 		return domain.ExportJob{}, fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
 	}
 	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
-	if err := s.Store.Update(func(data *store.Snapshot) error {
+	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
 		return nil
 	}); err != nil {
 		return domain.ExportJob{}, err
 	}
-	go s.runExport(job.ID)
+	// The export runs to completion in the background, so it must outlive the
+	// request that created it: withoutCancel keeps the job's store operations
+	// bounded by the store's own operation deadline (and by the archive
+	// client's timeout) instead of being killed the moment the HTTP response
+	// is written. Cancellation of the caller's context legitimately abandons
+	// the create; it must not abandon a durable export job.
+	go s.runExport(context.WithoutCancel(ctx), job.ID)
 	return job, nil
 }
 
-func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
+func (s *Service) GetExport(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ExportJob{}, err
 	}
 	var job domain.ExportJob
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		value, ok := data.Exports[jobID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
@@ -95,7 +101,7 @@ func (s *Service) GetExport(tenantID, jobID string) (domain.ExportJob, error) {
 // completed export being downloaded. Called by the transport after the job
 // is verified completed and before the sealed object is streamed; a failed
 // append aborts the download (fail-closed).
-func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
+func (s *Service) RecordExportDownload(ctx context.Context, tenantID, actor, jobID string) error {
 	if err := requireTenantScope(tenantID); err != nil {
 		return err
 	}
@@ -109,7 +115,7 @@ func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 	// keeps the recordReadAction no-fact convention).
 	var hold domain.LegalHold
 	blocked := false
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		value, ok := data.Exports[jobID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
@@ -122,13 +128,13 @@ func (s *Service) RecordExportDownload(tenantID, actor, jobID string) error {
 	}
 	if blocked {
 		if actor != "" {
-			if err := s.Store.AppendAdminFact(s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions); err != nil {
+			if err := s.Store.AppendAdminFact(ctx, s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions); err != nil {
 				return err
 			}
 		}
 		return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
 	}
-	return s.recordReadAction(tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
+	return s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
 }
 
 // exportDigestPattern is the exact shape of domain.HashBytes output
@@ -153,12 +159,12 @@ var exportDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // per job; RecoverStuckExports only transitions "running" jobs), so the
 // blob the transport fetched at job.ObjectPath and this record's
 // binding/digest always describe the same export.
-func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([]byte, error) {
+func (s *Service) VerifyExportDownload(ctx context.Context, tenantID, jobID string, sealed []byte) ([]byte, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
 	var job domain.ExportJob
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		value, ok := data.Exports[jobID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
@@ -175,15 +181,15 @@ func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([
 	}
 	plain, err := security.DecryptExport(sealed, s.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
 	if err != nil {
-		s.recordExportRejected(job.TenantID, job.ID)
+		s.recordExportRejected(ctx, job.TenantID, job.ID)
 		return nil, err
 	}
 	if !exportDigestPattern.MatchString(job.Digest) {
-		s.recordExportRejected(job.TenantID, job.ID)
+		s.recordExportRejected(ctx, job.TenantID, job.ID)
 		return nil, fmt.Errorf("export %s: stored digest is empty or malformed", job.ID)
 	}
 	if domain.HashBytes(plain) != job.Digest {
-		s.recordExportRejected(job.TenantID, job.ID)
+		s.recordExportRejected(ctx, job.TenantID, job.ID)
 		return nil, fmt.Errorf("export %s: decrypted content digest mismatch", job.ID)
 	}
 	return plain, nil
@@ -196,8 +202,8 @@ func (s *Service) VerifyExportDownload(tenantID, jobID string, sealed []byte) ([
 // internals. Actor stays empty because VerifyExportDownload does not receive
 // transport identity; the fact's purpose is exposing tamper attempts, and
 // tenant + job identify the target.
-func (s *Service) recordExportRejected(tenantID, jobID string) {
-	_ = s.Store.AppendAdminFact(s.adminAction(tenantID, "", domain.AdminActionExportRejected, "export", jobID, "download_verification_failed"), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
+func (s *Service) recordExportRejected(ctx context.Context, tenantID, jobID string) {
+	_ = s.Store.AppendAdminFact(ctx, s.adminAction(tenantID, "", domain.AdminActionExportRejected, "export", jobID, "download_verification_failed"), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions)
 }
 
 // detached-cancellation bound. Package-level var (not const) as a test seam:
@@ -249,12 +255,12 @@ var exportTerminalRetryLimit = 3
 // ErrSnapshotConflict, so a terminal job is never regressed and two worker
 // replicas cannot double-fail the same job. No archive I/O. Returns the
 // number of transitions committed by the winning attempt.
-func (s *Service) RecoverStuckExports(tenantID string) (int, error) {
+func (s *Service) RecoverStuckExports(ctx context.Context, tenantID string) (int, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return 0, err
 	}
 	recovered := 0
-	err := s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+	err := s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
 		// Store.UpdateChecked may re-invoke the closure on a CAS conflict; a
 		// failed attempt's mutations are discarded, so the counter is reset at
 		// the start of every invocation to count only the committed attempt
@@ -367,8 +373,8 @@ func (s *Service) holdBlockingCandidates(data *store.Snapshot, tenantID string, 
 // the fact is never committed on a no-op (e.g. a concurrent recovery already
 // failed the job) and a transient Store error is retried rather than silently
 // discarded (FR-1). The legal-hold access-time gate R4 remains authoritative.
-func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
-	s.persistTerminalExport(jobID, "failed", "", "", 0,
+func (s *Service) failExportBlocked(ctx context.Context, jobID string, hold domain.LegalHold) {
+	s.persistTerminalExport(ctx, jobID, "failed", "", "", 0,
 		fmt.Sprintf("export blocked by active legal hold %s", hold.ID),
 		func(data *store.Snapshot, job *domain.ExportJob) {
 			s.appendAdminAction(data, s.adminAction(job.TenantID, "governance-worker",
@@ -377,11 +383,11 @@ func (s *Service) failExportBlocked(jobID string, hold domain.LegalHold) {
 		})
 }
 
-func (s *Service) runExport(jobID string) {
+func (s *Service) runExport(ctx context.Context, jobID string) {
 	// Preserve the lookup-before-claim ordering: besides avoiding work for a
 	// deleted job, this keeps the selection read as a distinct failure boundary
 	// for the legal-hold and storage fault-injection seams.
-	if err := s.Store.Read(func(data *store.Snapshot) error {
+	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var ok bool
 		_, ok = data.Exports[jobID]
 		if !ok {
@@ -391,7 +397,7 @@ func (s *Service) runExport(jobID string) {
 	}); err != nil {
 		return
 	}
-	job, claimed, err := s.claimPendingExport(jobID)
+	job, claimed, err := s.claimPendingExport(ctx, jobID)
 	if err != nil || !claimed {
 		return
 	}
@@ -399,7 +405,7 @@ func (s *Service) runExport(jobID string) {
 	schemas := map[string]domain.EventSchema{}
 	var blockedHold domain.LegalHold
 	blocked := false
-	err = s.Store.Read(func(data *store.Snapshot) error {
+	err = s.Store.Read(ctx, func(data *store.Snapshot) error {
 		for key, schema := range data.Schemas {
 			schemas[key] = schema
 		}
@@ -422,11 +428,11 @@ func (s *Service) runExport(jobID string) {
 		return resolveErr
 	})
 	if err != nil {
-		s.finishExport(jobID, "failed", "", "", 0, err.Error())
+		s.finishExport(ctx, jobID, "failed", "", "", 0, err.Error())
 		return
 	}
 	if blocked {
-		s.failExportBlocked(jobID, blockedHold)
+		s.failExportBlocked(ctx, jobID, blockedHold)
 		return
 	}
 	sortEvents(events)
@@ -438,13 +444,13 @@ func (s *Service) runExport(jobID string) {
 		// 业务价值，因此一律剥离。
 		stripped, stripErr := security.StripSearchDigests(event.Payload)
 		if stripErr != nil {
-			s.finishExport(jobID, "failed", "", "", 0, stripErr.Error())
+			s.finishExport(ctx, jobID, "failed", "", "", 0, stripErr.Error())
 			return
 		}
 		event.Payload = stripped
 		line, marshalErr := domain.CanonicalJSON(event)
 		if marshalErr != nil {
-			s.finishExport(jobID, "failed", "", "", 0, marshalErr.Error())
+			s.finishExport(ctx, jobID, "failed", "", "", 0, marshalErr.Error())
 			return
 		}
 		bytesWritten = append(bytesWritten, line...)
@@ -455,7 +461,7 @@ func (s *Service) runExport(jobID string) {
 	// 绑定才能解开 —— 跨任务/跨租户的 blob 交换在 GCM 认证处失败（F8）。
 	sealed, sealErr := security.EncryptBytesBound(bytesWritten, s.Config.EncryptionKey, security.ExportBinding(job.TenantID, job.ID))
 	if sealErr != nil {
-		s.finishExport(jobID, "failed", "", "", 0, sealErr.Error())
+		s.finishExport(ctx, jobID, "failed", "", "", 0, sealErr.Error())
 		return
 	}
 	key := fmt.Sprintf("exports/%s.jsonl", safeName(jobID))
@@ -468,10 +474,10 @@ func (s *Service) runExport(jobID string) {
 	putCtx, cancel := context.WithTimeout(context.Background(), exportPutTimeout)
 	defer cancel()
 	if err := s.Config.Archive.Put(putCtx, key, sealed); err != nil {
-		s.finishExport(jobID, "failed", "", "", 0, err.Error())
+		s.finishExport(ctx, jobID, "failed", "", "", 0, err.Error())
 		return
 	}
-	s.finishExport(jobID, "completed", key, domain.HashBytes(bytesWritten), len(events), "")
+	s.finishExport(ctx, jobID, "completed", key, domain.HashBytes(bytesWritten), len(events), "")
 }
 
 // persistTerminalExport writes the terminal outcome for jobID, but ONLY when the
@@ -488,12 +494,12 @@ func (s *Service) runExport(jobID string) {
 // record is deliberately left in place so RecoverStuckExports converges it
 // (FR-1 / AC-1). Failures are observed only via bounded, non-sensitive logs
 // (FR-7) — never raw error text, payload, path, or credential.
-func (s *Service) persistTerminalExport(
+func (s *Service) persistTerminalExport(ctx context.Context,
 	jobID, status, path, digest string, count int, failure string,
 	onWrite func(data *store.Snapshot, job *domain.ExportJob),
 ) {
 	for attempt := 0; attempt <= exportTerminalRetryLimit; attempt++ {
-		err := s.Store.UpdateChecked(func(data *store.Snapshot) (bool, error) {
+		err := s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
 			value, ok := data.Exports[jobID]
 			if !ok || value.Status != "running" || value.FinishedAt != nil {
 				return false, nil // no-op: missing or already terminal (FR-2)
@@ -525,6 +531,6 @@ func (s *Service) persistTerminalExport(
 		jobID, status, exportTerminalRetryLimit+1)
 }
 
-func (s *Service) finishExport(jobID, status, path, digest string, count int, failure string) {
-	s.persistTerminalExport(jobID, status, path, digest, count, failure, nil)
+func (s *Service) finishExport(ctx context.Context, jobID, status, path, digest string, count int, failure string) {
+	s.persistTerminalExport(ctx, jobID, status, path, digest, count, failure, nil)
 }

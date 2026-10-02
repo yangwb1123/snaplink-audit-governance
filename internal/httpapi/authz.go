@@ -188,6 +188,12 @@ func errorBody(status int, err error, r *http.Request) map[string]any {
 		code = "tenant_mismatch"
 	case errors.Is(err, store.ErrSnapshotConflict):
 		code = "snapshot_conflict"
+	case errors.Is(err, store.ErrOperationDeadline):
+		// Store operation exhausted its deadline: the write outcome is
+		// unknown, exactly like an exhausted optimistic-lock retry, so it
+		// reuses the documented retryable 503 class. The >= 500 message
+		// redaction below still applies.
+		code = "store_timeout"
 	}
 	message := err.Error()
 	if status == http.StatusUnauthorized {
@@ -225,6 +231,9 @@ func statusForError(err error) int {
 		return http.StatusUnprocessableEntity
 	case errors.Is(err, store.ErrSnapshotConflict):
 		// 乐观锁冲突重试耗尽：请求结果未知，客户端应按幂等语义重试。
+		return http.StatusServiceUnavailable
+	case errors.Is(err, store.ErrOperationDeadline):
+		// 存储操作超时：语句中断且结果未知，与乐观锁冲突同属可重试 503 类。
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError

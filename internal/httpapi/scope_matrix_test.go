@@ -129,7 +129,7 @@ func TestPlatformExplicitSelectionMatrix(t *testing.T) {
 func TestPlatformBodySelectionAndBatchPreflight(t *testing.T) {
 	server, st := testHTTPServerWithStore(t)
 	defer server.Close()
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		source := data.Sources[store.SourceKey("tenant-a", "crm")]
 		source.AllowedClientIDs = []string{"crm", "platform"}
 		data.Sources[store.SourceKey("tenant-a", "crm")] = source
@@ -318,7 +318,7 @@ func TestTenantTokenIsolationMatrix(t *testing.T) {
 func TestApprovedAllTenantAllowlist(t *testing.T) {
 	server, st := testHTTPServerWithStore(t)
 	defer server.Close()
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		source := data.Sources[store.SourceKey("tenant-a", "crm")]
 		source.AllowedClientIDs = []string{"crm", "platform"}
 		data.Sources[store.SourceKey("tenant-a", "crm")] = source
@@ -343,7 +343,7 @@ func TestApprovedAllTenantAllowlist(t *testing.T) {
 	if result := postTestEvent(t, server.URL, "dev:platform:platform-admin", foreign); result.Status != http.StatusAccepted {
 		t.Fatalf("tenant-b platform seed status=%d code=%q", result.Status, result.Code)
 	}
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		// Keep a second tenant-b payload hot as well as the HTTP-seeded
 		// archived event. This makes the all-tenant assertion independent of
 		// archive fallback mechanics.
@@ -450,7 +450,7 @@ func TestApprovedAllTenantAllowlist(t *testing.T) {
 func TestSourceUpdateTenantScopeRegression(t *testing.T) {
 	server, st := testHTTPServerWithStore(t)
 	defer server.Close()
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		data.Sources[store.SourceKey("tenant-b", "crm")] = domain.SourceSystem{TenantID: "tenant-b", ID: "crm", Name: "CRM B", Active: true}
 		return nil
 	}); err != nil {
@@ -489,7 +489,7 @@ func TestSourceUpdateTenantScopeRegression(t *testing.T) {
 	if status, source := update("dev:tenant-a:tenant-admin", "/api/v1/sources/crm?tenant_id=tenant-b", `{"name":"CRM A tenant token","active":true}`); status != http.StatusOK || source.TenantID != "tenant-a" {
 		t.Fatalf("tenant-token override status=%d source=%+v", status, source)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if got := data.Sources[store.SourceKey("tenant-a", "crm")].Name; got != "CRM A tenant token" {
 			t.Fatalf("tenant-a source name=%q, want tenant-token update", got)
 		}
@@ -559,7 +559,7 @@ func mintTenantlessConsoleToken(t *testing.T) string {
 func snapshotBytes(t *testing.T, st *store.Store) []byte {
 	t.Helper()
 	var data []byte
-	if err := st.Read(func(snapshot *store.Snapshot) error {
+	if err := st.Read(testCtx, func(snapshot *store.Snapshot) error {
 		var err error
 		data, err = json.Marshal(snapshot)
 		return err
@@ -571,7 +571,7 @@ func snapshotBytes(t *testing.T, st *store.Store) []byte {
 
 func trailBytes(t *testing.T, st *store.Store) []byte {
 	t.Helper()
-	trail, err := st.ReadAdminTrail()
+	trail, err := st.ReadAdminTrail(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,12 +14,12 @@ import (
 func TestRegisterSchemaRejectsRollback(t *testing.T) {
 	svc := testService(t, false) // tenant-a already has audit.event v1
 	register := func(version int) error {
-		return svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: version, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
+		return svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: version, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
 	}
 	if err := register(2); err != nil {
 		t.Fatalf("forward registration v2 failed: %v", err)
 	}
-	actionsBefore, err := svc.ListAdminActions("tenant-a", false, 100)
+	actionsBefore, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,14 +30,14 @@ func TestRegisterSchemaRejectsRollback(t *testing.T) {
 	if errors.Is(err, domain.ErrConflict) {
 		t.Fatal("rollback re-register must not be reported as a duplicate conflict")
 	}
-	schemas, err := svc.ListSchemas("tenant-a")
+	schemas, err := svc.ListSchemas(testCtx, "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(schemas) != 2 {
 		t.Fatalf("rejected rollback must not mutate the snapshot, got %d schemas", len(schemas))
 	}
-	actionsAfter, err := svc.ListAdminActions("tenant-a", false, 100)
+	actionsAfter, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +51,10 @@ func TestRegisterSchemaRejectsRollback(t *testing.T) {
 // version is rejected.
 func TestRegisterSchemaAllowsForwardGap(t *testing.T) {
 	svc := testService(t, false) // audit.event v1
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 3, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 3, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatalf("forward gap v1->v3 must be allowed, got %v", err)
 	}
-	err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
+	err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
 	if !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("backfill of never-registered v2 below max v3 must be rejected, got %v", err)
 	}
@@ -67,12 +67,12 @@ func TestRegisterSchemaAllowsForwardGap(t *testing.T) {
 // ErrSchemaNotFound.
 func TestIngestRollbackShapeFails(t *testing.T) {
 	svc := testService(t, false) // audit.event v1
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 	// The re-registration that would re-admit a shape the newer version
 	// deliberately restricted must be impossible to construct.
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); !errors.Is(err, domain.ErrInvalid) {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("rollback state must be unconstructible, got %v", err)
 	}
 	// Exact-version lookup: the legitimate v1 still accepts events even
@@ -93,10 +93,10 @@ func TestIngestRollbackShapeFails(t *testing.T) {
 // (409 replay-safe) and is not reclassified as a rollback.
 func TestRegisterSchemaDuplicateMaxVersionStillConflicts(t *testing.T) {
 	svc := testService(t, false) // audit.event v1
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
-	err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
+	err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}})
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("duplicate of highest version must remain ErrConflict, got %v", err)
 	}
@@ -107,16 +107,16 @@ func TestRegisterSchemaDuplicateMaxVersionStillConflicts(t *testing.T) {
 // unaffected.
 func TestRegisterSchemaRollbackGuardIsScoped(t *testing.T) {
 	svc := testService(t, false) // tenant-a/audit.event v1
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "other.event", Version: 1, EventType: "other.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "other.event", Version: 1, EventType: "other.event", Active: true}); err != nil {
 		t.Fatalf("first registration of another schema_id must be unaffected: %v", err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-b", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatalf("first registration in another tenant must be unaffected: %v", err)
 	}
 }

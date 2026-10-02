@@ -48,30 +48,32 @@ func newConflictBackend(t *testing.T, conflictKey string) *conflictBackend {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seedService.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := seedService.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := seedService.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := seedService.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := seedService.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := seedService.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	seed, err := seedStore.Snapshot()
+	seed, err := seedStore.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &conflictBackend{seed: seed, conflictKey: conflictKey}
 }
 
-func (b *conflictBackend) Load() (*store.Snapshot, error)          { return b.clone() }
-func (b *conflictBackend) LoadForUpdate() (*store.Snapshot, error) { return b.clone() }
+func (b *conflictBackend) Load(ctx context.Context) (*store.Snapshot, error) { return b.clone() }
+func (b *conflictBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
+	return b.clone()
+}
 
 // Save commits by keeping a private copy and reports the optimistic-lock
 // conflict — persisting nothing — once the closure has added the conflicting
 // event to the snapshot. Because nothing is written, the store's retry loop
 // is sound and the request ends up committed nowhere.
-func (b *conflictBackend) Save(data *store.Snapshot) error {
+func (b *conflictBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	if _, conflicting := data.Events[b.conflictKey]; conflicting {
 		b.mu.Lock()
 		b.saveCalls++

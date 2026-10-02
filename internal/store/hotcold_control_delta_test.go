@@ -12,6 +12,7 @@ package store
 // still lands the delta.
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -34,11 +35,15 @@ func controlDeltaEvent(tenantID, eventID string) domain.Event {
 // updateLegacyTenant instead of the split store.
 type memoryControlDeltaBackend struct{ data *Snapshot }
 
-func (b *memoryControlDeltaBackend) Load() (*Snapshot, error) { return cloneSnapshot(b.data) }
+func (b *memoryControlDeltaBackend) Load(ctx context.Context) (*Snapshot, error) {
+	return cloneSnapshot(b.data)
+}
 
-func (b *memoryControlDeltaBackend) LoadForUpdate() (*Snapshot, error) { return cloneSnapshot(b.data) }
+func (b *memoryControlDeltaBackend) LoadForUpdate(ctx context.Context) (*Snapshot, error) {
+	return cloneSnapshot(b.data)
+}
 
-func (b *memoryControlDeltaBackend) Save(data *Snapshot) error {
+func (b *memoryControlDeltaBackend) Save(ctx context.Context, data *Snapshot) error {
 	clone, err := cloneSnapshot(data)
 	if err != nil {
 		return err
@@ -51,10 +56,10 @@ func TestUpdateTenantPersistsControlDeltaFromClosure(t *testing.T) {
 	queue := func(view *TenantView, tenantID, eventID string) {
 		view.Global.LedgeredOutbox[EventKey(tenantID, eventID)] = controlDeltaEvent(tenantID, eventID)
 	}
-	requireIntent := func(t *testing.T, read func(func(*Snapshot) error) error, tenantID, eventID, backend string) {
+	requireIntent := func(t *testing.T, read func(context.Context, func(*Snapshot) error) error, tenantID, eventID, backend string) {
 		t.Helper()
 		key := EventKey(tenantID, eventID)
-		if err := read(func(data *Snapshot) error {
+		if err := read(testCtx, func(data *Snapshot) error {
 			if _, ok := data.LedgeredOutbox[key]; !ok {
 				t.Errorf("%s: control delta %q missing after a committed UpdateTenant", backend, key)
 			}
@@ -70,7 +75,7 @@ func TestUpdateTenantPersistsControlDeltaFromClosure(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer st.Close()
-		if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+		if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 			queue(view, "tenant-a", "delta-file")
 			return nil
 		}); err != nil {
@@ -84,7 +89,7 @@ func TestUpdateTenantPersistsControlDeltaFromClosure(t *testing.T) {
 		// Defensive: ingestTenant is gated on HotCold(), but the v1 tenant API
 		// must not silently drop a control delta written by a closure.
 		st := NewWithBackend(&memoryControlDeltaBackend{data: NewSnapshot()})
-		if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+		if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 			queue(view, "tenant-a", "delta-legacy")
 			return nil
 		}); err != nil {
@@ -99,7 +104,7 @@ func TestUpdateTenantPersistsControlDeltaFromClosure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+		if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 			queue(view, "tenant-a", "delta-pg")
 			return nil
 		}); err != nil {
@@ -135,7 +140,7 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.Update(func(data *Snapshot) error {
+	if err := st.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["tenant-a"] = domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}
 		return nil
 	}); err != nil {
@@ -144,7 +149,7 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 
 	key := EventKey("tenant-a", "fault-delta")
 	receipt := domain.EventReceipt{EventID: "fault-delta", TenantID: "tenant-a", Status: domain.StatusLedgered, StreamID: "tenant-a:source:crm", Sequence: 1, Hash: "hash-1"}
-	err = st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	err = st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Hot.Events[key] = controlDeltaEvent("tenant-a", receipt.EventID)
 		view.Global.LedgeredOutbox[key] = controlDeltaEvent("tenant-a", receipt.EventID)
 		return view.Ledger.SetReceipt(receipt)
@@ -152,7 +157,7 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected control write failure") {
 		t.Fatalf("faulted commit err=%v, want the injected control write failure", err)
 	}
-	if err := st.ReadTenant("tenant-a", func(view *TenantView) error {
+	if err := st.ReadTenant(testCtx, "tenant-a", func(view *TenantView) error {
 		if _, hot := view.Hot.Events[key]; !hot {
 			t.Error("hot event must already be durable when the control write fails")
 		}
@@ -167,7 +172,7 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReadControl(func(data *Snapshot) error {
+	if err := st.ReadControl(testCtx, func(data *Snapshot) error {
 		if _, ok := data.LedgeredOutbox[key]; ok {
 			t.Error("control delta must not be durable after a failed control write")
 		}
@@ -176,7 +181,7 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	var records int
-	if err := st.LedgerScan("tenant-a", func(LedgerRecord) error { records++; return nil }); err != nil {
+	if err := st.LedgerScan(testCtx, "tenant-a", func(LedgerRecord) error { records++; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if records == 0 {
@@ -188,13 +193,13 @@ func TestUpdateTenantControlWriteFaultLosesOnlyControlDelta(t *testing.T) {
 	// delta. A guard that had claimed the key inside the first attempt would
 	// skip this write and lose the intent for good.
 	armed.Store(false)
-	if err := st.UpdateTenant("tenant-a", HotFirst, func(view *TenantView) error {
+	if err := st.UpdateTenant(testCtx, "tenant-a", HotFirst, func(view *TenantView) error {
 		view.Global.LedgeredOutbox[key] = controlDeltaEvent("tenant-a", receipt.EventID)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReadControl(func(data *Snapshot) error {
+	if err := st.ReadControl(testCtx, func(data *Snapshot) error {
 		if _, ok := data.LedgeredOutbox[key]; !ok {
 			t.Error("control delta lost when the closure is re-run against a fresh view")
 		}

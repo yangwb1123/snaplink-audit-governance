@@ -33,7 +33,7 @@ func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.CreateExport(scope.TenantID, claims.Subject, query)
+	job, err := s.Service.CreateExport(r.Context(), scope.TenantID, claims.Subject, query)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -52,7 +52,7 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(scope.TenantID, r.PathValue("jobID"))
+	job, err := s.Service.GetExport(r.Context(), scope.TenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -78,7 +78,7 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	job, err := s.Service.GetExport(scope.TenantID, r.PathValue("jobID"))
+	job, err := s.Service.GetExport(r.Context(), scope.TenantID, r.PathValue("jobID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -99,7 +99,7 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 	// 下载完整性：绑定认证 + 摘要格式 + 摘要一致全部通过后才返回明文。
 	// 任一失败均为 500（redacted），且不记录 audit.event.export —— 只有
 	// 经过验证的下载才是治理事实（此前 404/500 归档失败也会先记录该事实）。
-	decrypted, err := s.Service.VerifyExportDownload(job.TenantID, job.ID, data)
+	decrypted, err := s.Service.VerifyExportDownload(r.Context(), job.TenantID, job.ID, data)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -107,7 +107,7 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 	// 导出下载是治理事实（audit.event.export）：服务层追加失败则中止下载
 	// （fail-closed，与读自审计同一规则）。R4 法律保留门禁在服务方法内部
 	// 重新执行，故 403 仍在任何字节流出前生效。
-	if err := s.Service.RecordExportDownload(job.TenantID, claims.Subject, job.ID); err != nil {
+	if err := s.Service.RecordExportDownload(r.Context(), job.TenantID, claims.Subject, job.ID); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
@@ -167,7 +167,7 @@ func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 	}
 	hold.TenantID = scope.TenantID
 	hold.CreatedBy = claims.Subject
-	result, err := s.Service.CreateLegalHold(hold)
+	result, err := s.Service.CreateLegalHold(r.Context(), hold)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -186,7 +186,7 @@ func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListLegalHolds(scope.TenantID)
+	items, err := s.Service.ListLegalHolds(r.Context(), scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -205,7 +205,7 @@ func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	hold, err := s.Service.ReleaseLegalHold(scope.TenantID, r.PathValue("holdID"), claims.Subject)
+	hold, err := s.Service.ReleaseLegalHold(r.Context(), scope.TenantID, r.PathValue("holdID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -229,7 +229,7 @@ func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.PreviewRestore(scope.TenantID, request)
+	result, err := s.Service.PreviewRestore(r.Context(), scope.TenantID, request)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -253,7 +253,7 @@ func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.CreateRestore(scope.TenantID, request, claims.Subject)
+	result, err := s.Service.CreateRestore(r.Context(), scope.TenantID, request, claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -272,7 +272,7 @@ func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.ApproveRestore(scope.TenantID, r.PathValue("runID"), claims.Subject)
+	result, err := s.Service.ApproveRestore(r.Context(), scope.TenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -291,7 +291,7 @@ func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.RejectRestore(scope.TenantID, r.PathValue("runID"), claims.Subject)
+	result, err := s.Service.RejectRestore(r.Context(), scope.TenantID, r.PathValue("runID"), claims.Subject)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -310,7 +310,7 @@ func (s *Server) getRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.GetRestore(scope.TenantID, r.PathValue("runID"))
+	result, err := s.Service.GetRestore(r.Context(), scope.TenantID, r.PathValue("runID"))
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -338,7 +338,7 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	if !tenant.Active {
 		tenant.Active = true
 	}
-	if err := s.Service.CreateTenant(claims.Subject, tenant); err != nil {
+	if err := s.Service.CreateTenant(r.Context(), claims.Subject, tenant); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
@@ -354,7 +354,7 @@ func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListTenants()
+	items, err := s.Service.ListTenants(r.Context())
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -385,7 +385,7 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 	if !source.Active {
 		source.Active = true
 	}
-	if err := s.Service.AddSource(claims.Subject, source); err != nil {
+	if err := s.Service.AddSource(r.Context(), claims.Subject, source); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
@@ -403,7 +403,7 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSources(scope.TenantID)
+	items, err := s.Service.ListSources(r.Context(), scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -429,7 +429,7 @@ func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source.TenantID = scope.TenantID
-	updated, err := s.Service.UpdateSource(claims.Subject, source)
+	updated, err := s.Service.UpdateSource(r.Context(), claims.Subject, source)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -460,7 +460,7 @@ func (s *Server) createSchema(w http.ResponseWriter, r *http.Request) {
 	if !schema.Active {
 		schema.Active = true
 	}
-	if err := s.Service.RegisterSchema(claims.Subject, schema); err != nil {
+	if err := s.Service.RegisterSchema(r.Context(), claims.Subject, schema); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
@@ -478,7 +478,7 @@ func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	items, err := s.Service.ListSchemas(scope.TenantID)
+	items, err := s.Service.ListSchemas(r.Context(), scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -503,7 +503,7 @@ func (s *Server) setRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policy.TenantID = scope.TenantID
-	if err := s.Service.SetRetentionPolicy(claims.Subject, policy); err != nil {
+	if err := s.Service.SetRetentionPolicy(r.Context(), claims.Subject, policy); err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
@@ -521,7 +521,7 @@ func (s *Server) getRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	policy, err := s.Service.GetRetentionPolicy(scope.TenantID)
+	policy, err := s.Service.GetRetentionPolicy(r.Context(), scope.TenantID)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -540,7 +540,7 @@ func (s *Server) evaluateRetention(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	result, err := s.Service.EvaluateRetention(scope.TenantID, time.Time{})
+	result, err := s.Service.EvaluateRetention(r.Context(), scope.TenantID, time.Time{})
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
@@ -567,7 +567,7 @@ func (s *Server) listAdminActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, err := s.Service.ListAdminActions(scope.TenantID, claims.Platform || claims.CrossTenantAuditRead, limit)
+	items, err := s.Service.ListAdminActions(r.Context(), scope.TenantID, claims.Platform || claims.CrossTenantAuditRead, limit)
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return

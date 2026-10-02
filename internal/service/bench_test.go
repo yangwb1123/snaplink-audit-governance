@@ -20,13 +20,13 @@ func benchService(b testing.TB) *Service {
 	if err != nil {
 		b.Fatal(err)
 	}
-	if err := svc.CreateTenant("bench", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "bench", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		b.Fatal(err)
 	}
-	if err := svc.AddSource("bench", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "bench", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		b.Fatal(err)
 	}
-	if err := svc.RegisterSchema("bench", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "bench", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		b.Fatal(err)
 	}
 	return svc
@@ -52,7 +52,7 @@ func BenchmarkIngest(b *testing.B) {
 
 func seedArchivedReceipts(tb testing.TB, svc *Service, count int) {
 	tb.Helper()
-	if err := svc.Store.UpdateTenant("tenant-a", store.HotFirst, func(view *store.TenantView) error {
+	if err := svc.Store.UpdateTenant(testCtx, "tenant-a", store.HotFirst, func(view *store.TenantView) error {
 		for i := 0; i < count; i++ {
 			view.Ledger.SetReceipt(domain.EventReceipt{EventID: fmt.Sprintf("archived-%d", i), TenantID: "tenant-a", IdempotencyKey: fmt.Sprintf("archived-idem-%d", i), Status: domain.StatusArchived, StreamID: "tenant-a:aggregate:invoice:inv-1", Sequence: int64(i + 1), Hash: fmt.Sprintf("archived-hash-%d", i)})
 		}
@@ -130,7 +130,7 @@ func BenchmarkQuery(b *testing.B) {
 	query := domain.Query{From: base, To: base.Add(2000 * time.Second), EventType: "audit.event", PageSize: 100}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := svc.QueryEvents("tenant-a", "bench", query); err != nil {
+		if _, err := svc.QueryEvents(testCtx, "tenant-a", "bench", query); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -155,7 +155,7 @@ func BenchmarkQueryLargeLedger(b *testing.B) {
 	svc := benchService(b)
 	base := time.Unix(1_700_000_010, 0).UTC()
 	now := svc.Now()
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		for i := 0; i < 5000; i++ {
 			event := domain.Event{EventID: fmt.Sprintf("big-%d", i), TenantID: "tenant-a", SourceSystem: "crm", EventType: "audit.event", SchemaID: "audit.event", SchemaVersion: 1, OccurredAt: base.Add(time.Duration(i) * time.Second), ReceivedAt: now, Actor: domain.Actor{ID: "user-1"}, Action: "update", Outcome: "success", DataClassification: "internal", RetentionClass: "standard", IdempotencyKey: fmt.Sprintf("big-idem-%d", i), Payload: map[string]any{"resource": "invoice", "value": i}, StreamID: "tenant-a:source:crm", Sequence: int64(i + 1), Hash: fmt.Sprintf("hash-%d", i)}
 			key := store.EventKey("tenant-a", event.EventID)
@@ -169,7 +169,7 @@ func BenchmarkQueryLargeLedger(b *testing.B) {
 	query := domain.Query{From: base, To: base.Add(6000 * time.Second), EventType: "audit.event", PageSize: 100}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := svc.QueryEvents("tenant-a", "bench", query); err != nil {
+		if _, err := svc.QueryEvents(testCtx, "tenant-a", "bench", query); err != nil {
 			b.Fatal(err)
 		}
 	}

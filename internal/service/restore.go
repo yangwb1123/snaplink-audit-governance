@@ -5,6 +5,7 @@ package service
 // business system performs the compensating action through its own API.
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
-func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest) (domain.RestorePreview, error) {
+func (s *Service) PreviewRestore(ctx context.Context, tenantID string, request domain.RestoreRequest) (domain.RestorePreview, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RestorePreview{}, err
 	}
@@ -23,25 +24,25 @@ func (s *Service) PreviewRestore(tenantID string, request domain.RestoreRequest)
 	// pinned by TestReadSelfAuditRestoreFlowRecordsNothing). A restore
 	// preview is a proposal for a compensating action, not a content read;
 	// changing this requires a product decision, not a code change alone.
-	result, err := s.ReplayOperation(tenantID, "", request.OperationID)
+	result, err := s.ReplayOperation(ctx, tenantID, "", request.OperationID)
 	if err != nil {
 		return domain.RestorePreview{}, err
 	}
 	return domain.RestorePreview{ID: newID("restore-preview"), TenantID: tenantID, OperationID: request.OperationID, ProposedState: result.State, ExternalCalls: []string{}, RequiresApproval: true}, nil
 }
 
-func (s *Service) CreateRestore(tenantID string, request domain.RestoreRequest, requestedBy string) (domain.RestoreRun, error) {
+func (s *Service) CreateRestore(ctx context.Context, tenantID string, request domain.RestoreRequest, requestedBy string) (domain.RestoreRun, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RestoreRun{}, err
 	}
 	if request.OperationID == "" || request.Reason == "" {
 		return domain.RestoreRun{}, fmt.Errorf("%w: operation_id and reason are required", domain.ErrInvalid)
 	}
-	if _, err := s.ReplayOperation(tenantID, "", request.OperationID); err != nil {
+	if _, err := s.ReplayOperation(ctx, tenantID, "", request.OperationID); err != nil {
 		return domain.RestoreRun{}, err
 	}
 	run := domain.RestoreRun{ID: newID("restore"), TenantID: tenantID, OperationID: request.OperationID, Status: domain.RestoreStatusPendingApproval, Reason: request.Reason, CreatedBy: requestedBy, CreatedAt: s.Now()}
-	if err := s.Store.Update(func(data *store.Snapshot) error {
+	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		data.RestoreRuns[run.ID] = run
 		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionRestoreCreated, "restore", run.ID, request.OperationID))
 		return nil
@@ -55,22 +56,22 @@ func (s *Service) CreateRestore(tenantID string, request domain.RestoreRequest, 
 // records the decision fact; executing the compensating business calls is a
 // separate, later stage and is never triggered here.
 
-func (s *Service) ApproveRestore(tenantID, runID, approvedBy string) (domain.RestoreRun, error) {
-	return s.transitionRestore(tenantID, runID, approvedBy, domain.RestoreStatusApproved)
+func (s *Service) ApproveRestore(ctx context.Context, tenantID, runID, approvedBy string) (domain.RestoreRun, error) {
+	return s.transitionRestore(ctx, tenantID, runID, approvedBy, domain.RestoreStatusApproved)
 }
 
 // RejectRestore moves a pending restore run to rejected.
 
-func (s *Service) RejectRestore(tenantID, runID, rejectedBy string) (domain.RestoreRun, error) {
-	return s.transitionRestore(tenantID, runID, rejectedBy, domain.RestoreStatusRejected)
+func (s *Service) RejectRestore(ctx context.Context, tenantID, runID, rejectedBy string) (domain.RestoreRun, error) {
+	return s.transitionRestore(ctx, tenantID, runID, rejectedBy, domain.RestoreStatusRejected)
 }
 
-func (s *Service) transitionRestore(tenantID, runID, actor, target string) (domain.RestoreRun, error) {
+func (s *Service) transitionRestore(ctx context.Context, tenantID, runID, actor, target string) (domain.RestoreRun, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RestoreRun{}, err
 	}
 	var run domain.RestoreRun
-	err := s.Store.Update(func(data *store.Snapshot) error {
+	err := s.Store.Update(ctx, func(data *store.Snapshot) error {
 		value, ok := data.RestoreRuns[runID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
@@ -105,12 +106,12 @@ func (s *Service) transitionRestore(tenantID, runID, actor, target string) (doma
 	return run, err
 }
 
-func (s *Service) GetRestore(tenantID, runID string) (domain.RestoreRun, error) {
+func (s *Service) GetRestore(ctx context.Context, tenantID, runID string) (domain.RestoreRun, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RestoreRun{}, err
 	}
 	var run domain.RestoreRun
-	err := s.Store.Read(func(data *store.Snapshot) error {
+	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		value, ok := data.RestoreRuns[runID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound

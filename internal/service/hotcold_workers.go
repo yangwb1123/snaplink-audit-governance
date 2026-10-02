@@ -13,7 +13,7 @@ import (
 // safe only after the immutable segment and checkpoint are durable.
 func (s *Service) sealPendingTenant(ctx context.Context, tenantID string) error {
 	now := s.Now()
-	return s.Store.UpdateTenant(tenantID, store.ColdFirst, func(view *store.TenantView) error {
+	return s.Store.UpdateTenant(ctx, tenantID, store.ColdFirst, func(view *store.TenantView) error {
 		keys := make([]string, 0, len(view.Hot.Streams))
 		for key, stream := range view.Hot.Streams {
 			if stream.TenantID == tenantID && len(stream.PendingHashes) > 0 {
@@ -49,9 +49,9 @@ type archiveTenantBatch struct {
 	deadLetters map[string]domain.DeadLetter
 }
 
-func (s *Service) collectArchiveTenantBatch(tenantID string) (archiveTenantBatch, error) {
+func (s *Service) collectArchiveTenantBatch(ctx context.Context, tenantID string) (archiveTenantBatch, error) {
 	batch := archiveTenantBatch{deadLetters: map[string]domain.DeadLetter{}}
-	err := s.Store.ReadTenant(tenantID, func(view *store.TenantView) error {
+	err := s.Store.ReadTenant(ctx, tenantID, func(view *store.TenantView) error {
 		for key, event := range view.Hot.Events {
 			if event.TenantID != tenantID {
 				continue
@@ -93,7 +93,7 @@ func (s *Service) collectArchiveTenantBatch(tenantID string) (archiveTenantBatch
 }
 
 func (s *Service) archivePendingTenant(ctx context.Context, tenantID string) (int, error) {
-	batch, err := s.collectArchiveTenantBatch(tenantID)
+	batch, err := s.collectArchiveTenantBatch(ctx, tenantID)
 	if err != nil {
 		return 0, err
 	}
@@ -122,7 +122,7 @@ func (s *Service) archivePendingTenant(ctx context.Context, tenantID string) (in
 	if len(archivedEvents) == 0 && len(batch.deadLetters) == 0 && len(batch.evictedKeys) == 0 {
 		return 0, nil
 	}
-	err = s.Store.UpdateTenant(tenantID, store.ColdFirst, func(view *store.TenantView) error {
+	err = s.Store.UpdateTenant(ctx, tenantID, store.ColdFirst, func(view *store.TenantView) error {
 		for _, key := range batch.evictedKeys {
 			if receipt, ok := view.Ledger.Receipt(key); ok && receipt.Status == domain.StatusArchived {
 				delete(view.Hot.Events, key)

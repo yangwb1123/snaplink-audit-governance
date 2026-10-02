@@ -16,6 +16,18 @@ services:
       AUDIT_ALLOW_INSECURE_GRPC_LISTEN: "true"
       AUDIT_STATE_PATH: /var/lib/audit/state.json
       AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      # Store-operation deadline and connection pool (operator-configured; see
+      # docs/DEPLOY_RUNBOOK.md and docs/BENCHMARKS.md). NONE of these four
+      # pool variables is set here on purpose: unset means "apply no setter at
+      # all", so the verify stack exercises the shipped database/sql defaults
+      # (MaxOpenConnections 0 = unlimited) — exactly the un-tuned shape
+      # /metrics reports. The value provenance is therefore "unset / shipped
+      # default", not "omitted by accident":
+      #   AUDIT_POSTGRES_MAX_OPEN_CONNS      unset -> no SetMaxOpenConns call
+      #   AUDIT_POSTGRES_MAX_IDLE_CONNS      unset -> no SetMaxIdleConns call
+      #   AUDIT_POSTGRES_CONN_MAX_LIFETIME   unset -> no SetConnMaxLifetime call
+      #   AUDIT_POSTGRES_CONN_MAX_IDLE_TIME  unset -> no SetConnMaxIdleTime call
+      # AUDIT_STORE_OPERATION_TIMEOUT is also unset here -> store.DefaultOperationTimeout (10s).
       # 验证栈明示：允许从残留文件状态切到 PostgreSQL 快照（防数据丢失保护
       # 的显式覆盖，仅限本机 verify 栈；生产切换必须走受控迁移）。
       AUDIT_ALLOW_PG_EMPTY_LEDGER: "true"
@@ -67,6 +79,10 @@ services:
     command: ["-interval", "5s"]
     environment:
       AUDIT_OUTBOX_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      # Pool provenance: AUDIT_POSTGRES_MAX_OPEN_CONNS / MAX_IDLE_CONNS /
+      # CONN_MAX_LIFETIME / CONN_MAX_IDLE_TIME are all unset here, which means
+      # the relay applies no setter and keeps the shipped database/sql defaults
+      # (see docs/DEPLOY_RUNBOOK.md).
       AUDIT_OUTBOX_KAFKA_BROKERS: redpanda:9092
       AUDIT_OUTBOX_TOKEN: ${AUDIT_OUTBOX_TOKEN:-dev:demo:service}
       AUDIT_OUTBOX_INTERVAL: 5s
@@ -132,6 +148,9 @@ services:
       # 与 audit-api 共享控制面快照（PostgreSQL 单行 + 乐观锁，B1-2 多副本
       # 冲突重试的真实载体）；归档目标与签名/加密密钥必须与 audit-api 一致。
       AUDIT_POSTGRES_DSN: postgres://audit:audit-local-only@postgres:5432/audit?sslmode=disable
+      # Same pool/deadline provenance as audit-api above: all four pool
+      # variables and AUDIT_STORE_OPERATION_TIMEOUT are unset, so the worker
+      # resolves the shipped defaults through the identical implementation.
       AUDIT_ARCHIVE_DIR: /var/lib/audit/archive
       # Keep the worker's development-secret opt-in explicit and independent
       # from AUDIT_ALLOW_DEV_AUTH, matching the API above.

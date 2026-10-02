@@ -93,7 +93,7 @@ func TestFileBackendLockReleasedOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Update(func(data *Snapshot) error {
+	if err := first.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["demo"] = domain.Tenant{ID: "demo", Name: "Demo", Active: true}
 		return nil
 	}); err != nil {
@@ -108,7 +108,7 @@ func TestFileBackendLockReleasedOnClose(t *testing.T) {
 		t.Fatalf("reopen after Close must succeed: %v", err)
 	}
 	defer second.Close()
-	if err := second.Read(func(data *Snapshot) error {
+	if err := second.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["demo"]; !ok {
 			t.Fatal("snapshot committed by the first store is not visible after reopen")
 		}
@@ -183,14 +183,14 @@ func TestFileBackendLockNoSilentClobber(t *testing.T) {
 	if _, err := Open(path); !errors.Is(err, ErrStateFileLocked) {
 		t.Fatalf("second writer must be refused with ErrStateFileLocked, got %v", err)
 	}
-	if err := a.Update(func(data *Snapshot) error {
+	if err := a.Update(testCtx, func(data *Snapshot) error {
 		data.Tenants["t"] = domain.Tenant{ID: "t", Name: "T", Active: true}
 		data.Events[EventKey("t", "e1")] = domain.Event{TenantID: "t", EventID: "e1"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Read(func(data *Snapshot) error {
+	if err := a.Read(testCtx, func(data *Snapshot) error {
 		if _, ok := data.Tenants["t"]; !ok || len(data.Events) != 1 {
 			t.Fatal("write after the refused peer open was silently dropped")
 		}

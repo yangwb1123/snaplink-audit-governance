@@ -85,7 +85,7 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 	// Nothing was written by the rejected ingests, and a valid ingest after
 	// them still produces only parseable keys (the leak vector "0x1F source
 	// + event pair" is dead: AddSource rejects the source id first).
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if bad := unparsableKeyCount(data); bad != 0 {
 			t.Fatalf("rejected ingests wrote %d unparsable keys", bad)
 		}
@@ -99,7 +99,7 @@ func TestIngestRejectsKeyFramingStreamComponents(t *testing.T) {
 			t.Fatalf("valid ingest %d failed: %v", i, err)
 		}
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if bad := unparsableKeyCount(data); bad != 0 {
 			t.Fatalf("valid ingests produced %d unparsable keys", bad)
 		}
@@ -120,7 +120,7 @@ func TestIngestRejectsColonStreamComponentsMutationFree(t *testing.T) {
 	at := time.Unix(1_700_000_010, 0).UTC()
 	counts := func() (events, receipts, streams, segments, checkpoints, actions int) {
 		t.Helper()
-		if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 			events = len(data.Events)
 			receipts = len(data.Receipts)
 			streams = len(data.Streams)
@@ -166,7 +166,7 @@ func TestIngestRejectsColonStreamComponentsMutationFree(t *testing.T) {
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatalf("valid ingest after colon rejections failed: %v", err)
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if bad := unparsableKeyCount(data); bad != 0 {
 			t.Fatalf("valid ingest produced %d unparsable keys", bad)
 		}
@@ -206,7 +206,7 @@ func TestStoredStreamFramingByteIdentical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		for eventID, want := range map[string]string{
 			"frame-agg-1": "tenant-a:aggregate:invoice:inv-1",
 			"frame-op-1":  "tenant-a:operation:op-9",
@@ -234,7 +234,7 @@ func TestStoredStreamFramingByteIdentical(t *testing.T) {
 		t.Fatalf("integrity invalid after framing regression: %+v", result)
 	}
 	var storedSegments int
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		for key := range data.Segments {
 			if tenantID, _, ok := store.SplitTenantKey(key); ok && tenantID == "tenant-a" {
 				storedSegments += len(data.Segments[key])
@@ -258,7 +258,7 @@ func TestAddSourceUpdateSourceRegisterSchemaRejectKeyFraming(t *testing.T) {
 	svc := testService(t, false)
 	counts := func() (sources, schemas, actions int) {
 		t.Helper()
-		if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 			sources = len(data.Sources)
 			schemas = len(data.Schemas)
 			actions = len(data.AdminActions)
@@ -271,23 +271,23 @@ func TestAddSourceUpdateSourceRegisterSchemaRejectKeyFraming(t *testing.T) {
 	beforeSources, beforeSchemas, beforeActions := counts()
 
 	for _, id := range []string{"x\x1fy", "a b", "a/b", "\x00-nul"} {
-		err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true})
+		err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true})
 		if !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("AddSource(id=%q) = %v, want ErrInvalid", id, err)
 		}
 	}
 	// UpdateSource: the path id lands in SourceKey via normalizeSource.
-	if _, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "a\x1fb", Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "a\x1fb", Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
 		t.Errorf("UpdateSource(id=0x1F) = %v, want ErrInvalid", err)
 	}
 	// The valid update path still works (tenant-existence check must not
 	// break legitimate updates).
-	updated, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM v2", Active: true})
+	updated, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM v2", Active: true})
 	if err != nil || updated.Name != "CRM v2" {
 		t.Fatalf("valid UpdateSource failed: %+v %v", updated, err)
 	}
 	for _, id := range []string{"a\x1fb", "a b", "a/b"} {
-		err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: id, Version: 1, EventType: "x", Active: true})
+		err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: id, Version: 1, EventType: "x", Active: true})
 		if !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("RegisterSchema(schema_id=%q) = %v, want ErrInvalid", id, err)
 		}
@@ -302,7 +302,7 @@ func TestAddSourceUpdateSourceRegisterSchemaRejectKeyFraming(t *testing.T) {
 	if afterActions != beforeActions+1 {
 		t.Fatalf("admin actions %d->%d, want exactly +1 (valid update only)", beforeActions, afterActions)
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if bad := unparsableKeyCount(data); bad != 0 {
 			t.Fatalf("rejected source/schema writes produced %d unparsable keys", bad)
 		}
@@ -329,10 +329,10 @@ func TestSourceRegistrationLengthCapBoundary(t *testing.T) {
 	runes29 := strings.Repeat("界", 29)
 
 	for _, id := range []string{punct86, runes29} {
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("AddSource(id=%d bytes) = %v, want ErrInvalid", len(id), err)
 		}
-		if _, err := svc.UpdateSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
+		if _, err := svc.UpdateSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("UpdateSource(id=%d bytes) = %v, want ErrInvalid", len(id), err)
 		}
 	}
@@ -341,7 +341,7 @@ func TestSourceRegistrationLengthCapBoundary(t *testing.T) {
 	// action appended.
 	sourcesBefore, actionsBefore := func() (int, int) {
 		var sources, actions int
-		if err := svc.Store.Read(func(data *store.Snapshot) error {
+		if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 			sources = len(data.Sources)
 			actions = len(data.AdminActions)
 			return nil
@@ -350,7 +350,7 @@ func TestSourceRegistrationLengthCapBoundary(t *testing.T) {
 		}
 		return sources, actions
 	}()
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.Sources) != sourcesBefore {
 			t.Fatalf("over-cap source registrations mutated the snapshot: %d → %d sources", sourcesBefore, len(data.Sources))
 		}
@@ -369,11 +369,11 @@ func TestSourceRegistrationLengthCapBoundary(t *testing.T) {
 	// pre-flight and dead-lettered — the layered defense pinned by
 	// TestArchiveStoreBoundaryCatchesCapBoundaryEvent.
 	for _, id := range []string{punct85, runes28} {
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); err != nil {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: id, Name: "X", Active: true}); err != nil {
 			t.Errorf("AddSource(id=%d bytes) = %v, want nil", len(id), err)
 		}
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: strings.Repeat("a", domain.MaxArchiveComponentBytes), Name: "X-safe", Active: true, AllowedClientIDs: []string{"crm"}}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: strings.Repeat("a", domain.MaxArchiveComponentBytes), Name: "X-safe", Active: true, AllowedClientIDs: []string{"crm"}}); err != nil {
 		t.Fatalf("AddSource(85 safe bytes) = %v, want nil", err)
 	}
 	at := time.Unix(1_700_000_010, 0).UTC()
@@ -432,7 +432,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 
 	// (i) every segment/checkpoint key parses.
 	var segmentTotal, checkpointTotal int
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		if bad := unparsableKeyCount(data); bad != 0 {
 			t.Fatalf("%d unparsable keys after sealed ingests", bad)
 		}
@@ -471,7 +471,7 @@ func TestIntegrityCoversEverySealedStream(t *testing.T) {
 	if err := svc.CreateAggregateCheckpoint(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Store.Read(func(data *store.Snapshot) error {
+	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
 		items := data.AggregateCheckpoints
 		if len(items) == 0 {
 			t.Fatal("no aggregate checkpoint was created")

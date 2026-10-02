@@ -293,7 +293,7 @@ func postParityHTTPEvent(t *testing.T, baseURL string, event domain.Event) parit
 
 func assertCapEventAbsent(t *testing.T, st *store.Store, eventID string) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", eventID)
 		if _, exists := data.Events[key]; exists {
 			t.Fatalf("rejected event %q was persisted", eventID)
@@ -309,7 +309,7 @@ func assertCapEventAbsent(t *testing.T, st *store.Store, eventID string) {
 
 func assertCapEventPresent(t *testing.T, st *store.Store, eventID string) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", eventID)
 		if _, exists := data.Events[key]; !exists {
 			t.Fatalf("accepted event %q was not persisted", eventID)

@@ -65,16 +65,16 @@ func testHTTPServerWithStore(t *testing.T) (*httptest.Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), st
@@ -769,7 +769,7 @@ func TestHTTPCreateExportPlatformRequiresTenantID(t *testing.T) {
 	if status := post(server.URL + "/api/v1/exports"); status != http.StatusBadRequest {
 		t.Fatalf("platform export without tenant_id status=%d, want 400", status)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.Exports) != 0 {
 			t.Fatalf("rejected export persisted %d job(s), want 0", len(data.Exports))
 		}
@@ -935,7 +935,7 @@ func TestHTTPDownloadExportRedacts500(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports["export-t1"] = domain.ExportJob{ID: "export-t1", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/dummy.jsonl"}
 		return nil
 	}); err != nil {
@@ -1039,7 +1039,7 @@ func downloadExportTestServer(t *testing.T, job domain.ExportJob) (*httptest.Ser
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[job.ID] = job
 		return nil
 	}); err != nil {
@@ -1150,7 +1150,7 @@ func TestHTTPDownloadExportRejectsSwappedV2Blob(t *testing.T) {
 	// Job B: a second completed job in the same store, sealed under B's own
 	// binding.
 	jobB := domain.ExportJob{ID: "export-swap-v2b", TenantID: "tenant-a", Status: "completed", ObjectPath: "exports/export-swap-v2b.jsonl", Digest: domain.HashBytes([]byte("job B content\n"))}
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		data.Exports[jobB.ID] = jobB
 		return nil
 	}); err != nil {
@@ -1288,7 +1288,7 @@ func TestHTTPDownloadVerificationFacts(t *testing.T) {
 	// Read-path facts are persisted in the append-only Admin Trail rather than
 	// Snapshot.AdminActions. Verify the public merged view so this boundary
 	// test stays correct for both the file and PostgreSQL backends.
-	actions, err := svc.ListAdminActions("tenant-a", false, 100)
+	actions, err := svc.ListAdminActions(testCtx, "tenant-a", false, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,13 +1343,13 @@ func TestHTTPIngestRedactsStorePersistError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
@@ -2242,7 +2242,7 @@ func TestHTTPIngestRejectsTrailingJSONBody(t *testing.T) {
 		t.Fatalf("whitespace trailer status=%d body=%s, want 202", status, body)
 	}
 
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		key := store.EventKey("tenant-a", "trail-ok")
 		if receipt, exists := data.Receipts[key]; !exists || receipt.Status == "" {
 			t.Error("whitespace-trailer event was not receipted")
@@ -2304,7 +2304,7 @@ func TestHTTPCreateTenantRejectsKeyFramingIDs(t *testing.T) {
 	if status := postTenant("tenant-http-c"); status != http.StatusCreated {
 		t.Fatalf("valid POST tenant status=%d, want 201", status)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, id := range []string{"a\u001fb", "a/b", "a b", "\u0000-nul"} {
 			if _, exists := data.Tenants[id]; exists {
 				t.Fatalf("rejected tenant %q was persisted", id)
@@ -2370,7 +2370,7 @@ func TestDevAuditorCannotCreateTenant(t *testing.T) {
 		t.Fatalf("POST tenants with dev:platform:platform-admin status=%d, want 201", status)
 	}
 	// The 403 bodies were never persisted; the 201 control was.
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, id := range []string{"auditor-created", "service-created"} {
 			if _, exists := data.Tenants[id]; exists {
 				t.Fatalf("rejected tenant %q was persisted", id)
@@ -2403,17 +2403,17 @@ func TestDevAuditorTenantOverrideIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
-		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2468,17 +2468,17 @@ func TestDevPlatformComplianceExportScopedToOwnTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
-		if err := svc.AddSource("test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
+		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: tenantID, ID: "crm", Name: "CRM", Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
-		if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: tenantID, SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2523,7 +2523,7 @@ func TestDevPlatformComplianceExportScopedToOwnTenant(t *testing.T) {
 	// The compliance token's job is persisted under its own tenant; the
 	// platform-admin control's job is persisted under the victim (escape
 	// hatch). Neither may be mis-scoped.
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if got := data.Exports[job.ID].TenantID; got != "platform" {
 			t.Fatalf("compliance export %q persisted under tenant %q, want platform", job.ID, got)
 		}
@@ -2541,7 +2541,7 @@ func TestDevPlatformComplianceExportScopedToOwnTenant(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		done := true
-		if err := st.Read(func(data *store.Snapshot) error {
+		if err := st.Read(testCtx, func(data *store.Snapshot) error {
 			for _, id := range []string{job.ID, adminJob.ID} {
 				current := data.Exports[id]
 				if current.Status != "completed" && current.Status != "failed" {
@@ -2575,7 +2575,7 @@ func TestDevPlatformTenantAdminSourceStampedToOwnTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tenantID := range []string{"platform", "tenant-a", "tenant-b"} {
-		if err := svc.CreateTenant("test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
+		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: tenantID, Name: tenantID, Active: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2601,7 +2601,7 @@ func TestDevPlatformTenantAdminSourceStampedToOwnTenant(t *testing.T) {
 	if source.TenantID != "platform" {
 		t.Fatalf("source.TenantID=%q, want platform (body tenant_id override ignored)", source.TenantID)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Sources[store.SourceKey("platform", "src-x")]; !exists {
 			t.Fatalf("source src-x was not persisted under the claim's own tenant platform")
 		}
@@ -2628,10 +2628,10 @@ func TestDevPlatformAuditorSourceTamperRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "victim-src", Name: "Victim", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "victim-src", Name: "Victim", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true}, log.New(io.Discard, "", 0)).Handler())
@@ -2648,7 +2648,7 @@ func TestDevPlatformAuditorSourceTamperRejected(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("POST sources with dev:platform:auditor status=%d, want 403", response.StatusCode)
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.Sources) != 1 {
 			t.Fatalf("source count=%d, want 1 (no tamper persisted)", len(data.Sources))
 		}
@@ -2698,13 +2698,13 @@ func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
@@ -2763,7 +2763,7 @@ func TestHTTPResponsesStripSearchDigestsRecursively(t *testing.T) {
 
 	// Positive control: the store keeps the digest — stripping must never
 	// mutate the stored payload shared with the snapshot.
-	stored, err := svc.GetEvent("tenant-a", "test", "strip-evt-1")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "strip-evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2869,13 +2869,13 @@ func timelineStripFixture(t *testing.T) (*httptest.Server, *service.Service) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 2, EventType: "audit.event", Active: true, AllowedFields: []string{"resource", "email", "nested"}, SearchableFields: []string{"email"}}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
@@ -2914,7 +2914,7 @@ func timelineStripAssertions(t *testing.T, svc *service.Service, body []byte) {
 	}
 	// Positive control: the store keeps the digests — stripping must never
 	// mutate the stored payload shared with the snapshot (REQ-3).
-	stored, err := svc.GetEvent("tenant-a", "test", "strip-evt-1")
+	stored, err := svc.GetEvent(testCtx, "tenant-a", "test", "strip-evt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3227,7 +3227,7 @@ func TestEventReturningHandlersStripSearchDigests(t *testing.T) {
 // that none of the rejected identifiers was persisted.
 func assertNoFramedCompositeKeys(t *testing.T, st *store.Store, rejectedIDs ...string) {
 	t.Helper()
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		composite := map[string]func() map[string]string{
 			"Events":      func() map[string]string { return stringKeys(data.Events) },
 			"Receipts":    func() map[string]string { return stringKeys(data.Receipts) },
@@ -3332,7 +3332,7 @@ func TestHTTPIngestRejectsKeyFramingEventIDs(t *testing.T) {
 	// composite-key map holds a multi-separator key (the fail-closed
 	// SplitTenantKey case) after any of the rejected or accepted posts.
 	assertNoFramedCompositeKeys(t, st, rejectedIDs...)
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if receipt, exists := data.Receipts[store.EventKey("tenant-a", base.EventID)]; !exists || receipt.Status == "" {
 			t.Fatal("positive-control event was not receipted")
 		}
@@ -3404,7 +3404,7 @@ func TestHTTPIngestBatchAbortsOnKeyFramingEvent(t *testing.T) {
 	// the valid prefix of the first batch WAS (partial acceptance), and no
 	// composite-key map holds a multi-separator key.
 	assertNoFramedCompositeKeys(t, st, "http-kfb-bad-1")
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if receipt, exists := data.Receipts[store.EventKey("tenant-a", "http-kfb-ok-1")]; !exists || receipt.Status == "" {
 			t.Fatal("valid batch prefix was not receipted before the abort")
 		}
@@ -3492,7 +3492,7 @@ func TestHTTPSourceSchemaRejectKeyFramingIDs(t *testing.T) {
 	// valid ones were, and no composite-key map holds a multi-separator key
 	// (the %1F-decoded path id created nothing).
 	assertNoFramedCompositeKeys(t, st)
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, id := range []string{"a\x1fb", "\x00-nul", "a/b", "a b"} {
 			if _, exists := data.Sources[store.SourceKey("tenant-a", id)]; exists {
 				t.Errorf("rejected source id %q was persisted", id)
@@ -3528,13 +3528,13 @@ func TestHTTPPlatformEscapeHatchRejectsKeyFramingTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
@@ -3591,7 +3591,7 @@ func TestHTTPPlatformEscapeHatchRejectsKeyFramingTenant(t *testing.T) {
 
 	// F-4: no self-audit record under the forged tenant, and the forged
 	// calls appended nothing at all (count unchanged from the seed calls).
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, action := range data.AdminActions {
 			if action.TenantID == "a\x1fb" {
 				t.Errorf("forged self-audit record found: %+v", action)
@@ -3677,7 +3677,7 @@ func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0))
@@ -3685,7 +3685,7 @@ func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
 	// appended nothing to the self-audit trail (count unchanged from the
 	// CreateTenant seed action).
 	var before int
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		before = len(data.AdminActions)
 		return nil
 	}); err != nil {
@@ -3713,7 +3713,7 @@ func TestHTTPJWTRejectsKeyFramingTenantClaim(t *testing.T) {
 			t.Errorf("tenant claim %q error.code=%q, want unauthorized", tenantID, body.Error.Code)
 		}
 	}
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if len(data.AdminActions) != before {
 			t.Errorf("rejected claims appended %d admin actions, want %d", len(data.AdminActions), before)
 		}
@@ -3831,9 +3831,9 @@ type scriptedStoreBackend struct {
 	loads          int
 }
 
-func (b *scriptedStoreBackend) Load() (*store.Snapshot, error) { return b.data, nil }
+func (b *scriptedStoreBackend) Load(ctx context.Context) (*store.Snapshot, error) { return b.data, nil }
 
-func (b *scriptedStoreBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *scriptedStoreBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	b.loads++
 	encoded, err := json.Marshal(b.data)
 	if err != nil {
@@ -3848,7 +3848,7 @@ func (b *scriptedStoreBackend) LoadForUpdate() (*store.Snapshot, error) {
 	return copyData, nil
 }
 
-func (b *scriptedStoreBackend) Save(data *store.Snapshot) error {
+func (b *scriptedStoreBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.saves++
 	if b.saveErr != nil {
 		return b.saveErr
@@ -3871,16 +3871,16 @@ func testHTTPServerWithBackend(t *testing.T, backend *scriptedStoreBackend) (*ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-b", Name: "Tenant B", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
 		t.Fatal(err)
 	}
 	return httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler()), svc

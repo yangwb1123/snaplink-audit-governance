@@ -165,7 +165,7 @@ func TestHTTPExportHold403BodyLeaksNothingCrossTenant(t *testing.T) {
 	// (The download-denial fact path is pinned at the service layer by
 	// TestExportAccessBlockedByHoldCreatedAfterCompletion, which calls
 	// RecordExportDownload directly.)
-	snap, err := st.Snapshot()
+	snap, err := st.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}

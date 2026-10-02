@@ -99,7 +99,7 @@ func (p *gatedLedgeredPublisher) counts() map[string]int {
 // whose ingest-time publication never reached the broker.
 func seedLedgeredOutbox(t *testing.T, svc *Service, ids ...string) {
 	t.Helper()
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		for index, id := range ids {
 			event := testEvent(id, "op-ledgered-gate", time.Unix(1_700_000_600+int64(index), 0).UTC())
 			event.TenantID = "tenant-a"
@@ -118,7 +118,7 @@ func startFlushRound(svc *Service, limit int) (done chan struct{}, failures chan
 	done, failures = make(chan struct{}), make(chan error, 1)
 	go func() {
 		defer close(done)
-		if _, err := svc.FlushLedgeredOutbox(context.Background(), limit); err != nil {
+		if _, err := svc.FlushLedgeredOutbox(testCtx, limit); err != nil {
 			failures <- err
 		}
 	}()
@@ -244,7 +244,7 @@ func TestDeferredLedgeredPublishDrainsOnNextFlush(t *testing.T) {
 	close(publisher.block["hl-drain"])
 	awaitRound(t, flushDone, flushErr, "the first flush round to finish")
 
-	if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil || flushed != 0 {
+	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
 		t.Fatalf("post-drain flush=%d err=%v, want an already-drained outbox", flushed, err)
 	}
 	if pending := pendingLedgeredEvents(t, svc); len(pending) != 0 {
@@ -383,7 +383,7 @@ func TestNoConcurrentPublishPerPendingEvent(t *testing.T) {
 		awaitChannel(t, entered, "the request path to enter its publish")
 
 		// The outbox now holds exactly this key, owned by the request path.
-		if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil || flushed != 0 {
+		if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
 			t.Fatalf("flush over an owned key published %d (err=%v), want a skip", flushed, err)
 		}
 		close(release)
@@ -425,7 +425,7 @@ func TestConcurrentFlushRoundsPublishEachEventOnce(t *testing.T) {
 	firstDone, firstErr := startFlushRound(svc, 100)
 	awaitChannel(t, publisher.entered["aa-round-busy"], "the first flush round to enter its publish")
 
-	if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil || flushed != 0 {
+	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
 		t.Fatalf("second concurrent round published %d (err=%v), want a no-op", flushed, err)
 	}
 	if got := publisher.counts()["zz-round-free"]; got != 0 {
@@ -504,7 +504,7 @@ func newCountingBackend() *countingBackend {
 	return &countingBackend{data: store.NewSnapshot(), loadError: errors.New("snapshot unavailable")}
 }
 
-func (b *countingBackend) Load() (*store.Snapshot, error) {
+func (b *countingBackend) Load(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.reads++
@@ -514,14 +514,14 @@ func (b *countingBackend) Load() (*store.Snapshot, error) {
 	return cloneTestSnapshot(b.data)
 }
 
-func (b *countingBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *countingBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.updates++
 	return cloneTestSnapshot(b.data)
 }
 
-func (b *countingBackend) Save(data *store.Snapshot) error {
+func (b *countingBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.updates++
@@ -651,7 +651,7 @@ func TestFlushRoundSkipsQuietlyWithoutStarvation(t *testing.T) {
 	}()
 	awaitChannel(t, publisher.entered["sk-request"], "the request path to enter its publish")
 
-	if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil || flushed != 0 {
+	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
 		t.Fatalf("round over a fully owned outbox published %d (err=%v), want a quiet skip", flushed, err)
 	}
 	if pending := pendingLedgeredEvents(t, svc); len(pending) != 1 {
@@ -660,7 +660,7 @@ func TestFlushRoundSkipsQuietlyWithoutStarvation(t *testing.T) {
 
 	close(publisher.block["sk-request"])
 	awaitChannel(t, ingestDone, "the request path to finish")
-	if flushed, err := svc.FlushLedgeredOutbox(context.Background(), 100); err != nil || flushed != 0 {
+	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
 		t.Fatalf("post-ingest flush=%d err=%v, want the request path to have acknowledged the row", flushed, err)
 	}
 	if pending := pendingLedgeredEvents(t, svc); len(pending) != 0 {

@@ -80,7 +80,7 @@ func TestGRPCWriteStreamSkipBudgetBoundaryRecovers(t *testing.T) {
 		t.Fatalf("over-cap log count=%d, want %d", got, MaxStreamSkips)
 	}
 	assertNoFramedKeys(t, st, overIDs...)
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
 			t.Fatal("valid event after skips was not persisted")
 		}
@@ -145,7 +145,7 @@ func TestGRPCWriteStreamSkipBudgetIsPerStream(t *testing.T) {
 		t.Fatalf("over-cap log count=%d, want %d", got, MaxStreamSkips+1)
 	}
 	assertNoFramedKeys(t, st, append(firstIDs, secondOverID)...)
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
 			t.Fatal("valid event on independent stream was not persisted")
 		}
@@ -175,7 +175,7 @@ func TestGRPCWriteStreamSkipBudgetNilLogger(t *testing.T) {
 
 func TestGRPCWriteStreamSkipsDoNotConsumeQuota(t *testing.T) {
 	st, client, ctx := newGRPCHarness(t)
-	if err := st.Update(func(data *store.Snapshot) error {
+	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		tenant := data.Tenants["tenant-a"]
 		tenant.EventsPerSecond = 1
 		tenant.Burst = 0
@@ -209,7 +209,7 @@ func TestGRPCWriteStreamSkipsDoNotConsumeQuota(t *testing.T) {
 		t.Fatalf("quota rejection code=%v, want ResourceExhausted", status.Code(err))
 	}
 	assertNoFramedKeys(t, st, "grpc-stream-quota-over-a", "grpc-stream-quota-over-b", "grpc-stream-quota-over-c", quotaRejected.GetEventId())
-	if err := st.Read(func(data *store.Snapshot) error {
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		if _, exists := data.Events[store.EventKey("tenant-a", valid.GetEventId())]; !exists {
 			t.Fatal("valid event was not persisted after skipped messages")
 		}

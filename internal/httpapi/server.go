@@ -249,6 +249,26 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "audit_ledgered_publish_deferred_total %d\n", s.Service.LedgeredPublishDeferrals())
 	}
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
+	// Store pool + deadline observability. Unlabelled by construction: a
+	// tenant, event, host, DSN or route label would make the cardinality
+	// unbounded. max_open is reported verbatim, so 0 means "no operator
+	// limit" (database/sql's default) rather than a hidden value — the
+	// saturation decision is documented in docs/BENCHMARKS.md.
+	//
+	// The pool lines are omitted (not zero-filled) when the store has no
+	// PostgreSQL pool: a file-backed deployment emitting
+	// audit_store_pg_pool_in_use 0 would read as "pool exhausted at zero
+	// connections", which is a different fact.
+	if s.Service != nil && s.Service.Store != nil {
+		if stats := s.Service.Store.PoolStats(); stats != nil {
+			fmt.Fprintf(w, "audit_store_pg_pool_in_use %d\n", stats.InUse)
+			fmt.Fprintf(w, "audit_store_pg_pool_idle %d\n", stats.Idle)
+			fmt.Fprintf(w, "audit_store_pg_pool_max_open %d\n", stats.MaxOpenConnections)
+			fmt.Fprintf(w, "audit_store_pg_pool_wait_count_total %d\n", stats.WaitCount)
+			fmt.Fprintf(w, "audit_store_pg_pool_wait_duration_seconds_total %g\n", stats.WaitDuration.Seconds())
+		}
+		fmt.Fprintf(w, "audit_store_operation_deadline_exceeded_total %d\n", s.Service.Store.OperationDeadlineExhaustions())
+	}
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"valid\"} %d\n", s.integrityValidCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"invalid\"} %d\n", s.integrityInvalidCount.Load())
 	for i, upper := range s.latencyBuckets {

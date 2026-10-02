@@ -39,14 +39,16 @@ type scriptedConflictBackend struct {
 	alwaysConflict bool
 }
 
-func (b *scriptedConflictBackend) Load() (*store.Snapshot, error) { return b.data, nil }
+func (b *scriptedConflictBackend) Load(ctx context.Context) (*store.Snapshot, error) {
+	return b.data, nil
+}
 
-func (b *scriptedConflictBackend) LoadForUpdate() (*store.Snapshot, error) {
+func (b *scriptedConflictBackend) LoadForUpdate(ctx context.Context) (*store.Snapshot, error) {
 	b.loads++
 	return cloneTestSnapshot(b.data)
 }
 
-func (b *scriptedConflictBackend) Save(data *store.Snapshot) error {
+func (b *scriptedConflictBackend) Save(ctx context.Context, data *store.Snapshot) error {
 	b.saves++
 	if b.saveErr != nil {
 		return b.saveErr
@@ -94,13 +96,13 @@ func newServiceOn(t *testing.T, st *store.Store) *Service {
 // by the archive tests.
 func seedTestDomain(t *testing.T, svc *Service) {
 	t.Helper()
-	if err := svc.CreateTenant("test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
+	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddSource("test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
+	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RegisterSchema("test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
+	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -134,7 +136,7 @@ func seedPendingEvents(t *testing.T, svc *Service, archiveStub *recordingArchive
 
 func assertAllArchived(t *testing.T, svc *Service, n int, passTime time.Time) {
 	t.Helper()
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,10 +163,10 @@ func TestArchivePendingBatchesSingleUpdate(t *testing.T) {
 	seedPendingEvents(t, svc, archiveStub, 5)
 	// Simulate prior exhausted passes: the counter must be reset inside the
 	// batch commit, not by a second window.
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,7 +174,7 @@ func TestArchivePendingBatchesSingleUpdate(t *testing.T) {
 	archiveStub.fail = false
 	archiveStub.puts = nil
 	passTime := svc.Now()
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending = %d, %v; want 5, nil", count, err)
 	}
@@ -183,7 +185,7 @@ func TestArchivePendingBatchesSingleUpdate(t *testing.T) {
 		t.Fatalf("archive Puts = %d, want 5", len(archiveStub.puts))
 	}
 	assertAllArchived(t, svc, 5, passTime)
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("conflict counter after successful pass = %d, %v; want 0 (reset in the batch commit)", n, err)
 	}
 }
@@ -204,7 +206,7 @@ func TestArchivePendingConvergesWithinRetryBudget(t *testing.T) {
 	archiveStub.fail = false
 	archiveStub.puts = nil
 	started := time.Now()
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending = %d, %v; want 5, nil", count, err)
 	}
@@ -234,7 +236,7 @@ func TestArchivePendingExhaustionAtomicAndConverges(t *testing.T) {
 	backend.saves = 0
 	archiveStub.fail = false
 	archiveStub.puts = nil
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if !errors.Is(err, store.ErrSnapshotConflict) {
 		t.Fatalf("ArchivePending err=%v, want ErrSnapshotConflict", err)
 	}
@@ -249,7 +251,7 @@ func TestArchivePendingExhaustionAtomicAndConverges(t *testing.T) {
 	if len(archiveStub.puts) != 5 {
 		t.Fatalf("archive Puts = %d, want 5 (all Puts happened before the failed commit)", len(archiveStub.puts))
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +266,7 @@ func TestArchivePendingExhaustionAtomicAndConverges(t *testing.T) {
 	backend.conflicts = 0
 	backend.saves = 0
 	archiveStub.puts = nil
-	count, err = svc.ArchivePending(context.Background(), "tenant-a")
+	count, err = svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending after heal = %d, %v; want 5, nil", count, err)
 	}
@@ -281,15 +283,15 @@ func TestRecordArchivePassConflictIncrements(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
 	for i := 1; i <= 2; i++ {
-		if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+		if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 			t.Fatalf("increment %d: %v", i, err)
 		}
 	}
 	backend.conflicts = 1
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatalf("increment with one conflict retry: %v", err)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 3 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 3 {
 		t.Fatalf("counter = %d, %v; want 3", n, err)
 	}
 }
@@ -308,10 +310,10 @@ func TestArchivePassConflictCounterPersistsAndResets(t *testing.T) {
 	seedTestDomain(t, svc)
 	archiveStub := &recordingArchive{fail: true}
 	seedPendingEvents(t, svc, archiveStub, 5)
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 1 {
 		t.Fatalf("counter before reopen = %d, %v; want 1", n, err)
 	}
 	if err := st.Close(); err != nil {
@@ -325,7 +327,7 @@ func TestArchivePassConflictCounterPersistsAndResets(t *testing.T) {
 	}
 	defer st2.Close()
 	svc2 := newServiceOn(t, st2)
-	if n, err := svc2.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+	if n, err := svc2.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 1 {
 		t.Fatalf("counter after reopen = %d, %v; want 1 (survives restart)", n, err)
 	}
 
@@ -335,7 +337,7 @@ func TestArchivePassConflictCounterPersistsAndResets(t *testing.T) {
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending after reopen = %d, %v; want 5, nil", count, err)
 	}
-	if n, err := svc2.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc2.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("counter after successful pass = %d, %v; want 0", n, err)
 	}
 }
@@ -350,7 +352,7 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 	svc := testServiceWithBackend(t, backend)
 	archiveStub := &recordingArchive{fail: true}
 	seedPendingEvents(t, svc, archiveStub, 5)
-	if err := svc.Store.Update(func(data *store.Snapshot) error {
+	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
 		delete(data.Receipts, store.EventKey("tenant-a", "evt-3"))
 		return nil
 	}); err != nil {
@@ -360,7 +362,7 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 	backend.saves = 0
 	archiveStub.fail = false
 	archiveStub.puts = nil
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ArchivePending err=%v, want ErrNotFound", err)
 	}
@@ -370,7 +372,7 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 	if backend.saves != 0 {
 		t.Fatalf("saves=%d, want 0 (closure error commits nothing)", backend.saves)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +388,7 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 			t.Fatalf("event %d receipt ok=%v status=%+v, want untouched StatusIndexed", i, ok, receipt.Status)
 		}
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 0 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 0 {
 		t.Fatalf("counter = %d, %v; want 0 untouched", n, err)
 	}
 }
@@ -398,20 +400,20 @@ func TestArchivePendingMissingReceiptAbortsAtomically(t *testing.T) {
 func TestArchivePendingEmptyPassLeavesCounter(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
-	if err := svc.RecordArchivePassConflict("tenant-a"); err != nil {
+	if err := svc.RecordArchivePassConflict(testCtx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	svc.Config.Archive = &recordingArchive{}
 
 	backend.saves = 0
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 0 {
 		t.Fatalf("ArchivePending = %d, %v; want 0, nil", count, err)
 	}
 	if backend.saves != 0 {
 		t.Fatalf("saves=%d, want 0 (empty pass opens no window)", backend.saves)
 	}
-	if n, err := svc.ArchivePassConflictFailures("tenant-a"); err != nil || n != 1 {
+	if n, err := svc.ArchivePassConflictFailures(testCtx, "tenant-a"); err != nil || n != 1 {
 		t.Fatalf("counter = %d, %v; want 1 (empty pass must not reset)", n, err)
 	}
 }
@@ -429,7 +431,7 @@ func TestArchivePendingPutFailureReturnsZeroWithoutWindow(t *testing.T) {
 	archiveStub.puts = nil
 	backend.saves = 0
 
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if err == nil {
 		t.Fatal("ArchivePending err=nil, want Put failure")
 	}
@@ -442,7 +444,7 @@ func TestArchivePendingPutFailureReturnsZeroWithoutWindow(t *testing.T) {
 	if len(archiveStub.puts) != 1 {
 		t.Fatalf("pass Puts = %d, want 1 (aborts on the first event)", len(archiveStub.puts))
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +494,7 @@ func TestArchivePendingContextErrorIsTransientAndRetried(t *testing.T) {
 	svc.Config.Archive = ctxErr
 
 	backend.saves = 0
-	count, err := svc.ArchivePending(context.Background(), "tenant-a")
+	count, err := svc.ArchivePending(testCtx, "tenant-a")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("ArchivePending err=%v, want context.Canceled", err)
 	}
@@ -502,7 +504,7 @@ func TestArchivePendingContextErrorIsTransientAndRetried(t *testing.T) {
 	if backend.saves != 0 {
 		t.Fatalf("saves=%d, want 0 (no Store.Update window on a transient abort)", backend.saves)
 	}
-	snap, err := svc.Store.Snapshot()
+	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +520,7 @@ func TestArchivePendingContextErrorIsTransientAndRetried(t *testing.T) {
 	// Heal: the next pass archives the same events — retry preserved.
 	ctxErr.heal = true
 	backend.saves = 0
-	count, err = svc.ArchivePending(context.Background(), "tenant-a")
+	count, err = svc.ArchivePending(testCtx, "tenant-a")
 	if err != nil || count != 5 {
 		t.Fatalf("ArchivePending after heal = %d, %v; want 5, nil", count, err)
 	}
@@ -573,7 +575,7 @@ func TestRunExportPutTimeoutFailsJobAndHeals(t *testing.T) {
 	t.Cleanup(func() { exportPutTimeout = original })
 	query := domain.Query{From: time.Unix(1_700_000_000, 0).UTC(), To: time.Unix(1_700_000_100, 0).UTC()}
 
-	job, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +595,7 @@ func TestRunExportPutTimeoutFailsJobAndHeals(t *testing.T) {
 
 	// Healed re-request: a fresh CreateExport completes normally.
 	archiveStub.heal = true
-	job2, err := svc.CreateExport("tenant-a", "compliance-1", query)
+	job2, err := svc.CreateExport(testCtx, "tenant-a", "compliance-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}

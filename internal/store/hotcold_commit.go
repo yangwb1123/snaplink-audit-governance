@@ -6,6 +6,7 @@ package store
 // and never rewrites the control plane wholesale.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -20,7 +21,10 @@ func keyBelongsToTenant(key, tenantID string) bool {
 	return ok && owner == tenantID
 }
 
-func (s *splitStore) readTenant(tenantID string, fn func(*TenantView) error) error {
+func (s *splitStore) readTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state := s.tenant[tenantID]
 	if state == nil {
 		state = &tenantState{hot: emptyTenantHot(tenantID), ledger: NewTenantLedger(tenantID), version: 1}
@@ -40,7 +44,10 @@ func (s *splitStore) readTenant(tenantID string, fn func(*TenantView) error) err
 	return view.Ledger.Err()
 }
 
-func (s *splitStore) updateTenant(tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+func (s *splitStore) updateTenant(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state := s.tenantState(tenantID)
 	hot, err := cloneTenantHot(state.hot)
 	if err != nil {
@@ -72,19 +79,22 @@ func (s *splitStore) updateTenant(tenantID string, order CommitOrder, fn func(*T
 	}
 	pending := ledger.pendingRecords()
 	globalChanged := !reflect.DeepEqual(retainedGlobal, s.control)
-	if err := s.commitTenant(tenantID, order, retainedHot, ledger, pending, retainedGlobal, globalChanged); err != nil {
+	if err := s.commitTenant(ctx, tenantID, order, retainedHot, ledger, pending, retainedGlobal, globalChanged); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *splitStore) commitTenant(tenantID string, order CommitOrder, hot *Snapshot, ledger *TenantLedger, pending []LedgerRecord, global *Snapshot, globalChanged bool) error {
+func (s *splitStore) commitTenant(ctx context.Context, tenantID string, order CommitOrder, hot *Snapshot, ledger *TenantLedger, pending []LedgerRecord, global *Snapshot, globalChanged bool) error {
 	if err := checkControlTempPath(s.path); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	state := s.tenantState(tenantID)
 	if order == ColdFirst {
-		if err := s.appendLedger(tenantID, state.ledger, pending); err != nil {
+		if err := s.appendLedger(ctx, tenantID, state.ledger, pending); err != nil {
 			return err
 		}
 		if err := s.saveTenantHot(tenantID, hot, state.version+1); err != nil {
@@ -105,7 +115,7 @@ func (s *splitStore) commitTenant(tenantID string, order CommitOrder, hot *Snaps
 		// in-memory stream and could derive the wrong next sequence.
 		state.hot = hot
 		state.version++
-		if err := s.appendLedger(tenantID, state.ledger, pending); err != nil {
+		if err := s.appendLedger(ctx, tenantID, state.ledger, pending); err != nil {
 			return err
 		}
 	}
@@ -144,7 +154,10 @@ func checkControlTempPath(path string) error {
 	return nil
 }
 
-func (s *splitStore) appendLedger(tenantID string, committed *TenantLedger, pending []LedgerRecord) error {
+func (s *splitStore) appendLedger(ctx context.Context, tenantID string, committed *TenantLedger, pending []LedgerRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(pending) == 0 {
 		return nil
 	}

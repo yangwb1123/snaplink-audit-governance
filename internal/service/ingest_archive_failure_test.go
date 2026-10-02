@@ -148,7 +148,7 @@ func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testi
 			if failed.Status != domain.StatusIndexed || !failed.ArchivedAt.IsZero() {
 				t.Fatalf("failed receipt=%+v, want indexed and not archived", failed)
 			}
-			stored, err := svc.GetReceipt("tenant-a", "", event.EventID)
+			stored, err := svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -162,11 +162,11 @@ func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testi
 			archiveDir := t.TempDir()
 			svc.Config.ArchiveDir = archiveDir
 			svc.Config.Archive = &archive.FileStore{Dir: archiveDir}
-			count, err := svc.ArchivePending(context.Background(), "tenant-a")
+			count, err := svc.ArchivePending(testCtx, "tenant-a")
 			if err != nil || count != 1 {
 				t.Fatalf("ArchivePending count=%d err=%v, want 1,nil", count, err)
 			}
-			archivedReceipt, err := svc.GetReceipt("tenant-a", "", event.EventID)
+			archivedReceipt, err := svc.GetReceipt(testCtx, "tenant-a", "", event.EventID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +176,7 @@ func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testi
 			if archivedReceipt.EventID != failed.EventID || archivedReceipt.Sequence != failed.Sequence || archivedReceipt.Hash != failed.Hash || archivedReceipt.IdempotencyKey != failed.IdempotencyKey {
 				t.Fatalf("archived receipt identity changed: failed=%+v archived=%+v", failed, archivedReceipt)
 			}
-			archivedEvent, err := svc.GetEvent("tenant-a", "auditor", event.EventID)
+			archivedEvent, err := svc.GetEvent(testCtx, "tenant-a", "auditor", event.EventID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,7 +185,7 @@ func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testi
 			}
 
 			recordsAfterFirstRetry := ledgerRecordCount(t, st, tc.hot, event.EventID)
-			count, err = svc.ArchivePending(context.Background(), "tenant-a")
+			count, err = svc.ArchivePending(testCtx, "tenant-a")
 			if err != nil || count != 0 {
 				t.Fatalf("second ArchivePending count=%d err=%v, want 0,nil", count, err)
 			}
@@ -199,7 +199,7 @@ func TestArchivePendingRetriesFailedArchivedWaitWithoutChangingIdentity(t *testi
 func ledgerRecordCount(t *testing.T, st *store.Store, hot bool, eventID string) int {
 	t.Helper()
 	if !hot {
-		snapshot, err := st.Snapshot()
+		snapshot, err := st.Snapshot(testCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +209,7 @@ func ledgerRecordCount(t *testing.T, st *store.Store, hot bool, eventID string) 
 		return 0
 	}
 	count := 0
-	if err := st.LedgerScan("tenant-a", func(record store.LedgerRecord) error {
+	if err := st.LedgerScan(testCtx, "tenant-a", func(record store.LedgerRecord) error {
 		if record.RecordType == store.LedgerReceipt && record.Key == store.EventKey("tenant-a", eventID) {
 			count++
 		}
