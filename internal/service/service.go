@@ -111,10 +111,43 @@ type Service struct {
 	Config  Config
 	quotaMu sync.Mutex
 	quotas  map[string]quotaWindow
-	// ledgeredPublishMu serializes the immediate post-commit publisher and
-	// the durable queue flusher. Without this gate both paths could read the
-	// same pending event and issue an avoidable duplicate concurrently.
-	ledgeredPublishMu sync.Mutex
+	// ledgeredGatesMu guards ledgeredGates. It is held only while a gate is
+	// looked up, referenced or released — never across a publish or a store
+	// call — so it cannot become the head-of-line block the per-event gate
+	// exists to remove.
+	ledgeredGatesMu sync.Mutex
+	// ledgeredGates maps store.EventKey to the gate that serializes the
+	// publishers of that one pending event. An entry exists only while some
+	// publisher holds a reference, so the table is bounded by in-flight
+	// publications rather than by the events a process has ever published.
+	//
+	// The invariant, narrowed in scope: at most one publisher per pending
+	// event at a time. The previous process-wide ledgeredPublishMu also
+	// serialized unrelated events, and FlushLedgeredOutbox held it for a whole
+	// round (one snapshot read plus up to ledgeredOutboxBatchSize publishes
+	// and acknowledgements), so a slow broker head-of-line blocked every
+	// concurrent ingest by an amount bounded by nothing in the request path.
+	ledgeredGates map[string]*ledgeredKeyGate
+	// ledgeredFlushMu admits one flush round at a time per process. Two
+	// overlapping rounds would read the same outbox snapshot and could each
+	// publish the same key from their own stale copy — a duplicate the
+	// per-event gate cannot prevent, because the gate is free once the first
+	// round acknowledges the key. It is never shared with the request path.
+	ledgeredFlushMu sync.Mutex
+	// ledgeredPublishDeferrals counts post-commit publications the request
+	// path declined because another publisher already owned the event's key
+	// gate. The durable intent stays in Snapshot.LedgeredOutbox, so a
+	// deferral delays the rebuildable projection feed by at most one flush
+	// round; it can never lose the event and never changes the ingest answer.
+	// Exposed as audit_ledgered_publish_deferred_total.
+	ledgeredPublishDeferrals atomic.Uint64
+	// ledgeredRequestAcks counts post-commit publications acknowledged since
+	// process start. A flush round samples it before its snapshot read and
+	// re-checks it before each key, so a key the request path already
+	// delivered since the snapshot is skipped instead of published twice. The
+	// flusher's own acknowledgements are deliberately not counted: its
+	// snapshot already reflects them, and only one round runs at a time.
+	ledgeredRequestAcks atomic.Uint64
 	// ledgeredIntentRepairs counts publication intents an interrupted tenant
 	// ingest lost and an idempotent retry re-created. Each increment is direct
 	// evidence that a tenant commit died between its durable cold append and

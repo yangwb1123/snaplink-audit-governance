@@ -238,6 +238,15 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	// event or route label would make the cardinality unbounded.
 	if s.Service != nil {
 		fmt.Fprintf(w, "audit_ledgered_intent_repaired_total %d\n", s.Service.LedgeredIntentRepairs())
+		// Unlabelled and monotonic for the same cardinality reason. It counts
+		// post-commit publications the ingest request path declined because
+		// the background outbox flusher already owned that one pending event:
+		// with a consistent durable outbox the request path never contends,
+		// so a non-zero value means the one-publisher-per-pending-event
+		// invariant was breached and at-least-once delivery absorbed it. An
+		// atomic load, so a scrape never waits on the publication gate or the
+		// store.
+		fmt.Fprintf(w, "audit_ledgered_publish_deferred_total %d\n", s.Service.LedgeredPublishDeferrals())
 	}
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
 	fmt.Fprintf(w, "audit_integrity_checks_total{result=\"valid\"} %d\n", s.integrityValidCount.Load())
