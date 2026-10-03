@@ -47,6 +47,13 @@ const envGRPCRequireMTLS = "AUDIT_GRPC_REQUIRE_MTLS"
 // documented retry into an opaque transport error.
 const httpWriteTimeout = 30 * time.Second
 
+// shutdownTimeout bounds one shutdown stage that has no stronger bound of its
+// own: the HTTP connection drain and the tracer flush. It is a named constant
+// so both stages — and the nil-store gRPC drain fallback — share one citable
+// value instead of three inline literals. The value is unchanged from the
+// pre-existing HTTP drain budget.
+const shutdownTimeout = 10 * time.Second
+
 func main() {
 	// Register the termination handler before opening the state store. The
 	// file-lock contract exposes the lock as soon as openStore succeeds; a
@@ -232,21 +239,155 @@ func main() {
 	}()
 	<-stop
 	cancelLedgered()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = server.Shutdown(ctx)
-	if tracer != nil {
-		_ = tracer.Shutdown(ctx)
-	}
-	if grpcServer != nil {
-		// Drain the health service before GracefulStop (FR-2.3) so probes and
-		// load balancers observe NOT_SERVING while in-flight RPCs drain.
-		if healthServer != nil {
-			healthServer.Shutdown()
+	shutdown(shutdownDeps{server: server, tracer: tracer, grpcServer: grpcServer, healthServer: healthServer, state: st, logger: logger})
+}
+
+// shutdownDeps is the explicit dependency set of the bounded exit sequence:
+// main owns construction, shutdown owns ordering and nothing else. Grouping
+// them keeps shutdown's parameter count inside the module's function-shape
+// budget instead of widening every future shutdown stage to a longer list.
+type shutdownDeps struct {
+	server       *http.Server
+	tracer       tracerShutdowner
+	grpcServer   *grpc.Server
+	healthServer *health.Server
+	state        *store.Store
+	logger       *log.Logger
+}
+
+// shutdown is the bounded, ordered exit sequence: stop accepting HTTP
+// connections, flush traces, drain the gRPC ingest surface, release the store.
+// Every stage is individually bounded, so the sequence is finite for every
+// reachable state and Close is always reached — the file backend's advisory
+// flock on <state>.lock and the PostgreSQL pool are therefore released by the
+// process itself instead of by an external SIGKILL.
+//
+// The defer st.Close() registered in main stays as the panic/early-return
+// backstop; a second Close is already today's behaviour and is a no-op for
+// both backends.
+func shutdown(deps shutdownDeps) {
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelHTTP()
+	_ = deps.server.Shutdown(httpCtx)
+	// The tracer flush runs second and under its own context: the HTTP drain
+	// above can consume its entire budget, and a spent context would silently
+	// degrade the flush to a ctx.Err() no-op.
+	shutdownTracer(deps.tracer, deps.logger)
+	if deps.grpcServer != nil {
+		// Drain the health service before the graceful gRPC stop (FR-2.3) so
+		// probes and load balancers observe NOT_SERVING while in-flight RPCs
+		// drain.
+		if deps.healthServer != nil {
+			deps.healthServer.Shutdown()
 		}
-		grpcServer.GracefulStop()
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), grpcDrainBound(deps.state))
+		defer cancelDrain()
+		drainGRPC(drainCtx, deps.grpcServer, deps.logger)
 	}
-	_ = st.Close()
+	_ = deps.state.Close()
+}
+
+// grpcDrainBound returns the shutdown window for the gRPC ingest drain. The
+// window is derived, never invented: it is exactly one store operation, so a
+// detached in-flight commit (the gRPC ingest path hands the commit a
+// WithoutCancel context) has had this same bound available on the request path
+// before the forced stop arrives. AUDIT_STORE_OPERATION_TIMEOUT stays the single
+// knob — there is no second "drain timeout" variable — and
+// runtimeconfig.ValidateStoreOperationTimeoutBelow, already enforced in
+// openStore and prepareServer, keeps the bound strictly below httpWriteTimeout,
+// so the drain can never outgrow the HTTP socket budget.
+//
+// A nil store only arises in configuration-only tests built on service.New(nil,
+// …); it reuses shutdownTimeout rather than introducing a second literal.
+func grpcDrainBound(st *store.Store) time.Duration {
+	if st == nil {
+		return shutdownTimeout
+	}
+	return st.OperationTimeout()
+}
+
+// tracerShutdowner is the shutdown surface *telemetry.Tracer exposes, named
+// so the flush is testable without a collector and without a live exporter.
+type tracerShutdowner interface{ Shutdown(context.Context) error }
+
+// shutdownTracer flushes buffered spans under its OWN context. The previous
+// call shared the HTTP drain context, which server.Shutdown can spend in full,
+// silently degrading the flush into a ctx.Err() no-op; deriving from
+// context.Background() makes inheriting a spent budget structurally impossible.
+//
+// The nil check covers the untyped-nil interface; the production caller passes
+// the typed-nil *telemetry.Tracer that telemetry.Init returns when tracing is
+// disabled, whose Shutdown is nil-receiver safe. A failure logs one line with
+// no error text: an OTLP error can embed the collector endpoint URL, which
+// startup already logs as "tracing=otlp endpoint=…".
+func shutdownTracer(tracer tracerShutdowner, logger *log.Logger) {
+	if tracer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := tracer.Shutdown(ctx); err != nil && logger != nil {
+		logger.Printf("tracing_shutdown=failed")
+	}
+}
+
+// drainGRPC drains grpcServer within ctx and reports whether it had to be
+// force-stopped. A nil server is a no-op that reports no drain (there was no
+// listener), and a nil logger is guarded so the helper cannot panic on the
+// shutdown path.
+//
+// The parameter is deliberately named grpcServer: the pinned static test in
+// internal/grpcapi requires the literal graceful-stop call to appear in THIS
+// file, after the health-drain literal its caller emits first. Renaming the
+// parameter would delete that literal and fail the pin.
+//
+// The graceful stop has no deadline and no escape hatch — an idle authenticated
+// WriteStream parks in the server's Recv with no timer — so an unbounded wait
+// turns one open stream into an unkillable process that never releases its
+// state lock. Stop closes every connection and cancels every handler context,
+// which unblocks even a bare Recv().
+//
+// Both the forced Stop and the graceful stop run off the caller's goroutine,
+// so the helper returns as soon as ctx ends no matter what grpc-go does next:
+// Stop's own return is not a documented prompt contract (a handler that ignores
+// cancellation keeps the server mutex while it waits for the handler set, and a
+// concurrent GracefulStop holding that mutex can keep Stop parked), and an
+// unbounded shutdown helper would reintroduce exactly the hang this exists to
+// remove. Waiting longer would not change any outcome either: a detached
+// ingest commit survives the process exit and converges on idempotent retry by
+// event_id, so a longer wait would only delay an operator's SIGKILL.
+func drainGRPC(ctx context.Context, grpcServer *grpc.Server, logger *log.Logger) bool {
+	if grpcServer == nil {
+		return false
+	}
+	drained := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(drained)
+	}()
+	forced := false
+	select {
+	case <-drained:
+	case <-ctx.Done():
+		// Tie-break: when the graceful stop completes in the same instant the
+		// deadline fires, select chooses between two ready cases at random.
+		// The re-check keeps the operator line honest instead of occasionally
+		// reporting a force stop that never happened.
+		select {
+		case <-drained:
+		default:
+			go grpcServer.Stop()
+			forced = true
+		}
+	}
+	if logger != nil {
+		if forced {
+			logger.Printf("grpc_drain=force_stopped")
+		} else {
+			logger.Printf("grpc_drain=drained")
+		}
+	}
+	return forced
 }
 
 // archiveReadyTimeout bounds the boot archive readiness probe so a hung or

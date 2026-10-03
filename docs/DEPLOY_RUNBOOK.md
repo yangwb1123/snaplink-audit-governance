@@ -177,3 +177,38 @@ DLQ 以外的对端地址）会在启动时 fail closed 且不建立任何 Kafka
 `SetConnMaxLifetime(10m)` 已移除（一次性命令，等价物为 `AUDIT_POSTGRES_CONN_MAX_LIFETIME=10m`）；
 原先无界的 `db.Ping()` 改为带 10s 上限的探测，黑洞 DSN 会让命令失败而不是永久挂起。
 大规模切换可临时调高 `AUDIT_STORE_OPERATION_TIMEOUT`。
+
+## SIGTERM 下的有界退出序列（gRPC drain）
+
+`audit-api` 收到 `SIGTERM`/`SIGINT` 后按固定顺序退出，每一段都有界，因此进程
+**一定会**走到 `st.Close()`——释放文件后端的 `<state>.lock` 独占 flock 与
+PostgreSQL 连接池。退出序列（`cmd/audit-api/main.go`）：
+
+| 顺序 | 阶段 | 上界 | 失败表现 | 日志 |
+|---|---|---|---|---|
+| 1 | HTTP 连接排空（`server.Shutdown`） | `shutdownTimeout` = 10s | 错误按旧行为丢弃 | — |
+| 2 | tracer flush（**自己的** context） | `shutdownTimeout` = 10s | 采集端不可达 | `tracing_shutdown=failed` |
+| 3 | health 置 `NOT_SERVING`（FR-2.3） | 无需上界 | — | — |
+| 4 | gRPC 摄入面 drain（优雅优先） | `grpcDrainBound(st)` = `AUDIT_STORE_OPERATION_TIMEOUT`（默认 10s） | 空闲流永不返回 → 强制停止 | `grpc_drain=drained` / `grpc_drain=force_stopped` |
+| 5 | `st.Close()` | 文件后端瞬时；PG 后端 ≤ `op` | — | — |
+
+- **最坏预算。** `2·shutdownTimeout + 2·op`（PG：第 5 步的 `db.Close()` 等待在途
+  语句）；发布默认下 `op` = 10s，即 **40s**，启动门禁允许的最大值（`op` 趋近 30s）下
+  **< 80s**。文件后端为 `2·shutdownTimeout + op`，默认 30s。两者都是有限的：
+  释放状态锁**不再需要外部 `SIGKILL`**。
+- **drain 窗口是推导值，不是新常量。** 第 4 步的窗口恰好等于一次存储操作预算，
+  因此被 detach 的在途提交（`context.WithoutCancel`）在强制停止之前已经享有同一个
+  上界；`AUDIT_STORE_OPERATION_TIMEOUT` 仍是唯一的旋钮，启动时
+  `runtimeconfig.ValidateStoreOperationTimeoutBelow` 保证它 `< 30s` HTTP `WriteTimeout`。
+  **调小它同时缩短整个退出预算**（例如 `5s` → PG 约 30s），但也会同步收紧请求路径上的
+  存储上界，二者一起改。
+- **`grpc_drain` 的两值语义。** `drained` = 优雅排空；`force_stopped` = 到达窗口上界、
+  已调用 `grpcServer.Stop()`（连接关闭、handler context 取消）。**未配置 gRPC 监听时
+  这一行不打印**（没有 drain 可报告），不要把缺行当成失败。每条退出最多一行，
+  取值域封闭为两值，不带 tenant / client / event / route / URL 标签。
+- **强制停止是安全的（at-least-once）。** 摄入提交与 RPC context 解耦，`fileBackend.Save`
+  是原子的；被 pool 关闭打断的 PG 语句落在 `store.ErrOperationDeadline` 的“结果未知、
+  按 `event_id` 幂等重试”类别里。客户端看到 `Unavailable`/`Canceled` 时按 `event_id`
+  重试即可收敛到**恰好一份** receipt。
+- **回滚。** 回滚二进制即恢复旧行为（无界 drain）；无数据迁移、无配置迁移，也没有
+  新增变量。
