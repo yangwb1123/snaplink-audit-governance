@@ -58,10 +58,16 @@ func (s *Service) publishLedgered(ctx context.Context, event domain.Event) {
 		return
 	}
 	if err := s.ackLedgered(ctx, event); err != nil {
+		// Delivery succeeded but the durable acknowledgement did not, so the
+		// intent stays owed and the feed is stale rather than lost. Counted
+		// here (not in publishLedgeredNow) because this exit is disjoint from
+		// the two failure exits below.
+		s.ledgeredPublishFailures.Add(1)
 		s.logf("ledgered outbox acknowledgement failed event_id=%s error=%v", event.EventID, err)
 		return
 	}
 	s.ledgeredRequestAcks.Add(1)
+	s.ledgeredPublishSuccesses.Add(1)
 }
 
 // LedgeredPublishDeferrals reports how many post-commit publications this
@@ -78,9 +84,43 @@ func (s *Service) publishLedgered(ctx context.Context, event domain.Event) {
 // still owed: the durable row survives and the next round drains it.
 func (s *Service) LedgeredPublishDeferrals() uint64 { return s.ledgeredPublishDeferrals.Load() }
 
+// LedgeredPublishFailures reports post-ledger publication attempts this
+// process could not complete, across both the ingest request path and the
+// background flush round: a broker refusal, an event clone failure, or a
+// delivery whose durable acknowledgement failed. Each increment leaves the
+// intent in Snapshot.LedgeredOutbox, so at-least-once delivery is unaffected
+// and the immutable ledger stays authoritative — this measures projection
+// staleness only. It is exposed as audit_ledgered_publish_failures_total.
+func (s *Service) LedgeredPublishFailures() uint64 { return s.ledgeredPublishFailures.Load() }
+
+// LedgeredPublishSuccesses reports post-ledger publications this process
+// delivered to the broker and removed from Snapshot.LedgeredOutbox, across
+// both the ingest request path and the background flush round. A success is
+// therefore a confirmed durable acknowledgement, not merely a delivered
+// message. It is exposed as audit_ledgered_publish_success_total.
+func (s *Service) LedgeredPublishSuccesses() uint64 { return s.ledgeredPublishSuccesses.Load() }
+
+// LedgeredOutboxPending reports the durable backlog observed by the most recent
+// completed flush round, sampled before that round's batch truncation. It is a
+// last sample, not a live read: a frozen store or a contended round leaves the
+// previous value in place rather than reporting a fabricated number, so a
+// stale gauge means "sampling stopped", not "the backlog is this number".
+//
+// sampled == false means "no meaningful value exists yet" — either no
+// LedgeredPublisher is configured, or no round has completed a successful
+// snapshot read — and the caller must omit the series rather than render a
+// fabricated 0. It is exposed as audit_ledgered_outbox_pending.
+func (s *Service) LedgeredOutboxPending() (int64, bool) {
+	if !s.ledgeredOutboxSampled.Load() {
+		return 0, false
+	}
+	return s.ledgeredOutboxPending.Load(), true
+}
+
 func (s *Service) publishLedgeredNow(ctx context.Context, event domain.Event) bool {
 	published, err := domain.CloneEvent(event)
 	if err != nil {
+		s.ledgeredPublishFailures.Add(1)
 		s.logf("ledgered publish clone failed event_id=%s sequence=%d error=%v", event.EventID, event.Sequence, err)
 		return false
 	}
@@ -90,6 +130,11 @@ func (s *Service) publishLedgeredNow(ctx context.Context, event domain.Event) bo
 	publishCtx, cancel := context.WithTimeout(ctx, ledgeredPublishTimeout)
 	defer cancel()
 	if err := s.Config.LedgeredPublisher.Publish(publishCtx, published); err != nil {
+		// Covers the bounded ledgeredPublishTimeout and a caller cancellation
+		// surfaced through it. That coarseness is accepted: the existing log
+		// line has the same property, and suppressing ctx.Err() here would
+		// hide a genuine mid-request cancellation. It is self-clearing.
+		s.ledgeredPublishFailures.Add(1)
 		s.logf("ledgered publish failed event_id=%s sequence=%d error=%v", event.EventID, event.Sequence, err)
 		return false
 	}
@@ -204,8 +249,13 @@ func (s *Service) flushLedgeredKey(ctx context.Context, key string, event domain
 		return ledgeredKeyFailed, nil
 	}
 	if err := s.ackLedgered(ctx, event); err != nil {
+		// No logf here: the caller of FlushLedgeredOutbox already logs the
+		// returned error (cmd/audit-api/ledgered.go), and the publish-failure
+		// path is pinned to exactly one log line per attempt.
+		s.ledgeredPublishFailures.Add(1)
 		return ledgeredKeyFailed, err
 	}
+	s.ledgeredPublishSuccesses.Add(1)
 	return ledgeredKeyPublished, nil
 }
 
@@ -251,8 +301,19 @@ func (s *Service) FlushLedgeredOutbox(ctx context.Context, limit int) (int, erro
 	acksAtSnapshot := s.ledgeredRequestAcks.Load()
 	keys, events, err := s.pendingLedgeredOutbox(ctx)
 	if err != nil {
+		// No sample: a failed snapshot read says nothing about the backlog, so
+		// the previous value AND the sampled flag are both left untouched.
 		return 0, err
 	}
+	// Sampled here: pendingLedgeredOutbox has already released the store's
+	// read lock and no lock of ours is held, so the /metrics path stays
+	// store-free and can never block on a frozen store. Before the limit
+	// truncation, so the gauge is the backlog rather than this round's batch
+	// size. Every early return above this point (nil publisher or store,
+	// contended round mutex, failed read) takes no sample, so a contended tick
+	// can never overwrite a fresh sample with a stale one.
+	s.ledgeredOutboxPending.Store(int64(len(keys)))
+	s.ledgeredOutboxSampled.Store(true)
 	if len(keys) > limit {
 		keys = keys[:limit]
 	}

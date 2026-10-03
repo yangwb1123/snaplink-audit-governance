@@ -153,6 +153,39 @@ type Service struct {
 	// evidence that a tenant commit died between its durable cold append and
 	// its control-plane write.
 	ledgeredIntentRepairs atomic.Uint64
+	// ledgeredPublishFailures counts post-ledger publication attempts this
+	// process could not complete: a broker refusal (including the bounded
+	// ledgeredPublishTimeout and any caller cancellation surfaced through it),
+	// an event clone failure, or a delivered publication whose durable
+	// acknowledgement could not be persisted. The intent always survives in
+	// Snapshot.LedgeredOutbox, so the immutable ledger is unaffected — this is
+	// projection staleness, not evidence loss. Deliberately unlabelled: the
+	// three causes have three distinct fixes but already three distinct log
+	// lines (ledgered publish failed / ledgered publish clone failed /
+	// ledgered outbox acknowledgement failed), so a reason, broker or topic
+	// label would multiply cardinality for no operator gain.
+	// Exposed as audit_ledgered_publish_failures_total.
+	ledgeredPublishFailures atomic.Uint64
+	// ledgeredPublishSuccesses counts post-ledger publications this process
+	// both delivered to the broker and removed from Snapshot.LedgeredOutbox,
+	// over the ingest request path AND the background flush round. It is
+	// deliberately not ledgeredRequestAcks: that counter excludes the
+	// flusher's own acknowledgements because it doubles as the flush round's
+	// staleness predicate (acksAtSnapshot), so exporting it here would report
+	// ~0 exactly while the flusher drains a post-outage backlog.
+	// Exposed as audit_ledgered_publish_success_total.
+	ledgeredPublishSuccesses atomic.Uint64
+	// ledgeredOutboxPending is the durable-intent count observed by the most
+	// recent completed flush round, sampled out of band — never on the
+	// /metrics request path, never while holding store.Store.mu, never issuing
+	// a statement — and before the round's batch truncation, so the value is
+	// the backlog and not this round's batch size.
+	// Exposed as audit_ledgered_outbox_pending.
+	ledgeredOutboxPending atomic.Int64
+	// ledgeredOutboxSampled reports whether at least one flush round has
+	// completed a successful snapshot read. It is what lets the renderer omit
+	// the gauge instead of fabricating 0 before any sample exists.
+	ledgeredOutboxSampled atomic.Bool
 	// repairedMu guards repairedIntents, the bounded process-local set of keys
 	// already repaired. It is deliberately not Store.mu: the repair predicate
 	// runs inside an UpdateTenant closure, which already holds Store.mu.

@@ -267,6 +267,29 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		// atomic load, so a scrape never waits on the publication gate or the
 		// store.
 		fmt.Fprintf(w, "audit_ledgered_publish_deferred_total %d\n", s.Service.LedgeredPublishDeferrals())
+		// Publisher-side feed observability: the post-ledger publication is the
+		// only channel feeding the ClickHouse projection, so its failures and
+		// its durable backlog are published too. All three series are
+		// unlabelled for the same cardinality reason as the lines above (a
+		// tenant, event, route, host or reason label would make the endpoint
+		// grow with traffic) and are read only through atomic loads, so a
+		// scrape never takes store.Store.mu or issues a statement — the same
+		// rule Store.PoolStats already follows.
+		//
+		// Omitted, NOT zero-filled, unless a LedgeredPublisher is configured: a
+		// process that cannot publish at all must not report "0 failures since
+		// boot" as if it were healthy. The gauge is additionally omitted until
+		// one flush round has sampled it, and its value is a last sample taken
+		// at the start of that round — after a drain it reads the drained value
+		// on the next tick (audit-api flushes every second), so a stale gauge
+		// means sampling stopped, not that the backlog is that number.
+		if s.Service.Config.LedgeredPublisher != nil {
+			fmt.Fprintf(w, "audit_ledgered_publish_failures_total %d\n", s.Service.LedgeredPublishFailures())
+			fmt.Fprintf(w, "audit_ledgered_publish_success_total %d\n", s.Service.LedgeredPublishSuccesses())
+			if pending, sampled := s.Service.LedgeredOutboxPending(); sampled {
+				fmt.Fprintf(w, "audit_ledgered_outbox_pending %d\n", pending)
+			}
+		}
 	}
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
 	// Store pool + deadline observability. Unlabelled by construction: a

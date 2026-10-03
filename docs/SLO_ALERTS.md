@@ -18,12 +18,13 @@
 
 ## 2. 告警规则（映射到现有指标）
 
-> 已落地：`deploy/prometheus-rules.verify.yml`（18 条规则，3 组：audit-dlq /
+> 已落地：`deploy/prometheus-rules.verify.yml`（19 条规则，3 组：audit-dlq /
 > audit-slo / audit-production；audit-dlq 组含 `AuditDLQPublishFailures`（DLQ 发布失败）、
 > `AuditDLQUnresolvableDrop`（unresolvable 永久丢弃）、`AuditDLQAuthBlocked`（401 类死信）
 > 与 `AuditDLQAuthBlockedBacklog`（auth-blocked 积压），
-> 见 2026-08-15 release note）。本机可验证的 8 条 SLO 规则直接映射
-> audit-api `/metrics`；消费滞后与签名失败依赖生产形态指标（本机不提供，
+> 见 2026-08-15 release note）。本机可验证的 9 条 SLO 规则直接映射
+> audit-api `/metrics`（含发布侧的 `AuditLedgeredPublishFailures`，见下方告警表）；
+> 消费滞后与签名失败依赖生产形态指标（本机不提供，
 > 规则已声明待生产接入）；readyz 的 store/archive 503 由部署侧探针负责
 > （本机以 `AuditAPIDown`（up=0）兜底）。
 
@@ -34,6 +35,11 @@
 > 未启用时这些规则永远静默，新增的 `AuditDLQAuthBlockedBacklog`（H2 伪造/残留阻塞楔子）
 > 也不例外；兜底信号是 replay 每轮的 `N auth-blocked records pending` 日志行。生产部署
 > 必须设置两个变量并接入 Prometheus 抓取（verify 栈已配 `:9092`/`:9093`）。
+> audit-slo 组的发布侧腿 `AuditLedgeredPublishFailures` 有同样的性质：它要求
+> audit-api 以 `-ledgered-brokers`/`AUDIT_LEDGERED_BROKERS` 启动，否则
+> `audit_ledgered_publish_failures_total` 根本不发布、规则永久静默（兜底信号是
+> `ledgered publish failed` 日志行）。它的 `audit_ledgered_outbox_pending` 是上一轮
+> flush 开始时的采样值（audit-api 每秒一轮），drain 之后最多晚一轮回到 0。
 
 | 告警 | 表达式 | 级别 | 动作 |
 |---|---|---|---|
@@ -50,6 +56,7 @@
 | DLQ 发布失败（新） | `increase(audit_consumer_dlq_publish_failures_total[15m]) > 0` | P1 | 恢复 DLQ broker/ACL；确认 source offset 未提交、重启/继续消费并核对 redelivery，禁止回退到 commit+log |
 | 401 类死信（新） | `increase(audit_consumer_unauthorized_total[15m]) > 0` | P2 | 区分凭证问题与 IdP/JWKS 故障；修复 token 后死信记录保持 auth-blocked，凭证恢复后 `-replay-auth-blocked` 排空（runbook 见 release-notes 2026-08-15） |
 | auth-blocked 积压（新） | `audit_dlq_auth_blocked > 0`（replay 侧 gauge） | P2 | 凭证健康时仍 > 0 说明存在伪造/残留 `unauthorized` 记录（明文 Kafka 可注入）；确认 accepted 原文后排空或清理 |
+| ledgered 发布失败（新） | `increase(audit_ledgered_publish_failures_total[15m]) > 0` | P2 | 恢复 ledgered broker/ACL/topic；确认 `audit_ledgered_outbox_pending` 回到 0（账本权威、outbox durable，属投影陈旧而非账本丢失） |
 
 ## 3. 错误预算
 
