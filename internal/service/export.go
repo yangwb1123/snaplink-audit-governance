@@ -157,8 +157,9 @@ var exportDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // a (tenant, job) pair that differs from the authenticated job. Pairing
 // invariant: completed jobs are immutable (finishExport runs at most once
 // per job; RecoverStuckExports only transitions "running" jobs), so the
-// blob the transport fetched at job.ObjectPath and this record's
-// binding/digest always describe the same export.
+// blob the service read at job.ObjectPath (ReadExportObject, the only
+// archive read on this route) and this record's binding/digest always
+// describe the same export.
 func (s *Service) VerifyExportDownload(ctx context.Context, tenantID, jobID string, sealed []byte) ([]byte, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +35,12 @@ import (
 //     client vanish mid-read.
 //
 // Together they cover the criterion without a flaky read of a dead socket.
+//
+// The archive read on this route now runs inside the service's store
+// operation (Service.ReadExportObject). A cancellation therefore still arrives
+// bare and answers 499, while a deadline consumed by that read is classified
+// by Store.end as the retryable store_timeout — the documented behaviour
+// change pinned by TestDownloadCallerDeadlineInsideStoreOperationIsStoreTimeout.
 
 // withdrawalFixture is one seeded server plus its handler: the same *Server
 // serves both the live socket (for /metrics scrapes and the disconnect test)
@@ -103,62 +108,28 @@ func (f *withdrawalFixture) counter(t *testing.T, text, name string) float64 {
 	return 0
 }
 
-// withdrawMode selects how the caller withdraws mid-read.
-type withdrawMode int
+// callerDeadlineWindow is the caller deadline budget of the served-deadline
+// test below. It must be long enough that the local store operations which
+// precede the archive read are never the ones that expire (the assertion that
+// the exports/ read was in flight proves it), and short enough to keep the
+// test in the sub-second range.
+const callerDeadlineWindow = 750 * time.Millisecond
 
-const (
-	withdrawByCancel withdrawMode = iota
-	withdrawByDeadline
-)
-
-// deferredDeadline is a caller context whose deadline expires only when the
-// test releases it. Deadline() reports none, so no store operation or archive
-// bound can pre-expire it, and the request reaches the archive read in flight
-// first. That makes the caller-deadline case deterministic (no sleeping) and
-// keeps it the documented coverage boundary: a deadline consumed INSIDE a
-// store operation is store_timeout, not a withdrawal.
-type deferredDeadline struct {
-	context.Context
-	done chan struct{}
-	mu   sync.Mutex
-	err  error
-}
-
-func (d *deferredDeadline) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (d *deferredDeadline) Done() <-chan struct{}       { return d.done }
-
-func (d *deferredDeadline) Err() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.err
-}
-
-func (d *deferredDeadline) expire() {
-	d.mu.Lock()
-	d.err = context.DeadlineExceeded
-	d.mu.Unlock()
-	close(d.done)
-}
-
-// withdraw drives one request whose context is withdrawn while the blocking
+// withdraw drives one request whose context is CANCELLED while the blocking
 // archive read is in flight, and returns the recorder holding the response.
-func withdraw(t *testing.T, f *withdrawalFixture, archive *gateHTTPArchive, path, token string, mode withdrawMode) *httptest.ResponseRecorder {
+// Store.end propagates context.Canceled unchanged, so the withdrawal class
+// survives the move of the read inside a store operation.
+func withdraw(t *testing.T, f *withdrawalFixture, archive *gateHTTPArchive, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	base, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx := context.Context(base)
-	release := cancel
-	if mode == withdrawByDeadline {
-		deferred := &deferredDeadline{Context: base, done: make(chan struct{})}
-		ctx, release = deferred, deferred.expire
-	}
 	entered := archive.blocked()
 	go func() {
 		select {
 		case <-entered:
 		case <-time.After(2 * time.Second):
 		}
-		release()
+		cancel()
 	}()
 	request := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -199,7 +170,7 @@ func TestDownloadWithdrawalReturnsClientWithdrawalClass(t *testing.T) {
 	f, archive := newWithdrawalFixture(t, true)
 	before := f.counter(t, f.metrics(t), "audit_http_errors_total")
 
-	recorder := withdraw(t, f, archive, "/api/v1/exports/"+f.jobID+"/download", gateComplianceToken, withdrawByCancel)
+	recorder := withdraw(t, f, archive, "/api/v1/exports/"+f.jobID+"/download", gateComplianceToken)
 	assertWithdrawalBody(t, recorder, "client_cancelled", cancelledMessage,
 		f.jobID, "exports/", "tenant-a", "internal", "context canceled")
 
@@ -218,26 +189,74 @@ func TestDownloadWithdrawalReturnsClientWithdrawalClass(t *testing.T) {
 	}
 }
 
-// TestCallerDeadlineReturnsDeadlineClass is the deadline half of AC-2: a
-// caller-context deadline that reaches the boundary as the sentinel is its own
-// code, distinct from a cancellation. Coverage boundary, stated: a deadline
-// consumed INSIDE a store operation is classified store_timeout (503) — see
-// TestWithdrawalMappingDoesNotStealStoreClasses — so this route (whose archive
-// read is the caller's own read) is where the class is observable.
-func TestCallerDeadlineReturnsDeadlineClass(t *testing.T) {
+// TestDownloadCallerDeadlineInsideStoreOperationIsStoreTimeout is the
+// documented behaviour change of moving the export download's archive read
+// behind the service: the read now runs INSIDE a store operation, so a caller
+// deadline consumed there is classified by Store.end as the retryable
+// store_timeout — 503, not the 499 this route used to answer while the read
+// was the caller's own.
+//
+// A REAL declared deadline is used on purpose. context.WithTimeout(parent, d)
+// with an earlier parent deadline returns WithCancel(parent) registered on the
+// parent's cancelCtx, so Store.begin's derived operation context and the
+// archive fallback context are cancelled synchronously when the parent timer
+// fires. That makes the classification deterministic; a synthetic context
+// (one whose Done channel is not its parent's) propagates through a watcher
+// goroutine and would race the archive read's own return.
+//
+// Coverage boundary, restated after this change: the 499 client_deadline_exceeded
+// class is no longer observable on this route (every stage runs inside a store
+// operation). It stays pinned as a mapping and counter class in
+// caller_withdrawal_mapping_test.go, and the route still declares it.
+func TestDownloadCallerDeadlineInsideStoreOperationIsStoreTimeout(t *testing.T) {
 	f, archive := newWithdrawalFixture(t, true)
-	before := f.counter(t, f.metrics(t), "audit_http_errors_total")
+	before := f.metrics(t)
+	errorsBefore := f.counter(t, before, "audit_http_errors_total")
+	storeBefore := f.counter(t, before, "audit_store_operation_deadline_exceeded_total")
+	cancelledBefore := f.counter(t, before, `audit_http_request_cancelled_total{reason="cancelled"}`)
+	deadlineBefore := f.counter(t, before, `audit_http_request_cancelled_total{reason="deadline_exceeded"}`)
 
-	recorder := withdraw(t, f, archive, "/api/v1/exports/"+f.jobID+"/download", gateComplianceToken, withdrawByDeadline)
-	assertWithdrawalBody(t, recorder, "client_deadline_exceeded", deadlineExceededMessage,
-		f.jobID, "exports/", "tenant-a", "internal", "context deadline exceeded")
+	ctx, cancel := context.WithTimeout(context.Background(), callerDeadlineWindow)
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/exports/"+f.jobID+"/download", nil).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer "+gateComplianceToken)
+	recorder := httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, request)
 
-	after := f.counter(t, f.metrics(t), "audit_http_errors_total")
-	if after != before {
-		t.Fatalf("audit_http_errors_total moved %v -> %v", before, after)
+	if archive.count()["exports/"] == 0 {
+		t.Fatalf("the deadline must have fired with the archive read in flight, counts=%v", archive.count())
 	}
-	if got := f.counter(t, f.metrics(t), `audit_http_request_cancelled_total{reason="deadline_exceeded"}`); got < 1 {
-		t.Fatalf("withdrawal deadline counter=%v, want >= 1", got)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", recorder.Code, recorder.Body.String())
+	}
+	var envelope errorEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("error body decode: %v (body=%s)", err, recorder.Body.String())
+	}
+	if envelope.Error.Code != "store_timeout" || envelope.Error.Message != "internal server error" {
+		t.Fatalf("envelope=%+v, want store_timeout / internal server error", envelope)
+	}
+	for _, token := range []string{f.jobID, "exports/", "tenant-a", "context deadline exceeded", "store operation deadline"} {
+		if strings.Contains(recorder.Body.String(), token) {
+			t.Fatalf("503 body leaked %q: %s", token, recorder.Body.String())
+		}
+	}
+	if got := strings.Contains(recorder.Header().Get("Content-Type"), "x-ndjson"); got {
+		t.Fatalf("a failed download must not stream ndjson, content-type=%q", recorder.Header().Get("Content-Type"))
+	}
+
+	after := f.metrics(t)
+	if got := f.counter(t, after, "audit_store_operation_deadline_exceeded_total"); got != storeBefore+1 {
+		t.Fatalf("audit_store_operation_deadline_exceeded_total %v -> %v, want +1", storeBefore, got)
+	}
+	if got := f.counter(t, after, "audit_http_errors_total"); got != errorsBefore+1 {
+		t.Fatalf("audit_http_errors_total %v -> %v, want +1 (a retryable 5xx IS an availability error)", errorsBefore, got)
+	}
+	if got := f.counter(t, after, `audit_http_request_cancelled_total{reason="cancelled"}`); got != cancelledBefore {
+		t.Fatalf("withdrawal cancelled counter moved %v -> %v", cancelledBefore, got)
+	}
+	if got := f.counter(t, after, `audit_http_request_cancelled_total{reason="deadline_exceeded"}`); got != deadlineBefore {
+		t.Fatalf("withdrawal deadline counter moved %v -> %v", deadlineBefore, got)
 	}
 }
 

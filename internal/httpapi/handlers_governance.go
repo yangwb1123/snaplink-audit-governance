@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -87,16 +86,18 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, fmt.Errorf("%w: export is not completed", domain.ErrConflict))
 		return
 	}
-	data, err := s.Service.Config.Archive.Get(r.Context(), job.ObjectPath)
+	// The WORM object is read by the service, inside one store operation, so
+	// the archive port is never reached from the transport: the read is
+	// bounded by the store's own operation deadline and its failure is
+	// classified where every other store operation is. A cancelled caller
+	// still arrives bare as context.Canceled (Store.end propagates a
+	// cancellation unchanged) and answers 499; an exhausted bound arrives as
+	// store.ErrOperationDeadline and answers the retryable 503 store_timeout;
+	// a missing object answers 404. Any genuine archive failure still falls
+	// through statusForError's default arm to 500 internal_error with the
+	// redacted message.
+	data, err := s.Service.ReadExportObject(r.Context(), job.TenantID, job.ID)
 	if err != nil {
-		if os.IsNotExist(err) {
-			s.writeError(w, r, http.StatusNotFound, domain.ErrNotFound)
-			return
-		}
-		// The archive read is the caller's own read: a withdrawal here is the
-		// caller's cancellation reaching the boundary, not a server fault.
-		// Any genuine archive failure still falls through statusForError's
-		// default arm to 500 internal_error with the redacted message.
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}

@@ -185,7 +185,14 @@ func TestArchiveFallbackIsBoundedByStoreOperationTimeout(t *testing.T) {
 // bound of remote work and one Archive.Get — never N × archiveReadTimeout.
 func TestArchiveFallbackStopsReadingOnceTheBoundIsExhausted(t *testing.T) {
 	withArchiveReadTimeout(t, 5*time.Second)
-	arch := &countingBlockingArchive{}
+	// The 5s ceiling leaves the 100ms store operation bound as the effective
+	// read bound, so the fallback deadline and op.ctx's carry the SAME
+	// duration. The settle pause (see countingBlockingArchive.settle) makes
+	// op.ctx observably expired before the read returns, so the retryable
+	// classification this test asserts is a property of the placement rather
+	// than a race between two timers due at the same instant — without it this
+	// assertion failed intermittently (reproduced at HEAD).
+	arch := &countingBlockingArchive{settle: 10 * time.Millisecond}
 	svc := boundTestService(t, 100*time.Millisecond, arch)
 	const receipts = 25
 	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
