@@ -261,7 +261,7 @@
       </IrisAlert>
     {/if}
   {:else}
-    {#if $authState.session?.platform && tenantLoadError}
+    {#if $authState.session?.platform && tenantLoadError && platformScopeEstablished}
       <IrisAlert tone="warning" title="租户列表刷新失败" onclose={undefined} style="" icon={undefined} titleSlot={undefined}>
         仍在使用上次成功读取的租户范围，页面保持可用。<IrisButton size="sm" variant="outline" onclick={refreshTenants}>重试</IrisButton>
       </IrisAlert>

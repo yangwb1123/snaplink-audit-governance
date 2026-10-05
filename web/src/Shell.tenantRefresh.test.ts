@@ -250,6 +250,27 @@ describe('Shell platform tenant refresh', () => {
     expect(api.queryEvents).not.toHaveBeenCalled()
   })
 
+  // R5 scopes the refresh-failure banner to an already-established scope. On the
+  // catalog bootstrap route the else-branch renders even without a tenant, so an
+  // ungated banner would claim a retained tenant scope that never existed.
+  it('never claims a retained tenant scope on the catalog bootstrap path (R5)', async () => {
+    window.location.hash = '#catalog'
+    api.listTenants.mockResolvedValue({ items: [], count: 0 })
+    component = mount(Harness, { target })
+    await settle()
+    expect(content().textContent).toContain('治理目录')
+
+    api.listTenants.mockRejectedValueOnce(new Error('list failed'))
+    window.dispatchEvent(new Event(TENANTS_CHANGED_EVENT))
+    await settle()
+    await settle()
+
+    expect(content().textContent).not.toContain('租户列表刷新失败')
+    expect(content().textContent).not.toContain('仍在使用上次成功读取的租户范围')
+    expect(tenantSelect().value).toBe('')
+    expect(tenantSelect().disabled).toBe(true)
+  })
+
   it('remounts the page when the refreshed list no longer contains the selected tenant (AC7, R2, R10)', async () => {
     const node = await mountWithResolvedTenant()
     expect(tenantSelect().value).toBe('tenant-a')
