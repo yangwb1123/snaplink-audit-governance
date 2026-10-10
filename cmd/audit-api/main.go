@@ -24,6 +24,7 @@ import (
 	"github.com/snaplink/audit-governance/internal/grpcapi"
 	"github.com/snaplink/audit-governance/internal/httpapi"
 	"github.com/snaplink/audit-governance/internal/kafka"
+	"github.com/snaplink/audit-governance/internal/projection"
 	"github.com/snaplink/audit-governance/internal/runtimeconfig"
 	"github.com/snaplink/audit-governance/internal/service"
 	"github.com/snaplink/audit-governance/internal/store"
@@ -67,6 +68,7 @@ func main() {
 	listen := flag.String("listen", envOr("AUDIT_LISTEN", ":8089"), "HTTP listen address")
 	statePath := flag.String("state", envOr("AUDIT_STATE_PATH", "./data/state.json"), "local state snapshot path")
 	postgresDSN := flag.String("postgres-dsn", os.Getenv("AUDIT_POSTGRES_DSN"), "PostgreSQL DSN for the control-plane state snapshot; overrides -state")
+	queryClickHouseDSN := flag.String("query-clickhouse-dsn", os.Getenv("AUDIT_QUERY_CLICKHOUSE_DSN"), "optional ClickHouse candidate index for event queries; evidence remains Ledger/WORM")
 	archiveDir := flag.String("archive", envOr("AUDIT_ARCHIVE_DIR", "./data/archive"), "local append-only archive directory")
 	jwtSecret := flag.String("jwt-secret", os.Getenv("AUDIT_JWT_SECRET"), "local-only HS256 JWT secret; requires explicit opt-in")
 	allowLocalHS256 := flag.Bool("allow-local-hs256", strictBoolEnv("AUDIT_ALLOW_LOCAL_HS256", false), "enable isolated local HS256 verification; incompatible with public key or JWKS trust")
@@ -146,11 +148,31 @@ func main() {
 		logger.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	if err := st.CheckQuerySnapshotStorage(context.Background()); err != nil {
+		logger.Fatalf("query snapshot storage unavailable; apply migrations/008_query_snapshot.sql before API deployment")
+	}
+	if cfg.LedgeredPublisher != nil {
+		if err := st.CheckPublicationStorage(context.Background()); err != nil {
+			logger.Fatalf("publication storage unavailable; apply migrations/007_publication_confirmation.sql before enabling ledgered publication")
+		}
+	}
 	svc, err := service.New(st, cfg)
 	if err != nil {
 		logger.Fatalf("invalid secrets: %v", err)
 	}
 	logSecretWarnings(logger, svc.Config)
+	if *queryClickHouseDSN != "" {
+		queryStore, err := projection.Open(*queryClickHouseDSN)
+		if err != nil {
+			logger.Fatalf("query projection connection unavailable")
+		}
+		defer queryStore.Close()
+		if err := queryStore.CheckQueryStorage(context.Background()); err != nil {
+			logger.Fatalf("query projection schema unavailable; initialize/rebuild with audit-projector before enabling queries")
+		}
+		svc.Config.QueryProjection = queryStore
+		logger.Printf("query_projection=enabled completeness=not_asserted")
+	}
 	if err := wireExternal(logger, svc, external, *vaultTransitKey, *vaultAddr, *s3Bucket, *s3Endpoint); err != nil {
 		logger.Fatalf("%v", err)
 	}
@@ -228,6 +250,8 @@ func main() {
 		}()
 	}
 	ledgeredCtx, cancelLedgered := context.WithCancel(context.Background())
+	go svc.RunExportQueue(ledgeredCtx)
+	go runHotCommitRecoveryLoop(ledgeredCtx, svc, logger)
 	if svc.Config.LedgeredPublisher != nil {
 		go runLedgeredOutboxLoop(ledgeredCtx, svc, logger)
 	}

@@ -86,6 +86,7 @@ export function sessionFromTokens(
   const identityClaims = decodeJwtClaims(response.id_token)
   validateClaims(identityClaims, config.snaplinkIssuer, config.snaplinkClientId, expectedNonce)
   validateClaims(accessClaims, config.snaplinkIssuer, config.snaplinkResource)
+  if (accessClaims.sub !== identityClaims.sub) throw new Error('Snaplink ID token 与 access token 的 subject 不一致')
 
   const roles = stringList(accessClaims.roles)
   const permissions = new Set([

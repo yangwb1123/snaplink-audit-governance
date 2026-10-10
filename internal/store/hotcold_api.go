@@ -36,6 +36,7 @@ func (s *Store) ReadTenant(ctx context.Context, tenantID string, fn func(*Tenant
 
 // readTenant is ReadTenant's body; see Store.read for the nesting rule.
 func (s *Store) readTenant(ctx context.Context, tenantID string, fn func(*TenantView) error) error {
+	fn = s.withPublicationReader(ctx, tenantID, fn)
 	if s.split == nil {
 		if s.pgSplit != nil {
 			enabled, err := s.pgSplit.enabled(ctx)
@@ -66,6 +67,7 @@ func (s *Store) UpdateTenant(ctx context.Context, tenantID string, order CommitO
 
 // updateTenant is UpdateTenant's body; see Store.read for the nesting rule.
 func (s *Store) updateTenant(ctx context.Context, tenantID string, order CommitOrder, fn func(*TenantView) error) error {
+	fn = s.withPublicationReader(ctx, tenantID, fn)
 	if s.split == nil {
 		if s.pgSplit != nil {
 			enabled, err := s.pgSplit.enabled(ctx)

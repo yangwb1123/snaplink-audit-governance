@@ -1,5 +1,6 @@
 import { postLogoutUri, redirectUri, type RuntimeConfig } from '../config'
 import { sessionFromTokens } from './claims'
+import { safeNavigationHash } from '../pages/evidenceNavigation'
 import { browserEndpoint } from './endpoints'
 import { pkceChallenge, randomValue } from './pkce'
 import { verifyTokenSignatures } from './verify'
@@ -105,6 +106,7 @@ export async function authorizationUrl(dependencies: AuthDependencies): Promise<
     redirectUri: callback,
     issuer: document.issuer,
     createdAt: Date.now(),
+    returnHash: safeNavigationHash(dependencies.returnHash),
   })
   const url = validateBrowserUrl(config.snaplinkHostedLoginUrl, 'Snaplink Hosted Login')
   url.searchParams.set('client_id', config.snaplinkClientId)
@@ -172,7 +174,10 @@ export async function completeAuthorization(
     throw new Error('Snaplink token 响应不完整')
   }
   await verifyTokenSignatures(tokens, document, config, fetcher)
-  return sessionFromTokens(tokens, config, pending.nonce)
+  const session = sessionFromTokens(tokens, config, pending.nonce)
+  // Navigation is released only after state/nonce/signature/claims validation.
+  dependencies.onReturnHash?.(safeNavigationHash(pending.returnHash))
+  return session
 }
 
 export async function logoutUrl(

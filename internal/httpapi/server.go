@@ -85,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/events/{eventID}", s.spanWrap(s.getEvent))
 	mux.HandleFunc("GET /api/v1/events/{eventID}/receipt", s.spanWrap(s.getReceipt))
 	mux.HandleFunc("GET /api/v1/events", s.spanWrap(s.queryEvents))
+	mux.HandleFunc("POST /api/v1/events:query", s.spanWrap(s.queryEvents))
 	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/events", s.spanWrap(s.querySnaplinkAuditEvents))
 	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/events/{eventID}", s.spanWrap(s.getEvent))
 	mux.HandleFunc("GET /api/v1/compat/snaplink/audit/facets", s.spanWrap(s.querySnaplinkAuditFacets))
@@ -93,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/operations/{operationID}/replay", s.spanWrap(s.replayOperation))
 	mux.HandleFunc("GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline", s.spanWrap(s.getAggregateTimeline))
 	mux.HandleFunc("POST /api/v1/exports", s.spanWrap(s.createExport))
+	mux.HandleFunc("GET /api/v1/exports", s.spanWrap(s.listExports))
 	mux.HandleFunc("GET /api/v1/exports/{jobID}", s.spanWrap(s.getExport))
 	mux.HandleFunc("GET /api/v1/exports/{jobID}/download", s.spanWrap(s.downloadExport))
 	mux.HandleFunc("POST /api/v1/integrity/verify", s.spanWrap(s.verifyIntegrity))
@@ -101,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/legal-holds/{holdID}/release", s.spanWrap(s.releaseLegalHold))
 	mux.HandleFunc("POST /api/v1/restores/preview", s.spanWrap(s.previewRestore))
 	mux.HandleFunc("POST /api/v1/restores", s.spanWrap(s.createRestore))
+	mux.HandleFunc("GET /api/v1/restores", s.spanWrap(s.listRestores))
 	mux.HandleFunc("GET /api/v1/restores/{runID}", s.spanWrap(s.getRestore))
 	mux.HandleFunc("POST /api/v1/restores/{runID}/approve", s.spanWrap(s.approveRestore))
 	mux.HandleFunc("POST /api/v1/restores/{runID}/reject", s.spanWrap(s.rejectRestore))
@@ -219,6 +222,22 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "store_unavailable"})
 		return
 	}
+	if err := s.Service.Store.CheckQuerySnapshotStorage(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "store_unavailable"})
+		return
+	}
+	if s.Service.Config.LedgeredPublisher != nil {
+		if err := s.Service.Store.CheckPublicationStorage(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "store_unavailable"})
+			return
+		}
+	}
+	if s.Service.Config.QueryProjection != nil {
+		if err := s.Service.Config.QueryProjection.CheckQueryStorage(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "projection_unavailable"})
+			return
+		}
+	}
 	// Readiness reflects the configured archive dependency: an unavailable
 	// WORM destination must surface here instead of silently degrading the
 	// archived status of new events. An unconfigured store (nil or an
@@ -252,10 +271,9 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "audit_ingest_duplicates_total %d\n", s.ingestDuplicateCount.Load())
 	fmt.Fprintf(w, "audit_ingest_conflicts_total %d\n", s.ingestConflictCount.Load())
 	fmt.Fprintf(w, "audit_ingest_quota_exceeded_total %d\n", s.ingestQuotaCount.Load())
-	// Unlabelled and monotonic: this counter is evidence that a tenant commit
-	// died between its durable cold append and its control-plane write, and an
-	// idempotent retry re-created the missing publication intent. A tenant,
-	// event or route label would make the cardinality unbounded.
+	// Unlabelled and monotonic: committed intent re-creations by retries or
+	// active reconciliation. Missing confirmation is unknown, including old
+	// deliveries before confirmations existed. No tenant/event/route labels.
 	if s.Service != nil {
 		fmt.Fprintf(w, "audit_ledgered_intent_repaired_total %d\n", s.Service.LedgeredIntentRepairs())
 		// Unlabelled and monotonic for the same cardinality reason. It counts
@@ -286,10 +304,17 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		if s.Service.Config.LedgeredPublisher != nil {
 			fmt.Fprintf(w, "audit_ledgered_publish_failures_total %d\n", s.Service.LedgeredPublishFailures())
 			fmt.Fprintf(w, "audit_ledgered_publish_success_total %d\n", s.Service.LedgeredPublishSuccesses())
+			fmt.Fprintf(w, "audit_ledgered_reconcile_scanned_total %d\n", s.Service.LedgeredReconcileScanned())
+			fmt.Fprintf(w, "audit_ledgered_reconcile_evidence_failures_total %d\n", s.Service.LedgeredReconcileEvidenceFailures())
+			fmt.Fprintf(w, "audit_ledgered_reconcile_errors_total %d\n", s.Service.LedgeredReconcileErrors())
 			if pending, sampled := s.Service.LedgeredOutboxPending(); sampled {
 				fmt.Fprintf(w, "audit_ledgered_outbox_pending %d\n", pending)
 			}
 		}
+	}
+	if s.Service != nil && s.Service.Store != nil {
+		fmt.Fprintf(w, "audit_hot_commit_recovered_records_total %d\n", s.Service.HotCommitRecovered())
+		fmt.Fprintf(w, "audit_hot_commit_recovery_failures_total %d\n", s.Service.HotCommitRecoveryFailures())
 	}
 	fmt.Fprintf(w, "audit_query_requests_total %d\n", s.queryCount.Load())
 	// Store pool + deadline observability. Unlabelled by construction: a

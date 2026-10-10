@@ -27,6 +27,11 @@ channels:
       Post-ledger, chain-linked audit events. Published after the immutable
       ledger commit; stream_id, sequence, prev_hash and hash are server-assigned
       and present on this channel. The Kafka message key MUST equal event_id.
+      Delivery is at least once: persistent identity-bound broker confirmations
+      precede outbox cleanup; startup and periodic ledger reconciliation repair
+      missing intents. Receipt status indexed or archived is not a broker or
+      ClickHouse projection acknowledgement. Historical unconfirmed deliveries
+      may be re-emitted; consumers must remain tenant/event-id idempotent.
     messages:
       auditEvent:
         $ref: '#/components/messages/LedgeredEvent'

@@ -103,6 +103,7 @@ func seedLedgeredOutbox(t *testing.T, svc *Service, ids ...string) {
 		for index, id := range ids {
 			event := testEvent(id, "op-ledgered-gate", time.Unix(1_700_000_600+int64(index), 0).UTC())
 			event.TenantID = "tenant-a"
+			event.StreamID, event.Sequence, event.Hash = "tenant-a:source:crm", int64(index+1), fmt.Sprintf("hash-%d", index+1)
 			data.LedgeredOutbox[store.EventKey(event.TenantID, event.EventID)] = event
 		}
 		return nil
@@ -564,6 +565,7 @@ func TestFlushRevalidationReadsOncePerRound(t *testing.T) {
 	// A request-path acknowledgement lands while the round holds its snapshot.
 	deferred := testEvent("rv-3", "op-ledgered-gate", time.Unix(1_700_000_800, 0).UTC())
 	deferred.TenantID = "tenant-a"
+	deferred.StreamID, deferred.Sequence, deferred.Hash = "tenant-a:source:crm", 4, "hash-4"
 	svc.publishLedgered(testCtx, deferred)
 	if got := svc.LedgeredPublishDeferrals(); got != 0 {
 		t.Fatalf("deferrals=%d, want 0: the request path owns no key the round holds", got)

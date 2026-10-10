@@ -24,12 +24,14 @@ describe('AuditApi', () => {
       'tenant/a',
     )
     const [url, init] = fetcher.mock.calls[0]!
-    expect(String(url)).toContain('/api/v1/events?')
-    expect(String(url)).toContain('event_type=file.downloaded')
-    expect(String(url)).toContain('correlation_id=flow%2F100')
-    expect(String(url)).toContain('payload_field=object_id')
-    expect(String(url)).toContain('payload_digest=digest%2Bvalue')
-    expect(String(url)).toContain('tenant_id=tenant%2Fa')
+    expect(String(url)).toBe('/audit-api/api/v1/events:query?tenant_id=tenant%2Fa')
+    expect(String(url)).not.toContain('digest')
+    expect(String(url)).not.toContain('flow')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      event_type: 'file.downloaded', correlation_id: 'flow/100',
+      payload_field: 'object_id', payload_digest: 'digest+value', page_size: 50,
+    })
     expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer token')
   })
 

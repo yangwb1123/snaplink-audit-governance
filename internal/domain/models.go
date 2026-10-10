@@ -277,10 +277,20 @@ type Query struct {
 	PageSize      int       `json:"page_size,omitempty"`
 }
 
+// QuerySnapshotInfo describes a fixed membership observation, not proof of
+// ledger/projection completeness or a globally atomic transaction snapshot.
+type QuerySnapshotInfo struct {
+	ObservedAt   time.Time `json:"observed_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Source       string    `json:"source"`
+	Completeness string    `json:"completeness"`
+}
+
 type QueryResult struct {
-	Items      []Event `json:"items"`
-	NextCursor string  `json:"next_cursor,omitempty"`
-	Count      int     `json:"count"`
+	Items      []Event            `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+	Count      int                `json:"count"`
+	Snapshot   *QuerySnapshotInfo `json:"snapshot,omitempty"`
 }
 
 // EventFacets is the bounded compatibility projection used by the Snaplink
@@ -361,6 +371,7 @@ type ExportJob struct {
 	Query       Query      `json:"query"`
 	Status      string     `json:"status"`
 	CreatedAt   time.Time  `json:"created_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 	ObjectPath  string     `json:"object_path,omitempty"`
 	Digest      string     `json:"digest,omitempty"`

@@ -295,7 +295,7 @@ func TestInsertRejectsUnscopedTenantClickHouse(t *testing.T) {
 	}
 
 	good := ledgeredFixture("tenant-guard-good")
-	good.TenantID = "demo"
+	good.TenantID = "tenant-guard-it"
 	if err := store.Insert(ctx, good); err != nil {
 		t.Fatalf("insert good: %v", err)
 	}
@@ -311,18 +311,18 @@ func TestInsertRejectsUnscopedTenantClickHouse(t *testing.T) {
 		t.Fatalf("insert colon tenant: error = %v, want ErrTenantUnscoped", err)
 	}
 
-	countGood, err := store.CountTenant(ctx, "demo")
+	countGood, err := store.CountTenant(ctx, good.TenantID)
 	if err != nil {
 		t.Fatalf("count demo: %v", err)
 	}
 	if countGood != 1 {
 		t.Fatalf("CountTenant(demo) = %d, want 1", countGood)
 	}
-	countPhantom, err := store.CountTenant(ctx, "")
-	if err != nil {
-		t.Fatalf("count empty: %v", err)
+	if _, err := store.CountTenant(ctx, ""); !errors.Is(err, ErrTenantUnscoped) {
+		t.Fatalf("unscoped count err=%v, want fail-closed tenant guard", err)
 	}
-	if countPhantom != 0 {
-		t.Fatalf("CountTenant(\"\") = %d, want 0 (no phantom tenant_id='' rows)", countPhantom)
+	var countPhantom uint64
+	if err := store.db.QueryRowContext(ctx, `SELECT count() FROM audit_projection_events WHERE tenant_id = ''`).Scan(&countPhantom); err != nil || countPhantom != 0 {
+		t.Fatalf("phantom rows=%d err=%v", countPhantom, err)
 	}
 }

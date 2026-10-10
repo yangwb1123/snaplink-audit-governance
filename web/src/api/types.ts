@@ -8,6 +8,11 @@ export interface Actor extends JsonRecord {
   roles?: string[]
 }
 
+export interface FieldChange extends JsonRecord {
+  before?: unknown
+  after?: unknown
+}
+
 export interface AuditEvent extends JsonRecord {
   event_id: string
   tenant_id: string
@@ -32,7 +37,7 @@ export interface AuditEvent extends JsonRecord {
   action: string
   outcome: string
   reason?: string
-  changed_fields?: JsonRecord
+  changed_fields?: Record<string, FieldChange>
   payload?: JsonRecord
   payload_ref?: string
   source_digest?: string
@@ -88,6 +93,12 @@ export interface QueryResult extends JsonRecord {
   items: AuditEvent[]
   next_cursor?: string
   count: number
+  snapshot?: {
+    observed_at: string
+    expires_at: string
+    source: 'ledger' | 'clickhouse'
+    completeness: 'not_asserted'
+  }
 }
 
 export interface EventFacetQuery {
@@ -231,6 +242,7 @@ export interface ExportJob extends JsonRecord {
   query: EventQuery
   status: string
   created_at: string
+  started_at?: string
   finished_at?: string
   digest?: string
   event_count: number
@@ -263,6 +275,33 @@ export interface RestoreRun extends JsonRecord {
   approved_at?: string
   rejected_by?: string
   rejected_at?: string
+}
+
+export interface JobQuery {
+  status?: string
+  requested_by?: string
+  operation_id?: string
+  view?: 'all' | 'mine' | 'actionable'
+  from?: string
+  to?: string
+  page_size?: number
+  cursor?: string
+}
+
+export interface ExportSummary {
+  id: string
+  tenant_id: string
+  requested_by: string
+  status: string
+  created_at: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface JobPage<T> {
+  items: T[]
+  count: number
+  next_cursor?: string
 }
 
 export interface ItemList<T> extends JsonRecord {

@@ -38,7 +38,25 @@ func loadTenantState(root, tenantID string) (*tenantState, error) {
 		if hot.Streams == nil {
 			hot.Streams = map[string]StreamState{}
 		}
-		return loadTenantLedger(root, tenantID, hot, disk.Version)
+		if disk.TenantID != tenantID {
+			return nil, fmt.Errorf("tenant hot identity mismatch")
+		}
+		state, err := loadTenantLedger(root, tenantID, hot, disk.Version)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateTenantCommitRecords(tenantID, disk.PendingLedger); err != nil {
+			return nil, err
+		}
+		state.pending = cloneLedgerRecords(disk.PendingLedger)
+		unresolved, err := unresolvedTenantCommit(state)
+		if err != nil {
+			return nil, err
+		}
+		if !unresolved {
+			state.pending = nil
+		}
+		return state, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -253,4 +271,7 @@ type TenantView struct {
 	Hot    *Snapshot
 	Ledger *TenantLedger
 	Global *Snapshot
+	// PublicationConfirmed is a read-only, tenant-bound lookup under this
+	// operation's context/lock. It performs no nested Store operation.
+	PublicationConfirmed func(domain.EventReceipt) (bool, error)
 }

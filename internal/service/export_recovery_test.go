@@ -20,7 +20,7 @@ func seedExportJob(backend *scriptedConflictBackend, job domain.ExportJob) {
 	backend.data.Exports[job.ID] = job
 }
 
-// stuckJob builds an ExportJob stuck in "running" since created; the query
+// stuckJob builds a legacy ExportJob lacking started_at, stuck since created; the query
 // is a wide window so any event would match (matching is never exercised by
 // the fail path, which reads no event data).
 func stuckJob(id, tenantID string, created time.Time) domain.ExportJob {
@@ -89,7 +89,7 @@ func TestRecoverStuckExportsFailsStuckRunningJob(t *testing.T) {
 }
 
 func TestRecoverStuckExportsBoundary(t *testing.T) {
-	// AC-1 boundary: age is measured from CreatedAt with a strict "older
+	// AC-1 legacy boundary: without started_at, age uses CreatedAt with a strict "older
 	// than" cut — exactly 24h is untouched, fresh is untouched, and the same
 	// job fails once the pinned clock advances past the threshold.
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
@@ -303,7 +303,7 @@ func TestResumePendingExportsClaimsAndCompletesOnce(t *testing.T) {
 		t.Fatalf("resumed=%d err=%v, want one scheduled job", resumed, err)
 	}
 	completed := waitExportCompleted(t, svc, jobID)
-	if completed.Status != "completed" || completed.EventCount != 1 {
+	if completed.Status != "completed" || completed.EventCount != 1 || completed.StartedAt == nil {
 		t.Fatalf("resumed export=%+v, want completed one-event export", completed)
 	}
 	resumed, err = svc.ResumePendingExports(testCtx, "tenant-a")

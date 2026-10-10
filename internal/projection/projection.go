@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/ClickHouse/clickhouse-go/v2"
+	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/security"
@@ -39,10 +39,19 @@ type Store struct {
 
 // Open connects to ClickHouse over the native protocol (default port 9000).
 func Open(dsn string) (*Store, error) {
-	db, err := sql.Open("clickhouse", dsn)
+	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open clickhouse: %w", err)
+		// DSN parser diagnostics can contain userinfo/query credentials.
+		return nil, fmt.Errorf("%w: invalid ClickHouse connection configuration", domain.ErrInvalid)
 	}
+	if opts.Settings == nil {
+		opts.Settings = clickhouse.Settings{}
+	}
+	// A queue/buffer acknowledgement is not a projected fact confirmation.
+	// Override DSN/server async defaults, including Cloud defaults.
+	opts.Settings["async_insert"] = 0
+	opts.Settings["wait_for_async_insert"] = 1
+	db := clickhouse.OpenDB(opts)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
@@ -71,10 +80,15 @@ ORDER BY (tenant_id, occurred_at, event_id)`
 
 // EnsureSchema creates the projection table when missing.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if _, err := s.db.ExecContext(ctx, schemaDDL); err != nil {
 		return fmt.Errorf("ensure clickhouse schema: %w", err)
 	}
-	return nil
+	if _, err := s.db.ExecContext(ctx, confirmedSchemaDDL); err != nil {
+		return fmt.Errorf("ensure confirmed projection schema: %w", err)
+	}
+	return s.checkConfirmedSchema(ctx)
 }
 
 // projectionPayload removes derived search digests from a deep copy before
@@ -120,8 +134,14 @@ func (s *Store) Insert(ctx context.Context, event domain.Event) error {
 	// is assigned by the ledger upstream (the service strips client-supplied
 	// stream_id and stamps StreamID/Sequence/Hash in the commit closure), so a
 	// row lacking it is a non-fact.
-	if event.StreamID == "" || event.Sequence <= 0 || event.Hash == "" {
+	if event.EventID == "" || event.StreamID == "" || event.Sequence <= 0 || event.Hash == "" {
 		return ErrNotLedgered
+	}
+	if err := domain.ValidKeyComponent("event id", event.EventID); err != nil {
+		return err
+	}
+	if err := domain.ValidKeyComponent("stream id", event.StreamID); err != nil {
+		return err
 	}
 	// Ledger-horizon guard: defense in depth for events committed before the
 	// domain gate (REQ-2) existed. ClickHouse DateTime64(3,'UTC') cannot index
@@ -136,27 +156,43 @@ func (s *Store) Insert(ctx context.Context, event domain.Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events (tenant_id, occurred_at, event_id, stream_id, sequence, event_type, source_system, operation_id, actor_id, outcome, payload, event_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.TenantID, event.OccurredAt.UTC(), event.EventID, event.StreamID, event.Sequence,
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"async_insert": 0, "wait_for_async_insert": 1}))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events (tenant_id, occurred_at, event_id, stream_id, sequence, event_type, source_system, operation_id, actor_id, outcome, payload, event_hash) VALUES (?, parseDateTime64BestEffort(?, 3, 'UTC'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.TenantID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.EventID, event.StreamID, event.Sequence,
 		event.EventType, event.SourceSystem, event.OperationID, event.Actor.ID, event.Outcome,
 		string(payload), event.Hash)
 	if err != nil {
 		return fmt.Errorf("insert projection: %w", err)
 	}
-	return nil
+	// The legacy table remains a compatibility mirror, never a confirmation.
+	// A failed second write leaves the source message uncommitted; retries
+	// are harmless and logical counts do not depend on background merges.
+	return s.insertConfirmed(ctx, event)
 }
 
-// CountTenant returns the projected row count for a tenant (after
-// ReplacingMergeTree finalization is not guaranteed without FINAL).
+// CountTenant returns distinct projected fact identities, not physical rows.
+// Historical legacy-only rows remain unknown until controlled ledger rebuild.
 func (s *Store) CountTenant(ctx context.Context, tenantID string) (uint64, error) {
-	var count uint64
-	if err := s.db.QueryRowContext(ctx, `SELECT count() FROM audit_events WHERE tenant_id = ?`, tenantID).Scan(&count); err != nil {
+	if err := projectionScope(tenantID, ""); err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var count, conflicts uint64
+	if err := s.db.QueryRowContext(ctx, `SELECT count(), countIf(variants != 1) FROM
+(SELECT event_id, uniqExact(tuple(stream_id, sequence, event_hash, envelope_digest)) AS variants
+FROM audit_projection_events WHERE tenant_id = ? GROUP BY event_id)`, tenantID).Scan(&count, &conflicts); err != nil {
 		return 0, fmt.Errorf("count projection: %w", err)
+	}
+	if conflicts != 0 {
+		return 0, ErrProjectionConflict
 	}
 	return count, nil
 }
 
-// RebuildFrom scratch is supported by re-consuming the topic; no manual
-// truncation is needed because ReplacingMergeTree converges on event_id.
+// Rebuilds write validated ledger events again; no truncation or source-side
+// republish is necessary. Every destination owns its current confirmation.
 
 func (s *Store) Close() error { return s.db.Close() }

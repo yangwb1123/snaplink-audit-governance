@@ -305,7 +305,13 @@ func errorBody(status int, err error, r *http.Request) map[string]any {
 			message = cancelledMessage
 		}
 	}
-	return map[string]any{"error": map[string]any{"code": code, "message": message, "request_id": r.Context().Value(requestIDKey)}}
+	detail := map[string]any{"code": code, "message": message, "request_id": r.Context().Value(requestIDKey)}
+	var holdBlock interface{ LegalHoldID() string }
+	if status == http.StatusForbidden && errors.As(err, &holdBlock) {
+		detail["reason"] = "legal_hold"
+		detail["hold_id"] = holdBlock.LegalHoldID()
+	}
+	return map[string]any{"error": detail}
 }
 
 func statusForError(err error) int {

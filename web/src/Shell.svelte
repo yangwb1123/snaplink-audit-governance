@@ -25,18 +25,17 @@
     key: string
     title: string
     icon: string
-    permission?: string
+    permissions?: string[]
   }
 
   const pageDefinitions: PageDefinition[] = [
     { key: 'overview', title: '审计态势', icon: 'home' },
-    { key: 'events', title: '审计事件', icon: 'table', permission: 'audit:event:read' },
-    { key: 'operations', title: '操作时间线', icon: 'clock', permission: 'audit:operation:read' },
-    { key: 'evidence', title: '证据与治理', icon: 'shield', permission: 'audit:integrity:verify' },
-    { key: 'catalog', title: '治理目录', icon: 'settings', permission: 'audit:policy:read' },
+    { key: 'events', title: '审计事件', icon: 'table', permissions: ['audit:event:read'] },
+    { key: 'operations', title: '操作时间线', icon: 'clock', permissions: ['audit:operation:read'] },
+    { key: 'evidence', title: '证据与治理', icon: 'shield', permissions: ['audit:export:create', 'audit:operation:read', 'audit:legal_hold:manage', 'audit:integrity:verify'] },
+    { key: 'catalog', title: '治理目录', icon: 'settings', permissions: ['audit:policy:read'] },
   ]
 
-  const api = useAuditApi()
   const { skin, setSkin, setMode } = useSkin()
   let route = $state(readRoute())
   let tenantId = $state($authState.session?.platform ? '' : $authState.session?.tenantId ?? '')
@@ -49,7 +48,7 @@
 
   const visiblePages = $derived(
     pageDefinitions.filter(
-      (page) => !page.permission || ($authState.session && can($authState.session, page.permission)),
+      (page) => !page.permissions || ($authState.session && page.permissions.some((permission) => can($authState.session!, permission))),
     ),
   )
   const menus = $derived(
@@ -65,6 +64,8 @@
           $authState.session.subject,
           $authState.session.platform,
           $authState.session.tenantId,
+          [...$authState.session.permissions].sort(),
+          $authState.session.accessToken,
         ])
       : '',
   )
@@ -88,7 +89,7 @@
   )
 
   function readRoute(): string {
-    return window.location.hash.replace(/^#\/?/, '') || 'overview'
+    return window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview'
   }
 
   function navigate(next: string): void {
@@ -108,7 +109,7 @@
   async function loadTenants(session: UserSession | null): Promise<void> {
     const generation = ++tenantRequestGeneration
     const scopeKey = session
-      ? JSON.stringify([session.subject, session.platform, session.tenantId])
+      ? JSON.stringify([session.subject, session.platform, session.tenantId, [...session.permissions].sort(), session.accessToken])
       : ''
 
     if (!session) {
@@ -144,7 +145,8 @@
     tenantLoading = true
     tenantLoadError = null
     try {
-      const result = await api.listTenants()
+      // Shell survives token renewal; do not reuse an old credential adapter.
+      const result = await useAuditApi().listTenants()
       if (generation !== tenantRequestGeneration) return
       const available = [...result.items].sort(
         (left, right) => left.name.localeCompare(right.name, 'zh-CN') || left.id.localeCompare(right.id),
@@ -266,7 +268,7 @@
         仍在使用上次成功读取的租户范围，页面保持可用。<IrisButton size="sm" variant="outline" onclick={refreshTenants}>重试</IrisButton>
       </IrisAlert>
     {/if}
-    {#key `${activeRoute}:${tenantId}`}
+    {#key `${activeRoute}:${tenantId}:${sessionScopeKey}`}
       {#if activeRoute === 'events'}
         <EventsPage tenantId={tenantId || undefined} />
       {:else if activeRoute === 'operations'}

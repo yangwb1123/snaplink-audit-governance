@@ -26,6 +26,7 @@ EXPECTED_OPERATIONS = {
     "querySnaplinkConsoleAuditFacets",
     "writeEvent",
     "queryEvents",
+    "queryEventsBody",
     "getEvent",
     "getReceipt",
     "writeBatch",
@@ -34,6 +35,7 @@ EXPECTED_OPERATIONS = {
     "replayOperation",
     "getAggregateTimeline",
     "createExport",
+    "listExports",
     "getExport",
     "downloadExport",
     "verifyIntegrity",
@@ -42,6 +44,7 @@ EXPECTED_OPERATIONS = {
     "releaseLegalHold",
     "previewRestore",
     "createRestore",
+    "listRestores",
     "getRestore",
     "approveRestore",
     "rejectRestore",
@@ -183,7 +186,7 @@ def validate(root: Path) -> list[str]:
                 failures.append(f"{name}: missing reusable tenantId query parameter")
         elif item["tenant_param"]:
             failures.append(f"{name}: body/management operation must not declare tenantId query parameter")
-    if len(ALL_TENANT) != 3 or len(BODY_SCOPED) != 2 or len(PLATFORM_MANAGEMENT) != 2 or len(QUERY_SCOPED) != 28:
+    if len(ALL_TENANT) != 3 or len(BODY_SCOPED) != 2 or len(PLATFORM_MANAGEMENT) != 2 or len(QUERY_SCOPED) != 31:
         failures.append("scope matrix cardinality changed unexpectedly")
     parameter_text = (root / "api/openapi/openapi.yaml").read_text(encoding="utf-8")
     if "tenantId: { name: tenant_id" not in parameter_text:
@@ -201,7 +204,7 @@ def run(root: Path | None = None) -> int:
     if failures:
         print("FAIL: tenant scope", *failures, sep="\n  ")
         return 1
-    print("PASS: tenant scope (35 operations; 3 all-tenant, 28 query, 2 body, 2 management)")
+    print(f"PASS: tenant scope ({len(EXPECTED_OPERATIONS)} operations; {len(ALL_TENANT)} all-tenant, {len(QUERY_SCOPED)} query, {len(BODY_SCOPED)} body, {len(PLATFORM_MANAGEMENT)} management)")
     return 0
 
 

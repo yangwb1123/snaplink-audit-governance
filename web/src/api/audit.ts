@@ -10,6 +10,9 @@ import type {
   EventFacetsResponse,
   EventSchema,
   ExportJob,
+  ExportSummary,
+  JobPage,
+  JobQuery,
   IntegrityResult,
   ItemList,
   LegalHold,
@@ -56,9 +59,10 @@ export class AuditApi {
     return tenantId
   }
 
-  queryEvents(query: EventQuery, tenantId?: string): Promise<QueryResult> {
+  queryEvents(query: EventQuery, tenantId?: string, signal?: AbortSignal): Promise<QueryResult> {
     return this.client.request(
-      `/api/v1/events${queryString({ ...query, tenant_id: this.scopedTenant(tenantId) })}`,
+      `/api/v1/events:query${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { method: 'POST', body: jsonBody(query), signal },
     )
   }
 
@@ -82,15 +86,17 @@ export class AuditApi {
     })
   }
 
-  getEvent(eventId: string, tenantId?: string): Promise<AuditEvent> {
+  getEvent(eventId: string, tenantId?: string, signal?: AbortSignal): Promise<AuditEvent> {
     return this.client.request(
       `/api/v1/events/${encodeURIComponent(eventId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
-  getReceipt(eventId: string, tenantId?: string): Promise<EventReceipt> {
+  getReceipt(eventId: string, tenantId?: string, signal?: AbortSignal): Promise<EventReceipt> {
     return this.client.request(
       `/api/v1/events/${encodeURIComponent(eventId)}/receipt${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
@@ -135,87 +141,91 @@ export class AuditApi {
     )
   }
 
-  verifyIntegrity(streamId: string, tenantId?: string): Promise<IntegrityResult> {
+  verifyIntegrity(streamId: string, tenantId?: string, signal?: AbortSignal): Promise<IntegrityResult> {
     return this.client.request(
       `/api/v1/integrity/verify${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-        body: jsonBody({ stream_id: streamId }),
-      },
+      { method: 'POST', body: jsonBody({ stream_id: streamId }), signal },
     )
   }
 
-  listLegalHolds(tenantId?: string): Promise<ItemList<LegalHold>> {
+  listLegalHolds(tenantId?: string, signal?: AbortSignal): Promise<ItemList<LegalHold>> {
     return this.client.request(
       `/api/v1/legal-holds${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
   createLegalHold(
     hold: Pick<LegalHold, 'name' | 'reason' | 'filter'>,
     tenantId?: string,
+    signal?: AbortSignal,
   ): Promise<LegalHold> {
     return this.client.request(
       `/api/v1/legal-holds${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-        body: jsonBody(hold),
-      },
+      { method: 'POST', body: jsonBody(hold), signal },
     )
   }
 
-  releaseLegalHold(holdId: string, tenantId?: string): Promise<LegalHold> {
+  releaseLegalHold(holdId: string, tenantId?: string, signal?: AbortSignal): Promise<LegalHold> {
     return this.client.request(
       `/api/v1/legal-holds/${encodeURIComponent(holdId)}/release${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      { method: 'POST' },
+      { method: 'POST', signal },
     )
   }
 
-  createExport(query: EventQuery, tenantId?: string): Promise<ExportJob> {
+  listExports(query: JobQuery = {}, tenantId?: string, signal?: AbortSignal): Promise<JobPage<ExportSummary>> {
+    return this.client.request(
+      `/api/v1/exports${queryString({ ...query, tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
+    )
+  }
+
+  listRestores(query: JobQuery = {}, tenantId?: string, signal?: AbortSignal): Promise<JobPage<RestoreRun>> {
+    return this.client.request(
+      `/api/v1/restores${queryString({ ...query, tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
+    )
+  }
+
+  createExport(query: EventQuery, tenantId?: string, signal?: AbortSignal): Promise<ExportJob> {
     return this.client.request(
       `/api/v1/exports${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-        body: jsonBody(query),
-      },
+      { method: 'POST', body: jsonBody(query), signal },
     )
   }
 
-  getExport(jobId: string, tenantId?: string): Promise<ExportJob> {
+  getExport(jobId: string, tenantId?: string, signal?: AbortSignal): Promise<ExportJob> {
     return this.client.request(
       `/api/v1/exports/${encodeURIComponent(jobId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
-  downloadExport(jobId: string, tenantId?: string): Promise<Blob> {
+  downloadExport(jobId: string, tenantId?: string, signal?: AbortSignal): Promise<Blob> {
     return this.client.blob(
       `/api/v1/exports/${encodeURIComponent(jobId)}/download${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      signal,
     )
   }
 
-  previewRestore(request: RestoreRequest, tenantId?: string): Promise<RestorePreview> {
+  previewRestore(request: RestoreRequest, tenantId?: string, signal?: AbortSignal): Promise<RestorePreview> {
     return this.client.request(
       `/api/v1/restores/preview${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-        body: jsonBody(request),
-      },
+      { method: 'POST', body: jsonBody(request), signal },
     )
   }
 
-  createRestore(request: RestoreRequest, tenantId?: string): Promise<RestoreRun> {
+  createRestore(request: RestoreRequest, tenantId?: string, signal?: AbortSignal): Promise<RestoreRun> {
     return this.client.request(
       `/api/v1/restores${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-        body: jsonBody(request),
-      },
+      { method: 'POST', body: jsonBody(request), signal },
     )
   }
 
-  getRestore(runId: string, tenantId?: string): Promise<RestoreRun> {
+  getRestore(runId: string, tenantId?: string, signal?: AbortSignal): Promise<RestoreRun> {
     return this.client.request(
       `/api/v1/restores/${encodeURIComponent(runId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
@@ -223,10 +233,11 @@ export class AuditApi {
     runId: string,
     decision: 'approve' | 'reject',
     tenantId?: string,
+    signal?: AbortSignal,
   ): Promise<RestoreRun> {
     return this.client.request(
       `/api/v1/restores/${encodeURIComponent(runId)}/${decision}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      { method: 'POST' },
+      { method: 'POST', signal },
     )
   }
 

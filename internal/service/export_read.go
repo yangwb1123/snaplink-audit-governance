@@ -32,8 +32,8 @@ import (
 // tenant and a tenant-less caller are all refused before any remote call, so
 // the route cannot be used to probe another tenant's job ids.
 //
-// Classification: the read runs INSIDE the store closure, which is what makes
-// the failure class correct. archiveReadBound is min(archiveReadTimeout,
+// Classification: WithOperation starts one shared store deadline before the
+// metadata capture. External Get runs outside Store.mu with that same context. archiveReadBound is min(archiveReadTimeout,
 // Store.OperationTimeout()) and audit-api validates Store.OperationTimeout
 // strictly below its 30s HTTP write timeout
 // (runtimeconfig.ValidateStoreOperationTimeoutBelow), so in every shipping
@@ -59,19 +59,21 @@ func (s *Service) ReadExportObject(ctx context.Context, tenantID, jobID string) 
 		return nil, fmt.Errorf("export %s: archive is not configured", jobID)
 	}
 	var object []byte
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		job, ok := data.Exports[jobID]
-		if !ok || job.TenantID != tenantID {
-			return domain.ErrNotFound
+	err := s.Store.WithOperation(ctx, func(ctx context.Context) error {
+		var job domain.ExportJob
+		if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
+			value, ok := data.Exports[jobID]
+			if !ok || value.TenantID != tenantID {
+				return domain.ErrNotFound
+			}
+			if value.Status != "completed" || value.ObjectPath == "" {
+				return fmt.Errorf("%w: export is not completed", domain.ErrConflict)
+			}
+			job = value
+			return nil
+		}); err != nil {
+			return err
 		}
-		// Same shape as VerifyExportDownload: a job that cannot serve bytes
-		// is a conflict, never a silent empty download.
-		if job.Status != "completed" || job.ObjectPath == "" {
-			return fmt.Errorf("%w: export is not completed", domain.ErrConflict)
-		}
-		// PLACEMENT IS LOAD-BEARING (see the ReadExportObject doc comment and
-		// archiveFallbackContext): the bound is derived INSIDE the closure so
-		// the store operation deadline is the one that fires.
 		readCtx, cancel := s.archiveFallbackContext(ctx)
 		defer cancel()
 		// Short-circuit an already-exhausted bound before any remote work: a

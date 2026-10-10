@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -60,7 +61,10 @@ func (s *Service) collectArchiveTenantBatch(ctx context.Context, tenantID string
 				continue
 			}
 			receipt, ok := view.Ledger.Receipt(key)
-			if ok && receipt.Status == domain.StatusArchived {
+			if !ok {
+				return fmt.Errorf("%w: uncommitted hot evidence cannot be archived", domain.ErrConflict)
+			}
+			if receipt.Status == domain.StatusArchived {
 				batch.evictedKeys = append(batch.evictedKeys, key)
 				continue
 			}

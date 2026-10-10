@@ -49,6 +49,12 @@ func (s *splitStore) updateTenant(ctx context.Context, tenantID string, order Co
 		return err
 	}
 	state := s.tenantState(tenantID)
+	if unresolved, err := unresolvedTenantCommit(state); err != nil {
+		return err
+	} else if unresolved {
+		return ErrTenantCommitPending
+	}
+	state.pending = nil
 	hot, err := cloneTenantHot(state.hot)
 	if err != nil {
 		return err
@@ -106,7 +112,14 @@ func (s *splitStore) commitTenant(ctx context.Context, tenantID string, order Co
 		state.hot = hot
 		state.version++
 	} else {
-		if err := s.saveTenantHot(tenantID, hot, state.version+1); err != nil {
+		var journal []LedgerRecord
+		if len(pending) > 0 && (!reflect.DeepEqual(hot.Events, state.hot.Events) || !reflect.DeepEqual(hot.Streams, state.hot.Streams)) {
+			if err := validateTenantCommitRecords(tenantID, pending); err != nil {
+				return err
+			}
+			journal = cloneLedgerRecords(pending)
+		}
+		if err := s.saveTenantHotWithCommit(tenantID, hot, state.version+1, journal); err != nil {
 			return err
 		}
 		// HotFirst deliberately exposes the hot commit before the cold append.
@@ -115,9 +128,11 @@ func (s *splitStore) commitTenant(ctx context.Context, tenantID string, order Co
 		// in-memory stream and could derive the wrong next sequence.
 		state.hot = hot
 		state.version++
+		state.pending = journal
 		if err := s.appendLedger(ctx, tenantID, state.ledger, pending); err != nil {
 			return err
 		}
+		state.pending = nil
 	}
 	if globalChanged {
 		if s.path != "" {
@@ -166,6 +181,11 @@ func (s *splitStore) appendLedger(ctx context.Context, tenantID string, committe
 		return err
 	}
 	if s.path != "" && len(toAppend) > 0 {
+		if s.ledgerWriteFault != nil {
+			if err := s.ledgerWriteFault(); err != nil {
+				return err
+			}
+		}
 		if err := appendLedgerFile(s.root, tenantID, toAppend); err != nil {
 			return err
 		}
@@ -175,9 +195,13 @@ func (s *splitStore) appendLedger(ctx context.Context, tenantID string, committe
 }
 
 func (s *splitStore) saveTenantHot(tenantID string, hot *Snapshot, version int64) error {
+	return s.saveTenantHotWithCommit(tenantID, hot, version, nil)
+}
+
+func (s *splitStore) saveTenantHotWithCommit(tenantID string, hot *Snapshot, version int64, records []LedgerRecord) error {
 	hot.LayoutVersion = hotColdLayoutVersion
 	if s.path != "" {
-		return writeTenantFile(s.root, tenantID, tenantHotSnapshot{TenantID: tenantID, Version: version, Events: hot.Events, Streams: hot.Streams})
+		return writeTenantFile(s.root, tenantID, tenantHotSnapshot{TenantID: tenantID, Version: version, Events: hot.Events, Streams: hot.Streams, PendingLedger: records})
 	}
 	return nil
 }
@@ -191,7 +215,10 @@ func (s *splitStore) persistPrepared(prepared *preparedSplit) error {
 		sort.Strings(ids)
 		for _, tenantID := range ids {
 			state := prepared.tenant[tenantID]
-			if err := writeTenantFile(s.root, tenantID, tenantHotSnapshot{TenantID: tenantID, Version: state.version, Events: state.hot.Events, Streams: state.hot.Streams}); err != nil {
+			if current := s.tenant[tenantID]; current == state && len(state.pending) > 0 {
+				continue
+			}
+			if err := writeTenantFile(s.root, tenantID, tenantHotSnapshot{TenantID: tenantID, Version: state.version, Events: state.hot.Events, Streams: state.hot.Streams, PendingLedger: state.pending}); err != nil {
 				return err
 			}
 			if err := replaceLedgerFile(s.root, tenantID, state.ledger.committedRecords()); err != nil {

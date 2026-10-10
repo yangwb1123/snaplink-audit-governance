@@ -3,6 +3,8 @@ interface ApiErrorBody {
     code?: string
     message?: string
     request_id?: string
+    reason?: string
+    hold_id?: string
   }
 }
 
@@ -12,6 +14,8 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly requestId?: string,
+    readonly reason?: string,
+    readonly holdId?: string,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -37,7 +41,9 @@ export class ApiClient {
   private readonly fetcher: typeof fetch
 
   constructor(private readonly options: ApiClientOptions) {
-    this.fetcher = options.fetcher ?? fetch
+    // Calling a native fetch as this.fetcher(...) would bind `this` to the
+    // client, which Chromium rejects as an illegal Web API invocation.
+    this.fetcher = (options.fetcher ?? fetch).bind(globalThis)
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -60,9 +66,10 @@ export class ApiClient {
     return (await response.json()) as T
   }
 
-  async blob(path: string): Promise<Blob> {
+  async blob(path: string, signal?: AbortSignal): Promise<Blob> {
     const response = await this.fetcher(joinUrl(this.options.baseUrl, path), {
       credentials: 'omit',
+      signal,
       headers: { Authorization: `Bearer ${this.options.accessToken}` },
     })
     if (!response.ok) {
@@ -84,6 +91,8 @@ export class ApiClient {
       body.error?.code ?? `http_${response.status}`,
       body.error?.message ?? `Audit API request failed (${response.status})`,
       body.error?.request_id,
+      body.error?.reason,
+      body.error?.hold_id,
     )
   }
 }

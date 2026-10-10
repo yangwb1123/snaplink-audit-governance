@@ -55,6 +55,9 @@ func (s *Service) CreateExport(ctx context.Context, tenantID, requestedBy string
 	}
 	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
 	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
+		if !exportQueueHasCapacity(data.Exports, tenantID) {
+			return fmt.Errorf("%w: export queue capacity exhausted", domain.ErrQuotaExceeded)
+		}
 		data.Exports[job.ID] = job
 		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
 		return nil
@@ -67,7 +70,7 @@ func (s *Service) CreateExport(ctx context.Context, tenantID, requestedBy string
 	// client's timeout) instead of being killed the moment the HTTP response
 	// is written. Cancellation of the caller's context legitimately abandons
 	// the create; it must not abandon a durable export job.
-	go s.runExport(context.WithoutCancel(ctx), job.ID)
+	s.wakeExports(context.WithoutCancel(ctx))
 	return job, nil
 }
 
@@ -270,11 +273,14 @@ func (s *Service) RecoverStuckExports(ctx context.Context, tenantID string) (int
 		cutoff := s.Now().Add(-s.Config.StuckExportAge)
 		mutated := false
 		for jobID, job := range data.Exports {
-			// Strict "older than": a job created exactly at the cutoff waits
-			// for the next pass (deterministic boundary). A job with a zero
-			// CreatedAt (corrupt/hand-edited row) fails the Before test and is
-			// recovered, which is safe: CreateExport always stamps CreatedAt.
-			if job.TenantID != tenantID || job.Status != "running" || job.FinishedAt != nil || !job.CreatedAt.Before(cutoff) {
+			// Queue age is not running age. Legacy rows lacking a usable
+			// started_at retain the old CreatedAt fallback. Strictly at the
+			// cutoff is untouched; zero legacy timestamps still converge.
+			started := job.CreatedAt
+			if job.StartedAt != nil && !job.StartedAt.IsZero() {
+				started = *job.StartedAt
+			}
+			if job.TenantID != tenantID || job.Status != "running" || job.FinishedAt != nil || !started.Before(cutoff) {
 				continue
 			}
 			now := s.Now()
@@ -283,9 +289,9 @@ func (s *Service) RecoverStuckExports(ctx context.Context, tenantID string) (int
 			job.ObjectPath = ""
 			job.Digest = ""
 			job.EventCount = 0
-			job.Error = fmt.Sprintf("export interrupted: stuck in running since %s; re-request the export", job.CreatedAt.Format(time.RFC3339))
+			job.Error = fmt.Sprintf("export interrupted: stuck in running since %s; re-request the export", started.Format(time.RFC3339))
 			data.Exports[jobID] = job
-			s.appendAdminAction(data, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", job.CreatedAt.Format(time.RFC3339))))
+			s.appendAdminAction(data, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", started.Format(time.RFC3339))))
 			recovered++
 			mutated = true
 		}
@@ -309,6 +315,10 @@ func (e exportBlockedError) Error() string {
 }
 
 func (e exportBlockedError) Unwrap() error { return domain.ErrForbidden }
+
+// LegalHoldID exposes a stable machine-readable denial reason to transports
+// without making them parse the diagnostic text or import a service error type.
+func (e exportBlockedError) LegalHoldID() string { return e.holdID }
 
 // holdBlockingExport reports whether an export of tenantID matching query is
 // blocked by an active legal hold (ReleasedAt == nil), returning the blocking

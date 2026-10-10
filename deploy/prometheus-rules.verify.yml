@@ -160,7 +160,7 @@ groups:
       # 发布侧告警（audit-api /metrics）：post-ledger 发布失败说明唯一喂给
       # ClickHouse 投影的通道断了——账本本身仍然权威、durable outbox 仍在重试，
       # 因此这是投影陈旧（延迟而非丢失），与 AuditConsumerLag 同级 warning
-      # （不发 page：ledgered 发布路径不阻塞 ingest，1s 重试会让 page 持续响）。
+      # （不发 page：ledgered 发布路径不阻塞 ingest，后台持续有界重试）。
       # 依赖 audit-api /metrics 且要求启动时配置 -ledgered-brokers /
       # AUDIT_LEDGERED_BROKERS；未配置 LedgeredPublisher 的部署不发布该序列，
       # 规则随之静默（兜底信号是 "ledgered publish failed" 日志行）。
@@ -173,6 +173,30 @@ groups:
         annotations:
           summary: Post-ledger publication is failing (ClickHouse projection feed stalled)
           description: "{{ $value }} post-ledger publications failed in the last 15 minutes. The immutable ledger is unaffected and the durable outbox keeps retrying, so this is projection staleness, not ledger loss: restore broker/ACL/topic health for the ledgered feed and confirm audit_ledgered_outbox_pending drains back to 0. Requires audit-api /metrics with a LedgeredPublisher configured."
+
+      - alert: AuditLedgeredReconcileEvidenceFailures
+        expr: increase(audit_ledgered_reconcile_evidence_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Ledgered reconciliation cannot authenticate retained evidence
+          description: "{{ $value }} evidence failures in the last 15 minutes. Unconfirmed events are not queued when their payload or delivery metadata is missing, corrupt, or cannot be authenticated. Investigate the retained receipt, source object, exact schema and keys; never force-publish unauthenticated evidence. Other candidates continue and failed evidence is revisited on the next sweep. Requires audit-api with a LedgeredPublisher."
+
+      - alert: AuditHotCommitRecoveryFailures
+        expr: increase(audit_hot_commit_recovery_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Journaled hot-to-ledger recovery is blocked
+          description: "A file HotFirst recovery failed in the last 15 minutes. Check the original recovery journal, authenticated hot body, exact schema/keys and predecessor/signature evidence. Do not erase the journal or fabricate a committed receipt. The marker is an intention, not ledger truth; unrelated tenants can continue. Emitted independently of publisher configuration."
+
+      - alert: AuditLedgeredReconcileErrors
+        expr: increase(audit_ledgered_reconcile_errors_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Active ledgered reconciliation passes are not completing
+          description: "{{ $value }} failed passes in the last 15 minutes. Check PostgreSQL publication migration 007, store availability and pass deadlines. Scan cursors are retained for retry; other tenants continue. A scan position is not a commit or projection watermark. Requires audit-api with a LedgeredPublisher."
 
   - name: audit-production
     # 需要生产形态指标/日志，本机参考实现不提供（见 VALIDATION_PLAN

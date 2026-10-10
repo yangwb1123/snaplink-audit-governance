@@ -125,6 +125,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -172,12 +173,18 @@ func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	query, err := parseQuery(r)
+	var query domain.Query
+	if r.Method == http.MethodPost {
+		query, err = parseBodyQuery(w, r)
+	} else {
+		query, err = parseQuery(r)
+	}
 	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err)
 		return

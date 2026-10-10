@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte'
+  import { RequestScope } from '../api/requestScope'
+  import { ApiError } from '../api/client'
   import {
     IrisButton,
     IrisCard,
@@ -11,8 +14,9 @@
     IrisTable,
   } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../api/useAuditApi'
-  import type { AuditEvent, EventQuery, EventReceipt } from '../api/types'
+  import type { AuditEvent, EventQuery, EventReceipt, QueryResult } from '../api/types'
   import ErrorNotice from '../components/ErrorNotice.svelte'
+  import FieldDiff from '../components/FieldDiff.svelte'
   import LoadingBlock from '../components/LoadingBlock.svelte'
   import PageHeader from '../components/PageHeader.svelte'
   import StatusBadge from '../components/StatusBadge.svelte'
@@ -46,8 +50,10 @@
   let receipt = $state<EventReceipt | null>(null)
   let detailError = $state<unknown>(null)
   let failedCursor = $state('')
-  let requestSequence = 0
-  let detailRequestSequence = 0
+  let snapshot = $state<QueryResult['snapshot']>()
+  const queryScope = new RequestScope()
+  const detailScope = new RequestScope()
+  onDestroy(() => { queryScope.dispose(); detailScope.dispose() })
 
   const advancedFields: Array<{ name: keyof EventFilterDraft; label: string; placeholder: string }> = [
     { name: 'actorId', label: 'Actor ID', placeholder: '用户或服务主体' },
@@ -98,9 +104,10 @@
   }
 
   async function runQuery(cursor = '', append = false): Promise<void> {
-    const sequence = ++requestSequence
+    const request = queryScope.next()
     const query = { ...appliedQuery, cursor }
     if (!append) {
+      snapshot = undefined
       events = []
       total = 0
       nextCursor = ''
@@ -110,19 +117,23 @@
     loading = true
     error = null
     try {
-      const result = await api.queryEvents(query, tenantId)
-      if (sequence !== requestSequence) return
+      const result = await api.queryEvents(query, tenantId, request.signal)
+      if (!request.current()) return
       events = append ? [...events, ...result.items] : result.items
       total = result.count
+      snapshot = result.snapshot
       nextCursor = result.next_cursor ?? ''
       failedCursor = ''
     } catch (cause) {
-      if (sequence === requestSequence) {
+      if (request.current()) {
         error = cause
-        failedCursor = append ? cursor : ''
+        const restart = cause instanceof ApiError && cause.code === 'invalid_request'
+        failedCursor = append && !restart ? cursor : ''
+        if (restart) nextCursor = ''
       }
     } finally {
-      if (sequence === requestSequence) loading = false
+      if (request.current()) loading = false
+      request.finish()
     }
   }
 
@@ -138,29 +149,29 @@
   })
 
   function closeDetail(): void {
-    detailRequestSequence += 1
+    detailScope.invalidate()
     selected = null
     receipt = null
     detailError = null
   }
 
   async function openDetail(event: AuditEvent): Promise<void> {
-    const request = ++detailRequestSequence
+    const request = detailScope.next()
     const eventId = event.event_id
     selected = event
     receipt = null
     detailError = null
     try {
       const [full, eventReceipt] = await Promise.all([
-        api.getEvent(eventId, tenantId),
-        api.getReceipt(eventId, tenantId),
+        api.getEvent(eventId, tenantId, request.signal),
+        api.getReceipt(eventId, tenantId, request.signal),
       ])
-      if (request !== detailRequestSequence || selected?.event_id !== eventId) return
+      if (!request.current() || selected?.event_id !== eventId) return
       selected = full
       receipt = eventReceipt
     } catch (cause) {
-      if (request === detailRequestSequence && selected?.event_id === eventId) detailError = cause
-    }
+      if (request.current() && selected?.event_id === eventId) detailError = cause
+    } finally { request.finish() }
   }
 
   function tableRows(): Record<string, unknown>[] {
@@ -226,7 +237,13 @@
   <ErrorNotice {error} onRetry={retryQuery} />
   {#if loading && events.length === 0}<LoadingBlock />{/if}
   <IrisCard variant="outline" padding="none" style="" header={undefined} footer={undefined}>
-    <div class="table-summary" role="status">已加载 {events.length} / 共 {total} 条事件</div>
+    <div class="table-summary" role="status">
+      <span>已加载 {events.length} / 共 {total} 条事件</span>
+      {#if snapshot}
+        <span>固定结果集：{formatDate(snapshot.observed_at)}；有效至 {formatDate(snapshot.expires_at)}。新到达事件需重新查询；不表示完整性已确认。</span>
+      {/if}
+      <IrisButton size="sm" variant="outline" disabled={loading} onclick={() => void runQuery()}>重新查询最新结果</IrisButton>
+    </div>
     <IrisTable
       rowKey="event_id"
       columns={[
@@ -275,6 +292,7 @@
             ]}
           />
           <h3>Payload</h3>
+          <FieldDiff changes={selected.changed_fields} />
           <pre class="json-view">{JSON.stringify(selected.payload ?? {}, null, 2)}</pre>
           <h3>Hash</h3>
           <code class="hash-value">{selected.hash || receipt?.hash || '—'}</code>

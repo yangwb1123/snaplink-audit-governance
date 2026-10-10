@@ -59,6 +59,15 @@ describe('Snaplink claims', () => {
     expect(can(session, 'audit:platform:cross_tenant')).toBe(false)
   })
 
+  it('rejects a signed-token pair referring to different subjects before a session exists', () => {
+    const exp = Math.floor(Date.now() / 1000) + 300
+    expect(() => sessionFromTokens({
+      token_type: 'Bearer',
+      access_token: token({ sub: 'actor-a', iss: config.snaplinkIssuer, aud: config.snaplinkResource, exp }),
+      id_token: token({ sub: 'actor-b', iss: config.snaplinkIssuer, aud: config.snaplinkClientId, exp, nonce: 'expected' }),
+    }, config, 'expected')).toThrow('subject')
+  })
+
   it('rejects an ID token nonce mismatch', () => {
     const exp = Math.floor(Date.now() / 1000) + 300
     expect(() =>

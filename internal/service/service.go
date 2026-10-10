@@ -71,6 +71,9 @@ type Config struct {
 	// LedgeredPublisher optionally publishes the post-commit event to the
 	// ledgered topic. A nil publisher preserves the local reference behavior.
 	LedgeredPublisher LedgeredPublisher
+	// QueryProjection is opt-in; nil keeps reference reads. Projection is only
+	// a candidate index; returned evidence still comes from Ledger/WORM.
+	QueryProjection QueryProjectionReader
 	// Logf receives bounded publication diagnostics. It is nil-safe so service
 	// tests and embedded callers do not need to provide a logger.
 	Logf func(format string, args ...any)
@@ -111,6 +114,13 @@ type Service struct {
 	Config  Config
 	quotaMu sync.Mutex
 	quotas  map[string]quotaWindow
+	// Dispatcher reservations are bounded; running claims are also checked
+	// against the shared durable control document across replicas.
+	exportMu             sync.Mutex
+	exportActive         map[string]string
+	exportDispatching    bool
+	exportLastTenant     string
+	exportWakeGeneration uint64
 	// ledgeredGatesMu guards ledgeredGates. It is held only while a gate is
 	// looked up, referenced or released — never across a publish or a store
 	// call — so it cannot become the head-of-line block the per-event gate
@@ -148,11 +158,16 @@ type Service struct {
 	// flusher's own acknowledgements are deliberately not counted: its
 	// snapshot already reflects them, and only one round runs at a time.
 	ledgeredRequestAcks atomic.Uint64
-	// ledgeredIntentRepairs counts publication intents an interrupted tenant
-	// ingest lost and an idempotent retry re-created. Each increment is direct
-	// evidence that a tenant commit died between its durable cold append and
-	// its control-plane write.
+	// ledgeredIntentRepairs counts committed intent re-creations by client
+	// retries and active reconciliation. Receipt state is never delivery proof.
 	ledgeredIntentRepairs atomic.Uint64
+	// Active-reconciliation diagnostics are sampled outside /metrics and
+	// deliberately unlabelled: records examined, bad evidence, failed passes.
+	ledgeredReconcileScanned          atomic.Uint64
+	ledgeredReconcileEvidenceFailures atomic.Uint64
+	ledgeredReconcileErrors           atomic.Uint64
+	hotCommitRecovered                atomic.Uint64
+	hotCommitRecoveryFailures         atomic.Uint64
 	// ledgeredPublishFailures counts post-ledger publication attempts this
 	// process could not complete: a broker refusal (including the bounded
 	// ledgeredPublishTimeout and any caller cancellation surfaced through it),
@@ -186,11 +201,6 @@ type Service struct {
 	// completed a successful snapshot read. It is what lets the renderer omit
 	// the gauge instead of fabricating 0 before any sample exists.
 	ledgeredOutboxSampled atomic.Bool
-	// repairedMu guards repairedIntents, the bounded process-local set of keys
-	// already repaired. It is deliberately not Store.mu: the repair predicate
-	// runs inside an UpdateTenant closure, which already holds Store.mu.
-	repairedMu      sync.Mutex
-	repairedIntents map[string]struct{}
 }
 
 type quotaWindow struct {
@@ -244,7 +254,7 @@ func New(st *store.Store, cfg Config) (*Service, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}, repairedIntents: map[string]struct{}{}}, nil
+	return &Service{Store: st, Config: cfg, quotas: map[string]quotaWindow{}}, nil
 }
 
 // resolveSecrets fills the development defaults when explicitly allowed and
@@ -835,18 +845,15 @@ func (s *Service) GetEvent(ctx context.Context, tenantID, actor, eventID string)
 		return domain.Event{}, err
 	}
 	var event domain.Event
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		var resolveErr error
-		event, resolveErr = s.eventFromSnapshot(ctx, data, tenantID, eventID)
-		return resolveErr
+	err := s.Store.WithOperation(ctx, func(ctx context.Context) error {
+		items, err := s.readQueryEvidence(ctx, tenantID, []store.EventReference{{EventID: eventID}})
+		if err != nil {
+			return err
+		}
+		event = items[0]
+		return s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, "")
 	})
 	if err != nil {
-		return domain.Event{}, err
-	}
-	// Read self-audit (F-06): every event read is a governance fact appended
-	// to the append-only admin trail. The append happens in the service layer
-	// so no transport can bypass it; a failed append fails the read closed.
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
 		return domain.Event{}, err
 	}
 	return event, nil
@@ -867,74 +874,7 @@ func (s *Service) recordReadAction(ctx context.Context, tenantID, actor, action,
 }
 
 func (s *Service) QueryEvents(ctx context.Context, tenantID, actor string, query domain.Query) (domain.QueryResult, error) {
-	if err := requireTenantScope(tenantID); err != nil {
-		return domain.QueryResult{}, err
-	}
-	if query.From.IsZero() || query.To.IsZero() {
-		return domain.QueryResult{}, fmt.Errorf("%w: from and to are required", domain.ErrInvalid)
-	}
-	if !query.From.Before(query.To) {
-		return domain.QueryResult{}, fmt.Errorf("%w: from must be before to", domain.ErrInvalid)
-	}
-	if (query.PayloadField == "") != (query.PayloadDigest == "") {
-		return domain.QueryResult{}, fmt.Errorf("%w: payload_field and payload_digest must be provided together", domain.ErrInvalid)
-	}
-	if query.PageSize <= 0 {
-		query.PageSize = domain.DefaultPageSize
-	}
-	if query.PageSize > domain.MaxPageSize {
-		return domain.QueryResult{}, fmt.Errorf("%w: page_size exceeds %d", domain.ErrInvalid, domain.MaxPageSize)
-	}
-	var events []domain.Event
-	schemas := map[string]domain.EventSchema{}
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for key, schema := range data.Schemas {
-			schemas[key] = schema
-		}
-		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
-			return s.matches(event, query, schemas)
-		})
-		return resolveErr
-	})
-	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	sort.Slice(events, func(i, j int) bool { return compareEvents(events[i], events[j]) })
-	if query.Cursor != "" {
-		cur, err := domain.DecodeCursor(query.Cursor)
-		if err != nil {
-			return domain.QueryResult{}, err
-		}
-		if cur.Legacy {
-			return domain.QueryResult{}, fmt.Errorf("%w: cursor predates chronological ordering; re-run the query", domain.ErrInvalid)
-		}
-		filtered := events[:0]
-		for _, event := range events {
-			if event.OccurredAt.After(cur.OccurredAt) ||
-				(event.OccurredAt.Equal(cur.OccurredAt) &&
-					(event.Sequence > cur.Sequence ||
-						(event.Sequence == cur.Sequence && event.EventID > cur.EventID))) {
-				filtered = append(filtered, event)
-			}
-		}
-		events = filtered
-	}
-	result := domain.QueryResult{Count: len(events)}
-	if len(events) > query.PageSize {
-		last := events[query.PageSize-1]
-		result.Items = events[:query.PageSize]
-		result.NextCursor = domain.EncodeCursor(domain.Cursor{OccurredAt: last.OccurredAt, Sequence: last.Sequence, EventID: last.EventID})
-	} else {
-		result.Items = events
-	}
-	// Read self-audit (F-06): the query itself is a governance fact. The
-	// append happens in the service layer (every transport shares this
-	// method); a failed append fails the query closed.
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))); err != nil {
-		return domain.QueryResult{}, err
-	}
-	return result, nil
+	return s.queryEventsSnapshot(ctx, tenantID, actor, query)
 }
 
 func (s *Service) Operation(ctx context.Context, tenantID, actor, operationID string) (domain.OperationSummary, error) {

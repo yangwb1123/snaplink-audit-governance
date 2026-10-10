@@ -31,12 +31,14 @@ func platformScopedRequests() []scopedRequestCase {
 	return []scopedRequestCase{
 		{"console detail", http.MethodGet, "/api/v1/compat/snaplink/audit/events/event", ""},
 		{"event query", http.MethodGet, "/api/v1/events" + query, ""},
+		{"event query body", http.MethodPost, "/api/v1/events:query", `{"from":"2023-11-14T22:13:20Z","to":"2023-11-14T22:13:40Z"}`},
 		{"event detail", http.MethodGet, "/api/v1/events/event", ""},
 		{"receipt", http.MethodGet, "/api/v1/events/event/receipt", ""},
 		{"operation", http.MethodGet, "/api/v1/operations/op", ""},
 		{"operation timeline", http.MethodGet, "/api/v1/operations/op/timeline", ""},
 		{"operation replay", http.MethodGet, "/api/v1/operations/op/replay", ""},
 		{"aggregate timeline", http.MethodGet, "/api/v1/aggregates/invoice/inv/timeline", ""},
+		{"list exports", http.MethodGet, "/api/v1/exports", ""},
 		{"create export", http.MethodPost, "/api/v1/exports", `{"from":"2023-11-14T22:13:20Z","to":"2023-11-14T22:13:40Z"}`},
 		{"get export", http.MethodGet, "/api/v1/exports/job", ""},
 		{"download export", http.MethodGet, "/api/v1/exports/job/download", ""},
@@ -45,6 +47,7 @@ func platformScopedRequests() []scopedRequestCase {
 		{"list legal holds", http.MethodGet, "/api/v1/legal-holds", ""},
 		{"release legal hold", http.MethodPost, "/api/v1/legal-holds/hold/release", ""},
 		{"preview restore", http.MethodPost, "/api/v1/restores/preview", `{"operation_id":"op","reason":"review"}`},
+		{"list restores", http.MethodGet, "/api/v1/restores", ""},
 		{"create restore", http.MethodPost, "/api/v1/restores", `{"operation_id":"op","reason":"review"}`},
 		{"get restore", http.MethodGet, "/api/v1/restores/run", ""},
 		{"approve restore", http.MethodPost, "/api/v1/restores/run/approve", ""},
@@ -66,8 +69,8 @@ func TestPlatformExplicitSelectionMatrix(t *testing.T) {
 	before := snapshotBytes(t, st)
 	beforeTrail := trailBytes(t, st)
 	cases := platformScopedRequests()
-	if len(cases) != 28 {
-		t.Fatalf("scoped query operation matrix has %d cases, want 28", len(cases))
+	if len(cases) != 31 {
+		t.Fatalf("scoped query operation matrix has %d cases, want 31", len(cases))
 	}
 	for _, selector := range []struct {
 		name   string

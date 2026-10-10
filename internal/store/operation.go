@@ -103,6 +103,18 @@ func (s *Store) end(op *operation, err error) error {
 	return err
 }
 
+// WithOperation shares one deadline and classification across a multi-stage
+// read (catalog capture, lock-free archive IO, self-audit). It takes no Store.mu;
+// nested Store methods inherit this context. Never call from a Store closure.
+func (s *Store) WithOperation(ctx context.Context, fn func(context.Context) error) (err error) {
+	op := s.begin(ctx)
+	defer func() { op.cancel(); err = s.end(op, err) }()
+	if err := op.ctx.Err(); err != nil {
+		return err
+	}
+	return fn(op.ctx)
+}
+
 // sleepBackoff waits out the optimistic-lock retry backoff interruptibly.
 // time.Sleep held Store.mu for the whole delay; here an ended operation
 // context returns immediately, so a cancelled or expired caller cannot

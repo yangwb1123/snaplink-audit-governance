@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -23,16 +24,18 @@ import (
 const hotColdLayoutVersion = 2
 
 type tenantHotSnapshot struct {
-	TenantID string                  `json:"tenant_id"`
-	Version  int64                   `json:"version"`
-	Events   map[string]domain.Event `json:"events"`
-	Streams  map[string]StreamState  `json:"streams"`
+	TenantID      string                  `json:"tenant_id"`
+	Version       int64                   `json:"version"`
+	Events        map[string]domain.Event `json:"events"`
+	Streams       map[string]StreamState  `json:"streams"`
+	PendingLedger []LedgerRecord          `json:"pending_ledger,omitempty"`
 }
 
 type tenantState struct {
 	hot     *Snapshot
 	ledger  *TenantLedger
 	version int64
+	pending []LedgerRecord
 }
 
 type splitStore struct {
@@ -44,6 +47,7 @@ type splitStore struct {
 	// controlWriteFault is nil in production. When set (OpenWithControlWriteFault)
 	// it is consulted before every durable control-plane write of this store.
 	controlWriteFault ControlWriteFault
+	ledgerWriteFault  func() error
 }
 
 // newSplitStore opens the v2 layout. A v1 file is migrated before the
@@ -410,6 +414,18 @@ func (s *splitStore) replaceFromSnapshot(data *Snapshot) error {
 	prepared, err := splitSnapshot(data)
 	if err != nil {
 		return err
+	}
+	// Snapshot/control compatibility writers must not erase a lost append.
+	// Preserve an unchanged partial tenant; reject mutations of its evidence.
+	for id, current := range s.tenant {
+		if len(current.pending) == 0 {
+			continue
+		}
+		next := prepared.tenant[id]
+		if next == nil || !reflect.DeepEqual(current.hot.Events, next.hot.Events) || !reflect.DeepEqual(current.hot.Streams, next.hot.Streams) || !reflect.DeepEqual(current.ledger.receipts, next.ledger.receipts) || !reflect.DeepEqual(current.ledger.segments, next.ledger.segments) || !reflect.DeepEqual(current.ledger.checkpoints, next.ledger.checkpoints) {
+			return ErrTenantCommitPending
+		}
+		prepared.tenant[id] = current
 	}
 	if err := s.persistPrepared(prepared); err != nil {
 		return err

@@ -17,6 +17,8 @@ type errorEnvelope struct {
 	Error struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		Reason  string `json:"reason"`
+		HoldID  string `json:"hold_id"`
 	} `json:"error"`
 }
 
@@ -120,6 +122,9 @@ func TestHTTPExportHold403BodyLeaksNothingCrossTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
+	if envelope.Error.Reason != "legal_hold" || envelope.Error.HoldID != hold.ID {
+		t.Fatalf("missing structured hold block: %+v", envelope.Error)
+	}
 	if envelope.Error.Code != "forbidden" {
 		t.Fatalf("error code=%q, want forbidden", envelope.Error.Code)
 	}
@@ -144,7 +149,7 @@ func TestHTTPExportHold403BodyLeaksNothingCrossTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if denied.Error.Code != "forbidden" || !strings.Contains(denied.Error.Message, hold.ID) {
+	if denied.Error.Code != "forbidden" || !strings.Contains(denied.Error.Message, hold.ID) || denied.Error.Reason != "legal_hold" || denied.Error.HoldID != hold.ID {
 		t.Fatalf("blocked download error envelope=%+v", denied.Error)
 	}
 

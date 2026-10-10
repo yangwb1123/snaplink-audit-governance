@@ -75,12 +75,18 @@ elif [ -n "${AUDIT_IDP_CLIENT_ID:-}" ] && [ -n "${AUDIT_IDP_CLIENT_SECRET:-}" ];
   # 第二主体（demo-admin）：职责分离 e2e 的审批者。mint 会覆盖
   # AUDIT_OUTBOX_TOKEN，先保存再恢复（relay 必须保持 demo 客户端身份）。
   FIRST_OUTBOX_TOKEN="${AUDIT_OUTBOX_TOKEN}"
+  FIRST_IDP_CLIENT_ID="${AUDIT_IDP_CLIENT_ID}"
+  FIRST_IDP_CLIENT_SECRET="${AUDIT_IDP_CLIENT_SECRET}"
+  FIRST_IDP_SCOPE="${AUDIT_IDP_SCOPE}"
   AUDIT_IDP_CLIENT_ID="${AUDIT_IDP_ADMIN_CLIENT_ID:-demo-admin}"
   AUDIT_IDP_CLIENT_SECRET="${AUDIT_IDP_ADMIN_CLIENT_SECRET:-demo-admin-secret}"
   AUDIT_IDP_SCOPE="audit:event:read audit:operation:read audit:export:create audit:integrity:verify audit:legal_hold:manage audit:policy:read"
   source "${ROOT}/scripts/mint-token.sh" >/dev/null
   AUTH_SECONDARY="Bearer ${AUDIT_E2E_TOKEN}"
   export AUDIT_OUTBOX_TOKEN="${FIRST_OUTBOX_TOKEN}"
+  AUDIT_IDP_CLIENT_ID="${FIRST_IDP_CLIENT_ID}"
+  AUDIT_IDP_CLIENT_SECRET="${FIRST_IDP_CLIENT_SECRET}"
+  AUDIT_IDP_SCOPE="${FIRST_IDP_SCOPE}"
   log "PASS: real IdP token in use (G1 fixture path); dev auth off"
 else
   log "WARN: no IdP token fixture configured; using dev tokens (transitional, B1-7 awaits B4-1)"
@@ -122,6 +128,10 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/005_admin_action_trail.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/007_publication_confirmation.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/008_query_snapshot.sql" >/dev/null
 
 # 自举归档依赖：S3Store.Ready 要求 bucket 存在、启用 Object Lock（WORM）、
 # versioning，并且（自 R-1 收口起）默认留存为 COMPLIANCE 模式 + 正有效期。
@@ -178,7 +188,9 @@ fi
 
 checkconfig_expect() { # bucket want_marker forbid_marker want_rc
   local bucket="$1" want="$2" forbid="$3" wantrc="$4" rc
-  AUDIT_S3_BUCKET="$bucket" "$WORKER_BIN" -check-config >"$CHECKCONFIG_LOG" 2>&1 && rc=0 || rc=$?
+  # Match docker-compose.verify.yml's explicit local fixture-secret opt-in.
+  # Otherwise secret validation masks the Object Lock negative assertions.
+  AUDIT_ALLOW_DEV_SECRETS=true AUDIT_S3_BUCKET="$bucket" "$WORKER_BIN" -check-config >"$CHECKCONFIG_LOG" 2>&1 && rc=0 || rc=$?
   if [ "$rc" -ne "$wantrc" ] \
      || ! grep -qE "$want" "$CHECKCONFIG_LOG" \
      || { [ -n "$forbid" ] && grep -qE "$forbid" "$CHECKCONFIG_LOG"; }; then
@@ -208,7 +220,7 @@ checkconfig_expect "worm-audit" "check_config=ok" "" 0
 rm -f "$CHECKCONFIG_LOG"
 
 log "starting applications (audit-api/relay/consumer/projector/worker/idp)"
-$COMPOSE up -d audit-api audit-outbox-relay audit-kafka-consumer \
+$COMPOSE up -d --build audit-api audit-outbox-relay audit-kafka-consumer \
   audit-projector audit-kafka-dlq-replay audit-governance-worker audit-idp
 
 wait_http "$API/readyz" || { log "audit-api not ready"; exit 1; }

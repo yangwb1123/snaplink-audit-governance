@@ -21,6 +21,35 @@ select {
   font: inherit;
 }
 
+.native-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--iris-space-md, 16px);
+}
+
+.native-table th,
+.native-table td {
+  padding: var(--iris-space-sm, 8px);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--iris-border);
+  overflow-wrap: anywhere;
+}
+
+.native-table td p {
+  margin: var(--iris-space-xs, 6px) 0;
+}
+
+.field-diff-table {
+  overflow-x: auto;
+}
+
+.field-diff-table pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
 .bootstrap-page,
 .login-page {
   min-height: 100vh;

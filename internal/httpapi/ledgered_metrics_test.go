@@ -158,6 +158,7 @@ func newLedgeredGateFixture(t *testing.T, blockedID string) *ledgeredGateFixture
 	seeded := httpReadSeedEvent()
 	seeded.EventID = blockedID
 	seeded.TenantID = "tenant-a"
+	seeded.StreamID, seeded.Sequence, seeded.Hash = "tenant-a:source:crm", 1, "seed-ledger-hash"
 	if err := st.Update(testCtx, func(data *store.Snapshot) error {
 		data.LedgeredOutbox[store.EventKey(seeded.TenantID, seeded.EventID)] = seeded
 		return nil

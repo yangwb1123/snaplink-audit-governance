@@ -379,6 +379,9 @@ func TestQueryEventsCursorReproducesSet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if page.Count != reference.Count {
+			t.Fatalf("page %d count=%d, want total=%d", pages, page.Count, reference.Count)
+		}
 		for i := 0; i+1 < len(page.Items); i++ {
 			if !page.Items[i].OccurredAt.Before(page.Items[i+1].OccurredAt) {
 				t.Fatalf("page %d not strictly increasing: %v", pages, eventIDs(page.Items))

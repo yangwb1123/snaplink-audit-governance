@@ -212,6 +212,16 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		} else {
 			logger.Printf("tenant=%s stuck_exports_recovered=%d", tenant.ID, recovered)
 		}
+		if recovered, recoverErr := svc.RecoverHotTenantCommit(ctx, tenant.ID); recoverErr != nil {
+			logger.Printf("tenant=%s hot_commit_recovery_failed", tenant.ID)
+			// Unvalidated or uncommitted hot evidence must not be sealed,
+			// archived or treated as an eligible retention candidate.
+			if ctx.Err() == nil {
+				continue
+			}
+		} else if recovered > 0 {
+			logger.Printf("tenant=%s hot_commit_recovered_records=%d", tenant.ID, recovered)
+		}
 		if err := svc.SealPendingSegments(ctx, tenant.ID); err != nil {
 			logger.Printf("tenant=%s checkpoint_error=%v", tenant.ID, err)
 		}

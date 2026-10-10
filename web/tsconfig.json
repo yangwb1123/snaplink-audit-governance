@@ -24,6 +24,6 @@
     "types": ["vite/client", "svelte"],
     "allowJs": false
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.svelte.ts", "vite.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.svelte.ts", "vite.config.ts", "playwright.config.ts", "test/browser/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

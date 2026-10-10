@@ -119,9 +119,9 @@ func (s *Service) VerifyIntegrity(ctx context.Context, tenantID, actor, streamID
 	schemas := map[string]domain.EventSchema{}
 	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
 		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
+		events, resolveErr = s.resolveSnapshotEvents(ctx, data, tenantID, func(event domain.Event) bool {
 			return streamID == "" || event.StreamID == streamID
-		})
+		}, false)
 		if resolveErr != nil {
 			return resolveErr
 		}

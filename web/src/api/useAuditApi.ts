@@ -11,6 +11,9 @@ export function useAuditApi(): AuditApi {
     baseUrl: config.auditApiBaseUrl,
     accessToken: session.accessToken,
     platform: session.platform,
-    onUnauthorized: invalidate,
+    // A late 401 from an old page/token must not invalidate a newer login.
+    onUnauthorized: () => {
+      if (get(authState).session?.accessToken === session.accessToken) invalidate()
+    },
   })
 }

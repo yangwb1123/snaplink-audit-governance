@@ -66,8 +66,11 @@ if os.environ["EXPECTED_RESOURCE"] not in audience:
 '
 fi
 
-# Shell-exportable output; works both when sourced (`source mint-token.sh`)
-# and when evaluated (`eval "$(./mint-token.sh)"`).
+# Sourcing already sets the caller's environment: never echo bearer tokens
+# into verification/CI logs. Direct execution retains the documented eval
+# interface; capture its output, do not send it to a log or use shell tracing.
 export AUDIT_OUTBOX_TOKEN="${TOKEN}"
 export AUDIT_E2E_TOKEN="${TOKEN}"
-printf 'export AUDIT_OUTBOX_TOKEN=%q\nexport AUDIT_E2E_TOKEN=%q\n' "${TOKEN}" "${TOKEN}"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  printf 'export AUDIT_OUTBOX_TOKEN=%q\nexport AUDIT_E2E_TOKEN=%q\n' "${TOKEN}" "${TOKEN}"
+fi

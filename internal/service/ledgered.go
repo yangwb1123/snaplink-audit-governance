@@ -143,8 +143,17 @@ func (s *Service) publishLedgeredNow(ctx context.Context, event domain.Event) bo
 }
 
 func (s *Service) ackLedgered(ctx context.Context, event domain.Event) error {
+	// Broker -> durable identity-bound confirmation -> outbox cleanup. Never
+	// remove the intent first: an interrupted confirmation would lose delivery.
+	if err := s.Store.ConfirmPublication(ctx, event); err != nil {
+		return err
+	}
+	return s.clearLedgeredIntent(ctx, event)
+}
+
+func (s *Service) clearLedgeredIntent(ctx context.Context, event domain.Event) error {
 	key := store.EventKey(event.TenantID, event.EventID)
-	return s.Store.Update(ctx, func(data *store.Snapshot) error {
+	return s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		delete(data.LedgeredOutbox, key)
 		return nil
 	})
@@ -169,7 +178,7 @@ const (
 func (s *Service) pendingLedgeredOutbox(ctx context.Context) ([]string, map[string]domain.Event, error) {
 	keys := make([]string, 0, ledgeredOutboxBatchSize)
 	events := make(map[string]domain.Event, ledgeredOutboxBatchSize)
-	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
+	if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 		for key, event := range data.LedgeredOutbox {
 			keys = append(keys, key)
 			events[key] = event
@@ -201,7 +210,7 @@ type ledgeredRevalidator struct {
 func (r *ledgeredRevalidator) stillPending(ctx context.Context, key string) bool {
 	if !r.read {
 		r.read = true
-		if err := r.svc.Store.Read(ctx, func(data *store.Snapshot) error {
+		if err := r.svc.Store.ReadControl(ctx, func(data *store.Snapshot) error {
 			r.pending = make(map[string]struct{}, len(data.LedgeredOutbox))
 			for pending := range data.LedgeredOutbox {
 				r.pending[pending] = struct{}{}
@@ -236,6 +245,21 @@ func (s *Service) flushLedgeredKey(ctx context.Context, key string, event domain
 	// snapshot stale, so the counter decides whether revalidation is needed
 	// at all.
 	if s.ledgeredRequestAcks.Load() != acksAtSnapshot && !revalidate.stillPending(ctx, key) {
+		return ledgeredKeySkipped, nil
+	}
+	confirmed, err := s.Store.PublicationConfirmed(ctx, receiptFromEvent(event))
+	if err != nil {
+		s.ledgeredPublishFailures.Add(1)
+		return ledgeredKeyFailed, err
+	}
+	if confirmed {
+		// Another replica, or a crashed cleanup, already delivered this exact
+		// event. Clear a stale intent without issuing another broker call.
+		if err := s.clearLedgeredIntent(ctx, event); err != nil {
+			s.ledgeredPublishFailures.Add(1)
+			return ledgeredKeyFailed, err
+		}
+		s.ledgeredPublishSuccesses.Add(1)
 		return ledgeredKeySkipped, nil
 	}
 	if !s.publishLedgeredNow(ctx, event) {
@@ -277,10 +301,8 @@ func (s *Service) flushLedgeredKey(ctx context.Context, key string, event domain
 // The method is safe to call from a restart recovery loop and is a no-op when
 // publication is not configured.
 //
-// Known limitation: the caller retries on a fixed tick with no backoff or
-// jitter, so N replicas retry a dead broker in lockstep. Left as-is here
-// because the retry cadence belongs to the flush loop's owner
-// (cmd/audit-api/ledgered.go).
+// Retry cadence (exponential backoff and jitter) belongs to the loop owner in
+// cmd/audit-api/ledgered.go. The loop also actively repairs missing intents.
 func (s *Service) FlushLedgeredOutbox(ctx context.Context, limit int) (int, error) {
 	if s.Config.LedgeredPublisher == nil || s.Store == nil {
 		return 0, nil

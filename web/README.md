@@ -56,7 +56,29 @@ AUDIT_API_PROXY=http://localhost:19089 make web-dev
 
 前端通过 discovery 的 `jwks_uri` 校验 ID token 和 access token 的签名、issuer、
 audience 与有效期，并校验 state 和 nonce。令牌仅保存在 Svelte 应用内存中；
-sessionStorage 只保存一次性的 state、nonce 和 PKCE verifier。Audit API 仍是最终授权方。
+sessionStorage 只保存一次性的 state、nonce、PKCE verifier 和经白名单校验的返回路由；不保存完整 URL、查询载荷或令牌，登录后消费删除。Audit API 仍是最终授权方。
+
+## 治理任务工作台
+
+证据区拆为导出任务、恢复审批、法律保留、完整性四个独立授权子页。
+导出入口要求 `audit:export:create`，恢复读取要求 `audit:operation:read`，
+保留管理要求 `audit:legal_hold:manage`，完整性要求 `audit:integrity:verify`；
+恢复创建/决策暂沿用保留管理权限，服务端始终再次鉴权并禁止同主体自批。
+
+`GET /api/v1/exports`、`GET /api/v1/restores` 支持实时游标分页、状态、申请人、
+Operation 和创建时间筛选；`view=mine` 查看本人任务，恢复的 `view=actionable`
+还要求决策权限，并只返回其他已知主体创建的待审批单。`count` 是本次请求筛选的
+总匹配数量，不是剩余页数量。列表是运行状态，不是不可变证据快照。
+导出列表不包含证据范围、对象路径、摘要、事件数量及失败诊断；详情与下载继续通过
+Legal Hold 门禁，阻断响应兼容 `code=forbidden` 并增加 `reason=legal_hold`。
+
+任务支持 `#evidence/exports/<id>` 和 `#evidence/restores/<id>` 深链接。
+令牌不持久化，因此刷新需要重新登录；链接仍按当前有效租户解析，平台用户应重新
+选择任务所属租户，链接自身不能取得租户权限。切换身份、令牌或租户会取消请求、
+清理弹窗/预演/轮询，并通过请求代次丢弃晚到结果。进度未知只显示不定进度；当前
+没有取消/重试任务接口，也没有业务恢复执行按钮。`started_at` 是 CAS 领取时的真实
+开始时间，旧任务可能缺失；卡死恢复优先使用开始时间而非排队时长，但它还不是租约、
+心跳或可续跑检查点。
 
 ## 检查与构建
 
@@ -102,3 +124,20 @@ Facets 聚合、聚合历史与来源 Client 绑定接口。验证链还会使�
 仍保留给 Snaplink 控制台展示，Audit API 的最终授权以 access token scopes 为准。已有完整栈时
 可用 `AUDIT_WEB_REUSE_STACK=true make web-stack-up` 跳过基础设施重建；单独重跑认证
 链使用 `make web-auth-e2e`。停止本机验证栈使用 `make web-stack-down`。
+
+## 浏览器回归
+
+已有本机隔离服务（上述栈或本机真实 JWT API + Snaplink IdP）且 Web 地址与
+public client 注册的 redirect_uri 一致时执行：
+
+```sh
+corepack pnpm --dir web browser:test
+```
+
+默认 Web/API/IdP 端口为 15178/19089/18082，默认使用系统 Chrome；可设置
+`AUDIT_BROWSER_CHANNEL=chromium` 并安装相应 Playwright 浏览器。测试只接受 loopback
+服务。它覆盖最小权限入口、真实 API 导出/下载、后加 Hold 阻断、刷新后的任务链接、
+双主体审批，以及忽略 AbortSignal 时 A→B→A 的陈旧响应隔离；不录制令牌/载荷 trace、
+视频或截图。为了自动化，授权步骤通过真实 Snaplink password provider 完成，
+浏览器仍执行真实 PKCE、签名/nonce 校验和 API 授权；**不覆盖兄弟仓库 Flutter
+Hosted Login 的布局/交互，也不替代 PostgreSQL/Kafka/ClickHouse/WORM 完整栈验收**。

@@ -68,7 +68,8 @@ describe('Snaplink OAuth flow', () => {
     const discoveryOnly = vi.fn<typeof fetch>(
       async () => new Response(JSON.stringify(discovery), { status: 200 }),
     )
-    const loginTarget = new URL(await authorizationUrl({ config, storage, fetcher: discoveryOnly }))
+    const returnHash = '#evidence/exports/export-0123456789abcdef'
+    const loginTarget = new URL(await authorizationUrl({ config, storage, fetcher: discoveryOnly, returnHash }))
     expect(loginTarget.origin).toBe('https://console.example.test')
     expect(loginTarget.searchParams.get('code_challenge_method')).toBe('S256')
     expect(loginTarget.searchParams.get('resource')).toBe('audit-governance')
@@ -114,7 +115,9 @@ describe('Snaplink OAuth flow', () => {
     callback.searchParams.set('code', 'one-use-code')
     callback.searchParams.set('state', pending.state)
     callback.searchParams.set('iss', config.snaplinkIssuer)
-    const session = await completeAuthorization(callback, { config, storage, fetcher })
+    const onReturnHash = vi.fn()
+    const session = await completeAuthorization(callback, { config, storage, fetcher, onReturnHash })
+    expect(onReturnHash).toHaveBeenCalledWith(returnHash)
 
     expect(session.displayName).toBe('审计员')
     expect(session.tenantId).toBe('tenant-a')

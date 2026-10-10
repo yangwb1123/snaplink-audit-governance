@@ -222,7 +222,7 @@ func TestTenantIngestIntentIsOneCommitWithTheReceipt(t *testing.T) {
 // TestTenantIngestRepairIsOneShotPerProcess pins the R-4 bound: once this
 // process has re-created an intent, later retries must not keep re-queueing an
 // event whose publication the flush loop already owes.
-func TestTenantIngestRepairIsOneShotPerProcess(t *testing.T) {
+func TestTenantIngestRepairIsOneShotAfterConfirmation(t *testing.T) {
 	publisher := &recordingLedgeredPublisher{}
 	svc, arm, _ := faultedLedgeredService(t, publisher, false)
 	at := time.Unix(1_700_001_000, 0).UTC()
@@ -240,16 +240,11 @@ func TestTenantIngestRepairIsOneShotPerProcess(t *testing.T) {
 		t.Fatalf("repair counter=%d, want 1", got)
 	}
 
-	// Simulate the flush loop delivering and acknowledging the repaired row,
-	// then retry again. The receipt is still StatusLedgered (publication does
-	// not advance it), so only the bounded repair set can stop a second
-	// re-creation.
-	key := store.EventKey("tenant-a", event.EventID)
-	if err := svc.Store.Update(testCtx, func(data *store.Snapshot) error {
-		delete(data.LedgeredOutbox, key)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	// Actually deliver and durably confirm the repaired row, then retry.
+	// The receipt is still StatusLedgered; the persistent confirmation, not
+	// a process-local set or the absence of an outbox row, prevents requeue.
+	if n, err := svc.FlushLedgeredOutbox(testCtx, 10); err != nil || n != 1 {
+		t.Fatalf("flush=%d err=%v", n, err)
 	}
 	if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 		t.Fatal(err)

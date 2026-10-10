@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/snaplink/audit-governance/internal/domain"
@@ -17,7 +18,23 @@ import (
 // Store.mu is a non-reentrant mutex held for the whole UpdateTenant, and a
 // separate control write would be a separate durability boundary that a crash
 // can fall between.
-func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal domain.IngestPrincipal, tenantID string, event domain.Event, inputDigest string) (domain.Event, domain.EventReceipt, []domain.Segment, error) {
+func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal domain.IngestPrincipal, tenantID string, event domain.Event, inputDigest string) (result domain.Event, receipt domain.EventReceipt, sealed []domain.Segment, err error) {
+	err = s.Store.WithOperation(ctx, func(ctx context.Context) error {
+		var attemptErr error
+		result, receipt, sealed, attemptErr = s.ingestTenantOnce(ctx, tenantHint, principal, tenantID, event, inputDigest)
+		if !errors.Is(attemptErr, store.ErrTenantCommitPending) {
+			return attemptErr
+		}
+		if _, recoverErr := s.RecoverHotTenantCommit(ctx, tenantID); recoverErr != nil {
+			return recoverErr
+		}
+		result, receipt, sealed, attemptErr = s.ingestTenantOnce(ctx, tenantHint, principal, tenantID, event, inputDigest)
+		return attemptErr
+	})
+	return
+}
+
+func (s *Service) ingestTenantOnce(ctx context.Context, tenantHint string, principal domain.IngestPrincipal, tenantID string, event domain.Event, inputDigest string) (domain.Event, domain.EventReceipt, []domain.Segment, error) {
 	var receipt domain.EventReceipt
 	var sealed []domain.Segment
 	key := store.EventKey(tenantID, event.EventID)
@@ -41,10 +58,12 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 			receipt = existing
 			// Only a clean duplicate is repairable: a content conflict
 			// (existingErr != nil) must never queue anything for publication.
-			if existingErr == nil && s.repairLedgeredIntent(view, existing, key) {
-				repaired = true
+			if existingErr != nil {
+				return existingErr
 			}
-			return existingErr
+			var repairErr error
+			repaired, repairErr = s.repairLedgeredIntent(view, existing, key)
+			return repairErr
 		}
 		if idempotencyKeyReusedTenant(view, tenantID, key, event.IdempotencyKey) {
 			// The colliding (rejected) caller observes a freshly built,
@@ -61,6 +80,9 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 		stream := view.Hot.Streams[streamKey]
 		if stream.StreamID == "" {
 			stream = store.StreamState{TenantID: tenantID, StreamID: streamID, NextSequence: 1}
+		}
+		if err := validateIngestHotHead(view, stream); err != nil {
+			return err
 		}
 		event.StreamID = streamID
 		event.Sequence = stream.NextSequence
@@ -110,10 +132,26 @@ func (s *Service) ingestTenant(ctx context.Context, tenantHint string, principal
 		return nil
 	})
 	if err != nil {
+		// A hot-only append failure must not masquerade as a durable receipt
+		// (notably WriteBatch's COMMITTED outcome). Preserve known cold truth
+		// after a control failure, otherwise report the outcome as unknown.
+		if receipt.EventID != "" && !receipt.Conflict {
+			var committed domain.EventReceipt
+			readErr := s.Store.ReadTenant(ctx, tenantID, func(view *store.TenantView) error {
+				if value, ok := view.Ledger.Receipt(key); ok {
+					committed = value
+				}
+				return view.Ledger.Err()
+			})
+			if readErr != nil {
+				committed = domain.EventReceipt{}
+			}
+			receipt = committed
+		}
 		return event, receipt, sealed, err
 	}
 	if repaired {
-		s.rememberLedgeredIntentRepair(key)
+		s.ledgeredIntentRepairs.Add(1)
 	}
 	if receipt.Duplicate {
 		return event, receipt, sealed, nil
@@ -156,7 +194,9 @@ func (s *Service) checkExistingTenantIngest(ctx context.Context, view *store.Ten
 		}
 	}
 	if !hasReceipt {
-		stored = receiptFromEvent(existing)
+		// Pre-journal hot-only evidence has no exact recovery plan. A body
+		// alone cannot prove which receipt/segment/checkpoint was committed.
+		return domain.EventReceipt{}, true, fmt.Errorf("%w: hot evidence has no committed receipt", domain.ErrConflict)
 	}
 	digest, err := s.reconstructAndDerive(existing, view.Global.Schemas)
 	if err != nil {

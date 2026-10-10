@@ -1,12 +1,11 @@
 <script lang="ts">
   import { IrisAlert, IrisButton } from '@iris-ui-kit/svelte'
   import { ApiError } from '../api/client'
+  import { errorPresentation } from '../api/errorPresentation'
 
   let { error, onRetry }: { error: unknown; onRetry?: () => void } = $props()
 
-  function message(): string {
-    return error instanceof Error ? error.message : '请求失败'
-  }
+  const presentation = $derived(errorPresentation(error))
 
   function detail(): string | null {
     if (!(error instanceof ApiError)) return null
@@ -16,16 +15,17 @@
 
 {#if error}
   <IrisAlert
-    tone={error instanceof ApiError && error.status === 403 ? 'warning' : 'danger'}
-    title={message()}
+    tone={presentation.warning ? 'warning' : 'danger'}
+    title={presentation.title}
     onclose={undefined}
     style=""
     icon={undefined}
     titleSlot={undefined}
   >
+    <p>{presentation.guidance}</p>
     <div class="alert-detail">
       {#if detail()}<span>{detail()}</span>{/if}
-      {#if onRetry}
+      {#if onRetry && presentation.retryable}
         <IrisButton size="sm" variant="outline" onclick={onRetry}>重试</IrisButton>
       {/if}
     </div>

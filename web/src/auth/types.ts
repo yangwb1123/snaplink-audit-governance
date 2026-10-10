@@ -53,6 +53,7 @@ export interface PendingAuthorization {
   redirectUri: string
   issuer: string
   createdAt: number
+  returnHash?: string
 }
 
 export interface AuthDependencies {
@@ -60,4 +61,6 @@ export interface AuthDependencies {
   fetcher?: typeof fetch
   storage?: Storage
   crypto?: Crypto
+  returnHash?: string
+  onReturnHash?: (hash: string) => void
 }

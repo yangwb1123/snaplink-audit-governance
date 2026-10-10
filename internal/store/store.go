@@ -219,6 +219,15 @@ type Store struct {
 	backend Backend
 	split   *splitStore
 	pgSplit *postgresSplitStore
+	// publications is used only by in-memory/test backends. Durable backends
+	// use indexed rows or addressed files, never the shared control snapshot.
+	publications map[string]publicationConfirmation
+	// publicationSyncDir is nil in production. Tests can reproduce a rename
+	// whose ancestor directory fsync fails without changing global hooks.
+	publicationSyncDir func(string) error
+	// Query artifacts have a separate lock and never rewrite ledger/control.
+	queryMu        sync.Mutex
+	querySnapshots map[string][]byte
 
 	// opts holds the resolved operation timeout (see Options). pool is the
 	// PostgreSQL handle for this store, or nil for file/in-memory stores;
@@ -284,6 +293,20 @@ func OpenWithControlWriteFault(path string, fault ControlWriteFault) (*Store, er
 	}
 	split.controlWriteFault = fault
 	return &Store{backend: backend, split: split}, nil
+}
+
+// OpenWithLedgerWriteFault is an instance-local test seam at the HotFirst
+// cold append boundary. Production constructors always leave the hook nil.
+func OpenWithLedgerWriteFault(path string, fault func() error) (*Store, error) {
+	if fault == nil {
+		return nil, errors.New("store: ledger write fault requires a hook")
+	}
+	st, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	st.split.ledgerWriteFault = fault
+	return st, nil
 }
 
 // OpenPostgres returns a store whose snapshot lives in the single-row

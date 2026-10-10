@@ -38,9 +38,13 @@ func (r *archivePutRecorder) Ready(context.Context) error { return nil }
 
 type archivePutBlockingStore struct {
 	observedErr error
+	cancelOnPut context.CancelFunc
 }
 
 func (s *archivePutBlockingStore) Put(ctx context.Context, _ string, _ []byte) error {
+	if s.cancelOnPut != nil {
+		s.cancelOnPut()
+	}
 	<-ctx.Done()
 	s.observedErr = ctx.Err()
 	return ctx.Err()
@@ -137,20 +141,47 @@ func TestArchivePendingCancelledCtxAbortsPut(t *testing.T) {
 
 func TestIngestArchivePutUsesCallerContext(t *testing.T) {
 	svc := testService(t, true)
-	blocking := &archivePutBlockingStore{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel precisely when Put starts, not while preflight/fsync is still
+	// running. A 50ms timer armed before Ingest could expire before Put under
+	// race/load, testing early withdrawal rather than context propagation.
+	blocking := &archivePutBlockingStore{cancelOnPut: cancel}
 	svc.Config.Archive = blocking
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
 	receipt, err := svc.Ingest(ctx, "tenant-a", crmPrincipal, testEvent("ingest-context", "op-context", time.Unix(1_700_000_010, 0).UTC()), domain.StatusArchived)
-	if err == nil {
-		t.Fatal("Ingest succeeded despite a cancelled archive Put")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ingest err=%v, want caller cancellation from archive Put", err)
 	}
-	if !errors.Is(blocking.observedErr, context.DeadlineExceeded) {
-		t.Fatalf("Put observed %v, want caller deadline exceeded", blocking.observedErr)
+	if !errors.Is(blocking.observedErr, context.Canceled) {
+		t.Fatalf("Put observed %v, want caller cancellation", blocking.observedErr)
 	}
 	if receipt.Status == domain.StatusArchived {
 		t.Fatalf("receipt=%+v, must not claim archived after a failed Put", receipt)
+	}
+}
+
+func TestIngestArchivePutPreservesEarlierCallerDeadline(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	svc := newServiceOn(t, st)
+	seedTestDomain(t, svc)
+	recorder := &archivePutRecorder{}
+	svc.Config.Archive = recorder
+	// Assert the exact inherited deadline rather than relying on how fast
+	// preparation reaches a blocking Put. The per-object timeout stays 5s;
+	// the existing worker and detached-ingest tests still exercise real expiry.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	if _, err := svc.Ingest(ctx, "tenant-a", crmPrincipal, testEvent("ingest-earlier-deadline", "op-context", time.Unix(1_700_000_010, 0).UTC()), domain.StatusArchived); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.puts) != 1 || !recorder.puts[0].deadline.Equal(want) {
+		t.Fatalf("Put did not preserve the earlier caller deadline: puts=%d", len(recorder.puts))
 	}
 }
 

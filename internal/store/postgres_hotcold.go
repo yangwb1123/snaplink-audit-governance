@@ -207,6 +207,12 @@ func (p *postgresSplitStore) loadTenantHot(ctx context.Context, tenantID string)
 	if err := decodeJSON(encoded, &disk); err != nil {
 		return nil, 0, fmt.Errorf("decode tenant %s: %w", tenantID, err)
 	}
+	if disk.TenantID != "" && disk.TenantID != tenantID {
+		return nil, 0, fmt.Errorf("%w: tenant hot identity mismatch", domain.ErrInvalid)
+	}
+	if len(disk.PendingLedger) > 0 {
+		return nil, 0, ErrTenantCommitPending
+	}
 	if disk.Events != nil {
 		hot.Events = disk.Events
 	}
@@ -216,13 +222,22 @@ func (p *postgresSplitStore) loadTenantHot(ctx context.Context, tenantID string)
 	return hot, version, nil
 }
 
+type tenantCommitSQL interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (p *postgresSplitStore) saveTenantHot(ctx context.Context, tenantID string, hot *Snapshot, version int64) error {
+	return p.saveTenantHotOn(ctx, p.backend.db, tenantID, hot, version)
+}
+
+func (p *postgresSplitStore) saveTenantHotOn(ctx context.Context, db tenantCommitSQL, tenantID string, hot *Snapshot, version int64) error {
 	disk := tenantHotSnapshot{TenantID: tenantID, Version: version + 1, Events: hot.Events, Streams: hot.Streams}
 	encoded, err := json.Marshal(disk)
 	if err != nil {
 		return err
 	}
-	result, err := p.backend.db.ExecContext(ctx, postgresTenantSaveQuery, tenantID, string(encoded), version)
+	result, err := db.ExecContext(ctx, postgresTenantSaveQuery, tenantID, string(encoded), version)
 	if err != nil {
 		return fmt.Errorf("save tenant %s: %w", tenantID, err)
 	}
@@ -313,10 +328,10 @@ func (p *postgresSplitStore) updateTenantOnce(ctx context.Context, tenantID stri
 			return err
 		}
 	} else {
-		if err := p.saveTenantHot(ctx, tenantID, retainedHot, version); err != nil {
-			return err
-		}
-		if err := p.appendLedger(ctx, pending); err != nil {
+		// The logical HotFirst order stays hot then ledger, but PostgreSQL
+		// makes both visible atomically. A cold error rolls back the hot CAS;
+		// other replicas can never continue from an uncommitted stream head.
+		if err := p.commitHotFirst(ctx, tenantID, retainedHot, version, pending); err != nil {
 			return err
 		}
 	}
@@ -411,7 +426,26 @@ func unionControlSlice[T any](current, mutated []T) []T {
 	return union
 }
 
+func (p *postgresSplitStore) commitHotFirst(ctx context.Context, tenantID string, hot *Snapshot, version int64, records []LedgerRecord) error {
+	tx, err := p.backend.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := p.saveTenantHotOn(ctx, tx, tenantID, hot, version); err != nil {
+		return err
+	}
+	if err := p.appendLedgerOn(ctx, tx, records); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (p *postgresSplitStore) appendLedger(ctx context.Context, records []LedgerRecord) error {
+	return p.appendLedgerOn(ctx, p.backend.db, records)
+}
+
+func (p *postgresSplitStore) appendLedgerOn(ctx context.Context, db tenantCommitSQL, records []LedgerRecord) error {
 	for _, record := range records {
 		if err := validateLedgerRecord(record); err != nil {
 			return err
@@ -420,7 +454,7 @@ func (p *postgresSplitStore) appendLedger(ctx context.Context, records []LedgerR
 		if err != nil {
 			return err
 		}
-		result, err := p.backend.db.ExecContext(ctx, postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt)
+		result, err := db.ExecContext(ctx, postgresLedgerAppendQuery, record.TenantID, record.RecordType, record.Key, record.Version, string(encoded), record.WrittenAt)
 		if err != nil {
 			return fmt.Errorf("append tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
 		}
@@ -434,7 +468,7 @@ func (p *postgresSplitStore) appendLedger(ctx context.Context, records []LedgerR
 		var sqlTenant, sqlType, sqlKey string
 		var sqlVersion int
 		var existingEncoded []byte
-		err = p.backend.db.QueryRowContext(ctx, `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4`, record.TenantID, record.RecordType, record.Key, record.Version).Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &existingEncoded)
+		err = db.QueryRowContext(ctx, `SELECT tenant_id, record_type, key, version, record FROM audit_ledger WHERE tenant_id = $1 AND record_type = $2 AND key = $3 AND version = $4`, record.TenantID, record.RecordType, record.Key, record.Version).Scan(&sqlTenant, &sqlType, &sqlKey, &sqlVersion, &existingEncoded)
 		if err != nil {
 			return fmt.Errorf("inspect existing tenant ledger %s/%s: %w", record.TenantID, record.Key, err)
 		}

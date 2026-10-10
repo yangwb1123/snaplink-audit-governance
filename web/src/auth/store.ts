@@ -14,7 +14,7 @@ export interface AuthState {
 const initialState: AuthState = { status: 'checking', session: null, error: null }
 export const authState = writable<AuthState>(initialState)
 
-let callbackPromise: Promise<UserSession> | null = null
+let callbackPromise: Promise<{ session: UserSession; returnHash: string }> | null = null
 let expiryTimer: number | undefined
 
 function clearExpiryTimer(): void {
@@ -42,10 +42,14 @@ export async function bootstrapAuth(): Promise<void> {
     return
   }
   try {
-    callbackPromise ??= completeAuthorization(new URL(window.location.href), { config })
-    const session = await callbackPromise
-    setSession(session)
-    window.history.replaceState(null, '', `${config.appBasePath}#overview`)
+    callbackPromise ??= (async () => {
+      let returnHash = '#overview'
+      const session = await completeAuthorization(new URL(window.location.href), { config, onReturnHash: (hash) => (returnHash = hash) })
+      return { session, returnHash }
+    })()
+    const result = await callbackPromise
+    setSession(result.session)
+    window.history.replaceState(null, '', `${config.appBasePath}${result.returnHash}`)
   } catch (cause) {
     authState.set({
       status: 'error',
@@ -62,7 +66,7 @@ export async function login(): Promise<void> {
   const config = loadRuntimeConfig()
   authState.update((state) => ({ ...state, status: 'checking', error: null }))
   try {
-    window.location.assign(await authorizationUrl({ config }))
+    window.location.assign(await authorizationUrl({ config, returnHash: window.location.hash }))
   } catch (cause) {
     authState.set({
       status: 'error',

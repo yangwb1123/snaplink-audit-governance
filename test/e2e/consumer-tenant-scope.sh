@@ -59,6 +59,10 @@ $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/004_state_snapshot.sql" >/dev/null
 $COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
   -f - < "${ROOT}/migrations/005_admin_action_trail.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/007_publication_confirmation.sql" >/dev/null
+$COMPOSE exec -T postgres psql -U audit -d audit -v ON_ERROR_STOP=1 \
+  -f - < "${ROOT}/migrations/008_query_snapshot.sql" >/dev/null
 
 # audit-api probes the archive destination at boot (probeArchiveReady), so the
 # WORM bucket must be fully bootstrapped before it starts (fullstack.sh parity).

@@ -137,10 +137,26 @@ func (s *Service) eventFromSnapshot(ctx context.Context, data *store.Snapshot, t
 // receipts no longer have a hot payload. Callers provide the predicate so
 // timeline, export and legal-hold reads share one fallback implementation.
 func (s *Service) eventsFromSnapshot(ctx context.Context, data *store.Snapshot, tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
+	return s.resolveSnapshotEvents(ctx, data, tenantID, predicate, true)
+}
+
+// Integrity verification must examine corrupted committed hot bodies to return
+// an invalid verdict and self-audit it, not turn corruption into a 409 or hide
+// it. This mode never exposes the payload and still excludes uncommitted hot.
+func (s *Service) resolveSnapshotEvents(ctx context.Context, data *store.Snapshot, tenantID string, predicate func(domain.Event) bool, checkCoordinates bool) ([]domain.Event, error) {
 	events := make([]domain.Event, 0)
-	for _, event := range data.Events {
+	for key, event := range data.Events {
 		if tenantID != "" && event.TenantID != tenantID {
 			continue
+		}
+		if data.LayoutVersion >= 2 {
+			receipt, committed := data.Receipts[key]
+			if !committed {
+				continue
+			} // a hot recovery marker is not ledger truth
+			if checkCoordinates && (receipt.TenantID != event.TenantID || receipt.EventID != event.EventID || receipt.StreamID != event.StreamID || receipt.Sequence != event.Sequence || receipt.Hash != event.Hash) {
+				return nil, domain.ErrConflict
+			}
 		}
 		cloned, err := domain.CloneEvent(event)
 		if err != nil {

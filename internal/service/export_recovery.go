@@ -2,36 +2,34 @@ package service
 
 import (
 	"context"
-	"sort"
 
 	"github.com/snaplink/audit-governance/internal/domain"
 	"github.com/snaplink/audit-governance/internal/store"
 )
 
 // ResumePendingExports schedules durable export jobs that survived an API
-// restart before their in-process worker started. runExport claims each job
-// with a CAS transition, so an API worker and a governance worker cannot both
-// execute the same pending job.
+// restart before their in-process worker started. The returned count is the
+// observed tenant backlog, NOT a claim count. A bounded fair dispatcher claims
+// shared durable work by CAS; no goroutine is allocated per pending record.
 func (s *Service) ResumePendingExports(ctx context.Context, tenantID string) (int, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return 0, err
 	}
-	var jobIDs []string
-	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for jobID, job := range data.Exports {
+	backlog := 0
+	if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
+		for _, job := range data.Exports {
 			if job.TenantID == tenantID && job.Status == "pending" {
-				jobIDs = append(jobIDs, jobID)
+				backlog++
 			}
 		}
 		return nil
 	}); err != nil {
 		return 0, err
 	}
-	sort.Strings(jobIDs)
-	for _, jobID := range jobIDs {
-		go s.runExport(ctx, jobID)
+	if backlog != 0 {
+		s.wakeExports(ctx)
 	}
-	return len(jobIDs), nil
+	return backlog, nil
 }
 
 func (s *Service) claimPendingExport(ctx context.Context, jobID string) (domain.ExportJob, bool, error) {
@@ -41,10 +39,12 @@ func (s *Service) claimPendingExport(ctx context.Context, jobID string) (domain.
 		job = domain.ExportJob{}
 		claimed = false
 		value, ok := data.Exports[jobID]
-		if !ok || value.Status != "pending" {
+		if !ok || value.Status != "pending" || !exportClaimHasCapacity(data.Exports, value.TenantID) {
 			return false, nil
 		}
+		now := s.Now()
 		value.Status = "running"
+		value.StartedAt = &now
 		data.Exports[jobID] = value
 		job = value
 		claimed = true

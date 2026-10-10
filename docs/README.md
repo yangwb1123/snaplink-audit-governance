@@ -7,13 +7,13 @@
 - [`../README.md`](../README.md) — 职责边界、当前实现的功能面、核心原则
 - [`ARCHITECTURE_PLAN.md`](ARCHITECTURE_PLAN.md) — 架构基线、CQRS 分工、产品边界与非目标
 - [`GLOSSARY.md`](GLOSSARY.md) — 术语
-- [`../api/openapi/openapi.yaml`](../api/openapi/openapi.yaml) · [`../api/asyncapi/asyncapi.yaml`](../api/asyncapi/asyncapi.yaml) · [`../api/proto/audit.proto`](../api/proto/audit.proto) — 三条线面契约（29 个 REST 路径 / 3 个 topic / 3 个 gRPC 方法）
+- [`../api/openapi/openapi.yaml`](../api/openapi/openapi.yaml) · [`../api/asyncapi/asyncapi.yaml`](../api/asyncapi/asyncapi.yaml) · [`../api/proto/audit.proto`](../api/proto/audit.proto) — 三条线面契约（30 个 REST 路径 / 38 个 REST 操作 / 4 个 topic / 3 个 gRPC 方法）
 
 ## 我要改代码，怕破坏什么
 
 - [`ENGINEERING_GATE.md`](ENGINEERING_GATE.md) — 强制门禁的阶段清单；失败行即阶段命令
 - [`CONTRACT_SYNC.md`](CONTRACT_SYNC.md) — 契约面与运行时的同步规则（proto 三道防线等）
-- [`adr/`](adr/) — 已决策且不再重开的问题（消息接入、编码、分段哈希链、投影路由、归档与密钥、租户键框架、开发认证、导出完整性、平台 token 过滤、跨进程一致性键）
+- [`adr/`](adr/) — 已决策且不再重开的问题（消息接入、编码、分段哈希链、投影路由、归档与密钥、租户键框架、开发认证、导出完整性、平台 token 过滤、跨进程一致性键、发布确认与主动对账、当前目的地投影确认/流前缀/账本重建、固定查询成员集/授权游标/投影候选读取、导出队列预算/公平调度/锁外下载读取、HotFirst 原始追加意图/断点恢复）
 - [`design/`](design/) · [`proposals/`](proposals/) — 设计与提案；每篇的规模与状态见 [`proposals/README.md`](proposals/README.md)（历史决策输入，不是当前规范）
 - [`THREAT_MODEL.md`](THREAT_MODEL.md) — 威胁模型（含归档传输与留存门禁）
 
