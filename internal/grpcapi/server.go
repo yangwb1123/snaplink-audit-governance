@@ -77,8 +77,11 @@ func (s *Server) WriteBatch(ctx context.Context, request *auditv1.WriteBatchRequ
 	response := &auditv1.WriteBatchResponse{}
 	principal := domain.IngestPrincipal{ClientID: claims.ClientID}
 	commitCtx := context.WithoutCancel(ctx)
-	for index, item := range request.GetEvents() {
-		outcome := &auditv1.WriteBatchOutcome{InputIndex: int32(index), EventId: batchEventID(item)}
+	// The count cap above bounds the protocol index. Iterate in its actual
+	// type rather than narrowing an arbitrary machine-word index per outcome.
+	for index := int32(0); int(index) < len(request.GetEvents()); index++ {
+		item := request.GetEvents()[index]
+		outcome := &auditv1.WriteBatchOutcome{InputIndex: index, EventId: batchEventID(item)}
 		event, convertErr := fromProto(item)
 		if convertErr != nil {
 			response.Outcomes = appendRejectedOutcome(response.Outcomes, outcome, s.statusError(convertErr))
@@ -131,10 +134,10 @@ func appendRejectedOutcome(outcomes []*auditv1.WriteBatchOutcome, outcome *audit
 	return append(outcomes, outcome)
 }
 
-func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*auditv1.EventEnvelope, start int) []*auditv1.WriteBatchOutcome {
-	for index := start; index < len(events); index++ {
+func appendUnattemptedOutcomes(outcomes []*auditv1.WriteBatchOutcome, events []*auditv1.EventEnvelope, start int32) []*auditv1.WriteBatchOutcome {
+	for index := start; int(index) < len(events); index++ {
 		outcomes = append(outcomes, &auditv1.WriteBatchOutcome{
-			InputIndex: int32(index), EventId: batchEventID(events[index]),
+			InputIndex: index, EventId: batchEventID(events[index]),
 			Status: auditv1.WriteBatchOutcome_NOT_ATTEMPTED,
 		})
 	}

@@ -17,5 +17,8 @@
 
 <IrisCard variant="outline" class="timeline-card" style="" header={undefined} footer={undefined}>
   <h3 class="card-heading">{title}</h3>
+  {#if result && items.length === 0}
+    <p class="muted-copy" role="status">本次读取未返回事件；这不是历史不存在或完整性的证明。</p>
+  {/if}
   <IrisTimeline {items} />
 </IrisCard>

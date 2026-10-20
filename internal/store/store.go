@@ -79,19 +79,22 @@ type Snapshot struct {
 	// this snapshot while tenant hot data and immutable ledger metadata live
 	// in the split tier. The field is additive so old snapshots remain
 	// decodable and can be migrated on the next file-store open.
-	LayoutVersion int                               `json:"layout_version,omitempty"`
-	Tenants       map[string]domain.Tenant          `json:"tenants"`
-	Sources       map[string]domain.SourceSystem    `json:"sources"`
-	Schemas       map[string]domain.EventSchema     `json:"schemas"`
-	Policies      map[string]domain.RetentionPolicy `json:"policies"`
-	Events        map[string]domain.Event           `json:"events"`
-	Receipts      map[string]domain.EventReceipt    `json:"receipts"`
-	Streams       map[string]StreamState            `json:"streams"`
-	Segments      map[string][]domain.Segment       `json:"segments"`
-	Checkpoints   map[string][]domain.Checkpoint    `json:"checkpoints"`
-	LegalHolds    map[string]domain.LegalHold       `json:"legal_holds"`
-	Exports       map[string]domain.ExportJob       `json:"exports"`
-	RestoreRuns   map[string]domain.RestoreRun      `json:"restore_runs"`
+	LayoutVersion     int                               `json:"layout_version,omitempty"`
+	Tenants           map[string]domain.Tenant          `json:"tenants"`
+	Sources           map[string]domain.SourceSystem    `json:"sources"`
+	Schemas           map[string]domain.EventSchema     `json:"schemas"`
+	Policies          map[string]domain.RetentionPolicy `json:"policies"`
+	Events            map[string]domain.Event           `json:"events"`
+	Receipts          map[string]domain.EventReceipt    `json:"receipts"`
+	Streams           map[string]StreamState            `json:"streams"`
+	Segments          map[string][]domain.Segment       `json:"segments"`
+	Checkpoints       map[string][]domain.Checkpoint    `json:"checkpoints"`
+	LegalHolds        map[string]domain.LegalHold       `json:"legal_holds"`
+	Exports           map[string]domain.ExportJob       `json:"exports"`
+	ExportLeases      map[string]ExportLease            `json:"export_leases,omitempty"`
+	ExportCheckpoints map[string]ExportCheckpoint       `json:"export_checkpoints,omitempty"`
+	ExportPlans       map[string]ExportPlan             `json:"export_plans,omitempty"`
+	RestoreRuns       map[string]domain.RestoreRun      `json:"restore_runs"`
 	// LedgeredOutbox retains post-commit projection publications until a
 	// broker acknowledges them. It is intentionally separate from Events: the
 	// immutable event remains the source of truth while this queue is a
@@ -128,6 +131,9 @@ func NewSnapshot() *Snapshot {
 		Checkpoints:             map[string][]domain.Checkpoint{},
 		LegalHolds:              map[string]domain.LegalHold{},
 		Exports:                 map[string]domain.ExportJob{},
+		ExportLeases:            map[string]ExportLease{},
+		ExportCheckpoints:       map[string]ExportCheckpoint{},
+		ExportPlans:             map[string]ExportPlan{},
 		RestoreRuns:             map[string]domain.RestoreRun{},
 		LedgeredOutbox:          map[string]domain.Event{},
 		AdminActions:            []domain.AdminAction{},
@@ -170,6 +176,15 @@ func (s *Snapshot) normalize() {
 	}
 	if s.Exports == nil {
 		s.Exports = map[string]domain.ExportJob{}
+	}
+	if s.ExportLeases == nil {
+		s.ExportLeases = map[string]ExportLease{}
+	}
+	if s.ExportCheckpoints == nil {
+		s.ExportCheckpoints = map[string]ExportCheckpoint{}
+	}
+	if s.ExportPlans == nil {
+		s.ExportPlans = map[string]ExportPlan{}
 	}
 	if s.RestoreRuns == nil {
 		s.RestoreRuns = map[string]domain.RestoreRun{}
@@ -594,9 +609,9 @@ func CheckFileToPostgresMigrationHazard(statePath string) error {
 	if statePath == "" {
 		return nil
 	}
-	contents, err := os.ReadFile(statePath)
+	contents, err := fsutil.ReadDataFile(statePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("check file state before postgres switch: %w", err)
@@ -659,10 +674,16 @@ type fileBackend struct {
 	// (compactTrail holds it exclusively). Read only by same-package tests to
 	// pin the amortized watermark schedule — not exported, not a metric.
 	trailCompactions int64
+
+	// Close serializes with trail IO under mu, closes the persistent trail
+	// before releasing flock, and remembers both close outcomes. A closed
+	// trail must never reopen after another file writer acquires that lock.
+	closed   bool
+	closeErr error
 }
 
 // openFileBackend builds a file-backed store. For a non-empty path it first
-// creates the parent directory (0o750, the same mode Save uses) and then
+// creates a private parent directory (0700 for newly created components) and then
 // acquires the process-lifetime exclusive advisory flock on <path>.lock, so
 // a second live writer on the same state path (another audit-api or
 // audit-governance-worker) is refused at open with ErrStateFileLocked — the
@@ -677,7 +698,7 @@ func openFileBackend(path string) (*fileBackend, error) {
 	}
 	// REQ-1: create the parent before lock acquisition so the lock file can
 	// exist before the first Save (Save's own MkdirAll is unchanged).
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := fsutil.MakeDataDir(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("create state directory for %s: %w", path, err)
 	}
 	lock, err := acquireStateLock(path)
@@ -685,30 +706,41 @@ func openFileBackend(path string) (*fileBackend, error) {
 		return nil, err // ErrStateFileLocked-wrapped on contention
 	}
 	f.lock = lock
-	contents, err := os.ReadFile(path)
+	contents, err := fsutil.ReadDataFile(path)
 	if err == nil && len(contents) > 0 {
 		if err := decodeSnapshot(contents, f.data); err != nil {
 			_ = lock.Close() // release before returning the decode error
 			return nil, err
 		}
 		f.data.normalize()
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = lock.Close()
 		return nil, err
 	}
 	return f, nil
 }
 
-// Close releases the advisory flock and the lock file descriptor. It is safe
-// on backends without a lock (in-memory mode, direct test constructions): a
-// nil handle is tolerated. The kernel additionally releases the flock when
-// the process dies, so a crashed holder never leaves a stale lock — no
-// stale-lock detection or cleanup is needed.
+// Close waits for in-flight trail IO, closes its persistent descriptor, then
+// releases the advisory flock even if trail close failed. Each descriptor is
+// consumed once; repeated Close preserves the original combined outcome.
+// Callers still drain service work before closing the store: this is not a
+// replacement for API/worker shutdown or fencing of every split-store method.
 func (f *fileBackend) Close() error {
-	if f.lock == nil {
-		return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return f.closeErr
 	}
-	return f.lock.Close()
+	f.closed = true
+	if f.trailFile != nil {
+		f.closeErr = f.trailFile.Close()
+		f.trailFile = nil
+	}
+	if f.lock != nil {
+		f.closeErr = errors.Join(f.closeErr, f.lock.Close())
+		f.lock = nil
+	}
+	return f.closeErr
 }
 
 func (f *fileBackend) Load(ctx context.Context) (*Snapshot, error) {
@@ -748,72 +780,19 @@ func (f *fileBackend) Save(ctx context.Context, data *Snapshot) error {
 		f.data = copyData
 		return nil
 	}
-	parent := filepath.Dir(f.path)
-	// REQ-2: chain root = deepest ancestor that pre-exists this Save
-	// (probed BEFORE MkdirAll so freshly created intermediates are included
-	// in the post-rename sync chain). The snapshot has no configured root
-	// directory (unlike archive's FileStore.Dir), so the chain terminates
-	// at the deepest pre-existing directory: ancestors above it already
-	// have durable dentries and must not be re-synced (fsutil_test.go pins
-	// the root==dir collapse to exactly one sync).
-	root := fsutil.DeepestExistingAncestor(parent)
-	if err := os.MkdirAll(parent, 0o750); err != nil {
-		return err
-	}
 	encoded, err := json.MarshalIndent(copyData, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := f.path + ".tmp"
-	// fsync before rename: the snapshot is the control-plane source of
-	// truth, so a crash after rename must not leave an empty or partial
-	// state file behind. Any write/sync error removes the temp file
-	// best-effort, keeping the invariant: Save returned an error ⇒ the
-	// previously persisted snapshot stays authoritative (in memory, and —
-	// best-effort — on disk); the target never holds a torn snapshot; no
-	// .tmp remains (mirrors FileStore.Put).
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
-	if err != nil {
+	// Pin the parent for temp creation, rename and cleanup. An unknown old
+	// .tmp is never truncated/deleted. Only update memory after file and full
+	// directory-chain fsync; retain the prior post-rename restore contract.
+	if err := fsutil.AtomicDataFile(f.path, encoded, fsutil.PrivateFileMode, f.syncDir); err != nil {
+		if errors.Is(err, fsutil.ErrDataDirectorySync) {
+			f.restoreSnapshot()
+			return fmt.Errorf("sync directory chain for %s: %w", f.path, err)
+		}
 		return err
-	}
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, f.path); err != nil {
-		return err
-	}
-	// The renamed entry must be durable before Save reports success (M-12,
-	// the same crash window the archive package closed): a power failure
-	// after rename can otherwise revert or lose the snapshot's directory
-	// entry, silently rolling back committed ledger state. Sync the
-	// parent-directory chain leaf-to-root; f.data is updated only after the
-	// chain sync succeeds.
-	syncDir := f.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
-	}
-	if err := fsutil.SyncDirChain(root, parent, syncDir); err != nil {
-		// Chain sync failed: the rename already replaced the target, so
-		// best-effort restore the previously persisted snapshot to the
-		// target path ("no rename visible" — a fresh Open must load the
-		// previously persisted snapshot). f.data still holds the previous
-		// snapshot; it is only replaced below. Restore failures are
-		// best-effort: the original chain-sync error is returned
-		// regardless, and the restore's write+sync-before-rename guarantees
-		// the target never holds a torn snapshot and no .tmp remains.
-		f.restoreSnapshot()
-		return fmt.Errorf("sync directory chain for %s: %w", f.path, err)
 	}
 	f.data = copyData
 	return nil
@@ -837,34 +816,7 @@ func (f *fileBackend) restoreSnapshot() {
 	if err != nil {
 		return
 	}
-	tmp := f.path + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
-	if err != nil {
-		return
-	}
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return
-	}
-	if err := os.Rename(tmp, f.path); err != nil {
-		_ = os.Remove(tmp)
-		return
-	}
-	syncDir := f.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
-	}
-	_ = fsutil.SyncDirChain(fsutil.DeepestExistingAncestor(filepath.Dir(f.path)), filepath.Dir(f.path), syncDir)
+	_ = fsutil.AtomicDataFile(f.path, encoded, fsutil.PrivateFileMode, f.syncDir)
 }
 
 type snapshotJSONCopy struct {
@@ -879,6 +831,9 @@ type snapshotJSONCopy struct {
 	Checkpoints             map[string][]domain.Checkpoint    `json:"checkpoints"`
 	LegalHolds              map[string]domain.LegalHold       `json:"legal_holds"`
 	Exports                 map[string]domain.ExportJob       `json:"exports"`
+	ExportLeases            map[string]ExportLease            `json:"export_leases,omitempty"`
+	ExportCheckpoints       map[string]ExportCheckpoint       `json:"export_checkpoints,omitempty"`
+	ExportPlans             map[string]ExportPlan             `json:"export_plans,omitempty"`
 	RestoreRuns             map[string]domain.RestoreRun      `json:"restore_runs"`
 	AdminActions            []domain.AdminAction              `json:"admin_actions"`
 	AggregateCheckpoints    []domain.AggregateCheckpoint      `json:"aggregate_checkpoints"`
@@ -914,6 +869,9 @@ func cloneSnapshot(data *Snapshot) (*Snapshot, error) {
 		Checkpoints:             data.Checkpoints,
 		LegalHolds:              data.LegalHolds,
 		Exports:                 data.Exports,
+		ExportLeases:            data.ExportLeases,
+		ExportCheckpoints:       data.ExportCheckpoints,
+		ExportPlans:             data.ExportPlans,
 		RestoreRuns:             data.RestoreRuns,
 		AdminActions:            data.AdminActions,
 		AggregateCheckpoints:    data.AggregateCheckpoints,

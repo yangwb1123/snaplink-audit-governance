@@ -370,6 +370,8 @@ type ExportJob struct {
 	RequestedBy string     `json:"requested_by"`
 	Query       Query      `json:"query"`
 	Status      string     `json:"status"`
+	RetryOf     string     `json:"retry_of,omitempty"`
+	FailureCode string     `json:"failure_code,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
@@ -432,12 +434,20 @@ type AdminAction struct {
 }
 
 const (
-	AdminActionTenantCreated      = "tenant.created"
-	AdminActionSourceCreated      = "source.created"
-	AdminActionSourceUpdated      = "source.updated"
-	AdminActionSchemaCreated      = "schema.created"
-	AdminActionRetentionPolicySet = "retention_policy.set"
-	AdminActionExportCreated      = "export.created"
+	AdminActionTenantCreated            = "tenant.created"
+	AdminActionSourceCreated            = "source.created"
+	AdminActionSourceUpdated            = "source.updated"
+	AdminActionSchemaCreated            = "schema.created"
+	AdminActionRetentionPolicySet       = "retention_policy.set"
+	AdminActionExportCreated            = "export.created"
+	AdminActionExportCancelled          = "export.cancelled"
+	AdminActionExportRetried            = "export.retried"
+	AdminActionExportPlanned            = "export.planned"
+	AdminActionExportProgressed         = "export.progressed"
+	AdminActionExportCheckpointed       = "export.checkpointed"
+	AdminActionExportResumed            = "export.resumed"
+	AdminActionExportCompleted          = "export.completed"
+	AdminActionExportCheckpointRejected = "export.checkpoint_rejected"
 	// AdminActionExportRecovered records a governance-worker recovery: an
 	// export job stuck in "running" past the worker's stuck-age threshold was
 	// failed by the worker pass (atomic with the status change it audits).

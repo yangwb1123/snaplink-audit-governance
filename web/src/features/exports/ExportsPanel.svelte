@@ -3,7 +3,9 @@
   import { IrisButton, IrisCard, IrisInput, IrisProgress } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../../api/useAuditApi'
   import { RequestScope } from '../../api/requestScope'
-  import type { ExportJob } from '../../api/types'
+  import type { ExportJob, ExportSummary } from '../../api/types'
+  import ExportActions from './ExportActions.svelte'
+  import { exportFailureLabel } from './exportWorkflow'
   import ErrorNotice from '../../components/ErrorNotice.svelte'
   import JobList from '../../components/JobList.svelte'
   import StatusBadge from '../../components/StatusBadge.svelte'
@@ -106,6 +108,8 @@
     if (!id) return
     const ticket = reads.next()
     const scopeTenant = tenantId
+    writes.invalidate()
+    creating = false
     downloads.invalidate()
     downloading = false
     busy = true; job = null; error = null; pollError = null; paused = true
@@ -127,6 +131,20 @@
     if (!id) return
     if (id === initialId) void lookup(id)
     else navigateEvidence('exports', id)
+  }
+
+  function afterAction(summary: ExportSummary): void {
+    reads.invalidate(); writes.invalidate(); downloads.invalidate()
+    job = null; jobId = summary.id; error = null; pollError = null
+    busy = false; creating = false; downloading = false; attempts = 0; paused = true
+    revision += 1
+    if (summary.id === initialId) void lookup(summary.id)
+    else navigateEvidence('exports', summary.id)
+  }
+
+  async function refreshAction(id: string): Promise<void> {
+    revision += 1
+    await lookup(id)
   }
 
   async function download(): Promise<void> {
@@ -153,10 +171,16 @@
   }
 </script>
 
-<JobList kind="exports" {tenantId} {revision} />
+<JobList kind="exports" {tenantId} {revision}>
+  {#snippet actions(item)}
+    {#if 'requested_by' in item}
+      <ExportActions job={item as ExportSummary} {tenantId} onCommitted={afterAction} onRefresh={refreshAction} />
+    {/if}
+  {/snippet}
+</JobList>
 <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
   <h2 class="card-heading">创建合规导出</h2>
-  <p class="card-copy">按时间及关联条件封存 JSONL。下载前服务端重新校验摘要、租户和法律保留。</p>
+  <p class="card-copy">按时间及关联条件封存 JSONL。下载前服务端重新校验摘要、租户和法律保留。取消仅撤销运行权，不证明外部写入停止；重试创建关联新任务，不延续旧查询快照。</p>
   <EvidenceScopeFields {range} {scope} disabled={creating} onRangeChange={(next) => (range = next)} onScopeChange={(field, value) => (scope = { ...scope, [field]: value })} />
   <IrisButton variant="solid" disabled={creating} onclick={() => void create()}>{creating ? '提交中…' : '创建范围导出'}</IrisButton>
 </IrisCard>
@@ -171,7 +195,10 @@
     <p>开始执行：{job.started_at ? formatDate(job.started_at) : job.status === 'pending' ? '等待启动' : '未上报（旧任务）'}</p>
     <p>范围：{evidenceScopeSummary(job.query)}</p>
     {#if job.digest}<p>内容摘要：<code class="hash-value">{job.digest}</code></p>{/if}
+    {#if job.retry_of}<p>重试自：<a href={`#evidence/exports/${encodeURIComponent(job.retry_of)}`}>{job.retry_of}</a>。原任务终态不变。</p>{/if}
+    {#if job.failure_code}<p class="muted-copy">{exportFailureLabel(job.failure_code)}</p>{/if}
     {#if job.error}<p class="error-copy">{job.error}</p>{/if}
+    <ExportActions {job} {tenantId} onCommitted={afterAction} onRefresh={refreshAction} />
     {#if job.status === 'completed'}<IrisButton variant="outline" disabled={downloading} onclick={() => void download()}>{downloading ? '准备下载…' : '下载 JSONL'}</IrisButton>{/if}
     {#if shouldPollExport(job.status) && attempts >= EXPORT_POLL_MAX_ATTEMPTS}<p>已达到自动查询上限。任务可能仍在执行，可手动刷新。</p><IrisButton variant="outline" onclick={() => void lookup()}>继续查询</IrisButton>{/if}
   {:else if !busy && !error && !pollError}<p class="muted-copy">从任务列表选择一项，或输入任务 ID。</p>{/if}

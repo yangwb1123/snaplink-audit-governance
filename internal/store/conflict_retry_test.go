@@ -240,7 +240,7 @@ func (b readyProbeBackend) Ready(context.Context) error { return b.err }
 // TestFileBackendSaveFsyncAtomicity pins the B1-2 fsync acceptance: Save
 // leaves a durable regular file at the target path (no .tmp residue), the
 // persisted bytes are the current snapshot, and the mode is the documented
-// 0640.
+// 0600 (owner-only; legacy files are not chmod'd during reads).
 func TestFileBackendSaveFsyncAtomicity(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
@@ -261,8 +261,8 @@ func TestFileBackendSaveFsyncAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o640 {
-		t.Fatalf("state file mode=%o, want 640", got)
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state file mode=%o, want 600", got)
 	}
 	// A subsequent Save replaces the file atomically (same inode path).
 	if err := backend.Save(testCtx, NewSnapshot()); err != nil {

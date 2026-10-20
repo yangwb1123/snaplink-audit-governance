@@ -36,8 +36,11 @@ EXPECTED_OPERATIONS = {
     "getAggregateTimeline",
     "createExport",
     "listExports",
+    "getGovernanceStatus",
     "getExport",
     "downloadExport",
+    "cancelExport",
+    "retryExport",
     "verifyIntegrity",
     "createLegalHold",
     "listLegalHolds",
@@ -186,7 +189,7 @@ def validate(root: Path) -> list[str]:
                 failures.append(f"{name}: missing reusable tenantId query parameter")
         elif item["tenant_param"]:
             failures.append(f"{name}: body/management operation must not declare tenantId query parameter")
-    if len(ALL_TENANT) != 3 or len(BODY_SCOPED) != 2 or len(PLATFORM_MANAGEMENT) != 2 or len(QUERY_SCOPED) != 31:
+    if len(ALL_TENANT) != 3 or len(BODY_SCOPED) != 2 or len(PLATFORM_MANAGEMENT) != 2 or len(QUERY_SCOPED) != 34:
         failures.append("scope matrix cardinality changed unexpectedly")
     parameter_text = (root / "api/openapi/openapi.yaml").read_text(encoding="utf-8")
     if "tenantId: { name: tenant_id" not in parameter_text:

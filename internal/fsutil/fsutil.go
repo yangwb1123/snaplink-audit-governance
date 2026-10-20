@@ -9,6 +9,7 @@
 package fsutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,12 +20,12 @@ import (
 // written and closed (or be about to close) the file; Sync returns an error
 // when the underlying device reports a failure, so a silently lost write is
 // surfaced instead of being reported as committed.
-func SyncFile(path string) error {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+func SyncFile(path string) (err error) {
+	file, err := OpenDataFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open %s for sync: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { err = errors.Join(err, file.Close()) }()
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", path, err)
 	}
@@ -34,12 +35,12 @@ func SyncFile(path string) error {
 // SyncDir flushes the directory entry of path so a completed rename survives
 // a crash. Opening a directory read-only and syncing it is the standard
 // pattern; it is a no-op on filesystems without directory fsync support.
-func SyncDir(path string) error {
-	dir, err := os.Open(path)
+func SyncDir(path string) (err error) {
+	dir, err := OpenDataDir(path, false)
 	if err != nil {
 		return fmt.Errorf("open directory %s for sync: %w", path, err)
 	}
-	defer dir.Close()
+	defer func() { err = errors.Join(err, dir.Close()) }()
 	if err := dir.Sync(); err != nil {
 		return fmt.Errorf("sync directory %s: %w", path, err)
 	}

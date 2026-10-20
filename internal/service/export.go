@@ -23,44 +23,27 @@ func (s *Service) CreateExport(ctx context.Context, tenantID, requestedBy string
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ExportJob{}, err
 	}
-	// Fail closed before any read fact, job, self-audit record, or goroutine
-	// exists (same ordering discipline as the R2 legal-hold gate).
-	// The export reads events: run the query through the audited read path so
-	// the same actor's audit.event.read fact is recorded, then create the job.
-	if _, err := s.QueryEvents(ctx, tenantID, requestedBy, query); err != nil {
-		return domain.ExportJob{}, err
-	}
-	// R2 (legal-hold gate): fail closed before any job exists. The check is a
-	// read; the block fact commits in its own Update (a closure returning an
-	// error discards its mutations, so check-and-abort cannot share the
-	// job-creating closure). No job, no export.created, no goroutine on the
-	// block path.
-	var hold domain.LegalHold
-	blocked := false
-	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		var holdErr error
-		hold, blocked, holdErr = s.holdBlockingExport(ctx, data, tenantID, query)
-		return holdErr
-	}); err != nil {
-		return domain.ExportJob{}, err
-	}
-	if blocked {
-		if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
-			s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
+	var job domain.ExportJob
+	if err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		holdBinding, err := s.prepareExport(opCtx, tenantID, requestedBy, query)
+		if err != nil {
+			return err
+		}
+		job = domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
+		// Admission owns only control metadata. Run its checks on every fresh
+		// control CAS attempt; a materialized compatibility Update can replace
+		// evidence files and reuse a stale control copy after a PG conflict.
+		return s.Store.UpdateControl(opCtx, func(data *store.Snapshot) error {
+			if err := s.checkExportPreflight(data, tenantID, holdBinding); err != nil {
+				return err
+			}
+			if !exportQueueHasCapacity(data.Exports, tenantID) {
+				return fmt.Errorf("%w: export queue capacity exhausted", domain.ErrQuotaExceeded)
+			}
+			data.Exports[job.ID] = job
+			s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
 			return nil
-		}); err != nil {
-			return domain.ExportJob{}, err
-		}
-		return domain.ExportJob{}, fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
-	}
-	job := domain.ExportJob{ID: newID("export"), TenantID: tenantID, RequestedBy: requestedBy, Query: query, Status: "pending", CreatedAt: s.Now()}
-	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
-		if !exportQueueHasCapacity(data.Exports, tenantID) {
-			return fmt.Errorf("%w: export queue capacity exhausted", domain.ErrQuotaExceeded)
-		}
-		data.Exports[job.ID] = job
-		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionExportCreated, "export", job.ID, fmt.Sprintf("from=%s to=%s", query.From.Format(time.RFC3339), query.To.Format(time.RFC3339))))
-		return nil
+		})
 	}); err != nil {
 		return domain.ExportJob{}, err
 	}
@@ -79,25 +62,22 @@ func (s *Service) GetExport(ctx context.Context, tenantID, jobID string) (domain
 		return domain.ExportJob{}, err
 	}
 	var job domain.ExportJob
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		value, ok := data.Exports[jobID]
-		if !ok || value.TenantID != tenantID {
-			return domain.ErrNotFound
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		access, err := s.captureExportAccess(opCtx, tenantID, jobID)
+		if err != nil {
+			return err
 		}
-		// R4 (legal-hold gate): fail closed while any active hold covers the
-		// job's query, regardless of job status (covers exports completed
-		// before the hold). Read-only denial: no block fact is appended.
-		hold, blocked, holdErr := s.holdBlockingExport(ctx, data, tenantID, value.Query)
-		if holdErr != nil {
-			return holdErr
+		// Read-only denial, including exports completed before the Hold.
+		if access.Blocked {
+			return exportBlockedError{holdID: access.Hold.ID}
 		}
-		if blocked {
-			return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
-		}
-		job = value
-		return nil
+		job, err = s.revalidateExportAccess(opCtx, access, false)
+		return err
 	})
-	return job, err
+	if err != nil {
+		return domain.ExportJob{}, err
+	}
+	return job, nil
 }
 
 // RecordExportDownload appends the audit.event.export self-audit fact for a
@@ -111,33 +91,34 @@ func (s *Service) RecordExportDownload(ctx context.Context, tenantID, actor, job
 	if jobID == "" {
 		return fmt.Errorf("%w: job id is required", domain.ErrInvalid)
 	}
-	// R4 (legal-hold gate): defense in depth — never stream a sealed object
-	// while any matching hold is active, even if a caller bypassed GetExport.
-	// Tenant-scoped job lookup + gate run in one read; on block the
-	// export.blocked fact replaces the audit.event.export fact (empty actor
-	// keeps the recordReadAction no-fact convention).
-	var hold domain.LegalHold
-	blocked := false
-	if err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		value, ok := data.Exports[jobID]
-		if !ok || value.TenantID != tenantID {
-			return domain.ErrNotFound
+	// Defense in depth for callers bypassing GetExport. Capture only owned
+	// structures under the lock; current evidence, self-audit and the final
+	// control recheck share one deadline without holding Store.mu across Get.
+	return s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		access, err := s.captureExportAccess(opCtx, tenantID, jobID)
+		if err != nil {
+			return err
 		}
-		var holdErr error
-		hold, blocked, holdErr = s.holdBlockingExport(ctx, data, tenantID, value.Query)
-		return holdErr
-	}); err != nil {
-		return err
-	}
-	if blocked {
-		if actor != "" {
-			if err := s.Store.AppendAdminFact(ctx, s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions); err != nil {
-				return err
+		if access.Blocked {
+			if actor != "" {
+				hold := access.Hold
+				if err := s.Store.AppendAdminFact(opCtx, s.adminAction(tenantID, actor, domain.AdminActionExportBlocked, "legal_hold", hold.ID, fmt.Sprintf("export_blocked reason=%s", hold.Reason)), s.Config.MaxAdminActions, s.Config.MaxAdminTrailActions); err != nil {
+					return err
+				}
 			}
+			return exportBlockedError{holdID: access.Hold.ID}
 		}
-		return fmt.Errorf("%w", exportBlockedError{holdID: hold.ID})
-	}
-	return s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download")
+		if _, err := s.revalidateExportAccess(opCtx, access, true); err != nil {
+			return err
+		}
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventExport, "export", jobID, "download"); err != nil {
+			return err
+		}
+		// The independent append can block while another replica changes a
+		// Hold. A recorded attempt is not proof that any bytes were served.
+		_, err = s.revalidateExportAccess(opCtx, access, true)
+		return err
+	})
 }
 
 // exportDigestPattern is the exact shape of domain.HashBytes output
@@ -250,54 +231,16 @@ var exportTerminalRetryLimit = 3
 // atomic write resets the tenant's archive-conflict counter, and the
 // successful pass's receipts share one timestamp.
 
-// RecoverStuckExports fails one tenant's export jobs stuck in "running" past
-// Config.StuckExportAge (jobs left non-terminal by a crashed or restarted
-// audit-api — runExport is a fire-and-forget goroutine, so nothing else ever
-// re-examines them). The status change and the export.recovered self-audit
-// fact ride one Store.UpdateChecked Save: the closure re-checks
-// status/finished/age against the fresh snapshot and retries on
-// ErrSnapshotConflict, so a terminal job is never regressed and two worker
-// replicas cannot double-fail the same job. No archive I/O. Returns the
-// number of transitions committed by the winning attempt.
+// RecoverStuckExports atomically fails expired uncheckpointed leased jobs,
+// or legacy jobs past StuckExportAge (StartedAt, otherwise CreatedAt). Valid
+// selected/sealed checkpoints remain running for fenced dispatcher continuation, not
+// reported as completed recovery. Never requeues a terminal job. Transitions
+// and export.recovered share the control CAS; no archive I/O or partial count.
 func (s *Service) RecoverStuckExports(ctx context.Context, tenantID string) (int, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return 0, err
 	}
-	recovered := 0
-	err := s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
-		// Store.UpdateChecked may re-invoke the closure on a CAS conflict; a
-		// failed attempt's mutations are discarded, so the counter is reset at
-		// the start of every invocation to count only the committed attempt
-		// (mirrors Ingest's sealedSegments truncation precedent).
-		recovered = 0
-		cutoff := s.Now().Add(-s.Config.StuckExportAge)
-		mutated := false
-		for jobID, job := range data.Exports {
-			// Queue age is not running age. Legacy rows lacking a usable
-			// started_at retain the old CreatedAt fallback. Strictly at the
-			// cutoff is untouched; zero legacy timestamps still converge.
-			started := job.CreatedAt
-			if job.StartedAt != nil && !job.StartedAt.IsZero() {
-				started = *job.StartedAt
-			}
-			if job.TenantID != tenantID || job.Status != "running" || job.FinishedAt != nil || !started.Before(cutoff) {
-				continue
-			}
-			now := s.Now()
-			job.Status = "failed"
-			job.FinishedAt = &now
-			job.ObjectPath = ""
-			job.Digest = ""
-			job.EventCount = 0
-			job.Error = fmt.Sprintf("export interrupted: stuck in running since %s; re-request the export", started.Format(time.RFC3339))
-			data.Exports[jobID] = job
-			s.appendAdminAction(data, s.adminAction(tenantID, "governance-worker", domain.AdminActionExportRecovered, "export", jobID, fmt.Sprintf("stuck_running_since=%s status=failed", started.Format(time.RFC3339))))
-			recovered++
-			mutated = true
-		}
-		return mutated, nil
-	})
-	return recovered, err
+	return s.recoverExportJobs(ctx, tenantID, true)
 }
 
 // exportBlockedError is the legal-hold gate denial error. Its text is the
@@ -391,6 +334,7 @@ func (s *Service) failExportBlocked(ctx context.Context, jobID string, hold doma
 	s.persistTerminalExport(ctx, jobID, "failed", "", "", 0,
 		fmt.Sprintf("export blocked by active legal hold %s", hold.ID),
 		func(data *store.Snapshot, job *domain.ExportJob) {
+			job.FailureCode = domain.ExportFailureLegalHold
 			s.appendAdminAction(data, s.adminAction(job.TenantID, "governance-worker",
 				domain.AdminActionExportBlocked, "legal_hold", hold.ID,
 				fmt.Sprintf("export_blocked reason=%s", hold.Reason)))
@@ -411,64 +355,35 @@ func (s *Service) runExport(ctx context.Context, jobID string) {
 	}); err != nil {
 		return
 	}
-	job, claimed, err := s.claimPendingExport(ctx, jobID)
+	job, claimed, err := s.claimExport(ctx, jobID, true)
 	if err != nil || !claimed {
 		return
 	}
-	var events []domain.Event
-	schemas := map[string]domain.EventSchema{}
-	var blockedHold domain.LegalHold
-	blocked := false
-	err = s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for key, schema := range data.Schemas {
-			schemas[key] = schema
-		}
-		// R3 (legal-hold gate): re-check at the start of the selection pass; a
-		// hold created after CreateExport's gate blocks the seal (no archive
-		// write). The block is reported after the read returns — an Update
-		// inside a Read closure would self-deadlock on the store RWMutex.
-		hold, ok, holdErr := s.holdBlockingExport(ctx, data, job.TenantID, job.Query)
-		if holdErr != nil {
-			return holdErr
-		}
-		if ok {
-			blockedHold, blocked = hold, true
-			return nil
-		}
-		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(ctx, data, job.TenantID, func(event domain.Event) bool {
-			return s.matches(event, job.Query, schemas)
-		})
-		return resolveErr
-	})
-	if err != nil {
-		s.finishExport(ctx, jobID, "failed", "", "", 0, err.Error())
+	ctx, stopHeartbeat := s.startExportHeartbeat(ctx, job)
+	defer stopHeartbeat()
+	if job.Checkpoint.Version != 0 {
+		s.finalizeExportCheckpoint(ctx, job, nil)
 		return
 	}
-	if blocked {
-		s.failExportBlocked(ctx, jobID, blockedHold)
+	job, events, ready := s.exportExecutionEvidence(ctx, job)
+	if !ready {
 		return
 	}
-	sortEvents(events)
+	ctx = exportClaimContext(ctx, job)
 	var bytesWritten []byte
-	for _, event := range events {
-		// 导出内容剥离搜索摘要（深拷贝，不触碰存储共享的 payload）：解密
-		// 后的 JSONL 不得携带可跨租户关联的 digest 值。v2 bound 摘要本身
-		// 已租户隔离，但 v1 遗留摘要对同明文跨租户相等，且摘要对消费者无
-		// 业务价值，因此一律剥离。
-		stripped, stripErr := security.StripSearchDigests(event.Payload)
-		if stripErr != nil {
-			s.finishExport(ctx, jobID, "failed", "", "", 0, stripErr.Error())
+	if job.Plan.Version == 2 {
+		job, bytesWritten, ready = s.generateExportPages(ctx, job)
+		if !ready {
 			return
 		}
-		event.Payload = stripped
-		line, marshalErr := domain.CanonicalJSON(event)
-		if marshalErr != nil {
-			s.finishExport(ctx, jobID, "failed", "", "", 0, marshalErr.Error())
+		ctx = exportClaimContext(ctx, job)
+	} else {
+		var err error
+		bytesWritten, err = encodeExportEvents(ctx, events)
+		if err != nil {
+			s.finishExport(ctx, jobID, "failed", "", "", 0, err.Error())
 			return
 		}
-		bytesWritten = append(bytesWritten, line...)
-		bytesWritten = append(bytesWritten, '\n')
 	}
 	// 独立加密：导出文件整体以 AES-GCM 密封后写入归档（§14）。v2 密封把
 	// 租户/任务派生绑定（ExportBinding）作为 AEAD 关联数据，下载时同一
@@ -478,25 +393,38 @@ func (s *Service) runExport(ctx context.Context, jobID string) {
 		s.finishExport(ctx, jobID, "failed", "", "", 0, sealErr.Error())
 		return
 	}
-	key := fmt.Sprintf("exports/%s.jsonl", safeName(jobID))
+	if err := s.checkExportPlan(ctx, job); err != nil {
+		return
+	}
+	// Attempt-specific WORM identity fences stale writers from another
+	// attempt's object. A late external Put may still leave an unreferenced
+	// sealed object; only a valid current control lease can publish its path.
+	key := exportObjectKey(job)
 	// Per-write bound (REQ-3): runExport has no pass context (it outlives the
 	// request that created it), so a black-holed endpoint must not be able to
 	// keep the goroutine — and its finishExport write — alive for minutes per
 	// object. Mirrors vaultCallBudget's detached-cancellation bound. Failure
 	// semantics are unchanged: a timed-out Put fails the job, and a re-request
 	// is a fresh CreateExport.
-	putCtx, cancel := context.WithTimeout(context.Background(), exportPutTimeout)
+	putCtx, cancel := context.WithTimeout(ctx, exportPutTimeout)
 	defer cancel()
 	if err := s.Config.Archive.Put(putCtx, key, sealed); err != nil {
 		s.finishExport(ctx, jobID, "failed", "", "", 0, err.Error())
 		return
 	}
-	s.finishExport(ctx, jobID, "completed", key, domain.HashBytes(bytesWritten), len(events), "")
+	checkpoint, err := s.saveExportCheckpoint(ctx, job, sealed, bytesWritten, len(job.Plan.Members))
+	if err != nil {
+		s.logf("export checkpoint persistence deferred job_id=%s category=control", jobID)
+		return // an unknown Save may have committed; do not guess or reseal
+	}
+	job.Checkpoint = checkpoint
+	job.Plan = store.ExportPlan{} // consumed atomically by the sealed checkpoint
+	s.finalizeExportCheckpoint(exportClaimContext(ctx, job), job, sealed)
 }
 
 // persistTerminalExport writes the terminal outcome for jobID, but ONLY when the
-// durable record is still terminal-eligible: status == "running" and
-// FinishedAt == nil. It is idempotent and safe:
+// durable record is still terminal-eligible: running, unfinished and owned
+// by this exact unexpired claim from ctx. It is idempotent and safe:
 //   - missing job        -> no write, no Save, never created (FR-2)
 //   - already terminal    -> no write, no Save (no late overwrite; T3)
 //   - worker-recovered     -> no write, no Save (no duplicate export.recovered)
@@ -512,23 +440,45 @@ func (s *Service) persistTerminalExport(ctx context.Context,
 	jobID, status, path, digest string, count int, failure string,
 	onWrite func(data *store.Snapshot, job *domain.ExportJob),
 ) {
+	claim, owned := exportClaimFromContext(ctx)
+	if !owned || claim.ID != jobID {
+		return // never infer ownership by looking up another executor's lease
+	}
 	for attempt := 0; attempt <= exportTerminalRetryLimit; attempt++ {
-		err := s.Store.UpdateChecked(ctx, func(data *store.Snapshot) (bool, error) {
+		err := s.Store.UpdateControlChecked(ctx, func(data *store.Snapshot) (bool, error) {
 			value, ok := data.Exports[jobID]
-			if !ok || value.Status != "running" || value.FinishedAt != nil {
-				return false, nil // no-op: missing or already terminal (FR-2)
-			}
 			now := s.Now()
+			if !ok || !ownsExportLease(data, value, claim, now) {
+				return false, nil // missing/terminal/expired/wrong-owner is a no-op
+			}
+			_, planned := data.ExportPlans[jobID]
+			if !s.exportPlanMatches(data, value, claim) || (planned && status == "completed") {
+				return false, errExportPlanInvalid
+			}
+			if !s.terminalExportCheckpointMatches(data, value, claim, status, path, digest, count) {
+				return false, errExportCheckpointInvalid
+			}
+			_, checkpointed := data.ExportCheckpoints[jobID]
+			if checkpointed && status == "completed" {
+				s.appendAdminAction(data, s.adminAction(value.TenantID, "governance-worker", domain.AdminActionExportCompleted, "export", jobID, "stage=sealed status=completed"))
+			}
 			value.Status = status
 			value.FinishedAt = &now
 			value.ObjectPath = path
 			value.Digest = digest
 			value.EventCount = count
 			value.Error = failure
-			data.Exports[jobID] = value
+			value.FailureCode = ""
+			if status == "failed" {
+				value.FailureCode = domain.ExportFailureExecution
+			}
+			delete(data.ExportLeases, jobID)
+			delete(data.ExportCheckpoints, jobID)
+			delete(data.ExportPlans, jobID)
 			if onWrite != nil {
 				onWrite(data, &value)
 			}
+			data.Exports[jobID] = value
 			return true, nil
 		})
 		if err == nil {

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 // ErrStateFileLocked is returned by Open when another live process holds
@@ -63,7 +65,7 @@ func absPath(path string) string {
 // from the lock file.
 func acquireStateLock(path string) (io.Closer, error) {
 	lockPath := path + ".lock"
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	file, err := fsutil.OpenDataFile(lockPath, os.O_CREATE|os.O_RDWR, fsutil.PrivateFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("open state lock %s: %w", lockPath, err)
 	}
@@ -114,7 +116,7 @@ func writeHolderIdentity(f *os.File) {
 // Best-effort: an unreadable, empty or torn file yields "unknown" (still
 // actionable — the stateLockedError always names the path and the fix).
 func readHolderIdentity(lockPath string) (string, error) {
-	b, err := os.ReadFile(lockPath)
+	b, err := fsutil.ReadDataFile(lockPath)
 	if err != nil {
 		return "unknown", err
 	}

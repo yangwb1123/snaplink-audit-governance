@@ -158,6 +158,12 @@ func runSIGTERMDrainCase(t *testing.T, binary, token string, idleStream bool, wa
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 	archiveDir := filepath.Join(dir, "archive")
+	eventID := "evt-sigterm-drain"
+	request := &auditv1.WriteRequest{Event: drainChildEvent(eventID), WaitFor: "ledgered"}
+	seededReceipt, err := prepareDrainFileState(statePath, drainFileConfig(archiveDir), request)
+	if err != nil {
+		t.Fatal("could not finish the original authenticated file commit before drain startup")
+	}
 	httpAddr := freeLoopbackAddr(t)
 	grpcAddr := freeLoopbackAddr(t)
 
@@ -175,8 +181,9 @@ func runSIGTERMDrainCase(t *testing.T, binary, token string, idleStream bool, wa
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
-		"AUDIT_SIGNING_SECRET=test-signing-secret-0123456789abcdefgh",
-		"AUDIT_ENCRYPTION_KEY=test-encryption-key-0123456789abcdefg",
+		"GOMAXPROCS=2",
+		"AUDIT_SIGNING_SECRET=" + drainChildSigningSecret,
+		"AUDIT_ENCRYPTION_KEY=" + drainChildEncryptionKey,
 		"AUDIT_JWT_SECRET=" + testJWTSecret,
 		"AUDIT_ALLOW_LOCAL_HS256=true",
 		"AUDIT_ALLOW_DEV_AUTH=true",
@@ -227,27 +234,20 @@ func runSIGTERMDrainCase(t *testing.T, binary, token string, idleStream bool, wa
 	client := auditv1.NewIngestClient(connection)
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 
-	eventID := "evt-sigterm-drain"
-	if idleStream {
-		// The stream sends exactly one event and then nothing. The single
-		// exchange is what puts the handler in flight: a stream whose HEADERS
-		// never left the client is not an in-flight RPC at all, and the handler
-		// would park in the unbounded receive the drain has to bound.
-		stream, err := client.WriteStream(ctx)
-		if err != nil {
-			t.Fatalf("open WriteStream err=%v\nchild output:\n%s", err, output.String())
-		}
-		if err := stream.Send(&auditv1.WriteRequest{Event: drainChildEvent(eventID)}); err != nil {
-			t.Fatalf("stream Send err=%v\nchild output:\n%s", err, output.String())
-		}
-		if _, err := stream.Recv(); err != nil {
-			t.Fatalf("stream Recv err=%v\nchild output:\n%s", err, output.String())
-		}
-	} else {
-		// The control exercises the same exit path with nothing in flight.
-		if _, err := client.Write(ctx, &auditv1.WriteRequest{Event: drainChildEvent(eventID)}); err != nil {
-			t.Fatalf("control Write err=%v\nchild output:\n%s", err, output.String())
-		}
+	// The original new Write is already durable in this exact file ledger.
+	// Make the measured child authenticate the same request and acknowledge
+	// its duplicate before SIGTERM. New file/archival commits are preparation,
+	// not a 1s drain performance SLA; auth and the real parked stream remain.
+	preparation, cancelPreparation := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelPreparation()
+	preparedReceipt, release, err := prepareDrainIngest(preparation, client, request, idleStream)
+	if err != nil {
+		t.Fatalf("prepare drain exchange err=%v\nchild output:\n%s", err, output.String())
+	}
+	t.Cleanup(release)
+	cancelPreparation() // must not cancel the successfully parked stream
+	if preparedReceipt.GetEventId() != eventID || preparedReceipt.GetTenantId() != "demo" || preparedReceipt.GetSequence() != 1 || !preparedReceipt.GetDuplicate() || preparedReceipt.GetHash() != seededReceipt.GetHash() || preparedReceipt.GetStreamId() != seededReceipt.GetStreamId() || preparedReceipt.GetStatus() != seededReceipt.GetStatus() {
+		t.Fatal("measured child did not authenticate the exact original durable receipt")
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -294,6 +294,9 @@ func runSIGTERMDrainCase(t *testing.T, binary, token string, idleStream bool, wa
 		receipt, ok := data.Receipts[key]
 		if !ok {
 			return fmt.Errorf("no durable receipt for %s", key)
+		}
+		if len(data.Receipts) != 1 || receipt.EventID != eventID || receipt.TenantID != "demo" || receipt.Sequence != 1 || receipt.Hash != preparedReceipt.GetHash() {
+			return fmt.Errorf("drain preparation did not preserve exactly one original receipt")
 		}
 		_, eventPresent := data.Events[key]
 		archived := !receipt.ArchivedAt.IsZero()

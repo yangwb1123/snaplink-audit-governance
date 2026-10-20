@@ -154,6 +154,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getReceipt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:event:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -213,6 +214,7 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) querySnaplinkAuditEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, tenantID, query, ok := s.snaplinkConsoleQuery(w, r)
 	if !ok {
 		return
@@ -237,6 +239,7 @@ func (s *Server) querySnaplinkAuditEvents(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) querySnaplinkAuditFacets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, tenantID, query, ok := s.snaplinkConsoleQuery(w, r)
 	if !ok {
 		return
@@ -251,6 +254,7 @@ func (s *Server) querySnaplinkAuditFacets(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -304,6 +308,7 @@ func (s *Server) getOperationTimeline(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) replayOperation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)

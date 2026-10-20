@@ -82,13 +82,17 @@ func projectionEnvelope(event domain.Event) ([]byte, string, error) {
 }
 
 func (s *Store) insertConfirmed(ctx context.Context, event domain.Event) error {
+	sequence := event.Sequence
+	if sequence <= 0 {
+		return ErrNotLedgered
+	}
 	envelope, digest, err := projectionEnvelope(event)
 	if err != nil {
 		return fmt.Errorf("encode projection envelope: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_projection_events
 (tenant_id, stream_id, sequence, event_id, event_hash, prev_hash, occurred_at, envelope_digest, envelope)
-VALUES (?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?, 3, 'UTC'), ?, ?)`, event.TenantID, event.StreamID, uint64(event.Sequence),
+VALUES (?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?, 3, 'UTC'), ?, ?)`, event.TenantID, event.StreamID, uint64(sequence),
 		event.EventID, event.Hash, event.PrevHash, event.OccurredAt.UTC().Format(time.RFC3339Nano), digest, string(envelope))
 	if err != nil {
 		return fmt.Errorf("confirm projection write: %w", err)

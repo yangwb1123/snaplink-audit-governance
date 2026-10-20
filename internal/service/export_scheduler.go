@@ -32,13 +32,19 @@ func exportQueueHasCapacity(jobs map[string]domain.ExportJob, tenant string) boo
 // No scheduler mutex is ever held across a Store call or external archive IO.
 func (s *Service) wakeExports(ctx context.Context) {
 	s.exportMu.Lock()
+	defer s.exportMu.Unlock()
+	s.wakeExportsLocked(ctx)
+}
+
+// Caller holds exportMu. A finishing executor hands off its reservation and
+// any follow-up pass atomically: no idle window before a later Store read.
+// Starting the goroutine here does not run Store/archive IO under this lock.
+func (s *Service) wakeExportsLocked(ctx context.Context) {
 	s.exportWakeGeneration++
 	if s.exportDispatching {
-		s.exportMu.Unlock()
 		return
 	}
 	s.exportDispatching = true
-	s.exportMu.Unlock()
 	go s.dispatchExports(ctx)
 }
 
@@ -61,7 +67,7 @@ func (s *Service) dispatchExports(ctx context.Context) {
 		s.exportMu.Unlock()
 		var chosen domain.ExportJob
 		err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
-			chosen = nextExport(data.Exports, active, after)
+			chosen = nextRunnableExport(data, active, after, s.Now())
 			return nil
 		})
 		s.exportMu.Lock()
@@ -82,19 +88,23 @@ func (s *Service) dispatchExports(ctx context.Context) {
 		s.exportMu.Unlock()
 		go func(jobID string) {
 			s.runExport(ctx, jobID)
+			// Keep the local reservation through the executor's final bounded
+			// Store read, not merely through durable terminal persistence. Idle
+			// must mean there is no remaining Store IO or unregistered wake.
+			// A claim/read failure can leave pending or checkpointed running
+			// work. Do not hot-spin on either; a later queue/worker pass retries.
+			progressed := false
+			err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
+				job, ok := data.Exports[jobID]
+				progressed = !ok || job.Status == "completed" || job.Status == "failed" || job.Status == domain.ExportStatusCancelled
+				return nil
+			})
 			s.exportMu.Lock()
 			delete(s.exportActive, jobID)
-			s.exportMu.Unlock()
-			// A claim/read failure leaves pending durable work. Do not spin on it;
-			// the next explicit resume or periodic worker pass retries it.
-			progressed := false
-			if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
-				job, ok := data.Exports[jobID]
-				progressed = !ok || job.Status != "pending"
-				return nil
-			}); err == nil && progressed {
-				s.wakeExports(ctx)
+			if err == nil && progressed {
+				s.wakeExportsLocked(ctx)
 			}
+			s.exportMu.Unlock()
 		}(chosen.ID)
 	}
 }

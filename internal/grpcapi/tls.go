@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"os"
 
 	"google.golang.org/grpc/credentials"
 )
@@ -14,7 +13,7 @@ import (
 // (never logged inside) so callers fail fast with the same text at
 // check-config and startup.
 //
-// tls.LoadX509KeyPair validates that both files exist, parse as PEM, and
+// Bounded, root-confined reads and tls.X509KeyPair validate the PEM inputs and
 // that the key matches the cert; the returned credentials are then the only
 // transport credential on the listener, so grpc-go rejects plaintext (h2c)
 // clients at the handshake before any RPC — the authorization bearer
@@ -22,7 +21,7 @@ import (
 // MinVersion/cipher overrides (grpc-go defaults; server-side hardening is a
 // non-goal) and no network access, keeping check-config deterministic.
 func ServerCredentials(certFile, keyFile string) (credentials.TransportCredentials, error) {
-	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	certificate, err := loadTLSCertificate(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -35,11 +34,11 @@ func ServerCredentials(certFile, keyFile string) (credentials.TransportCredentia
 // CA. The CA file is deliberately explicit rather than inferred from the
 // server certificate bundle.
 func MutualTLSCredentials(certFile, keyFile, clientCAFile string) (credentials.TransportCredentials, error) {
-	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	certificate, err := loadTLSCertificate(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
-	caPEM, err := os.ReadFile(clientCAFile)
+	caPEM, err := readTLSPEMFile(clientCAFile)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +50,18 @@ func MutualTLSCredentials(certFile, keyFile, clientCAFile string) (credentials.T
 	config.ClientCAs = clientCAs
 	config.ClientAuth = tls.RequireAndVerifyClientCert
 	return credentials.NewTLS(config), nil
+}
+
+func loadTLSCertificate(certFile, keyFile string) (tls.Certificate, error) {
+	certPEM, err := readTLSPEMFile(certFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM, err := readTLSPEMFile(keyFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
 func serverTLSConfig(certificate tls.Certificate) *tls.Config {

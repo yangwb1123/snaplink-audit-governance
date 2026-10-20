@@ -37,7 +37,11 @@ func (s *Service) CreateAggregateCheckpoint(ctx context.Context, tenantID string
 			CreatedAt: now, StreamRoots: roots, AttestationVersion: aggregateAttestationVersion,
 			CheckpointRefs: refs,
 		}
-		signature, err := s.Config.Signer.Sign(ctx, aggregateAttestationPayload(candidate))
+		payload, err := aggregateAttestationPayload(candidate)
+		if err != nil {
+			return false, err
+		}
+		signature, err := s.Config.Signer.Sign(ctx, payload)
 		if err != nil {
 			return false, fmt.Errorf("sign aggregate checkpoint: %w", err)
 		}

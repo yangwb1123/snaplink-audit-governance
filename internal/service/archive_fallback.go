@@ -43,16 +43,15 @@ func (s *Service) archiveReadBound() time.Duration {
 // of ctx carrying archiveReadBound, so an earlier caller deadline still wins
 // unchanged and caller cancellation still aborts the read.
 //
-// PLACEMENT IS LOAD-BEARING: every caller must derive this INSIDE the store
-// closure, never before the Store.Read / Store.Update call. Store.begin arms
-// op.ctx with the store's own operationTimeout at t0, this derivation happens
-// at t1 > t0, and archiveReadBound is at most operationTimeout — so the
-// fallback deadline is never earlier than op.ctx's. When the fallback is
-// exhausted, op.ctx.Err() is therefore already context.DeadlineExceeded and
-// Store.end deterministically classifies the closure error as
+// PLACEMENT IS LOAD-BEARING: establish the Store operation context first,
+// either with WithOperation for lock-free evidence reads or inside a store
+// closure. Store.begin arms op.ctx with operationTimeout at t0; deriving this
+// from op.ctx at t1 >= t0 cannot extend that deadline. When that bound is
+// exhausted, op.ctx.Err() is already context.DeadlineExceeded and Store.end
+// deterministically classifies the operation error as
 // store.ErrOperationDeadline: the retryable 503 store_timeout every affected
 // route already declares, plus audit_store_operation_deadline_exceeded_total.
-// Deriving before the store call inverts that order — op.ctx is still live
+// Deriving before the Store operation context is armed inverts that order — op.ctx is still live
 // when the fallback fails, Store.end does not classify, and the client gets an
 // opaque 500 instead of the retryable status.
 func (s *Service) archiveFallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {

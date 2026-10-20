@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -141,11 +142,19 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reads, exports int
+	var reads, exports, queryReads, selectedReads int
 	for _, action := range actions {
 		switch action.Action {
 		case domain.AdminActionEventRead:
 			reads++
+			switch {
+			case action.TargetType == "query" && action.Actor == "compliance-1":
+				queryReads++
+			case action.TargetType == "export" && action.TargetID == job.ID && action.Actor == "governance-worker" && action.Detail == "stage=selected verification":
+				selectedReads++
+			default:
+				t.Fatal("unexpected export read self-audit identity or stage")
+			}
 		case domain.AdminActionEventExport:
 			exports++
 			if action.TargetID != job.ID || action.Actor != "compliance-1" {
@@ -153,8 +162,8 @@ func TestReadSelfAuditOnExport(t *testing.T) {
 			}
 		}
 	}
-	if reads != 1 {
-		t.Fatalf("audit.event.read rows=%d, want 1 (export's internal query)", reads)
+	if reads != 2 || queryReads != 1 || selectedReads != 1 {
+		t.Fatalf("audit.event.read rows=%d, want one requester query and one selected-stage internal verification", reads)
 	}
 	if exports != 1 {
 		t.Fatalf("audit.event.export rows=%d, want 1", exports)
@@ -359,29 +368,35 @@ func TestReadSelfAuditOutOfScopeReadsRecordNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitExport(t, svc, job.ID)
+	beforeGet := readFacts(t, svc)
 	if _, err := svc.GetExport(testCtx, "tenant-a", job.ID); err != nil {
 		t.Fatalf("GetExport: %v", err)
 	}
-	// Two read facts are expected: the operation summary (auditor-1) and the
-	// export's internal query (compliance-1). GetExport itself appends
-	// nothing — any fact attributable to it fails this scope pin.
+	// The operation summary, requester query and selected-stage internal
+	// verification are distinct reads. GetExport itself still appends nothing.
 	reads := readFacts(t, svc)
-	if len(reads) != 2 {
-		t.Fatalf("audit.event.read rows=%d, want 2 (operation summary + export's internal query); %+v", len(reads), reads)
+	if !reflect.DeepEqual(beforeGet, reads) {
+		t.Fatal("GetExport appended or changed a read fact")
+	}
+	if len(reads) != 3 {
+		t.Fatalf("audit.event.read rows=%d, want operation summary, requester query and selected-stage verification", len(reads))
 	}
 	var opFact, queryFact bool
+	selectedFacts := 0
 	for _, read := range reads {
 		switch {
 		case read.TargetType == "operation" && read.TargetID == "op-scope" && read.Detail == "summary" && read.Actor == "auditor-1":
 			opFact = true
 		case read.TargetType == "query" && read.Actor == "compliance-1":
 			queryFact = true
+		case read.TargetType == "export" && read.TargetID == job.ID && read.Actor == "governance-worker" && read.Detail == "stage=selected verification":
+			selectedFacts++
 		default:
-			t.Fatalf("unexpected read fact=%+v (GetExport must record nothing)", read)
+			t.Fatal("unexpected read fact identity or stage; GetExport must record nothing")
 		}
 	}
-	if !opFact || !queryFact {
-		t.Fatalf("read facts=%+v, want operation|op-scope|summary by auditor-1 and query by compliance-1", reads)
+	if !opFact || !queryFact || selectedFacts != 1 {
+		t.Fatal("missing exact operation/requester query/selected-stage read facts")
 	}
 }
 

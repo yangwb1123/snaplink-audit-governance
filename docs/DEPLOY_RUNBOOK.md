@@ -176,6 +176,59 @@ committed-cold 对账收敛，不证明 Kafka/ClickHouse 完整。
 PostgreSQL v2 不产生文件 journal：hot CAS 与 ledger 追加在同一事务，cold 失败整体回滚，
 control/Outbox 仍单独对账。v1 路径与全历史成本限制未变，见 ADR-0015。
 
+## 文件数据路径与权限升级（ADR-0017）
+
+Linux 文件后端的数据路径逐组件拒绝 symlink，文件须为 regular/单链接 inode；
+截断前验证，不打开 FIFO/设备作数据。新文件 0600、新目录 0700；旧 0640/0750
+不自动 chmod。原子写在同一 directory fd 下 O_EXCL 创建 `.tmp`、fsync、renameat
+并同步祖先；未知 temp 原样保留，不能删掉换成功。非 Linux 文件数据失败关闭。
+
+升级前停写，核对真实目录/挂载、服务 UID、ACL、硬/软链接、未知 temp 和 journal。
+文件 API/worker 仍不能共占同一路径；数据路径不依赖 symlink。备份身份须能显式读取
+0600/0700，同步备份 control、tenants、ledger、journal、publications 与密钥环境。
+本版本不自动遍历权限、更换账本或重新签名；旧组读的潜在泄露需单独处置。
+
+回滚前以当前版本完成已知 journal 恢复及 cold 核对，保存未知残留及原证据；旧版本
+忽略 journal、创建组读文件或截断 `.tmp` 都不是安全回滚。正常读仍可能可用而未知
+控制面 `.tmp` 阻止覆盖，运维须检查，而不是盲目重试。描述符防 symlink 重定向，
+不是特权主机/mount 管理或正式 WORM 的防篡改证明。TLS/DLQ 独立策略见 ADR-0018。
+
+## TLS secret mounts 与 DLQ state 升级（ADR-0018）
+
+- Linux gRPC cert/key/client CA 每文件最多 4 MiB，要求 regular inode，实际读取同样
+  有界且 FIFO 不阻塞。配置父目录作为受信 root，允许 `..data/...` 等 root 内相对
+  symlink，拒绝 root 外/绝对叶链接；父路径和挂载/CA 仍需运维授权。上线前核对
+  secret UID/ACL、大小和真实目标，需要跨目录就配置真实父目录，不能放宽 mTLS。
+  文件逐个读取、仅启动/预检加载，不是跨文件快照或热轮换；轮换后重启验证。
+- DLQ 可变 state/lock 使用严格 NOFOLLOW 数据策略（不是 TLS 策略）。唯一 O_EXCL
+  0600 temp 及 renameat/cleanup 共用捕获 parent，actual fd fsync 后发布；保留未知
+  temp，不遍历 chmod。旧 v1/v2 和显式 legacy tenant scope 不变；共用 state 的
+  DLQ writers 继续依赖本地 POSIX flock union，不能与 ledger 单写者混淆。
+- 升级/回滚前停本轮 DLQ writers，核对链接、owner/ACL、原 durable marks/union 和
+  legacy scope，备份原 state；不清空 state、不忽略旧 mark、不自动处理未知残留。
+  关闭/同步失败可能已经落盘，结果未知；保留 pending/offset，允许幂等重试。
+  非 Linux 文件 loader 失败关闭；仍无全历史 load/conversion 内存容量保证。
+
+## 租户治理状态观察
+
+`GET /api/v1/governance/status` 与 Web 概览展示当前保留的控制面元数据，不限 24 小时；
+已有导出创建、操作读取、Hold 管理、策略读取权限分别开放对应分区，至少需要其中一个。
+平台凭证必须选择单个 tenant_id；tenantless Console 能力不能读取此接口。未授权分区
+省略，不可解释为零；成功及错误均 `Cache-Control: no-store`，自审计失败不返回摘要。
+无需新增数据库迁移，API/Web 一起升级即可；旧 API 无此接口时不可补造成功计数。
+
+- 排队上限 32、运行上限 1 是本租户的固定共享 CAS 上限，不是可用余量；仍可能因
+  其他租户占满全局预算而无法创建/领取。不得根据本租户计数修改任务状态或扩大预算。
+- 运行数不是实际工作进程/租约数，完成不代表可绕过 Hold 下载；未知状态单独计数。
+- 待我决策排除本人和缺少申请人的旧记录，但最终审批仍重新授权和原子职责分离。
+  已批准仅是治理决策；业务执行未接线，不以此判断恢复成功。
+- Hold 数量不证明对象版本保全或保护的事件数量；留存只是存储的策略配置。
+  不判断对象 COMPLIANCE 到期、不执行删除、不缩短既有留存。
+- observed_at/source=control/completeness=not_asserted 不证明发布、投影或全租户证据完整。
+  摘要不探测 broker/ClickHouse/WORM；就绪、证据校验、完整性验收仍使用独立门禁。
+- 只使用 ReadControl；PostgreSQL v1 仍可能物化旧快照，v2 共享 control 的终态历史
+  也没有被本接口限额回收。生产查询成本/容量须另行验收，详见 ADR-0016。
+
 ## 导出队列容量与故障收敛
 
 同一共享 control 中 pending/running 最多全局 128、租户 32；创建 CAS 耗尽 429，
@@ -183,12 +236,157 @@ control/Outbox 仍单独对账。v1 路径与全历史成本限制未变，见 A
 不通过加副本乘大并发。API 启动及每秒唤醒有界 dispatcher；租户轮转、租户内
 oldest-first；恢复 API 返回 backlog，不表示已领取/完成。
 
-running 崩溃残留会占配额，必须运行同密钥/归档配置的 governance worker；既有
-started_at/24h 默认卡死恢复规则不变。先检查任务真实运行状态，不改终态、放宽预算
-或缩短 COMPLIANCE 来恢复吞吐。尚无租约/心跳/检查点或可续跑的分块导出；整块
-物化/密封的内存、共享 control 历史成本及真实 PG 容量须另验收。详见 ADR-0014。
-下载对象读取已移到锁外，共用一次 Store deadline；仍在所有认证/Hold/自审计通过
-后才输出明文，不能将该改造表述为认证前输出的流式大文件下载。
+领取原子保存私有 2 分钟租约、每 30 秒 control-only CAS 心跳；API 队列启动/每秒
+派发前和 governance worker 收敛无检查点的过期租约；合法 selected 计划或 sealed 检查点保留 running，
+由有限 dispatcher 在原 lease 到期后换新 owner 续跑已持久阶段（生成页或 sealed 终态提交）。恢复失败该队列 pass
+不派发，畸形租约/检查点失败关闭；失败状态/元数据清理与 export.recovered 同一次
+保存，终态不重新排队。仅无
+租约的旧 running 保留 started_at/CreatedAt、默认 24h 的严格年龄恢复。续期失败
+取消执行，迟到 Put 可能已提交无引用密封对象，但失主不能发布路径或删除 WORM。
+预算是有效持久 claim 上限，不是跨主机强杀或物理 I/O 上限；先核对真实运行和未知
+远端结果，不改终态、清空租约、放宽预算或缩短 COMPLIANCE 来恢复吞吐。
+
+升级/回滚不得混跑旧/新 API/worker：旧版本忽略 owner fencing。先停止新领取、停写
+并核对/排空原执行；running=0 不证明外部 Put 已结束。control 连同 export_leases、
+export_checkpoints、export_plans 必须按既有 ledger/hot/journal/发布确认/密钥流程备份；
+租约不是事实源或进度证明，计划绑定已完成的选择阶段，sealed 检查点绑定密封阶段。
+进程壁钟需同步，监测心跳写放大、control CAS 冲突与归档延迟；配置一致性键不证明
+二进制支持租约。API/worker 仍须同密钥/归档配置，文件数据仍单写者。
+
+导出所有者可通过 POST /api/v1/exports/{jobId}/cancel 撤销 pending/合法 leased
+running；未知 requester、其他主体（含平台主体）或旧无 lease running 不可代办。
+状态/撤销 lease/清输出引用与 export.cancelled 同一 CAS，重复取消零写入。取消释放
+持久预算，但最多在后续心跳观察撤销，不证明外部 Put 停止，不删除无引用 WORM。
+
+POST /api/v1/exports/{jobId}/retry 为本人已结束 failed/cancelled 创建关联新任务，原
+终态不变；清旧 cursor、重新读取/自审计/Hold 检查及共享队列准入。每个原任务最多
+一个直接后继，重复请求返回同一后继（也可能已结束）；再次尝试须指定失败后继。
+新任务不延续旧固定成员集。创建/重试共享各自一次服务 deadline，Hold 预检捕获
+独立快照后锁外取证，不阻塞租约续期/所有者取消；历史物化成本仍在。
+操作只返回安全 control 摘要；Hold 不阻止所有者撤销，
+也不能通过操作响应读取证据。499/超时/5xx 后先读列表 view=mine 核对，不能推断
+回滚；幂等重复不是批量自动重试策略。failure_code 是固定类别、旧记录可缺失，
+不是物理停止或成功重试回执。治理计数 cancelled 不计作 unknown/failed。
+
+API/worker/Web 配套升级；即使旧版本支持 lease，也不得混跑会丢弃 retry_of/
+failure_code/export_checkpoints 的旧 control writer。备份保留完整原任务、后继、leases
+和活跃检查点；不要清理
+关联历史、改 requester、回退终态或删 WORM 来重试。回滚须停写核对目标版本字段
+保存能力及远端未知结果，不以 running=0 或一致性键证明安全，详见 ADR-0020。
+
+### Put 后密封检查点 / 终态提交续跑（ADR-0021，有限子切片）
+
+- `export_checkpoints` 是私有 control 元数据，version=1/seal_version=2；任务/申请人/
+  retry_of/原筛选及创建/启动时间使用独立用途 HMAC 绑定，另认证原对象引用、密封
+  字节/JSONL 摘要、计数与检查点时间。没有载荷、密文、原始筛选副本或 owner；不得
+  将该 map、HMAC、对象字节放入 DTO/诊断日志/URL。既有 10000 匹配身份预算在执行
+  选择时也复核，不截断输出；选择 Get 现在锁外，仍有历史物化和整块 AEAD 内存。
+- Put 成功后，当前未过期 owner 以同一 CAS 保存 checkpoint + export.checkpointed。
+  未知 Save 可能已提交；不猜成功、不删对象。检查点提交前崩溃仍失败收敛，未知
+  WORM 对象/临时文件不可作为恢复计划。只恢复 sealed 阶段，不从短期查询 cursor
+  或最大 sequence 推断成员完整；也不自动重试已结束任务。
+- 原 running lease 到期后，接管 CAS 保留 started_at、换新随机 owner 并写
+  export.resumed；继续占原 running 配额，仍须全局≤2/租户≤1。不回退 pending、
+  不抢健康 owner、不放宽预算。API 启动/周期 dispatcher 和 worker Resume 均可唤醒；
+  Resume 返回 pending + 合法到期检查点的观察 backlog，不是完成数。恢复计数只统计
+  原有失败收敛，不把保留的检查点算作成功执行。
+- 续跑仅读原密封对象，重新认证精确密封字节/v2 tenant-job AEAD/JSONL 摘要和计数、
+  最新 committed receipt 坐标；不会重新选择输出、重新密封或 Put。当前 Hold 检查
+  和内部 governance-worker 读自审计失败关闭；一次验证共用一个 Store deadline。
+  Hold 集在锁外检查后若变化，终态 CAS 拒绝完成，留待后续重新检查。检查点终态的
+  Hold 证据从 committed receipts 锚定，在原查询/Hold 谓词之前验证身份、精确 Schema、
+  重建内容和链；敏感条件从认证原值按条件自身的 bound/legacy 格式推导，不信任派生
+  搜索索引的存在、格式或值。缺失/坏正文/不可认证 Schema 保留原检查点，不当作空
+  选择或删除运行元数据；先核对并修复原证据/密钥/目录，再等待正常过期接管重查，
+  不手改 lease/终态换成功。无候选/不相交 Hold 仍不读源对象；当前迟到证据和最低
+  匹配 Hold ID 语义不变，但不会改变原输出成员。这不是其他 Hold 路径或历史成本
+  的整体改造。源 Get 阻塞不持 Store.mu，仍共用终态验证 deadline，所有者取消/续期
+  可继续；取消/换主后的晚验证不能发布路径。
+- Get/Store/取消/超时/读自审计失败保留 running 检查点，停止本次 heartbeat 后等待
+  下一次租约接管。坏格式/摘要/AEAD/账本坐标原子 failed + export.checkpoint_rejected；
+  当前 Hold 阻断原子失败并写 export.blocked；完成与一次 export.completed 同 CAS。
+  完成/失败/所有者取消移除已知活跃检查点和 lease，不删事实/WORM。未知版本、任务
+  漂移或坏 MAC 失败关闭并保留现场，禁止手改元数据、清 lease 或重置终态换成功。
+- API/worker 配套停写升级；即使旧版本支持租约，也不能让不认识检查点的旧 writer
+  重写 control 或把它失败清理。备份完整任务/后继/leases/checkpoints 与既有证据、
+  journal、发布确认和原密钥。回滚须核对目标版本保存能力与远端未知结果；密钥轮换、
+  版本级对象 Hold、正式 WORM/合规和容量验收仍独立，不以一致性键或本机测试代替。
+
+### 生成前固定成员计划 / selected 阶段续跑（ADR-0023，v1 兼容路径）
+
+新单页任务和已保留的 v1 计划继续以下路径；新多页 v2 计划另见下节。
+
+- 私有 control export_plans（version=1/format_version=1），不含载荷/密文/原始
+  筛选副本/搜索摘要/owner；仅有任务 HMAC、有序账本坐标/发生时间、精确 Schema
+  ID/version/定义 HMAC、时间与签名。10000 身份/4 MiB 编码，不扩大共享 running
+  2/tenant1 或队列128/32；没有查询 cursor 的15分钟到期。计划不是新账本事实。
+- 生成前先认证 committed receipts/精确 Schema/内容/链再选择，不信任搜索 sidecar。
+  内部读自审计后，当前未过期 owner 将计划与 export.planned 同 CAS 保存。Save
+  未知立即停止，不猜提交或 Put。原 lease 到期后，合法计划留 running 供有限
+  dispatcher 换新 owner，保留 started_at，不复活终态，不用较新查询替代计划。
+- 恢复只读原成员坐标并认证最新 receipt/WORM、内容/链及 Schema 定义；当前 Hold
+  仍认证原查询的当前证据，可能包含迟到事实但不改输出成员。源 Get 锁外，一次
+  selected 验证 deadline 覆盖取证/Hold/读自审计/计划复核。证据缺失/不可认证、
+  Schema 漂移、自审计或 Store 失败保留计划，核对原证据/密钥/目录后等正常接管，
+  或由已知所有者取消；不清 metadata、改 owner 或重选一批换成功。
+- Put 前复核计划/当前 Schema/owner；sealed Save 再核对生成 JSONL 的有序身份/
+  版本，复核计划/Schema 并同 CAS 消费 selected，活跃阶段互斥。Put 后 sealed
+  保存前崩溃可能留下无引用对象，新 owner 仅按已知计划生成不同 attempt 对象；
+  不重放未知旧 key，不推断回滚/一次 Put，不删除 WORM。取消/终态只清已知合法
+  活跃计划，保留原阶段事实；retry 新建任务且不继承原计划。
+- API/worker/所有 control writer 配套停写升级，备份完整 plans/checkpoints/leases/
+  任务关联与既有证据/journal/确认/密钥。旧 sealed-only writer 也不得混跑；回滚
+  须核对字段保存与未知远端结果，不能以一致性键、running=0 或启动成功作证明。
+  沿用文件单写者/descriptor-relative 权限与 UTC 时钟，不改认证/超时/保留期。
+
+### 逐页生成进度（ADR-0024，新多页 v2 计划）
+
+- 新选择超过 100 成员使用 version=2/format_version=1，每页最多 100 个固定成员。
+  `chunks` 只含连续页范围、独立绑定的原密封对象引用/摘要/时间，不含对象字节、
+  原始筛选/搜索摘要或 owner。最多 10000 成员/100 页，4 MiB **总**计划元数据内预留
+  每页 1 KiB 引用空间，共享队列128/32与running2/1不变，无新增 TTL/并行执行器。
+- 每页认证原坐标/精确 Schema/内容/链、重查当前认证 Hold（包括迟到证据）、失败
+  关闭读自审计。锁外源读、Hold/audit、页 Put/Save 共用本页的一次原 operation
+  deadline；不按对象重启、不放宽原超时。Put 前和进度 CAS 复核 owner/计划/Schema/
+  Hold 集，页引用与一次 export.progressed 同 CAS。未知 Save 停止当前执行，实际
+  可能已提交；正常到期新 owner 只按耐久前缀继续，不人工改租约换成功。
+- 接管先认证引用的已生成页、最新 ledger 坐标和 Schema，只生成剩余页；缺失/不可用/
+  损坏的已提交页保留原计划，**不重读源事件来生成替代页**。修复原对象/密钥/目录后
+  等待正常接管，或所有者取消；未知版本/错绑元数据保留现场。当前 Hold 匹配失败
+  并清合法活跃元数据，但原页/事实不删；详情/下载仍有各自权威门禁。
+- 未提交/迟到页 Put 可留下无引用 `export-chunks/` 对象；新 owner 对未提交页用不同
+  attempt key，不猜旧 key、不宣称回滚或仅 Put 一次。所有页提交后才合并/整体密封
+  为现有最终对象，sealed Save 原子消费计划/进度，随后原 sealed finalizer 仍复核
+  当前 Hold/读自审计与终态 fencing。完成/取消不删除任何页或最终 WORM 对象。
+- API/worker/全部 control writer 配套停写升级；旧 v1-plan writer 也不能混跑/丢字段。
+  备份完整任务/关联/leases/plans（含 chunks）/checkpoints、页对象及既有证据/journal/
+  确认/原密钥。回滚先停领取/写入，核对格式保存能力与未知远端结果；禁止清理页对象、
+  owner/终态元数据或缩 COMPLIANCE 换成功。文件单写者、时钟同步要求不变。
+
+M3 检查点整项仍 Partial：已有多页 JSONL 生成进度，最终合并/整体 AEAD/Put 仍可重做，
+尚无流式认证大文件下载；首次选择/当前 Hold 历史扫描、最终合并/密封内存、共享
+control 成本及真实 PG 容量须另验收。详见 ADR-0014/0019/0020/0021/0023/0024。
+下载对象读取已移到锁外，共用一次 Store deadline；仍在认证/Hold/自审计通过后才
+输出明文，不能将该改造表述为认证前输出的流式大文件下载。
+
+### 导出详情 / 下载放行的当前 Hold（ADR-0022）
+
+详情与下载放行现在复用 receipt 锚定、精确 Schema/内容/链认证的 Hold 判定，再评估
+原查询/Hold；敏感条件从认证原值按条件的 bound/legacy 格式推导，不以搜索 sidecar
+的存在/格式/值判断未命中。缺失/损坏证据拒绝访问，不改终态或删除对象。无候选、
+时间不相交仍不读源对象；历史深快照/扫描成本和其他 Hold 路径并未整体消除。
+
+源 Get 与认证在锁外；详情、下载放行各有一次既有 Store 操作 deadline，后者包含
+拒绝/允许自审计和 control 复核，不按对象/追加重启。慢 Get 时续期/所有者取消仍可
+继续。允许前重读 control，活跃 Hold 集/任务选择变化返回 409，要求刷新，不自动
+重发；正常向前的作业进展不阻断详情轮询，下载及已捕获终态要求完整 job 不变。
+下载自审计前后均复核，独立 trail 已落盘的尝试事实不撤回，也不证明输出过明文或
+接收方已收到字节。匹配 Hold 后即使随后释放，本次仍保守拒绝，新的调用重新检查。
+
+HTTP 详情/下载成功及全部错误均 no-store；认证、AEAD/摘要、当前 Hold 与自审计
+通过前不输出明文。最终 control 复核是本次访问的放行观察点，不是全链路事务或
+对已经开始响应的撤回；整体认证下载不变，没有增加分块下载、生成检查点、执行
+权限、迁移或新运行元数据。继续沿用前述版本配套、备份与回滚限制，不清历史换成功。
 
 ## 本机全栈验证
 
@@ -321,3 +519,21 @@ PostgreSQL 连接池。退出序列（`cmd/audit-api/main.go`）：
   重试即可收敛到**恰好一份** receipt。
 - **回滚。** 回滚二进制即恢复旧行为（无界 drain）；无数据迁移、无配置迁移，也没有
   新增变量。
+
+### governance worker 启动期间的终止
+
+正常启动在 openStore 之前注册 SIGINT/SIGTERM，避免已经取得文件锁、尚未完成归档
+预检时落入 OS 默认终止。启动 Ready 使用同一进程取消上下文和原 5 秒上限；收到
+终止信号后取消预检，不开始治理 pass，正常关闭 store。无信号取消的 Ready 失败
+仍是启动错误、非零退出；没有绕过 Object Lock/versioning/COMPLIANCE 检查。其他
+存储打开/操作、每对象和整 pass 上限不变，不据此承诺所有启动 I/O 可被物理强杀。
+
+锁存在/可观察只证明排他所有权，不能用作就绪标记。验证分别在真实 startup bucket
+HEAD、归档 object HEAD 和 flock 边界同步；前置 v2 测试数据在计时前准备，启动护栏
+和 SIGTERM 后退出上限仍各 10 秒。API drain 夹具的 1 秒 store/drain 配置及退出上限
+不变；准备接入仅对固定存储超时使用同一完整事件进行幂等核对，其他错误立即失败，
+成功流不继承准备 TTL。此准备策略不是生产超时放宽或运行终态重试。
+
+无 SQL/control/归档格式迁移或新变量；回滚会恢复 worker 的启动信号窗口，不能靠
+延迟发信号、清锁文件、另起空账本或修改导出 owner/终态掩盖。API/worker 仍须遵守
+前述版本配套与完整备份限制。

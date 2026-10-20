@@ -42,7 +42,11 @@ func (s *Service) CreateRestore(ctx context.Context, tenantID string, request do
 		return domain.RestoreRun{}, err
 	}
 	run := domain.RestoreRun{ID: newID("restore"), TenantID: tenantID, OperationID: request.OperationID, Status: domain.RestoreStatusPendingApproval, Reason: request.Reason, CreatedBy: requestedBy, CreatedAt: s.Now()}
-	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Creation only adds control metadata. Reapply that delta on fresh control
+	// after a real Save conflict, never a previously materialized whole snapshot
+	// that can resurrect a revoked export lease/stage or replace hot/cold files.
+	// Replay keeps its existing separate budget and is not repeated by retries.
+	if err := s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		data.RestoreRuns[run.ID] = run
 		s.appendAdminAction(data, s.adminAction(tenantID, requestedBy, domain.AdminActionRestoreCreated, "restore", run.ID, request.OperationID))
 		return nil
@@ -71,7 +75,10 @@ func (s *Service) transitionRestore(ctx context.Context, tenantID, runID, actor,
 		return domain.RestoreRun{}, err
 	}
 	var run domain.RestoreRun
-	err := s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Re-run the decision guards on fresh control after every actual Save
+	// conflict. A materialized snapshot must not overwrite a newer decision,
+	// export terminal/lease/stage or Hold, nor rewrite unchanged v2 evidence.
+	err := s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		value, ok := data.RestoreRuns[runID]
 		if !ok || value.TenantID != tenantID {
 			return domain.ErrNotFound
@@ -80,7 +87,7 @@ func (s *Service) transitionRestore(ctx context.Context, tenantID, runID, actor,
 			return fmt.Errorf("%w: restore run is not pending approval", domain.ErrConflict)
 		}
 		// Separation of duties: the deciding actor must differ from the
-		// requesting actor. Inside the Update closure, so a refusal commits
+		// requesting actor. Inside the control CAS closure, so a refusal commits
 		// nothing (no version bump, no admin action). Precedence is pinned
 		// NotFound → Conflict → Forbidden: 404 masks cross-tenant existence,
 		// 409 dominates for decided runs.
@@ -103,7 +110,12 @@ func (s *Service) transitionRestore(ctx context.Context, tenantID, runID, actor,
 		run = value
 		return nil
 	})
-	return run, err
+	if err != nil {
+		// A failed/unknown Save (or a refused retry) is not a confirmed
+		// decision. Do not expose the value prepared by an earlier attempt.
+		return domain.RestoreRun{}, err
+	}
+	return run, nil
 }
 
 func (s *Service) GetRestore(ctx context.Context, tenantID, runID string) (domain.RestoreRun, error) {
@@ -111,15 +123,26 @@ func (s *Service) GetRestore(ctx context.Context, tenantID, runID string) (domai
 		return domain.RestoreRun{}, err
 	}
 	var run domain.RestoreRun
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		value, ok := data.RestoreRuns[runID]
-		if !ok || value.TenantID != tenantID {
-			return domain.ErrNotFound
+	// A request/decision is control metadata, not event evidence. Do not
+	// materialize unrelated v2 hot/cold history just to observe its status.
+	// Keep the original single read budget, including withdrawal after Load.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			value, ok := data.RestoreRuns[runID]
+			if !ok || value.TenantID != tenantID {
+				return domain.ErrNotFound
+			}
+			run = value
+			return nil
+		}); err != nil {
+			return err
 		}
-		run = value
-		return nil
+		return opCtx.Err()
 	})
-	return run, err
+	if err != nil {
+		return domain.RestoreRun{}, err
+	}
+	return run, nil
 }
 
 // DefaultStuckExportAge is the default age past which an export job stuck

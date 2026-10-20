@@ -15,7 +15,12 @@ func (s *Service) RunExportQueue(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.wakeExports(context.WithoutCancel(ctx))
+		if _, err := s.recoverExpiredExportLeases(ctx); err != nil {
+			s.logf("export lease recovery failed category=control")
+			// Do not dispatch through an unavailable/corrupt recovery pass.
+		} else {
+			s.wakeExports(context.WithoutCancel(ctx))
+		}
 		select {
 		case <-ctx.Done():
 			return

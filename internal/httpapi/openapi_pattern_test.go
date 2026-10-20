@@ -42,12 +42,12 @@ func TestOpenAPIDocumentsKeyFramingPatterns(t *testing.T) {
 	}
 	// The reusable query selector and the body tenant selector share the
 	// same validation language. Query declarations are references rather than
-	// duplicated inline schemas, so their 34 operations cannot drift.
+	// duplicated inline schemas, so their 37 operations cannot drift.
 	if count := strings.Count(text, queryPattern); count != 2 {
 		t.Errorf("tenant selector key-framing pattern appears %d times, want exactly 2 (query parameter and body selector)", count)
 	}
-	if count := strings.Count(text, "#/components/parameters/tenantId"); count != 34 {
-		t.Errorf("tenantId reusable parameter is referenced %d times, want 34", count)
+	if count := strings.Count(text, "#/components/parameters/tenantId"); count != 37 {
+		t.Errorf("tenantId reusable parameter is referenced %d times, want 37", count)
 	}
 	// The five Event key components must each carry their pattern inline;
 	// non-key components (event_type, schema_id, idempotency_key) must not.

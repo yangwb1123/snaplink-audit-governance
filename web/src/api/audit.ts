@@ -11,6 +11,7 @@ import type {
   EventSchema,
   ExportJob,
   ExportSummary,
+  GovernanceStatus,
   JobPage,
   JobQuery,
   IntegrityResult,
@@ -173,6 +174,13 @@ export class AuditApi {
     )
   }
 
+  getGovernanceStatus(tenantId?: string, signal?: AbortSignal): Promise<GovernanceStatus> {
+    return this.client.request(
+      `/api/v1/governance/status${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
+    )
+  }
+
   listExports(query: JobQuery = {}, tenantId?: string, signal?: AbortSignal): Promise<JobPage<ExportSummary>> {
     return this.client.request(
       `/api/v1/exports${queryString({ ...query, tenant_id: this.scopedTenant(tenantId) })}`,
@@ -198,6 +206,20 @@ export class AuditApi {
     return this.client.request(
       `/api/v1/exports/${encodeURIComponent(jobId)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       { signal },
+    )
+  }
+
+  cancelExport(jobId: string, tenantId?: string, signal?: AbortSignal): Promise<ExportSummary> {
+    return this.client.request(
+      `/api/v1/exports/${encodeURIComponent(jobId)}/cancel${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { method: 'POST', signal },
+    )
+  }
+
+  retryExport(jobId: string, tenantId?: string, signal?: AbortSignal): Promise<ExportSummary> {
+    return this.client.request(
+      `/api/v1/exports/${encodeURIComponent(jobId)}/retry${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { method: 'POST', signal },
     )
   }
 

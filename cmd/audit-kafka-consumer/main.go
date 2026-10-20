@@ -172,11 +172,7 @@ func devTokenTenant(token string) (string, bool) {
 // used by the audit-api /metrics endpoint, so Prometheus can alert on DLQ
 // traffic (the release-notes follow-up: DLQ consumer + traffic alert).
 func serveMetrics(address string, consumer *kafka.Consumer, logger *log.Logger) {
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprint(w, metricsText(consumer.Metrics()))
-	})
-	server := &http.Server{Addr: address}
+	server := newMetricsServer(address, consumer.Metrics)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Printf("metrics listen=%s error=%v", address, err)
 	}

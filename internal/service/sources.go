@@ -25,7 +25,10 @@ func (s *Service) AddSource(ctx context.Context, actor string, source domain.Sou
 	if !source.Active {
 		source.Active = true
 	}
-	return s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Registration and its fact only change control. Recheck current tenant
+	// and uniqueness after every real Save conflict; never replace evidence
+	// or restore captured control over current export/source authority.
+	return s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[source.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -48,7 +51,10 @@ func (s *Service) UpdateSource(ctx context.Context, actor string, source domain.
 	if err != nil {
 		return domain.SourceSystem{}, err
 	}
-	err = s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Source replacement and its fact only change control. After a real Save
+	// conflict recheck the current tenant/source (including CreatedAt), never
+	// restore captured control over current export authority or rewrite evidence.
+	err = s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		// Defense-in-depth (mirrors AddSource): the source key can only be
 		// reached for an existing tenant; a source row without its tenant
 		// record (hand-edited snapshot) must never be reachable by key
@@ -68,7 +74,10 @@ func (s *Service) UpdateSource(ctx context.Context, actor string, source domain.
 		s.appendAdminAction(data, s.adminAction(source.TenantID, actor, domain.AdminActionSourceUpdated, "source", source.ID, fmt.Sprintf("allowed_client_ids=%v active=%v", source.AllowedClientIDs, source.Active)))
 		return nil
 	})
-	return source, err
+	if err != nil {
+		return domain.SourceSystem{}, err
+	}
+	return source, nil
 }
 
 func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
@@ -99,7 +108,7 @@ func normalizeSource(source domain.SourceSystem) (domain.SourceSystem, error) {
 	// Control-plane resource caps (arity + per-entry bytes). Checked before
 	// the copy, the dedup map and the sort below, so an over-cap allow-list
 	// never allocates or does O(n) work proportional to it, and before
-	// AddSource/UpdateSource enters Store.Update: no Sources row, no mutation,
+	// AddSource/UpdateSource enters a store mutation: no Sources row, no mutation,
 	// no admin action, no durable write. Read paths stay ungated, so a row
 	// registered before the cap existed keeps authorizing.
 	if err := domain.ValidateSourceCaps(source); err != nil {

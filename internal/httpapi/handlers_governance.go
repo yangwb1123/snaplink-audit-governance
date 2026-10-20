@@ -17,6 +17,7 @@ import (
 )
 
 func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -41,6 +42,7 @@ func (s *Server) createExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -63,10 +65,12 @@ func (s *Server) getExport(w http.ResponseWriter, r *http.Request) {
 	if job.Error != "" {
 		job.Error = "export failed"
 	}
+	job.FailureCode = domain.PublicExportFailureCode(job.FailureCode)
 	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:export:create")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)

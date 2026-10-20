@@ -69,7 +69,12 @@ func (a *schedulerPausedArchive) Put(ctx context.Context, key string, data []byt
 }
 
 func TestExportSchedulerBoundedAcrossServiceReplicas(t *testing.T) {
-	svc := testService(t, true)
+	// Scheduling/CAS ceilings are not filesystem throughput requirements.
+	// Keep the real Store Save and paused Put boundaries with healthy,
+	// isolated in-memory dependencies; file durability is tested separately.
+	backend := newSchedulerObservationBackend()
+	svc := newServiceOn(t, store.NewWithBackend(backend))
+	svc.Config.Archive = newConsoleMemoryArchive()
 	other, err := New(svc.Store, svc.Config)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +98,20 @@ func TestExportSchedulerBoundedAcrossServiceReplicas(t *testing.T) {
 	}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(paused.release) }) }
-	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	queueCtx, stopQueues := context.WithCancel(ctx)
+	queueExited := make(chan struct{}, 2)
+	queuesStarted := 0
+	defer func() {
+		release()
+		stopQueues()
+		cancel()
+		for i := 0; i < queuesStarted; i++ {
+			<-queueExited
+		}
+		awaitSchedulerFixtureIdle(t, svc, other)
+		_ = svc.Store.Close()
+	}()
 	// Concurrent resume passes do not enqueue one goroutine for every pending
 	// record; shared durable CAS prevents multiplying the work on replicas.
 	var wg sync.WaitGroup
@@ -108,12 +126,15 @@ func TestExportSchedulerBoundedAcrossServiceReplicas(t *testing.T) {
 		}(replica)
 	}
 	wg.Wait()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	// A replica can lose a capacity race and retain pending work. Run the
 	// same periodic wake used by the API; completion alone is not a lease.
-	go svc.RunExportQueue(ctx)
-	go other.RunExportQueue(ctx)
+	for _, replica := range []*Service{svc, other} {
+		queuesStarted++
+		go func(s *Service) {
+			defer func() { queueExited <- struct{}{} }()
+			s.RunExportQueue(queueCtx)
+		}(replica)
+	}
 	for i := 0; i < ExportConcurrency; i++ {
 		select {
 		case <-paused.entered:
@@ -168,6 +189,7 @@ func TestExportSchedulerBoundedAcrossServiceReplicas(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	backend.assertCompletedWithinCeilings(t, ids)
 }
 
 func TestExportClaimCapacityDoesNotMutatePending(t *testing.T) {

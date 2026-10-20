@@ -114,12 +114,19 @@ func seedLedgeredOutbox(t *testing.T, svc *Service, ids ...string) {
 
 // startFlushRound runs one flush round in the background and returns a done
 // channel that is closed when the round returns, plus a channel carrying any
-// round error.
-func startFlushRound(svc *Service, limit int) (done chan struct{}, failures chan error) {
+// round error. Cleanup cancels and joins even on an early/fatal test exit;
+// normal success still explicitly releases the broker and checks the result.
+func startFlushRound(t *testing.T, svc *Service, limit int) (done chan struct{}, failures chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(testCtx)
 	done, failures = make(chan struct{}), make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		awaitChannel(t, done, "the fixture flush round to exit")
+	})
 	go func() {
 		defer close(done)
-		if _, err := svc.FlushLedgeredOutbox(testCtx, limit); err != nil {
+		if _, err := svc.FlushLedgeredOutbox(ctx, limit); err != nil {
 			failures <- err
 		}
 	}()
@@ -161,7 +168,7 @@ func TestFlushRoundDoesNotBlockConcurrentIngest(t *testing.T) {
 	svc.Config.LedgeredPublisher = publisher
 	seedLedgeredOutbox(t, svc, "hl-flush-1", "hl-flush-2")
 
-	flushDone, _ := startFlushRound(svc, 100)
+	flushDone, flushErr := startFlushRound(t, svc, 100)
 	awaitChannel(t, publisher.entered["hl-flush-1"], "the flush round to enter its first publish")
 
 	ingestDone := make(chan error, 1)
@@ -202,6 +209,11 @@ func TestFlushRoundDoesNotBlockConcurrentIngest(t *testing.T) {
 	if pending := pendingLedgeredEvents(t, svc); len(pending) != 2 {
 		t.Fatalf("pending outbox=%v, want only the two rows the round still owns", pending)
 	}
+	close(publisher.block["hl-flush-1"])
+	awaitRound(t, flushDone, flushErr, "the released flush round to finish")
+	if pending := pendingLedgeredEvents(t, svc); len(pending) != 0 {
+		t.Fatal("released flush did not durably acknowledge its original intents")
+	}
 }
 
 // TestDeferredLedgeredPublishDrainsOnNextFlush is AC-2 option (a): the deferred
@@ -220,7 +232,7 @@ func TestDeferredLedgeredPublishDrainsOnNextFlush(t *testing.T) {
 	svc.Config.LedgeredPublisher = publisher
 	seedLedgeredOutbox(t, svc, "hl-drain")
 
-	flushDone, flushErr := startFlushRound(svc, 100)
+	flushDone, flushErr := startFlushRound(t, svc, 100)
 	awaitChannel(t, publisher.entered["hl-drain"], "the flush round to enter its publish")
 
 	deferred := testEvent("hl-drain", "op-ledgered-gate", time.Unix(1_700_000_620, 0).UTC())
@@ -423,7 +435,7 @@ func TestConcurrentFlushRoundsPublishEachEventOnce(t *testing.T) {
 	svc.Config.LedgeredPublisher = publisher
 	seedLedgeredOutbox(t, svc, "aa-round-busy", "zz-round-free")
 
-	firstDone, firstErr := startFlushRound(svc, 100)
+	firstDone, firstErr := startFlushRound(t, svc, 100)
 	awaitChannel(t, publisher.entered["aa-round-busy"], "the first flush round to enter its publish")
 
 	if flushed, err := svc.FlushLedgeredOutbox(testCtx, 100); err != nil || flushed != 0 {
@@ -559,7 +571,7 @@ func TestFlushRevalidationReadsOncePerRound(t *testing.T) {
 	svc.Config.LedgeredPublisher = publisher
 	seedLedgeredOutbox(t, svc, "rv-0", "rv-1", "rv-2", "rv-3", "rv-4", "rv-5")
 
-	flushDone, flushErr := startFlushRound(svc, 100)
+	flushDone, flushErr := startFlushRound(t, svc, 100)
 	awaitChannel(t, publisher.entered["rv-0"], "the flush round to enter its publish")
 
 	// A request-path acknowledgement lands while the round holds its snapshot.
@@ -608,7 +620,7 @@ func TestFlushRevalidationFailsOpen(t *testing.T) {
 	svc.Config.LedgeredPublisher = publisher
 	seedLedgeredOutbox(t, svc, "fo-0", "fo-1", "fo-2")
 
-	flushDone, flushErr := startFlushRound(svc, 100)
+	flushDone, flushErr := startFlushRound(t, svc, 100)
 	awaitChannel(t, publisher.entered["fo-0"], "the flush round to enter its publish")
 
 	svc.ledgeredRequestAcks.Add(1)

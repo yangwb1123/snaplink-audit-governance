@@ -224,8 +224,8 @@ func (r *Replayer) SetReplayAuthBlocked(enabled bool) {
 }
 
 // authBlockedCount reports how many collected records are held auth-blocked.
-func authBlockedCount(collected []dlqRecord) int {
-	blocked := 0
+func authBlockedCount(collected []dlqRecord) uint64 {
+	var blocked uint64
 	for _, record := range collected {
 		if record.authBlocked {
 			blocked++
@@ -341,7 +341,7 @@ func (r *Replayer) RunOnce(ctx context.Context) (int, error) {
 	// in collectFailures, H1). The gauge is set even on the early path so a
 	// blocked-only round is observable via audit_dlq_auth_blocked even
 	// though audit_dlq_pending stays 0.
-	r.authBlockedPending.Store(uint64(authBlockedCount(collected)))
+	r.authBlockedPending.Store(authBlockedCount(collected))
 	if blocked := r.authBlockedPending.Load(); blocked > 0 {
 		r.logger.Printf("dlq round: %d auth-blocked records pending (fix AUDIT_OUTBOX_TOKEN before replay)", blocked)
 	}

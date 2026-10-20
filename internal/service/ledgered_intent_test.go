@@ -193,6 +193,9 @@ func TestTenantIngestIntentIsOneCommitWithTheReceipt(t *testing.T) {
 	// it can be observed; the write that matters is the commit's own.
 	publisher := &recordingLedgeredPublisher{err: errors.New("broker unavailable")}
 	svc, _, writes := faultedLedgeredService(t, publisher, false)
+	// Schema registration now uses the same real control-write seam. Retain
+	// its preparation count; measure only this Ingest without resetting it.
+	writesBeforeIngest := writes.Load()
 	at := time.Unix(1_700_000_950, 0).UTC()
 	event := testEvent("intent-single-commit", "op-single", at)
 
@@ -200,7 +203,7 @@ func TestTenantIngestIntentIsOneCommitWithTheReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := writes.Load(); got != 1 {
+	if got := writes.Load() - writesBeforeIngest; got != 1 {
 		t.Fatalf("durable control-plane writes=%d for one ingest, want 1 (the tenant commit)", got)
 	}
 	pending, ok := pendingIntent(t, svc, "tenant-a", event.EventID)
@@ -340,6 +343,8 @@ func TestTenantIngestRepairsOnlyInterruptedLedgeredIngests(t *testing.T) {
 
 	t.Run("no publisher means no intent", func(t *testing.T) {
 		svc, arm, writes := faultedLedgeredService(t, nil, false)
+		// Do not count the real Schema initialization as this Ingest's work.
+		writesBeforeIngest := writes.Load()
 		at := time.Unix(1_700_001_200, 0).UTC()
 		event := testEvent("intent-no-publisher", "op-no-pub", at)
 		// With no publisher the closure writes no control delta, so the commit
@@ -348,7 +353,7 @@ func TestTenantIngestRepairsOnlyInterruptedLedgeredIngests(t *testing.T) {
 		if _, err := svc.Ingest(testCtx, "tenant-a", crmPrincipal, event, domain.StatusLedgered); err != nil {
 			t.Fatalf("unconfigured publisher err=%v, want a successful ingest", err)
 		}
-		if got := writes.Load(); got != 0 {
+		if got := writes.Load() - writesBeforeIngest; got != 0 {
 			t.Fatalf("durable control-plane writes=%d without a publisher, want 0", got)
 		}
 		arm(false)

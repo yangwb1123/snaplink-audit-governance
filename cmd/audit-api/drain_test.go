@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -488,18 +489,24 @@ func seededDrainService(t *testing.T, st *store.Store) *service.Service {
 // startIngestServer serves the production grpcapi ingest surface over a loopback
 // listener with dev auth enabled and returns the server handle plus a client —
 // the forced stop must reach the very server that owns the in-flight RPC.
-func startIngestServer(t *testing.T, svc *service.Service) (*grpc.Server, auditv1.IngestClient) {
+func startIngestServer(t *testing.T, svc *service.Service, options ...grpc.ServerOption) (*grpc.Server, auditv1.IngestClient) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(options...)
 	grpcapi.Register(server, svc, auth.Authenticator{AllowDev: true})
-	go func() { _ = server.Serve(listener) }()
+	served := make(chan struct{})
+	go func() { defer close(served); _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()
 		_ = listener.Close()
+		select {
+		case <-served:
+		case <-time.After(15 * time.Second):
+			t.Error("owned ingest listener did not exit")
+		}
 	})
 	connection, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -537,8 +544,13 @@ func drainTestEvent(eventID string) *auditv1.EventEnvelope {
 // level and not only through the RPC response.
 func drainSnapshotCounts(t *testing.T, st *store.Store, eventID string) (receipts, events int, receiptFound, eventFound bool) {
 	t.Helper()
+	return drainSnapshotCountsContext(t, testCtx, st, eventID)
+}
+
+func drainSnapshotCountsContext(t *testing.T, ctx context.Context, st *store.Store, eventID string) (receipts, events int, receiptFound, eventFound bool) {
+	t.Helper()
 	key := store.EventKey("demo", eventID)
-	if err := st.Read(testCtx, func(data *store.Snapshot) error {
+	if err := st.Read(ctx, func(data *store.Snapshot) error {
 		receipts = len(data.Receipts)
 		events = len(data.Events)
 		_, receiptFound = data.Receipts[key]
@@ -550,16 +562,23 @@ func drainSnapshotCounts(t *testing.T, st *store.Store, eventID string) (receipt
 	return receipts, events, receiptFound, eventFound
 }
 
-// waitForDurableState polls the store until the key reaches a settled state
-// (a receipt is durable), so no assertion races the detached commit's own write.
-func waitForDurableState(t *testing.T, st *store.Store, eventID string) {
+// Join the actual detached handler and observe its durable receipt under ONE
+// original 15s guard. A transport EOF is not handler completion, and a queued
+// read must not start another observation budget behind fixture/commit writes.
+func waitForDurableState(t *testing.T, st *store.Store, eventID string, commitDone <-chan struct{}) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	ctx, cancel := context.WithTimeout(testCtx, 15*time.Second)
+	defer cancel()
+	select {
+	case <-commitDone:
+	case <-ctx.Done():
+		t.Fatal("the detached commit handler never exited")
+	}
 	for {
-		if _, _, found, _ := drainSnapshotCounts(t, st, eventID); found {
+		if _, _, found, _ := drainSnapshotCountsContext(t, ctx, st, eventID); found {
 			return
 		}
-		if time.Now().After(deadline) {
+		if ctx.Err() != nil {
 			t.Fatal("the detached commit never became durable")
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -567,18 +586,33 @@ func waitForDurableState(t *testing.T, st *store.Store, eventID string) {
 }
 
 // TestForcedStopDuringIngestCommitLeavesExactlyOneReceipt is AC-5: force-stopping
-// mid-commit is at-least-once safe. Holding the store write lock from the test
-// side is exactly what makes the ingest commit "in flight" — Store.begin
-// derives the operation deadline before the mutex is taken, so the blocked
-// writer is already bounded — and the identical retry must converge to exactly
-// one receipt.
+// mid-commit is at-least-once safe. Gate the actual cold append AFTER the real
+// hot-file commit, not a mutex that prevents ingest preflight from finishing.
+// The original fixture no-op Save is retained in preparation; every measured
+// ingest file/ledger fsync, original deadline and final convergence oracle stay.
 func TestForcedStopDuringIngestCommitLeavesExactlyOneReceipt(t *testing.T) {
 	const eventID = "evt-drain-1"
-	st, err := store.OpenWithOptions(filepath.Join(t.TempDir(), "state.json"), store.Options{OperationTimeout: 10 * time.Second})
+	var armed, observedColdAppend atomic.Bool
+	gate, release, appendExited := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	st, err := store.OpenWithLedgerWriteFault(filepath.Join(t.TempDir(), "state.json"), func() error {
+		if armed.CompareAndSwap(true, false) {
+			defer close(appendExited)
+			observedColdAppend.Store(true)
+			close(gate)
+			<-release
+		}
+		return nil // pause, never replace the real file append/fsync
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(releaseGate)
+	if st.OperationTimeout() != 10*time.Second {
+		t.Fatal("commit fixture changed its original store bound")
+	}
 	svc := seededDrainService(t, st)
 	ctx := devAuthContext()
 
@@ -603,37 +637,51 @@ func TestForcedStopDuringIngestCommitLeavesExactlyOneReceipt(t *testing.T) {
 		t.Fatalf("control state receipts=%d events=%d, want exactly one of each", receipts, events)
 	}
 
-	// Gate the store write lock so the ingest commit cannot complete.
-	gate := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(releaseGate)
-	go func() {
-		_ = st.Update(context.Background(), func(*store.Snapshot) error {
-			close(gate)
-			<-release
-			return nil
-		})
-	}()
-	select {
-	case <-gate:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the store write-lock gate never engaged")
-	}
-
-	server, client := startIngestServer(t, svc)
+	// Preserve the former lock-holder's real full-file Save and logical
+	// state, but finish this unrelated preparation before the measured RPC.
+	prepareForcedCommitState(t, st)
+	armed.Store(true)
+	handlerExited := make(chan struct{})
+	server, client := startIngestServer(t, svc, grpc.UnaryInterceptor(func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+		defer close(handlerExited)
+		return next(ctx, request)
+	}))
+	t.Cleanup(func() {
+		releaseGate()
+		joined := []<-chan struct{}{handlerExited}
+		if observedColdAppend.Load() {
+			joined = append(joined, appendExited)
+		}
+		ctx, cancel := context.WithTimeout(testCtx, 15*time.Second)
+		defer cancel()
+		for _, done := range joined {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Error("owned commit fixture did not exit")
+			}
+		}
+	})
 	writeDone := make(chan error, 1)
 	go func() {
 		_, writeErr := client.Write(ctx, &auditv1.WriteRequest{Event: drainTestEvent(eventID)})
 		writeDone <- writeErr
 	}()
-	// In-flight proof: the RPC cannot answer while the write lock is held,
-	// because every store read and write queues behind the same mutex.
+	select {
+	case <-gate:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the actual cold-append commit gate never engaged")
+	}
+	// In-flight proof at the actual file commit: the RPC cannot answer while
+	// the append is parked, and transport force-stop does not release it.
 	select {
 	case err := <-writeDone:
 		t.Fatalf("Write answered while the store write lock was held (err=%v); the fixture is vacuous", err)
 	case <-time.After(200 * time.Millisecond):
+	}
+
+	if !observedColdAppend.Load() {
+		t.Fatal("the lock fixture blocked preflight, not the actual cold commit boundary")
 	}
 
 	var logs bytes.Buffer
@@ -654,7 +702,7 @@ func TestForcedStopDuringIngestCommitLeavesExactlyOneReceipt(t *testing.T) {
 	}
 
 	releaseGate()
-	waitForDurableState(t, st, eventID)
+	waitForDurableState(t, st, eventID, handlerExited)
 
 	// The forced stop may only leave the commit all-or-nothing: a receipt
 	// always has its event, and never two of either.

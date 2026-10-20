@@ -34,7 +34,9 @@ func (s *Service) CreateLegalHold(ctx context.Context, hold domain.LegalHold) (d
 	if hold.CreatedAt.IsZero() {
 		hold.CreatedAt = s.Now()
 	}
-	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// A Hold owns control only. Recheck tenant/ID on every fresh CAS
+	// attempt, never write a captured whole snapshot over current execution.
+	if err := s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[hold.TenantID]; !ok {
 			return domain.ErrNotFound
 		}
@@ -72,14 +74,16 @@ func (s *Service) ReleaseLegalHold(ctx context.Context, tenantID, holdID, releas
 		return domain.LegalHold{}, err
 	}
 	var hold domain.LegalHold
-	if err := s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// The first durable release wins. A retry observes its original actor/time
+	// without another Save; a real conflict reruns this decision on control.
+	if err := s.Store.UpdateControlChecked(ctx, func(data *store.Snapshot) (bool, error) {
 		value, ok := data.LegalHolds[holdID]
 		if !ok || value.TenantID != tenantID {
-			return domain.ErrNotFound
+			return false, domain.ErrNotFound
 		}
 		if value.ReleasedAt != nil {
 			hold = value
-			return nil
+			return false, nil
 		}
 		now := s.Now()
 		value.ReleasedAt = &now
@@ -87,7 +91,7 @@ func (s *Service) ReleaseLegalHold(ctx context.Context, tenantID, holdID, releas
 		data.LegalHolds[holdID] = value
 		hold = value
 		s.appendAdminAction(data, s.adminAction(value.TenantID, releasedBy, domain.AdminActionLegalHoldReleased, "legal_hold", holdID, ""))
-		return nil
+		return true, nil
 	}); err != nil {
 		return domain.LegalHold{}, err
 	}

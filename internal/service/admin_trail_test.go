@@ -22,6 +22,11 @@ func adminTrailTestService(t *testing.T, dir string, maxActions, maxTrail int) (
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error("could not close owned admin-trail file fixture")
+		}
+	})
 	svc, err := New(st, Config{SegmentSize: 2, SigningSecret: "test-secret", AllowDevSecrets: true, MaxAdminActions: maxActions, MaxAdminTrailActions: maxTrail, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }})
 	if err != nil {
 		t.Fatal(err)

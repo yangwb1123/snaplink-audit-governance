@@ -29,7 +29,7 @@ func (s *Service) ListExports(ctx context.Context, tenantID, actor string, query
 			if job.TenantID != tenantID || !jobMatches(query, actor, job.Status, job.RequestedBy, job.Query.OperationID, job.CreatedAt) {
 				continue
 			}
-			items = append(items, domain.ExportSummary{ID: job.ID, TenantID: job.TenantID, RequestedBy: job.RequestedBy, Status: job.Status, CreatedAt: job.CreatedAt, StartedAt: job.StartedAt, FinishedAt: job.FinishedAt})
+			items = append(items, domain.SummarizeExport(job))
 		}
 		return nil
 	})
@@ -90,7 +90,7 @@ func normalizeJobQuery(tenantID, actor, kind string, query domain.JobQuery) (dom
 	if query.View != "all" && query.View != "mine" && !(kind == "restores" && query.View == "actionable") {
 		return query, fmt.Errorf("%w: invalid job view", domain.ErrInvalid)
 	}
-	statuses := map[string]bool{"": true, "pending": true, "running": true, "completed": true, "failed": true}
+	statuses := map[string]bool{"": true, "pending": true, "running": true, "completed": true, "failed": true, domain.ExportStatusCancelled: true}
 	if kind == "restores" {
 		statuses = map[string]bool{"": true, "pending_approval": true, "approved": true, "rejected": true}
 	}

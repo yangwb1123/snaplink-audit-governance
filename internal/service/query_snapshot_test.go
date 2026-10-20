@@ -14,7 +14,7 @@ import (
 )
 
 func TestQuerySnapshotExcludesLateOccurrenceAndBindsScope(t *testing.T) {
-	svc := testService(t, false)
+	svc := queryMemoryService(t, false)
 	at := time.Unix(1700000200, 0).UTC()
 	seedChronologyFixture(t, svc, at)
 	q := domain.Query{From: at.Add(-time.Second), To: at.Add(5 * time.Second), PageSize: 2}
@@ -87,7 +87,7 @@ func TestQuerySnapshotSurvivesServiceRestartAndExpires(t *testing.T) {
 }
 
 func TestQuerySnapshotRejectsTamperedMembershipAndEvidence(t *testing.T) {
-	svc := testService(t, false)
+	svc := queryMemoryService(t, false)
 	at := time.Unix(1700000200, 0).UTC()
 	seedChronologyFixture(t, svc, at)
 	q := domain.Query{From: at.Add(-time.Second), To: at.Add(5 * time.Second), PageSize: 2}

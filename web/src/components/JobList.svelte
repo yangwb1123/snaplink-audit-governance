@@ -1,16 +1,17 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte'
+  import { onDestroy, untrack, type Snippet } from 'svelte'
   import { IrisButton, IrisCard } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../api/useAuditApi'
   import { RequestScope } from '../api/requestScope'
   import type { ExportSummary, JobQuery, RestoreRun } from '../api/types'
+  import { exportFailureLabel } from '../features/exports/exportWorkflow'
   import { authState } from '../auth/store'
   import { can } from '../auth/claims'
   import ErrorNotice from './ErrorNotice.svelte'
   import StatusBadge from './StatusBadge.svelte'
   import { formatDate } from './format'
 
-  let { kind, tenantId, revision = 0 }: { kind: 'exports' | 'restores'; tenantId?: string; revision?: number } = $props()
+  let { kind, tenantId, revision = 0, actions }: { kind: 'exports' | 'restores'; tenantId?: string; revision?: number; actions?: Snippet<[ExportSummary | RestoreRun]> } = $props()
   const api = useAuditApi()
   const requests = new RequestScope()
   let view = $state<JobQuery['view']>('all')
@@ -30,7 +31,7 @@
   let error = $state<unknown>(null)
   let refresh = $state(0)
   const canDecide = $derived(Boolean($authState.session && can($authState.session, 'audit:legal_hold:manage')))
-  const statuses = $derived(kind === 'exports' ? ['pending', 'running', 'completed', 'failed'] : ['pending_approval', 'approved', 'rejected'])
+  const statuses = $derived(kind === 'exports' ? ['pending', 'running', 'completed', 'failed', 'cancelled'] : ['pending_approval', 'approved', 'rejected'])
 
   $effect(() => {
     void kind; void tenantId; void revision; void view; void status; void refresh
@@ -97,9 +98,12 @@
   <p class="muted-copy">{loading ? '读取任务…' : `当前筛选共 ${total} 条，当前页 ${items.length} 条`}。运行列表实时更新，不是证据快照。</p>
   {#if !loading && !error && !items.length}<p role="status">当前条件下没有任务。</p>{/if}
   <table class="native-table">
-    <thead><tr><th>任务 ID</th><th>申请人</th><th>创建时间</th><th>状态</th></tr></thead>
+    <thead><tr><th>任务 ID</th><th>申请人</th><th>创建时间</th><th>状态</th>{#if actions}<th>本人操作</th>{/if}</tr></thead>
     <tbody>{#each items as item (item.id)}<tr>
-      <td><a href={`#evidence/${kind}/${encodeURIComponent(item.id)}`}>{item.id}</a></td><td>{requester(item)}</td><td>{formatDate(item.created_at)}</td><td><StatusBadge value={item.status} /></td>
+      <td><a href={`#evidence/${kind}/${encodeURIComponent(item.id)}`}>{item.id}</a></td><td>{requester(item)}</td><td>{formatDate(item.created_at)}</td><td><StatusBadge value={item.status} />
+        {#if kind === 'exports' && typeof item.failure_code === 'string'}<p class="muted-copy">{exportFailureLabel(item.failure_code)}</p>{/if}
+        {#if kind === 'exports' && typeof item.retry_of === 'string'}<a href={`#evidence/exports/${encodeURIComponent(item.retry_of)}`}>原任务</a>{/if}
+      </td>{#if actions}<td>{@render actions(item)}</td>{/if}
     </tr>{/each}</tbody>
   </table>
   <div class="filter-footer"><span>第 {pageIndex + 1} 页</span><div class="button-row"><IrisButton size="sm" variant="outline" disabled={loading || filtersDirty || pageIndex === 0} onclick={previous}>上一页</IrisButton><IrisButton size="sm" variant="outline" disabled={loading || filtersDirty || !nextCursor} onclick={next}>下一页</IrisButton></div></div>

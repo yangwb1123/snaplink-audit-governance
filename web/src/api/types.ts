@@ -235,12 +235,16 @@ export interface AdminAction extends JsonRecord {
   created_at: string
 }
 
+export type ExportFailureCode = 'execution_failed' | 'legal_hold' | 'lease_expired' | 'legacy_stuck' | 'cancelled' | 'unknown'
+
 export interface ExportJob extends JsonRecord {
   id: string
   tenant_id: string
   requested_by: string
   query: EventQuery
   status: string
+  retry_of?: string
+  failure_code?: ExportFailureCode
   created_at: string
   started_at?: string
   finished_at?: string
@@ -293,6 +297,8 @@ export interface ExportSummary {
   tenant_id: string
   requested_by: string
   status: string
+  retry_of?: string
+  failure_code?: ExportFailureCode
   created_at: string
   started_at?: string
   finished_at?: string
@@ -302,6 +308,37 @@ export interface JobPage<T> {
   items: T[]
   count: number
   next_cursor?: string
+}
+
+export interface GovernanceStatus {
+  tenant_id: string
+  observed_at: string
+  source: 'control'
+  completeness: 'not_asserted'
+  exports?: {
+    total: number
+    pending: number
+    running: number
+    completed: number
+    failed: number
+    cancelled: number
+    unknown: number
+    tenant_queue_limit: number
+    tenant_running_limit: number
+    oldest_pending_at?: string
+  }
+  restores?: {
+    total: number
+    pending_approval: number
+    approved: number
+    rejected: number
+    unknown: number
+    mine_pending_approval: number
+    actionable?: number
+    execution: 'not_tracked'
+  }
+  legal_holds?: { total: number; active: number; released: number }
+  retention?: { configured: boolean; policy?: RetentionPolicy }
 }
 
 export interface ItemList<T> extends JsonRecord {

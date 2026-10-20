@@ -70,7 +70,7 @@ func isPostgresHotColdZeroBaseline(source *Snapshot) bool {
 		len(source.Tenants) == 0 && len(source.Sources) == 0 && len(source.Schemas) == 0 &&
 		len(source.Policies) == 0 && len(source.Events) == 0 && len(source.Receipts) == 0 &&
 		len(source.Streams) == 0 && len(source.Segments) == 0 && len(source.Checkpoints) == 0 &&
-		len(source.LegalHolds) == 0 && len(source.Exports) == 0 && len(source.RestoreRuns) == 0 &&
+		len(source.LegalHolds) == 0 && len(source.Exports) == 0 && len(source.ExportLeases) == 0 && len(source.ExportCheckpoints) == 0 && len(source.ExportPlans) == 0 && len(source.RestoreRuns) == 0 &&
 		len(source.LedgeredOutbox) == 0 && len(source.AdminActions) == 0 &&
 		len(source.AggregateCheckpoints) == 0 && len(source.ArchiveConflictFailures) == 0 &&
 		len(source.DeadLetters) == 0

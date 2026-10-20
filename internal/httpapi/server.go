@@ -95,8 +95,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/aggregates/{aggregateType}/{aggregateID}/timeline", s.spanWrap(s.getAggregateTimeline))
 	mux.HandleFunc("POST /api/v1/exports", s.spanWrap(s.createExport))
 	mux.HandleFunc("GET /api/v1/exports", s.spanWrap(s.listExports))
+	mux.HandleFunc("GET /api/v1/governance/status", s.spanWrap(s.getGovernanceStatus))
 	mux.HandleFunc("GET /api/v1/exports/{jobID}", s.spanWrap(s.getExport))
 	mux.HandleFunc("GET /api/v1/exports/{jobID}/download", s.spanWrap(s.downloadExport))
+	mux.HandleFunc("POST /api/v1/exports/{jobID}/cancel", s.spanWrap(s.cancelExport))
+	mux.HandleFunc("POST /api/v1/exports/{jobID}/retry", s.spanWrap(s.retryExport))
 	mux.HandleFunc("POST /api/v1/integrity/verify", s.spanWrap(s.verifyIntegrity))
 	mux.HandleFunc("POST /api/v1/legal-holds", s.spanWrap(s.createLegalHold))
 	mux.HandleFunc("GET /api/v1/legal-holds", s.spanWrap(s.listLegalHolds))
@@ -351,6 +354,11 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 // recordLatency updates the request duration histogram. Called from the
 // middleware after each request (including panics).
 func (s *Server) recordLatency(elapsed time.Duration) {
+	// A negative sample is not a duration and must never wrap into a huge
+	// unsigned histogram sum. time.Since's monotonic production path is valid.
+	if elapsed < 0 {
+		return
+	}
 	seconds := float64(elapsed) / float64(time.Second)
 	s.latencyTotal.Add(1)
 	s.latencySumNanos.Add(uint64(elapsed))

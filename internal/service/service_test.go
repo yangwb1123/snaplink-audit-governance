@@ -49,6 +49,13 @@ func testService(t *testing.T, archive bool) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Registered before later fixture cleanups: publishers/executors join
+	// first, then release the real trail/flock before TempDir removal.
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error("could not close owned service file fixture")
+		}
+	})
 	archiveDir := ""
 	if archive {
 		archiveDir = filepath.Join(dir, "archive")
@@ -57,15 +64,7 @@ func testService(t *testing.T, archive bool) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true, EventsPerSecond: 1000, Burst: 1000}); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true, RequiredFields: []string{"resource"}, AllowedFields: []string{"resource", "value"}}); err != nil {
-		t.Fatal(err)
-	}
+	seedFileTestDomain(t, svc)
 	return svc
 }
 
@@ -477,9 +476,19 @@ func TestTimelinePagesReproduceOperationAndAggregateOrder(t *testing.T) {
 // strict prefix of the export, and the export set equals the unpaginated API
 // result.
 func TestExportMatchesQueryEventsOrder(t *testing.T) {
+	started := time.Now()
 	svc := testService(t, true)
+	observeFileProgress(t, svc, started)
+	t.Cleanup(func() {
+		awaitSchedulerFixtureIdle(t, svc) // terminal visibility alone is not executor exit
+		svc.exportMu.Lock()
+		idle := !svc.exportDispatching && len(svc.exportActive) == 0
+		svc.exportMu.Unlock()
+		t.Logf("file_phase stage=executor_exit idle=%t elapsed_ms=%d", idle, time.Since(started).Milliseconds())
+	})
 	t0 := time.Unix(1_700_000_200, 0).UTC()
 	seedChronologyFixture(t, svc, t0)
+	t.Logf("file_phase stage=fixture_ready elapsed_ms=%d", time.Since(started).Milliseconds())
 	query := domain.Query{From: t0.Add(-time.Second), To: t0.Add(5 * time.Second), PageSize: 3}
 	page1, err := svc.QueryEvents(testCtx, "tenant-a", "test", query)
 	if err != nil {
@@ -488,11 +497,15 @@ func TestExportMatchesQueryEventsOrder(t *testing.T) {
 	if len(page1.Items) != 3 || page1.NextCursor == "" {
 		t.Fatalf("page1=%+v", page1)
 	}
+	t.Logf("file_phase stage=query_ready elapsed_ms=%d", time.Since(started).Milliseconds())
 	job, err := svc.CreateExport(testCtx, "tenant-a", "user-1", query)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("file_phase stage=created elapsed_ms=%d", time.Since(started).Milliseconds())
+	logExportFileStage(t, svc, job.ID)
 	job = waitExportCompleted(t, svc, job.ID)
+	t.Logf("file_phase stage=terminal elapsed_ms=%d", time.Since(started).Milliseconds())
 	if job.Status != "completed" || job.EventCount != 4 {
 		t.Fatalf("export did not complete: %+v", job)
 	}
@@ -782,7 +795,9 @@ func TestIngestStripsClientStreamID(t *testing.T) {
 // Regression property: against pre-fix code, the snapshot holds N stream
 // keys and this test fails.
 func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
+	started := time.Now()
 	svc := testService(t, true)
+	t.Logf("file_phase stage=domain_ready elapsed_ms=%d", time.Since(started).Milliseconds())
 	base := time.Unix(1_700_000_000, 0).UTC()
 	const n = 20
 	const derived = "tenant-a:source:crm"
@@ -796,6 +811,7 @@ func TestIngestCollapsesCraftedStreamIDs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Logf("file_phase stage=ingested members=%d elapsed_ms=%d", n, time.Since(started).Milliseconds())
 	snap, err := svc.Store.Snapshot(testCtx)
 	if err != nil {
 		t.Fatal(err)
@@ -1457,6 +1473,7 @@ func waitExportCompleted(t *testing.T, svc *Service, jobID string) domain.Export
 			return current
 		}
 		if time.Now().After(deadline) {
+			logExportFileStage(t, svc, jobID)
 			t.Fatalf("export stuck in %s", current.Status)
 		}
 		time.Sleep(10 * time.Millisecond)

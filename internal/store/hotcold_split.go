@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/snaplink/audit-governance/internal/domain"
+	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 const hotColdLayoutVersion = 2
@@ -56,7 +57,14 @@ func newSplitStore(data *Snapshot, path string) (*splitStore, error) {
 	if data == nil {
 		data = NewSnapshot()
 	}
-	stateExists := path != "" && fileHasContent(path)
+	stateExists := false
+	if path != "" {
+		var err error
+		stateExists, err = fileHasContent(path)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if stateExists && data.LayoutVersion < hotColdLayoutVersion {
 		if err := migrateV1File(path, data); err != nil {
 			return nil, err
@@ -90,13 +98,13 @@ func newSplitStore(data *Snapshot, path string) (*splitStore, error) {
 func validateV2Layout(path string, control *Snapshot) error {
 	root := filepath.Dir(path)
 	for tenantID := range control.Tenants {
-		if _, err := os.Stat(tenantFilePath(root, tenantID)); err != nil {
+		if _, err := fsutil.StatDataFile(tenantFilePath(root, tenantID)); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("v2 layout is incomplete: tenant %q hot file is missing", tenantID)
 			}
 			return err
 		}
-		if _, err := os.Stat(ledgerFilePath(root, tenantID)); err != nil {
+		if _, err := fsutil.StatDataFile(ledgerFilePath(root, tenantID)); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("v2 layout is incomplete: tenant %q ledger file is missing", tenantID)
 			}
@@ -104,7 +112,7 @@ func validateV2Layout(path string, control *Snapshot) error {
 		}
 	}
 	for _, directory := range []string{filepath.Join(root, "tenants"), filepath.Join(root, "ledger")} {
-		entries, err := os.ReadDir(directory)
+		entries, err := fsutil.ReadDataDir(directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -121,9 +129,15 @@ func validateV2Layout(path string, control *Snapshot) error {
 	return nil
 }
 
-func fileHasContent(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Size() > 0
+func fileHasContent(path string) (bool, error) {
+	info, err := fsutil.StatDataFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Size() > 0, nil
 }
 
 // splitFileEvidence inspects sibling v2 files without opening the store. It
@@ -132,7 +146,7 @@ func fileHasContent(path string) bool {
 func splitFileEvidence(root string) (int, int, error) {
 	hotEvents, ledgerRecords := 0, 0
 	for _, kind := range []string{"tenants", "ledger"} {
-		entries, err := os.ReadDir(filepath.Join(root, kind))
+		entries, err := fsutil.ReadDataDir(filepath.Join(root, kind))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -144,7 +158,7 @@ func splitFileEvidence(root string) (int, int, error) {
 				continue
 			}
 			path := filepath.Join(root, kind, entry.Name())
-			raw, err := os.ReadFile(path)
+			raw, err := fsutil.ReadDataFile(path)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -211,6 +225,9 @@ func emptyTenantHot(tenantID string) *Snapshot {
 	data.Policies = map[string]domain.RetentionPolicy{}
 	data.LegalHolds = map[string]domain.LegalHold{}
 	data.Exports = map[string]domain.ExportJob{}
+	data.ExportLeases = nil
+	data.ExportCheckpoints = nil
+	data.ExportPlans = nil
 	data.RestoreRuns = map[string]domain.RestoreRun{}
 	data.LedgeredOutbox = map[string]domain.Event{}
 	data.AdminActions = nil
@@ -254,7 +271,7 @@ func (s *splitStore) loadFiles() error {
 func tenantIDsFromFiles(root string) ([]string, error) {
 	seen := map[string]struct{}{}
 	for _, directory := range []string{filepath.Join(root, "tenants"), filepath.Join(root, "ledger")} {
-		entries, err := os.ReadDir(directory)
+		entries, err := fsutil.ReadDataDir(directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -282,7 +299,7 @@ func tenantIDsFromFiles(root string) ([]string, error) {
 }
 
 func tenantIDFromLayoutFile(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := fsutil.ReadDataFile(path)
 	if err != nil {
 		return "", err
 	}

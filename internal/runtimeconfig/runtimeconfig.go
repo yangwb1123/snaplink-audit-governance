@@ -108,13 +108,20 @@ func (s SigningArchive) validateS3Retention() error {
 	if s.S3Endpoint == "" {
 		return nil
 	}
-	if s.ArchiveRetentionDays == 0 {
-		return fmt.Errorf("s3 archive requires a positive retention duration: set %s (e.g. 365 for one year of COMPLIANCE retention on every archived object); without it every object would be deletable if the bucket default is absent or downgraded", EnvArchiveRetentionDays)
+	_, err := s3RetentionDuration(s.ArchiveRetentionDays)
+	return err
+}
+
+// Bound the exact local value before narrowing and multiplying. Both the
+// offline consistency check and Archive use this overflow-safe conversion.
+func s3RetentionDuration(days uint) (time.Duration, error) {
+	if days == 0 {
+		return 0, fmt.Errorf("s3 archive requires a positive retention duration: set %s (e.g. 365 for one year of COMPLIANCE retention on every archived object); without it every object would be deletable if the bucket default is absent or downgraded", EnvArchiveRetentionDays)
 	}
-	if s.ArchiveRetentionDays > maxArchiveRetentionDays {
-		return fmt.Errorf("s3 archive retention duration %d days exceeds the maximum of %d: set %s to at most 100 years", s.ArchiveRetentionDays, maxArchiveRetentionDays, EnvArchiveRetentionDays)
+	if days > maxArchiveRetentionDays {
+		return 0, fmt.Errorf("s3 archive retention duration %d days exceeds the maximum of %d: set %s to at most 100 years", days, maxArchiveRetentionDays, EnvArchiveRetentionDays)
 	}
-	return nil
+	return time.Duration(days) * 24 * time.Hour, nil
 }
 
 // Archive returns the configured compliance archive (S3 Object Lock when
@@ -136,10 +143,10 @@ func (s SigningArchive) Archive() (archive.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validateS3Retention(); err != nil {
+	retainFor, err := s3RetentionDuration(s.ArchiveRetentionDays)
+	if err != nil {
 		return nil, err
 	}
-	retainFor := time.Duration(s.ArchiveRetentionDays) * 24 * time.Hour
 	return newS3Store(endpoint, s.S3AccessKey, s.S3SecretKey, s.S3Bucket, useSSL, retainFor)
 }
 

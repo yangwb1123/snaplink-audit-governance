@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,7 +18,7 @@ var terminalTestNow = time.Unix(1_700_000_000, 0).UTC()
 // seedRunningJob writes a pending export job and claims it to "running" using
 // the real CAS path, so terminal-persistence tests start from a durable
 // running record (mirroring a worker that has claimed the job).
-func seedRunningJob(t *testing.T, svc *Service, jobID string) domain.ExportJob {
+func seedRunningJob(t *testing.T, svc *Service, jobID string) context.Context {
 	t.Helper()
 	job := domain.ExportJob{
 		ID:          jobID,
@@ -33,10 +34,11 @@ func seedRunningJob(t *testing.T, svc *Service, jobID string) domain.ExportJob {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, claimed, err := svc.claimPendingExport(testCtx, job.ID); err != nil || !claimed {
+	claim, claimed, err := svc.claimPendingExport(testCtx, job.ID)
+	if err != nil || !claimed {
 		t.Fatalf("claimPendingExport: claimed=%v err=%v", claimed, err)
 	}
-	return job
+	return exportClaimContext(testCtx, claim)
 }
 
 // T1 / AC-1: a single transient terminal-write failure converges. The bounded
@@ -46,13 +48,13 @@ func seedRunningJob(t *testing.T, svc *Service, jobID string) domain.ExportJob {
 // TestRunExportBlockFactUpdateFailure.
 func TestFinishExportRetriesTransientSaveFailure(t *testing.T) {
 	backend, svc := holdGateService(t)
-	seedRunningJob(t, svc, "export-t1")
+	claimCtx := seedRunningJob(t, svc, "export-t1")
 
 	// Fail only the next Save (the first terminal-write attempt); the retry
 	// Save succeeds and commits the transition.
 	backend.armSaveFailure(1)
 
-	svc.finishExport(testCtx, "export-t1", "completed", "exports/export-t1.jsonl", "digest-t1", 7, "")
+	svc.finishExport(claimCtx, "export-t1", "completed", "exports/export-t1.jsonl", "digest-t1", 7, "")
 
 	var got domain.ExportJob
 	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
@@ -78,12 +80,12 @@ func TestFinishExportRetriesTransientSaveFailure(t *testing.T) {
 func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
-	seedRunningJob(t, svc, "export-t2")
+	claimCtx := seedRunningJob(t, svc, "export-t2")
 
 	// Fail every Save from here on so all terminal-write attempts exhaust.
 	backend.saveErr = errors.New("storage write unavailable")
 
-	svc.finishExport(testCtx, "export-t2", "completed", "exports/export-t2.jsonl", "digest-t2", 3, "")
+	svc.finishExport(claimCtx, "export-t2", "completed", "exports/export-t2.jsonl", "digest-t2", 3, "")
 
 	var before domain.ExportJob
 	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
@@ -149,7 +151,7 @@ func TestFinishExportPersistentFailureThenRecover(t *testing.T) {
 // job (and vice versa), so a terminal job never regresses to running.
 func TestLateCompletionAfterRecoveryNoOverwrite(t *testing.T) {
 	_, svc := holdGateService(t)
-	seedRunningJob(t, svc, "export-t3a")
+	claimCtx := seedRunningJob(t, svc, "export-t3a")
 
 	svc.Config.Now = func() time.Time { return terminalTestNow.Add(48 * time.Hour) }
 	if _, err := svc.RecoverStuckExports(testCtx, "tenant-a"); err != nil {
@@ -157,7 +159,7 @@ func TestLateCompletionAfterRecoveryNoOverwrite(t *testing.T) {
 	}
 
 	// A late finishExport(completed) must no-op: job stays "failed".
-	svc.finishExport(testCtx, "export-t3a", "completed", "exports/late.jsonl", "digest-late", 9, "")
+	svc.finishExport(claimCtx, "export-t3a", "completed", "exports/late.jsonl", "digest-late", 9, "")
 
 	var got domain.ExportJob
 	if err := svc.Store.Read(testCtx, func(data *store.Snapshot) error {
@@ -230,7 +232,7 @@ func TestLateFailureAfterCompletionNoOverwrite(t *testing.T) {
 func TestTerminalPersistenceFailureLogged(t *testing.T) {
 	backend := &scriptedConflictBackend{data: store.NewSnapshot()}
 	svc := testServiceWithBackend(t, backend)
-	seedRunningJob(t, svc, "export-t5")
+	claimCtx := seedRunningJob(t, svc, "export-t5")
 
 	var mu sync.Mutex
 	var lines []string
@@ -242,7 +244,7 @@ func TestTerminalPersistenceFailureLogged(t *testing.T) {
 
 	rawErr := "disk I/O error at /mnt/audit/state.json: read-only"
 	backend.saveErr = errors.New(rawErr)
-	svc.finishExport(testCtx, "export-t5", "failed", "", "", 0, rawErr)
+	svc.finishExport(claimCtx, "export-t5", "failed", "", "", 0, rawErr)
 
 	var failed, exhausted int
 	for _, l := range lines {

@@ -18,8 +18,15 @@ import (
 // its serialized size is below the aggregate body cap, so a failure cannot be
 // misclassified as a transport-size rejection.
 func TestHTTPBatchResourceCapPreflight(t *testing.T) {
-	server, st := testHTTPServerWithStore(t)
+	// The 500/501 protocol boundary is not a file-fsync throughput SLA.
+	// Keep real HTTP/auth/ingest/Save/receipt paths with healthy dependencies;
+	// file persistence and actual Store deadlines have separate regressions.
+	backend := &scriptedStoreBackend{data: store.NewSnapshot()}
+	server, svc := testHTTPServerWithBackend(t, backend)
 	defer server.Close()
+	defer svc.Store.Close()
+	svc.Config.Archive = newMemoryArchive()
+	st, beforeSaves := svc.Store, backend.saves
 
 	overEvents := make([]domain.Event, domain.MaxBatchEvents+1)
 	for i := range overEvents {
@@ -36,6 +43,9 @@ func TestHTTPBatchResourceCapPreflight(t *testing.T) {
 		t.Fatalf("over-cap batch message=%q does not name max %d", response.Error.Message, domain.MaxBatchEvents)
 	}
 	assertHTTPBatchEventsAbsent(t, st, overEvents)
+	if backend.saves != beforeSaves {
+		t.Fatal("over-cap preflight reached a persistence Save")
+	}
 
 	boundary := make([]domain.Event, domain.MaxBatchEvents)
 	for i := range boundary {
@@ -56,6 +66,11 @@ func TestHTTPBatchResourceCapPreflight(t *testing.T) {
 		t.Fatalf("exact-boundary response receipts=%d, want %d", len(response.Receipts), domain.MaxBatchEvents)
 	}
 	assertHTTPBatchReceiptsPresent(t, st, boundary)
+	for i, receipt := range response.Receipts {
+		if receipt.EventID != boundary[i].EventID || receipt.TenantID != "tenant-a" || receipt.Status != domain.StatusAccepted || !receipt.LedgeredAt.IsZero() || !receipt.IndexedAt.IsZero() || !receipt.ArchivedAt.IsZero() {
+			t.Fatal("exact-boundary batch changed ordered accepted-response semantics")
+		}
+	}
 }
 
 // TestHTTPBatchMemberCapsPreservePartialStatus keeps ordinary member failure
@@ -157,8 +172,9 @@ func assertHTTPBatchReceiptsPresent(t *testing.T, st *store.Store, events []doma
 	t.Helper()
 	if err := st.Read(testCtx, func(data *store.Snapshot) error {
 		for _, event := range events {
-			if _, exists := data.Receipts[store.EventKey("tenant-a", event.EventID)]; !exists {
-				t.Fatalf("accepted receipt %q was not persisted", event.EventID)
+			receipt, exists := data.Receipts[store.EventKey("tenant-a", event.EventID)]
+			if !exists || receipt.TenantID != "tenant-a" || receipt.EventID != event.EventID || receipt.LedgeredAt.IsZero() || receipt.Sequence <= 0 || receipt.Hash == "" {
+				t.Fatal("batch input has no real persisted committed receipt; accepted response alone is not proof")
 			}
 		}
 		return nil

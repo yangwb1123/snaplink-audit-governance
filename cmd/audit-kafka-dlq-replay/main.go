@@ -126,8 +126,7 @@ func main() {
 // the audit-api /metrics endpoint, so Prometheus can alert on DLQ traffic.
 // Mount semantics unchanged: daemon-only; -once exposes no /metrics.
 func serveMetrics(address string, replayer *kafka.Replayer, logger *log.Logger) {
-	http.HandleFunc("/metrics", metricsHandler(replayer.Metrics))
-	server := &http.Server{Addr: address}
+	server := newMetricsServer(address, replayer.Metrics)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Printf("metrics listen=%s error=%v", address, err)
 	}

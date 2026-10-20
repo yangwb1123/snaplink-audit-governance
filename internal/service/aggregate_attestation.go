@@ -27,7 +27,7 @@ func aggregateCheckpointRefs(data *store.Snapshot, tenantID string) ([]domain.Ch
 			continue
 		}
 		checkpoint := latestCheckpoint(checkpoints)
-		if checkpoint.TenantID != tenantID || checkpoint.StreamID != streamID || checkpoint.ID == "" || checkpoint.MerkleRoot == "" {
+		if checkpoint.TenantID != tenantID || checkpoint.StreamID != streamID || checkpoint.ID == "" || checkpoint.MerkleRoot == "" || checkpoint.Sequence <= 0 {
 			return nil, fmt.Errorf("%w: malformed checkpoint for stream %s", domain.ErrInvalid, streamID)
 		}
 		refs = append(refs, domain.CheckpointRef{
@@ -78,25 +78,33 @@ func aggregateRoots(refs []domain.CheckpointRef) []string {
 // encoding. It deliberately includes both the roots compatibility field and
 // the references field: neither duplicated representation can be changed
 // without invalidating the signature.
-func aggregateAttestationPayload(aggregate domain.AggregateCheckpoint) []byte {
+func aggregateAttestationPayload(aggregate domain.AggregateCheckpoint) ([]byte, error) {
+	version, count := aggregate.AttestationVersion, aggregate.StreamCount
+	if version < 0 || count < 0 {
+		return nil, fmt.Errorf("%w: negative aggregate attestation version or stream count", domain.ErrInvalid)
+	}
 	var payload bytes.Buffer
 	writeAggregateField(&payload, "snaplink.aggregate-checkpoint")
-	writeAggregateUint(&payload, uint64(aggregate.AttestationVersion))
+	writeAggregateUint(&payload, uint64(version))
 	writeAggregateField(&payload, aggregate.TenantID)
 	writeAggregateField(&payload, aggregate.Algorithm)
-	writeAggregateUint(&payload, uint64(aggregate.StreamCount))
+	writeAggregateUint(&payload, uint64(count))
 	writeAggregateUint(&payload, uint64(len(aggregate.StreamRoots)))
 	for _, root := range aggregate.StreamRoots {
 		writeAggregateField(&payload, root)
 	}
 	writeAggregateUint(&payload, uint64(len(aggregate.CheckpointRefs)))
 	for _, ref := range aggregate.CheckpointRefs {
+		sequence := ref.Sequence
+		if sequence <= 0 {
+			return nil, fmt.Errorf("%w: aggregate checkpoint sequence must be positive", domain.ErrInvalid)
+		}
 		writeAggregateField(&payload, ref.StreamID)
 		writeAggregateField(&payload, ref.CheckpointID)
-		writeAggregateUint(&payload, uint64(ref.Sequence))
+		writeAggregateUint(&payload, uint64(sequence))
 		writeAggregateField(&payload, ref.MerkleRoot)
 	}
-	return payload.Bytes()
+	return payload.Bytes(), nil
 }
 
 func writeAggregateField(payload *bytes.Buffer, value string) {
@@ -183,7 +191,11 @@ func (s *Service) verifyAggregateCheckpoint(ctx context.Context, tenantID string
 	if merkleRoot(aggregate.StreamRoots) != aggregate.Root {
 		return false, aggregateDiagnostic(aggregate.ID, "failed root/signature verification")
 	}
-	valid, verifyErr := s.Config.Signer.Verify(ctx, aggregateAttestationPayload(aggregate), aggregate.Signature)
+	payload, err := aggregateAttestationPayload(aggregate)
+	if err != nil {
+		return false, aggregateDiagnostic(aggregate.ID, "has an invalid numeric field")
+	}
+	valid, verifyErr := s.Config.Signer.Verify(ctx, payload, aggregate.Signature)
 	if verifyErr != nil {
 		if isInterrupted(verifyErr) {
 			return false, aggregateDiagnostic(aggregate.ID, "verification interrupted")

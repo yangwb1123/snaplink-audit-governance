@@ -6,7 +6,6 @@ package service
 // ingest path so "what matches" and "what is admitted" stay separate.
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -18,16 +17,6 @@ import (
 	"github.com/snaplink/audit-governance/internal/security"
 	"github.com/snaplink/audit-governance/internal/store"
 )
-
-func (s *Service) eventsFor(ctx context.Context, tenantID string, predicate func(domain.Event) bool) ([]domain.Event, error) {
-	var events []domain.Event
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		var resolveErr error
-		events, resolveErr = s.eventsFromSnapshot(ctx, data, tenantID, predicate)
-		return resolveErr
-	})
-	return events, err
-}
 
 func (s *Service) matches(event domain.Event, query domain.Query, schemas map[string]domain.EventSchema) bool {
 	if event.OccurredAt.Before(query.From) || !event.OccurredAt.Before(query.To) {

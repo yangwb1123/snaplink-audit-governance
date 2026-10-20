@@ -49,9 +49,9 @@ type Config struct {
 	// (DefaultAggregateCheckpointRetention). The worker reads the override
 	// from AUDIT_AGGREGATE_CHECKPOINT_HISTORY.
 	AggregateCheckpointRetention int
-	// StuckExportAge fails export jobs left "running" by a crashed or
-	// restarted audit-api once they exceed this age, measured from CreatedAt
-	// (the only pre-terminal timestamp). Values <= 0 select the documented
+	// StuckExportAge applies only to legacy running jobs without leases,
+	// measured from usable StartedAt, otherwise CreatedAt. New jobs use their
+	// durable lease expiry instead. Values <= 0 select the documented
 	// default (DefaultStuckExportAge). The worker reads the override from
 	// AUDIT_GOVERNANCE_STUCK_EXPORT_AGE / -stuck-export-age.
 	StuckExportAge time.Duration
@@ -114,13 +114,15 @@ type Service struct {
 	Config  Config
 	quotaMu sync.Mutex
 	quotas  map[string]quotaWindow
-	// Dispatcher reservations are bounded; running claims are also checked
-	// against the shared durable control document across replicas.
+	// Dispatcher reservations cover each executor's final control read and
+	// atomic follow-up wake, not just terminal visibility. Running claims are
+	// also checked against the shared durable control document across replicas.
 	exportMu             sync.Mutex
 	exportActive         map[string]string
 	exportDispatching    bool
 	exportLastTenant     string
 	exportWakeGeneration uint64
+	exportHeartbeat      func() (<-chan time.Time, func())
 	// ledgeredGatesMu guards ledgeredGates. It is held only while a gate is
 	// looked up, referenced or released — never across a publish or a store
 	// call — so it cannot become the head-of-line block the per-event gate
@@ -385,7 +387,10 @@ func (s *Service) RegisterSchema(ctx context.Context, actor string, schema domai
 	if !schema.Active {
 		schema.Active = true
 	}
-	return s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Definitions and their facts only change control. Re-run all evolution
+	// checks on fresh control after a Save conflict; never restore a captured
+	// whole snapshot over current export authority or replace v2 evidence.
+	return s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[schema.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -395,7 +400,7 @@ func (s *Service) RegisterSchema(ctx context.Context, actor string, schema domai
 		// a newer schema deliberately restricted, and because validateEvent
 		// and reconstructAndDerive look schemas up version-exactly, the
 		// weakening would survive VerifyIntegrity. The guard runs inside the
-		// same store.Update closure as the write (atomic check-and-commit,
+		// same control CAS closure as the write (atomic check-and-commit,
 		// no TOCTOU window) and precedes the duplicate-key check so a
 		// rollback re-register of an existing version reports ErrInvalid
 		// instead of ErrConflict; re-registering the exact highest version
@@ -474,7 +479,10 @@ func (s *Service) SetRetentionPolicy(ctx context.Context, actor string, policy d
 		policy.ArchiveDays < 0 || policy.HotDays < 0 || policy.WarmDays < 0 {
 		return fmt.Errorf("%w: invalid retention policy", domain.ErrInvalid)
 	}
-	return s.Store.Update(ctx, func(data *store.Snapshot) error {
+	// Configuration and its fact only change control. Recheck the tenant on
+	// fresh control after every Save conflict instead of restoring an old
+	// whole snapshot over current export terminal/lease/stage or Hold state.
+	return s.Store.UpdateControl(ctx, func(data *store.Snapshot) error {
 		if _, ok := data.Tenants[policy.TenantID]; !ok {
 			return fmt.Errorf("%w: tenant does not exist", domain.ErrNotFound)
 		}
@@ -489,23 +497,48 @@ func (s *Service) GetRetentionPolicy(ctx context.Context, tenantID string) (doma
 		return domain.RetentionPolicy{}, err
 	}
 	var result domain.RetentionPolicy
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		policy, ok := data.Policies[tenantID]
-		if !ok {
-			return domain.ErrNotFound
+	// Configuration observation owns control only, not tenant evidence.
+	// Preserve the original read budget through the post-capture withdrawal
+	// check; a withdrawn read must not expose an otherwise valid policy.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			policy, ok := data.Policies[tenantID]
+			if !ok {
+				return domain.ErrNotFound
+			}
+			result = policy
+			return nil
+		}); err != nil {
+			return err
 		}
-		result = policy
-		return nil
+		return opCtx.Err()
 	})
-	return result, err
+	if err != nil {
+		return domain.RetentionPolicy{}, err
+	}
+	return result, nil
 }
 
 func (s *Service) EvaluateRetention(ctx context.Context, tenantID string, now time.Time) (domain.RetentionReport, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.RetentionReport{}, err
 	}
-	policy, err := s.GetRetentionPolicy(ctx, tenantID)
-	if err != nil {
+	// The policy is control-plane configuration, so this observation stays
+	// control-only. It deliberately keeps EvaluateRetention's original
+	// withdrawal semantics: the worker's between-tenant abort contract still
+	// attempts the in-flight tenant's full step sequence, so a cancelled
+	// caller keeps its existing evaluation path instead of inheriting the
+	// public GetRetentionPolicy pre-cancel gate. The second read below is
+	// unchanged and still sees caller cancellation.
+	var policy domain.RetentionPolicy
+	if err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
+		current, ok := data.Policies[tenantID]
+		if !ok {
+			return domain.ErrNotFound
+		}
+		policy = current
+		return nil
+	}); err != nil {
 		return domain.RetentionReport{}, err
 	}
 	if now.IsZero() {
@@ -819,22 +852,36 @@ func (s *Service) GetReceipt(ctx context.Context, tenantID, actor, eventID strin
 		return domain.EventReceipt{}, err
 	}
 	var receipt domain.EventReceipt
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		value, ok := data.Receipts[store.EventKey(tenantID, eventID)]
-		if !ok {
-			return domain.ErrNotFound
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		// V2 uses the exact cold receipt index, not a global history snapshot.
+		// Metadata reads do not require source Get or reinterpret stored status.
+		if err := s.Store.ReadTenant(opCtx, tenantID, func(view *store.TenantView) error {
+			value, found := view.Ledger.Receipt(store.EventKey(tenantID, eventID))
+			if err := view.Ledger.Err(); err != nil {
+				return err
+			}
+			if !found {
+				return domain.ErrNotFound
+			}
+			if value.TenantID != tenantID || value.EventID != eventID {
+				return fmt.Errorf("%w: receipt identity mismatch", domain.ErrConflict)
+			}
+			receipt = value
+			return nil
+		}); err != nil {
+			return err
 		}
-		receipt = value
-		return nil
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		// Append-before-serve once under the lookup's original budget. A
+		// durable attempt fact is not permission to serve after withdrawal.
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
+			return err
+		}
+		return opCtx.Err()
 	})
 	if err != nil {
-		return domain.EventReceipt{}, err
-	}
-	// Read self-audit (F-06): a receipt lookup exposes event content, so it
-	// appends one audit.event.read fact in the service layer (no transport
-	// can bypass it); a failed append fails the read closed, mirroring
-	// GetEvent/QueryEvents.
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, "receipt"); err != nil {
 		return domain.EventReceipt{}, err
 	}
 	return receipt, nil
@@ -851,7 +898,12 @@ func (s *Service) GetEvent(ctx context.Context, tenantID, actor, eventID string)
 			return err
 		}
 		event = items[0]
-		return s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, "")
+		if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
+			return err
+		}
+		// A durable attempt fact cannot be retracted, but is not permission
+		// to serve evidence after caller cancellation or the original deadline.
+		return ctx.Err()
 	})
 	if err != nil {
 		return domain.Event{}, err
@@ -884,43 +936,77 @@ func (s *Service) Operation(ctx context.Context, tenantID, actor, operationID st
 	if operationID == "" {
 		return domain.OperationSummary{}, fmt.Errorf("%w: operation_id is required", domain.ErrInvalid)
 	}
-	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+	var result domain.OperationSummary
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		// Capture owns its graph; Get and exact-schema/content/chain checks
+		// run outside Store.mu, before membership or summary aggregation.
+		events, err := s.readTimelineEvidence(opCtx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+		if err != nil {
+			return err
+		}
+		result = domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[0].OccurredAt}
+		set := map[string]bool{}
+		for _, event := range events {
+			if err := opCtx.Err(); err != nil {
+				return err
+			}
+			if event.OccurredAt.Before(result.FirstAt) {
+				result.FirstAt = event.OccurredAt
+			}
+			if event.OccurredAt.After(result.LastAt) {
+				result.LastAt = event.OccurredAt
+			}
+			set[event.Outcome] = true
+		}
+		result.Outcomes = make([]string, 0, len(set))
+		for outcome := range set {
+			result.Outcomes = append(result.Outcomes, outcome)
+		}
+		sort.Strings(result.Outcomes)
+		// Append-before-serve once, using the original operation deadline.
+		// An unknown/late append is an attempt fact, never proof of delivery.
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "summary"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
 		return domain.OperationSummary{}, err
 	}
-	if len(events) == 0 {
-		return domain.OperationSummary{}, domain.ErrNotFound
-	}
-	sortEvents(events)
-	set := map[string]bool{}
-	for _, event := range events {
-		set[event.Outcome] = true
-	}
-	outcomes := make([]string, 0, len(set))
-	for outcome := range set {
-		outcomes = append(outcomes, outcome)
-	}
-	sort.Strings(outcomes)
-	// Read self-audit (F-06): an operation summary exposes event content, so
-	// it appends one audit.event.read fact in the service layer (no transport
-	// can bypass it), fail-closed like GetEvent/QueryEvents. Encoding matches
-	// the sibling operation facts: (operation, id, timeline|replay|summary).
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "summary"); err != nil {
-		return domain.OperationSummary{}, err
-	}
-	return domain.OperationSummary{OperationID: operationID, TenantID: tenantID, EventCount: len(events), FirstAt: events[0].OccurredAt, LastAt: events[len(events)-1].OccurredAt, Outcomes: outcomes}, nil
+	return result, nil
 }
 
 func (s *Service) ReplayOperation(ctx context.Context, tenantID, actor, operationID string) (domain.ReplayResult, error) {
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ReplayResult{}, err
 	}
-	events, err := s.operationTimelineNoAudit(ctx, tenantID, operationID)
+	var result domain.ReplayResult
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		// Authenticate committed evidence before selection or local folding.
+		// Only owned snapshot capture holds Store.mu; source Get is lock-free.
+		events, err := s.readTimelineEvidence(opCtx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+		if err != nil {
+			return err
+		}
+		if len(events) > domain.MaxTimelineEvents {
+			return fmt.Errorf("%w: operation timeline exceeds %d events; use query or export", domain.ErrInvalid, domain.MaxTimelineEvents)
+		}
+		sortEvents(events)
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		result = replay(events, tenantID, operationID, "")
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		// One append-before-serve fact, never a delegated timeline fact.
+		// Internal restore callers retain their explicit empty-actor policy.
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "replay"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return domain.ReplayResult{}, err
-	}
-	result := replay(events, tenantID, operationID, "")
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "replay"); err != nil {
 		return domain.ReplayResult{}, err
 	}
 	return result, nil
@@ -930,15 +1016,27 @@ func (s *Service) ReplayAggregate(ctx context.Context, tenantID, actor, aggregat
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.ReplayResult{}, err
 	}
-	events, err := s.aggregateTimelineNoAudit(ctx, tenantID, aggregateType, aggregateID)
+	var result domain.ReplayResult
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		events, err := s.aggregateTimelineNoAudit(opCtx, tenantID, aggregateType, aggregateID)
+		if err != nil {
+			return err
+		}
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		result = replay(events, tenantID, "", aggregateID)
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		// D-ReplayAggregate: service-only compatibility read, exactly one
+		// original fact, never an extra delegated timeline read fact.
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, "replay"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return domain.ReplayResult{}, err
-	}
-	result := replay(events, tenantID, "", aggregateID)
-	// D-ReplayAggregate: zero production callers today; appends exactly one
-	// fact so the "every event-content read leaves exactly one fact"
-	// invariant holds for this method too (pinned by T-D1).
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, "replay"); err != nil {
 		return domain.ReplayResult{}, err
 	}
 	return result, nil

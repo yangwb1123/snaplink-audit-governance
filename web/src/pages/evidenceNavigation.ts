@@ -1,3 +1,5 @@
+import { investigationHash, investigationLocation } from './investigationNavigation'
+
 export type EvidenceTab = 'exports' | 'restores' | 'holds' | 'integrity'
 
 const tabs = new Set<EvidenceTab>(['exports', 'restores', 'holds', 'integrity'])
@@ -19,6 +21,8 @@ export function evidenceLocation(hash: string): { tab?: EvidenceTab; id: string 
 export function safeNavigationHash(raw = ''): string {
   const root = raw.replace(/^#\/?/, '')
   if (['overview', 'events', 'operations', 'evidence', 'catalog'].includes(root)) return `#${root}`
+  const investigation = investigationLocation(raw)
+  if (investigation) return investigationHash(investigation)
   const location = evidenceLocation(raw)
   if (!location.tab || /[?&=]/.test(root) || root.split('/').length > 3) return '#overview'
   if (!location.id) return `#evidence/${location.tab}`

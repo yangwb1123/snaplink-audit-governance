@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,7 +121,7 @@ func trailHeadroom(trailCap int) int {
 
 // AppendAdminFact appends one fact to <state>.admin-trail.jsonl as a JSONL
 // line, fsynced per append (durability parity with Save). The persistent
-// O_APPEND fd is lazily opened (parent 0o750, file 0o640, dir-chain fsync
+// O_APPEND fd is lazily opened (new parent 0700, new file 0600, dir-chain fsync
 // on first creation). trailCount is a lazy baseline count so the cap check
 // never re-reads the trail (F-4). Past the cap the file is compacted
 // crash-atomically (tmp + fsync + rename + dir-chain sync + fd reopen,
@@ -132,6 +133,9 @@ func (f *fileBackend) AppendAdminFact(ctx context.Context, fact domain.AdminActi
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return os.ErrClosed
+	}
 	if f.path == "" {
 		// In-memory mode: a plain bounded slice under f.mu.
 		f.trail = append(f.trail, fact)
@@ -180,6 +184,9 @@ func (f *fileBackend) ReadAdminTrail(ctx context.Context) ([]domain.AdminAction,
 	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	if f.closed {
+		return nil, os.ErrClosed
+	}
 	if f.path == "" {
 		out := make([]domain.AdminAction, 0, len(f.trail))
 		for i := len(f.trail) - 1; i >= 0; i-- {
@@ -209,23 +216,23 @@ func (f *fileBackend) ensureTrailFile() error {
 		f.trailPath = f.path + trailPathSuffix
 	}
 	parent := filepath.Dir(f.trailPath)
-	if err := os.MkdirAll(parent, 0o750); err != nil {
+	if err := fsutil.MakeDataDir(parent); err != nil {
 		return err
 	}
 	if !f.trailCounted {
-		if contents, err := os.ReadFile(f.trailPath); err == nil {
+		if contents, err := fsutil.ReadDataFile(f.trailPath); err == nil {
 			f.trailCount = countJSONLLines(contents)
-		} else if !os.IsNotExist(err) {
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		f.trailCounted = true
 	}
-	_, statErr := os.Stat(f.trailPath)
-	created := os.IsNotExist(statErr)
+	_, statErr := fsutil.StatDataFile(f.trailPath)
+	created := errors.Is(statErr, os.ErrNotExist)
 	if statErr != nil && !created {
 		return statErr
 	}
-	fd, err := os.OpenFile(f.trailPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	fd, err := fsutil.OpenDataFile(f.trailPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, fsutil.PrivateFileMode)
 	if err != nil {
 		return err
 	}
@@ -263,51 +270,26 @@ func (f *fileBackend) compactTrail(keepCount int) error {
 		return nil
 	}
 	keep := facts[len(facts)-keepCount:] // newest keepCount, oldest-first order
-	tmp := f.trailPath + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
-	if err != nil {
-		return err
-	}
+	var content bytes.Buffer
+	encoder := json.NewEncoder(&content)
 	for _, fact := range keep {
-		encoded, err := json.Marshal(fact)
-		if err != nil {
-			_ = file.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-		if _, err := file.Write(append(encoded, '\n')); err != nil {
-			_ = file.Close()
-			_ = os.Remove(tmp)
+		if err := encoder.Encode(fact); err != nil {
 			return err
 		}
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, f.trailPath); err != nil {
-		return err
+	err = fsutil.AtomicDataFile(f.trailPath, content.Bytes(), fsutil.PrivateFileMode, f.syncDir)
+	if err != nil && !errors.Is(err, fsutil.ErrDataDirectorySync) {
+		return err // no rename: previous trail/fd remain authoritative
 	}
 	f.trailCompactions++
 	if f.trailFile != nil {
-		_ = f.trailFile.Close()
+		err = errors.Join(err, f.trailFile.Close())
 		f.trailFile = nil
 	}
-	syncDir := f.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
+	if err != nil {
+		return err // renamed; next append reopens, never claim a durable read
 	}
-	if err := fsutil.SyncDirChain(fsutil.DeepestExistingAncestor(filepath.Dir(f.trailPath)), filepath.Dir(f.trailPath), syncDir); err != nil {
-		// The rename already replaced the trail; the next append reopens the
-		// fd. Report the error (fail closed, FM-5).
-		return err
-	}
-	fd, err := os.OpenFile(f.trailPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	fd, err := fsutil.OpenDataFile(f.trailPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, fsutil.PrivateFileMode)
 	if err != nil {
 		return err
 	}
@@ -323,9 +305,9 @@ func (f *fileBackend) readTrailFileLocked() ([]domain.AdminAction, error) {
 	if f.trailPath == "" {
 		f.trailPath = f.path + trailPathSuffix
 	}
-	contents, err := os.ReadFile(f.trailPath)
+	contents, err := fsutil.ReadDataFile(f.trailPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

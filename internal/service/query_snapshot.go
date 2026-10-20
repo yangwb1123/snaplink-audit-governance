@@ -195,7 +195,9 @@ func (s *Service) queryEventsSnapshot(ctx context.Context, tenantID, actor strin
 		if offset+len(events) < len(snapshot.Events) {
 			result.NextCursor = s.encodeQueryCursor(snapshot, offset+len(events))
 		}
-		return nil
+		// An append can commit before cancellation/result-unknown is observed.
+		// Keep the attempt fact, but never serve a withdrawn read's membership.
+		return ctx.Err()
 	})
 	if err != nil {
 		return domain.QueryResult{}, err

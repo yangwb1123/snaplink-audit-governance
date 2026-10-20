@@ -18,6 +18,33 @@ describe('governance work API', () => {
     expect(() => api.listRestores()).toThrow('tenant_id is required')
   })
 
+  it('reads scoped governance metadata without adding sensitive query parameters and forwards cancellation', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{"tenant_id":"tenant/a","observed_at":"2026-10-08T00:00:00Z","source":"control","completeness":"not_asserted"}', { status: 200 }))
+    const api = new AuditApi({ baseUrl: '/audit-api', accessToken: 'token', platform: true, fetcher })
+    const signal = new AbortController().signal
+    await api.getGovernanceStatus('tenant/a', signal)
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('/audit-api/api/v1/governance/status?tenant_id=tenant%2Fa')
+    expect(fetcher.mock.calls[0]?.[1]?.signal).toBe(signal)
+    expect(() => api.getGovernanceStatus()).toThrow('tenant_id is required')
+  })
+
+  it('sends owner commands with no identity/filter body or URL data and requires platform scope', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{"id":"child","tenant_id":"tenant-a","requested_by":"alice","status":"pending","created_at":"2026-10-14T00:00:00Z"}', { status: 202 }))
+    const api = new AuditApi({ baseUrl: '/audit-api', accessToken: 'token', platform: true, fetcher })
+    const signal = new AbortController().signal
+    await api.cancelExport('job/a', 'tenant-a', signal)
+    await api.retryExport('job/a', 'tenant-a', signal)
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('/audit-api/api/v1/exports/job%2Fa/cancel?tenant_id=tenant-a')
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe('/audit-api/api/v1/exports/job%2Fa/retry?tenant_id=tenant-a')
+    for (const [, options] of fetcher.mock.calls) {
+      expect(options?.method).toBe('POST')
+      expect(options?.body).toBeUndefined()
+      expect(options?.signal).toBe(signal)
+    }
+    expect(() => api.cancelExport('job')).toThrow('tenant_id is required')
+    expect(() => api.retryExport('job')).toThrow('tenant_id is required')
+  })
+
   it('calls fetch with its global Web API receiver, not with the API client as this', async () => {
     const fetcher = vi.fn<typeof fetch>(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation')

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { IrisButton, IrisCard, IrisDescriptions, IrisFormField, IrisInput } from '@iris-ui-kit/svelte'
   import type { QueryResult } from '../api/types'
   import { useAuditApi } from '../api/useAuditApi'
@@ -6,7 +7,7 @@
   import HistoryTimeline from './HistoryTimeline.svelte'
   import { LatestLookup } from './lookupState'
 
-  let { tenantId }: { tenantId?: string } = $props()
+  let { tenantId, initialType = '', initialId = '' }: { tenantId?: string; initialType?: string; initialId?: string } = $props()
   const api = useAuditApi()
   const lookupState = new LatestLookup()
   let aggregateType = $state('')
@@ -16,6 +17,15 @@
   let error = $state<unknown>(null)
   let failedCursor = $state<string | null>(null)
   let activeSearchKey = ''
+
+  onMount(() => {
+    const type = initialType.trim()
+    const id = initialId.trim()
+    if (!type || !id) return
+    aggregateType = type
+    aggregateId = id
+    void lookup()
+  })
 
   function lookupKey(type = aggregateType.trim(), id = aggregateId.trim()): string {
     return JSON.stringify([tenantId ?? '', type, id])

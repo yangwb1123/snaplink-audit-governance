@@ -50,6 +50,13 @@ var newArchiveStore = func(external runtimeconfig.SigningArchive) (archive.Store
 }
 
 func main() {
+	// The file lock becomes visible during openStore, before bootstrap and
+	// archive readiness finish. Handle termination before exposing that lock,
+	// so a supervisor can stop startup without the OS default SIGTERM exit.
+	// The same context cancels the startup probe and subsequent pass I/O.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	statePath := flag.String("state", envOr("AUDIT_STATE_PATH", "./data/state.json"), "state snapshot path")
 	postgresDSN := flag.String("postgres-dsn", os.Getenv("AUDIT_POSTGRES_DSN"), "PostgreSQL DSN for the control-plane state snapshot; overrides -state")
 	archiveDir := flag.String("archive", envOr("AUDIT_ARCHIVE_DIR", "./data/archive"), "archive directory")
@@ -142,17 +149,17 @@ func main() {
 	// -once mode). A misconfigured destination is a boot error, not a
 	// per-pass surprise: with S3 the bucket must exist with Object Lock and
 	// versioning enabled; with a local archive the dir must be writable.
-	if err := probeArchiveReady(svc.Config.Archive, logger); err != nil {
+	if err := probeArchiveReadyContext(ctx, svc.Config.Archive, logger); err != nil {
+		if ctx.Err() != nil {
+			return // orderly startup cancellation still runs the store Close
+		}
 		logger.Fatalf("archive ready: %v", err)
 	}
-	// REQ-3: the pass context is cancelled by SIGINT/SIGTERM so in-flight
-	// Vault sign calls and archive Puts abort promptly instead of blocking on
-	// client/transport timeouts. archiveEvent/archiveSegment add the service's
-	// per-object archivePutTimeout for black-holed destinations. stop() must be
-	// released (async F4: signal.NotifyContext's internal registration would
-	// otherwise leak for the process lifetime).
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	if ctx.Err() != nil {
+		return // do not start a governance pass after startup was withdrawn
+	}
+	// REQ-3: the process context cancels in-flight Vault sign calls and
+	// archive Puts. Per-object and pass deadlines remain unchanged.
 	evaluate := func() { runEvaluatePass(ctx, logger, svc) }
 	evaluate()
 	if *once {
@@ -266,11 +273,18 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 // (OQ-1). The caller decides the failure handling: main fails fast at startup,
 // runCheckConfig exits non-zero, runEvaluatePass skips archiving for the pass.
 func probeArchiveReady(store archive.Store, logger *log.Logger) error {
+	return probeArchiveReadyContext(context.Background(), store, logger)
+}
+
+// Startup also inherits process cancellation; other callers retain their
+// existing readiness policy. The 5s ceiling and fail-closed Ready checks do
+// not change, and cancellation can only make the effective bound shorter.
+func probeArchiveReadyContext(parent context.Context, store archive.Store, logger *log.Logger) error {
 	if !archive.Configured(store) {
 		logger.Printf("archive_ready=skipped")
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), archiveReadyTimeout)
+	ctx, cancel := context.WithTimeout(parent, archiveReadyTimeout)
 	defer cancel()
 	if err := store.Ready(ctx); err != nil {
 		logger.Printf("archive_ready=failed store=%T error=%v", store, err)

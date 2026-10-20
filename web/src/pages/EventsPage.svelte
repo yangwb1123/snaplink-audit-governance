@@ -22,6 +22,7 @@
   import StatusBadge from '../components/StatusBadge.svelte'
   import { formatDate } from '../components/format'
   import { buildEventQuery, emptyEventFilters, type EventFilterDraft } from './eventQuery'
+  import { navigateInvestigation } from './investigationNavigation'
 
   let { tenantId }: { tenantId?: string } = $props()
   const api = useAuditApi()
@@ -174,6 +175,17 @@
     } finally { request.finish() }
   }
 
+  function openOperationTimeline(): void {
+    const id = selected?.operation_id
+    if (id) navigateInvestigation({ mode: 'operation', operationId: id })
+  }
+
+  function openAggregateHistory(): void {
+    const type = selected?.aggregate_type
+    const id = selected?.aggregate_id
+    if (type && id) navigateInvestigation({ mode: 'aggregate', aggregateType: type, aggregateId: id })
+  }
+
   function tableRows(): Record<string, unknown>[] {
     return events.map((event) => ({
       ...event,
@@ -288,9 +300,30 @@
               { label: 'Trace / Span', value: `${selected.trace_id || '—'} / ${selected.span_id || '—'}` },
               { label: '聚合对象 / 版本', value: `${selected.aggregate_type || '—'}:${selected.aggregate_id || '—'} / ${selected.aggregate_version ?? '—'}` },
               { label: '流 / 序号', value: `${selected.stream_id || '—'} / ${selected.sequence ?? '—'}` },
-              { label: '回执状态', value: receipt?.status ?? '读取中…' },
+              { label: '回执状态', value: receipt?.status ?? (detailError ? '回执不可用' : '读取中…') },
             ]}
           />
+          {#if receipt}
+            <IrisDescriptions
+              style=""
+              bordered
+              columns={1}
+              items={[
+                { label: '回执流 / 序号', value: `${receipt.stream_id ?? '—'} / ${receipt.sequence ?? '—'}` },
+                { label: '账本 / 索引 / 归档', value: `${formatDate(receipt.ledgered_at)} / ${formatDate(receipt.indexed_at)} / ${formatDate(receipt.archived_at)}` },
+              ]}
+            />
+          {/if}
+          {#if selected.operation_id || (selected.aggregate_type && selected.aggregate_id)}
+            <div class="button-row">
+              {#if selected.operation_id}
+                <IrisButton size="sm" variant="outline" onclick={openOperationTimeline}>查看操作时间线</IrisButton>
+              {/if}
+              {#if selected.aggregate_type && selected.aggregate_id}
+                <IrisButton size="sm" variant="outline" onclick={openAggregateHistory}>查看聚合历史</IrisButton>
+              {/if}
+            </div>
+          {/if}
           <h3>Payload</h3>
           <FieldDiff changes={selected.changed_fields} />
           <pre class="json-view">{JSON.stringify(selected.payload ?? {}, null, 2)}</pre>

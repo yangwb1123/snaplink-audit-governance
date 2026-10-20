@@ -8,6 +8,7 @@
   import LoadingBlock from '../components/LoadingBlock.svelte'
   import PageHeader from '../components/PageHeader.svelte'
   import { formatDate } from '../components/format'
+  import GovernanceSummary from '../features/governance/GovernanceSummary.svelte'
   import FacetBreakdown from './FacetBreakdown.svelte'
   import { failedFacetCount } from './auditFacets'
 
@@ -111,9 +112,10 @@
   {/snippet}
   <PageHeader
     title="审计态势"
-    description="最近 24 小时的不可变审计事实与治理操作，数据直接来自 Audit Governance API。"
+    description="最近 24 小时的审计观察，以及独立按权限展示的当前租户治理元数据；不声明全租户证据完整性。"
     actions={headerActions}
   />
+  <GovernanceSummary {tenantId} {revision} />
   <ErrorNotice {error} onRetry={() => (revision += 1)} />
   {#if !readable}
     <IrisCard variant="outline" style="" header={undefined} footer={undefined}>当前 Snaplink 角色没有 audit:event:read，Audit API 不会返回审计事实。</IrisCard>

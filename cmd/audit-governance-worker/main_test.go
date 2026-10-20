@@ -939,9 +939,11 @@ func TestRunEvaluatePassCancelledCtxAbortsInflightPut(t *testing.T) {
 
 // TestRunEvaluatePassAbortsBetweenTenants pins the REQ-1 abort placement
 // (QA review F-2): the between-tenant check fires only after the in-flight
-// tenant completes its full step sequence. With a pre-cancelled context,
-// tenant-a still runs seal → aggregate → archive → retention and commits its
-// receipts; tenant-b is never started; exactly one pass_aborted= line is
+// tenant attempts its full step sequence. With a pre-cancelled context,
+// tenant-a still attempts recovery → seal → aggregate → archive → retention;
+// control checked recovery surfaces cancellation rather than fake success.
+// The existing archive stub commits its receipts; tenant-b is never started;
+// exactly one pass_aborted= line is
 // emitted. A top-of-loop placement would break this contract (and the pinned
 // single-tenant TestRunEvaluatePassAbortsOnCancelledContext), so this test
 // guards against both regressions.
@@ -965,7 +967,7 @@ func TestRunEvaluatePassAbortsBetweenTenants(t *testing.T) {
 		t.Fatalf("pass_aborted lines=%d, want exactly 1; log: %q", n, out)
 	}
 	for _, want := range []string{
-		"tenant=tenant-a stuck_exports_recovered=0",
+		"tenant=tenant-a export_recovery_error=context canceled",
 		"tenant=tenant-a archived=1 dead_lettered=0",
 		"tenant=tenant-a eligible=0",
 	} {
@@ -1437,7 +1439,7 @@ func TestStartupVaultHTTPFatal(t *testing.T) {
 // challenger would observe EWOULDBLOCK with an identifiable holder. Our poll
 // fd's brief flock (when the holder is not yet there) is released on close
 // and can never steal the holder's own lock.
-func waitForStateLock(t *testing.T, lockPath string) {
+func waitForStateLock(t *testing.T, lockPath string, holderPID int) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -1452,8 +1454,8 @@ func waitForStateLock(t *testing.T, lockPath string) {
 		locked := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
 		_ = f.Close()
 		if locked {
-			if raw, err := os.ReadFile(lockPath); err == nil && len(strings.TrimSpace(string(raw))) > 0 {
-				return
+			if raw, err := os.ReadFile(lockPath); err == nil && strings.HasPrefix(string(raw), fmt.Sprintf("%d\t", holderPID)) {
+				return // do not accept the closed preparation writer's old metadata
 			}
 		}
 		if time.Now().After(deadline) {
@@ -1503,10 +1505,11 @@ func runLockedChallenger(t *testing.T, binary, statePath string, holderPID int, 
 // stopHolderGracefully SIGTERMs the holder and asserts a graceful exit
 // (exit 0 via the binaries' signal.NotifyContext / stop-channel shutdown
 // paths, which close the store and release the lock).
-func stopHolderGracefully(t *testing.T, holder *exec.Cmd, holderOut *bytes.Buffer) {
+func stopHolderGracefully(t *testing.T, holder *exec.Cmd, holderOut *workerChildOutput) {
 	t.Helper()
 	if err := holder.Process.Signal(syscall.SIGTERM); err != nil {
 		_ = holder.Process.Kill()
+		_ = holder.Wait()
 		t.Fatalf("signal holder: %v", err)
 	}
 	done := make(chan error, 1)
@@ -1518,6 +1521,7 @@ func stopHolderGracefully(t *testing.T, holder *exec.Cmd, holderOut *bytes.Buffe
 		}
 	case <-time.After(10 * time.Second):
 		_ = holder.Process.Kill()
+		<-done
 		t.Fatalf("holder did not exit within 10s of SIGTERM\n%s", holderOut.String())
 	}
 }
@@ -1532,10 +1536,11 @@ func stateLockLeg(t *testing.T, name, holderBin, challengerBin, holderExeBase st
 	t.Run(name, func(t *testing.T) {
 		dir := t.TempDir()
 		statePath := filepath.Join(dir, "state.json")
+		prepared := prepareStateLockFixture(t, statePath)
 
 		holder := exec.Command(holderBin, append([]string{"-state", statePath, "-archive", filepath.Join(dir, "archive")}, holderArgs...)...)
 		holder.Env = append(os.Environ(), holderEnv...)
-		var holderOut bytes.Buffer
+		var holderOut workerChildOutput
 		holder.Stdout = &holderOut
 		holder.Stderr = &holderOut
 		if err := holder.Start(); err != nil {
@@ -1548,12 +1553,13 @@ func stateLockLeg(t *testing.T, name, holderBin, challengerBin, holderExeBase st
 				_ = holder.Wait()
 			}
 		}()
-		waitForStateLock(t, statePath+".lock")
+		waitForStateLock(t, statePath+".lock", holder.Process.Pid)
 
 		runLockedChallenger(t, challengerBin, statePath, holder.Process.Pid, holderExeBase, challengerEnv, challengerArgs...)
 
 		waited = true
 		stopHolderGracefully(t, holder, &holderOut)
+		assertStateLockFixture(t, statePath, prepared)
 	})
 }
 

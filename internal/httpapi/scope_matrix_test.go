@@ -39,9 +39,12 @@ func platformScopedRequests() []scopedRequestCase {
 		{"operation replay", http.MethodGet, "/api/v1/operations/op/replay", ""},
 		{"aggregate timeline", http.MethodGet, "/api/v1/aggregates/invoice/inv/timeline", ""},
 		{"list exports", http.MethodGet, "/api/v1/exports", ""},
+		{"governance status", http.MethodGet, "/api/v1/governance/status", ""},
 		{"create export", http.MethodPost, "/api/v1/exports", `{"from":"2023-11-14T22:13:20Z","to":"2023-11-14T22:13:40Z"}`},
 		{"get export", http.MethodGet, "/api/v1/exports/job", ""},
 		{"download export", http.MethodGet, "/api/v1/exports/job/download", ""},
+		{"cancel export", http.MethodPost, "/api/v1/exports/job/cancel", ""},
+		{"retry export", http.MethodPost, "/api/v1/exports/job/retry", ""},
 		{"verify integrity", http.MethodPost, "/api/v1/integrity/verify", `{}`},
 		{"create legal hold", http.MethodPost, "/api/v1/legal-holds", `{"name":"case","reason":"review"}`},
 		{"list legal holds", http.MethodGet, "/api/v1/legal-holds", ""},
@@ -69,8 +72,8 @@ func TestPlatformExplicitSelectionMatrix(t *testing.T) {
 	before := snapshotBytes(t, st)
 	beforeTrail := trailBytes(t, st)
 	cases := platformScopedRequests()
-	if len(cases) != 31 {
-		t.Fatalf("scoped query operation matrix has %d cases, want 31", len(cases))
+	if len(cases) != 34 {
+		t.Fatalf("scoped query operation matrix has %d cases, want 34", len(cases))
 	}
 	for _, selector := range []struct {
 		name   string

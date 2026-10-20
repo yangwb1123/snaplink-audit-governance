@@ -23,6 +23,8 @@ type ExportSummary struct {
 	TenantID    string     `json:"tenant_id"`
 	RequestedBy string     `json:"requested_by"`
 	Status      string     `json:"status"`
+	RetryOf     string     `json:"retry_of,omitempty"`
+	FailureCode string     `json:"failure_code,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`

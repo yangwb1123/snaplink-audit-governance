@@ -17,27 +17,34 @@ func (s *Service) QueryConsoleEvents(ctx context.Context, tenantID, actor string
 	if err := validateConsoleReadQuery(query); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.consoleEvents(ctx, tenantID, query)
-	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	sortEvents(events)
-	reverseEvents(events)
-	if query.Cursor != "" {
-		events, err = consoleEventsBeforeCursor(events, query.Cursor)
+	var result domain.QueryResult
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		events, err := s.consoleEvents(opCtx, tenantID, query)
 		if err != nil {
-			return domain.QueryResult{}, err
+			return err
 		}
-	}
-	result := consoleEventPage(events, query.PageSize)
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", "snaplink-console"); err != nil {
+		sortEvents(events)
+		reverseEvents(events)
+		if query.Cursor != "" {
+			events, err = consoleEventsBeforeCursor(events, query.Cursor)
+			if err != nil {
+				return err
+			}
+		}
+		result = consoleEventPage(events, query.PageSize)
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "query", "", "snaplink-console"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
+	if err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
 }
 
-// QueryEventFacets aggregates the same filtered event set as QueryEvents in a
-// single audited store read. SourceSystem is the governance-owned equivalent
+// QueryEventFacets aggregates the same authenticated selection as the Console
+// page under one audited operation. SourceSystem is the governance-owned equivalent
 // of the legacy Console client column; provider has no trusted counterpart in
 // the canonical event envelope and therefore remains an empty map.
 func (s *Service) QueryEventFacets(ctx context.Context, tenantID, actor string, query domain.Query) (domain.EventFacets, error) {
@@ -51,21 +58,28 @@ func (s *Service) QueryEventFacets(ctx context.Context, tenantID, actor string, 
 		Outcomes: map[string]int{}, Types: map[string]int{},
 		Clients: map[string]int{}, Providers: map[string]int{},
 	}
-	events, err := s.consoleEvents(ctx, tenantID, query)
-	if err == nil {
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		events, err := s.consoleEvents(opCtx, tenantID, query)
+		if err != nil {
+			return err
+		}
 		result.Total = len(events)
 		for _, event := range events {
+			if err := opCtx.Err(); err != nil {
+				return err
+			}
 			result.Outcomes[event.Outcome]++
 			result.Types[event.EventType]++
 			if event.SourceSystem != "" {
 				result.Clients[event.SourceSystem]++
 			}
 		}
-	}
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "query", "", "facets"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return domain.EventFacets{}, err
-	}
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "query", "", "facets"); err != nil {
 		return domain.EventFacets{}, err
 	}
 	return result, nil
@@ -85,22 +99,6 @@ func validateConsoleReadQuery(query domain.Query) error {
 		return fmt.Errorf("%w: invalid page size", domain.ErrInvalid)
 	}
 	return nil
-}
-
-func (s *Service) consoleEvents(ctx context.Context, tenantID string, query domain.Query) ([]domain.Event, error) {
-	var events []domain.Event
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		schemas := make(map[string]domain.EventSchema, len(data.Schemas))
-		for key, schema := range data.Schemas {
-			schemas[key] = schema
-		}
-		var readErr error
-		events, readErr = s.eventsFromSnapshot(ctx, data, tenantID, func(event domain.Event) bool {
-			return s.matches(event, query, schemas)
-		})
-		return readErr
-	})
-	return events, err
 }
 
 func reverseEvents(events []domain.Event) {
@@ -151,31 +149,45 @@ func consoleEventPage(events []domain.Event, limit int) domain.QueryResult {
 // reader. A duplicate id across tenants is intentionally ambiguous and fails
 // closed rather than selecting a tenant by map iteration order.
 func (s *Service) GetEventAcrossTenants(ctx context.Context, actor, eventID string) (domain.Event, error) {
-	var matches []domain.Event
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for _, event := range data.Events {
-			if event.EventID != eventID {
-				continue
+	var (
+		matches  []domain.Event
+		archived []domain.EventReceipt
+	)
+	// One operation deadline covers capture, WORM authentication and the one
+	// read self-audit. The capture holds Store.mu only long enough to clone hot
+	// evidence and archived receipt identities; the archive reads run after the
+	// lock is released, so a slow object store cannot freeze unrelated control
+	// writes for every tenant.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.Read(opCtx, func(data *store.Snapshot) error {
+			for _, event := range data.Events {
+				if event.EventID != eventID {
+					continue
+				}
+				cloned, err := domain.CloneEvent(event)
+				if err != nil {
+					return err
+				}
+				matches = append(matches, cloned)
 			}
-			cloned, err := domain.CloneEvent(event)
-			if err != nil {
-				return err
+			for key, receipt := range data.Receipts {
+				if receipt.EventID != eventID || receipt.Status != domain.StatusArchived {
+					continue
+				}
+				if _, hot := data.Events[key]; hot {
+					continue
+				}
+				archived = append(archived, receipt)
 			}
-			matches = append(matches, cloned)
+			return nil
+		}); err != nil {
+			return err
 		}
-		// ONE bound for this tenant's archived receipts, derived inside the
-		// store closure (see archiveFallbackContext). This loop is a
-		// multi-receipt pass like eventsFromSnapshot, so deriving per receipt
-		// would reintroduce N × bound amplification.
-		readCtx, cancel := s.archiveFallbackContext(ctx)
+		// ONE archive bound for this pass (see archiveFallbackContext): a
+		// multi-receipt loop must not re-derive N × the archive ceiling.
+		readCtx, cancel := s.archiveFallbackContext(opCtx)
 		defer cancel()
-		for key, receipt := range data.Receipts {
-			if receipt.EventID != eventID || receipt.Status != domain.StatusArchived {
-				continue
-			}
-			if _, hot := data.Events[key]; hot {
-				continue
-			}
+		for _, receipt := range archived {
 			event, readErr := s.archivedEventContext(readCtx, receipt)
 			if readErr != nil {
 				return readErr
@@ -186,22 +198,18 @@ func (s *Service) GetEventAcrossTenants(ctx context.Context, actor, eventID stri
 			}
 			matches = append(matches, cloned)
 		}
-		return nil
+		if len(matches) == 0 {
+			return domain.ErrNotFound
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("%w: event id is ambiguous across tenants", domain.ErrConflict)
+		}
+		return s.recordReadAction(opCtx, matches[0].TenantID, actor, domain.AdminActionEventRead, "event", eventID, "")
 	})
 	if err != nil {
 		return domain.Event{}, err
 	}
-	if len(matches) == 0 {
-		return domain.Event{}, domain.ErrNotFound
-	}
-	if len(matches) != 1 {
-		return domain.Event{}, fmt.Errorf("%w: event id is ambiguous across tenants", domain.ErrConflict)
-	}
-	event := matches[0]
-	if err := s.recordReadAction(ctx, event.TenantID, actor, domain.AdminActionEventRead, "event", eventID, ""); err != nil {
-		return domain.Event{}, err
-	}
-	return event, nil
+	return matches[0], nil
 }
 
 func (s *Service) GetReceiptAcrossTenants(ctx context.Context, actor, eventID string) (domain.EventReceipt, error) {

@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -154,7 +155,14 @@ func TestGRPCWriteStreamClaimsAreNotExtendedByEventFields(t *testing.T) {
 			t.Fatalf("stored server-derived scope=%q/%q, want tenant-a/crm", stored.TenantID, stored.SourceSystem)
 		}
 		if stored.Payload["tenant_id"] != "tenant-b" || stored.Payload["client_id"] != "attacker" {
-			t.Fatalf("payload was not retained as event data: %#v", stored.Payload)
+			t.Fatal("payload was not retained as event data")
+		}
+		key := store.EventKey("tenant-a", trusted.GetEventId())
+		if _, ok := data.Receipts[key]; !ok {
+			t.Fatal("claims-isolation event has no durable receipt witness")
+		}
+		if _, ok := data.LedgeredOutbox[key]; !ok {
+			t.Fatal("claims-isolation event has no durable outbox witness")
 		}
 		return nil
 	}); err != nil {
@@ -165,21 +173,39 @@ func TestGRPCWriteStreamClaimsAreNotExtendedByEventFields(t *testing.T) {
 		"sub": "auditor-subject", "tenant_id": "tenant-a", "client_id": "crm",
 		"roles": []string{"auditor"}, "exp": time.Now().Add(time.Hour).Unix(),
 	})
-	noWriteCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+noWriteToken))
+	noWriteCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	noWriteCtx = metadata.NewOutgoingContext(noWriteCtx, metadata.Pairs("authorization", "Bearer "+noWriteToken))
 	denied, err := client.WriteStream(noWriteCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// With no initial response headers, Header waits for the server's
+	// trailers-only rejection. This forces the denied-before-Send order on
+	// the real transport without a sleep or a shortened JWT lifetime.
+	if headers, err := denied.Header(); err != nil || headers != nil {
+		t.Fatalf("denied stream Header: metadata present=%t code=%v", headers != nil, status.Code(err))
+	}
 	spoofed := testProtoEvent("grpc-claims-permission-spoof", "crm")
 	spoofed.Actor.Roles = []string{"service"}
 	spoofed.PayloadJson = []byte(`{"permissions":["audit:event:write"]}`)
-	if err := denied.Send(&auditv1.WriteRequest{Event: spoofed}); err != nil {
-		t.Fatal(err)
+	// SendMsg reports a completed remote rejection as io.EOF, not the RPC
+	// status. Requiring nil here made this authorization test scheduler-dependent.
+	if err := denied.Send(&auditv1.WriteRequest{Event: spoofed}); err != io.EOF {
+		t.Fatalf("Send after rejection code=%v, want io.EOF", status.Code(err))
 	}
-	if _, err := denied.Recv(); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("actor/payload permission spoof code=%v, want PermissionDenied (err=%v)", status.Code(err), err)
+	if receipt, err := denied.Recv(); receipt != nil || status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("actor/payload permission spoof receipt present=%t code=%v, want no receipt and PermissionDenied", receipt != nil, status.Code(err))
 	}
 	assertNoFramedKeys(t, st, spoofed.GetEventId())
+	if err := st.Read(testCtx, func(data *store.Snapshot) error {
+		if len(data.Events) != 1 || len(data.Receipts) != 1 || len(data.LedgeredOutbox) != 1 {
+			t.Fatal("rejected stream changed persistence beyond the authorized prefix")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func jwtExpiryAuthenticator() *auth.Authenticator {

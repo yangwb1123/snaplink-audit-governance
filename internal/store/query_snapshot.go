@@ -139,25 +139,14 @@ func (s *Store) ReadQuerySnapshot(ctx context.Context, tenantID, id string, now 
 		}
 		if s.split != nil && s.split.path != "" {
 			path := s.querySnapshotPath(tenantID, id)
-			file, openErr := os.Open(path)
+			file, openErr := fsutil.OpenDataFile(path, os.O_RDONLY, 0)
 			if errors.Is(openErr, os.ErrNotExist) {
 				return q, ErrQuerySnapshotUnavailable
 			}
 			if openErr != nil {
 				return q, openErr
 			}
-			defer file.Close()
-			info, statErr := file.Stat()
-			if statErr != nil {
-				return q, statErr
-			}
-			if info.Size() > MaxQuerySnapshotBytes {
-				return q, ErrQuerySnapshotUnavailable
-			}
-			raw, err = io.ReadAll(io.LimitReader(file, MaxQuerySnapshotBytes+1))
-			if len(raw) > MaxQuerySnapshotBytes {
-				return q, ErrQuerySnapshotUnavailable
-			}
+			raw, err = readQuerySnapshotFile(file)
 		} else {
 			raw = append([]byte(nil), s.querySnapshots[EventKey(tenantID, id)]...)
 		}
@@ -178,13 +167,15 @@ func (s *Store) querySnapshotPath(tenantID, id string) string {
 	return filepath.Join(s.split.root, "query-snapshots", tenantFileName(tenantID), id+".json")
 }
 
-func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw []byte, now time.Time) error {
+func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw []byte, now time.Time) (err error) {
 	path := s.querySnapshotPath(q.TenantID, q.ID)
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	parent, err := fsutil.OpenDataDir(dir, true)
+	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
+	defer func() { err = errors.Join(err, parent.Close()) }()
+	entries, err := parent.ReadDir()
 	if err != nil {
 		return err
 	}
@@ -208,7 +199,11 @@ func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw 
 		if info.Size() > MaxQuerySnapshotBytes {
 			return ErrQuerySnapshotUnavailable
 		}
-		encoded, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		file, err := parent.OpenFile(entry.Name(), os.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		encoded, err := readQuerySnapshotFile(file)
 		if err != nil {
 			return err
 		}
@@ -217,7 +212,7 @@ func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw 
 			return ErrQuerySnapshotUnavailable
 		}
 		if !existing.ExpiresAt.After(now) {
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			if err := parent.Remove(entry.Name()); err != nil {
 				return err
 			}
 		} else {
@@ -227,7 +222,7 @@ func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw 
 	if active >= MaxActiveQuerySnapshots {
 		return domain.ErrQuotaExceeded
 	}
-	if _, err := os.Stat(path); err == nil {
+	if _, err := fsutil.StatDataFile(path); err == nil {
 		return domain.ErrConflict
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -235,10 +230,28 @@ func (s *Store) saveFileQuerySnapshot(ctx context.Context, q QuerySnapshot, raw 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := writeDurableFile(path, raw, 0o640); err != nil {
+	if err := writeDurableFile(path, raw, fsutil.PrivateFileMode); err != nil {
 		return err
 	}
 	return fsutil.SyncDirChain(s.split.root, dir, nil)
+}
+
+// Own and close this verified regular file; bound reads even if the inode's
+// size changes between directory enumeration/Stat and the actual read.
+func readQuerySnapshotFile(file *os.File) (raw []byte, err error) {
+	defer func() { err = errors.Join(err, file.Close()) }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > MaxQuerySnapshotBytes {
+		return nil, ErrQuerySnapshotUnavailable
+	}
+	raw, err = io.ReadAll(io.LimitReader(file, MaxQuerySnapshotBytes+1))
+	if len(raw) > MaxQuerySnapshotBytes {
+		return nil, ErrQuerySnapshotUnavailable
+	}
+	return raw, err
 }
 
 // Probe rather than create: migration 008 precedes API deployment on v1/v2 PG.

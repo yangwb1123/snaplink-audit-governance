@@ -1,14 +1,11 @@
 package store
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/snaplink/audit-governance/internal/archive"
 	"github.com/snaplink/audit-governance/internal/domain"
 )
 
@@ -19,7 +16,11 @@ type fileHotColdSize struct {
 
 func measureFileHotColdSize(t *testing.T, count, payloadSize int) fileHotColdSize {
 	t.Helper()
-	root := t.TempDir()
+	return measureFileHotColdSizeWithWriters(t, t.TempDir(), count, payloadSize, capacityArchiveWriters)
+}
+
+func measureFileHotColdSizeWithWriters(t *testing.T, root string, count, payloadSize, writers int) fileHotColdSize {
+	t.Helper()
 	statePath := filepath.Join(root, "control.json")
 	st, err := Open(statePath)
 	if err != nil {
@@ -47,17 +48,10 @@ func measureFileHotColdSize(t *testing.T, count, payloadSize int) fileHotColdSiz
 		t.Fatal(err)
 	}
 	archiveRoot := filepath.Join(root, "archive")
-	archiveStore := &archive.FileStore{Dir: archiveRoot}
-	for i := 0; i < count; i++ {
-		key := fmt.Sprintf("events/tenant-a/source/%08d.json", i)
-		if err := archiveStore.Put(context.Background(), key, []byte(strings.Repeat("x", payloadSize))); err != nil {
-			t.Fatal(err)
-		}
-	}
+	archiveBytes := prepareFileCapacityArchive(t, archiveRoot, count, payloadSize, writers)
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	archiveBytes := directoryBytes(t, archiveRoot)
 	return fileHotColdSize{state: directoryBytes(t, filepath.Dir(statePath)) - archiveBytes, archive: archiveBytes}
 }
 
@@ -83,7 +77,8 @@ func directoryBytes(t *testing.T, root string) int64 {
 // segment and checkpoint metadata grows linearly with event count, while
 // changing an already-evicted payload does not enlarge the control/ledger
 // state. Archive bytes are measured separately because WORM payload retention
-// is intentionally proportional to payload size.
+// is intentionally proportional to payload size. Sample counts, real file
+// objects, measured bytes and slope thresholds do not depend on writer count.
 func TestFileHotColdCapacitySlope(t *testing.T) {
 	small := measureFileHotColdSize(t, 100, 4096)
 	medium := measureFileHotColdSize(t, 1000, 4096)

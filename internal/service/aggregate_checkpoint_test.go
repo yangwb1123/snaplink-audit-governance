@@ -347,7 +347,7 @@ func TestCreateAggregateCheckpointDedupAfterConcurrentWinner(t *testing.T) {
 		Algorithm: signer.Algorithm(), CreatedAt: testTime, StreamRoots: roots,
 		AttestationVersion: aggregateAttestationVersion, CheckpointRefs: refs,
 	}
-	signature, err := signer.Sign(testCtx, aggregateAttestationPayload(candidate))
+	signature, err := signer.Sign(testCtx, mustAggregateAttestationPayload(t, candidate))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +583,7 @@ func TestMalformedBoundAggregateWithoutReferencesIsInvalid(t *testing.T) {
 		Root: merkleRoot(nil), Algorithm: svc.Config.Signer.Algorithm(),
 		AttestationVersion: aggregateAttestationVersion,
 	}
-	signature, err := svc.Config.Signer.Sign(testCtx, aggregateAttestationPayload(aggregate))
+	signature, err := svc.Config.Signer.Sign(testCtx, mustAggregateAttestationPayload(t, aggregate))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +679,7 @@ func TestVerifyIntegrityBoundedByRetentionCap(t *testing.T) {
 				CreatedAt: testTime, StreamRoots: roots, AttestationVersion: aggregateAttestationVersion,
 				CheckpointRefs: refs,
 			}
-			signature, err := svc.Config.Signer.Sign(testCtx, aggregateAttestationPayload(aggregate))
+			signature, err := svc.Config.Signer.Sign(testCtx, mustAggregateAttestationPayload(t, aggregate))
 			if err != nil {
 				return err
 			}

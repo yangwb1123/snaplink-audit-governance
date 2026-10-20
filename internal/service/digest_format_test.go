@@ -238,9 +238,10 @@ func TestDualFormatSearchDigestMatching(t *testing.T) {
 	}
 }
 
-// TestEncryptedSearchableFieldLimitsCrossFormatMatching pins the accepted
-// limitation: a searchable field that is also encrypted has no stored
-// plaintext, so cross-format matching fails closed (same-format only).
+// TestEncryptedSearchableFieldLimitsCrossFormatMatching retains the historical
+// legacy-helper limitation, but ADR-0030 ordinary first queries now reconstruct
+// authenticated values before matching either condition format. No protected
+// response field is replaced with the reconstructed plaintext.
 func TestEncryptedSearchableFieldLimitsCrossFormatMatching(t *testing.T) {
 	svc := testService(t, false)
 	registerDigestSchemas(t, svc)
@@ -266,9 +267,14 @@ func TestEncryptedSearchableFieldLimitsCrossFormatMatching(t *testing.T) {
 	if err != nil || sameFormat.Count != 1 {
 		t.Fatalf("same-format bound query must match the encrypted field: count=%d err=%v", sameFormat.Count, err)
 	}
+	// The unchanged legacy helper still cannot re-derive from ciphertext;
+	// ordinary first queries must no longer delegate trust to that sidecar.
+	if !svc.digestMatches(sameFormat.Items[0], digestQuery(base, "pii_email", bound), nil) || svc.digestMatches(sameFormat.Items[0], digestQuery(base, "pii_email", unbound), nil) {
+		t.Fatal("legacy same-format/ciphertext-only helper behavior changed")
+	}
 	crossFormat, err := svc.QueryEvents(testCtx, "tenant-a", "test", digestQuery(base, "pii_email", unbound))
-	if err != nil || crossFormat.Count != 0 {
-		t.Fatalf("cross-format query on an encrypted field must fail closed: count=%d err=%v", crossFormat.Count, err)
+	if err != nil || crossFormat.Count != 1 || len(crossFormat.Items) != 1 || crossFormat.Items[0].Payload["pii_email"] != sameFormat.Items[0].Payload["pii_email"] {
+		t.Fatal("authenticated cross-format query failed or exposed reconstructed plaintext")
 	}
 }
 

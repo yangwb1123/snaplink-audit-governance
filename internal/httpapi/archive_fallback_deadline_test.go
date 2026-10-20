@@ -10,6 +10,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -106,16 +107,19 @@ func (a *blackHoleArchive) count() int {
 	return a.gets
 }
 
-// archiveFallbackFixture serves a real HTTP handler over a real store whose
-// per-operation bound is fallbackOperationTimeout.
+// archiveFallbackFixture keeps the real file store and HTTP ingest. Arm the
+// short read budget only after preparation is durable and reopened; ingest
+// fsync is not the archive Get deadline being measured.
 type archiveFallbackFixture struct {
-	svc    *service.Service
-	server *httptest.Server
+	svc       *service.Service
+	server    *httptest.Server
+	statePath string
 }
 
 func newArchiveFallbackFixture(t *testing.T) *archiveFallbackFixture {
 	t.Helper()
-	st, err := store.OpenWithOptions(filepath.Join(t.TempDir(), "state.json"), store.Options{OperationTimeout: fallbackOperationTimeout})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, err := store.Open(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,9 +146,42 @@ func newArchiveFallbackFixture(t *testing.T) *archiveFallbackFixture {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if svc.Store != st {
+			_ = svc.Store.Close()
+		}
+	})
 	server := httptest.NewServer(NewServer(svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
 	t.Cleanup(server.Close)
-	return &archiveFallbackFixture{svc: svc, server: server}
+	return &archiveFallbackFixture{svc: svc, server: server, statePath: statePath}
+}
+
+func (f *archiveFallbackFixture) armReadBudget(t *testing.T) {
+	t.Helper()
+	f.server.Close() // join every preparation handler before replacing Store
+	if err := f.svc.Store.Read(testCtx, func(data *store.Snapshot) error {
+		if len(data.Events) != 0 || len(data.Receipts) != 1 {
+			return errors.New("fallback preparation did not durably archive and hot-evict the original event")
+		}
+		for _, receipt := range data.Receipts {
+			if receipt.Status != domain.StatusArchived || receipt.Hash == "" || receipt.ArchivedAt.IsZero() {
+				return errors.New("fallback preparation has no original archived receipt")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.OpenWithOptions(f.statePath, store.Options{OperationTimeout: fallbackOperationTimeout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.svc.Store = reopened
+	f.server = httptest.NewServer(NewServer(f.svc, auth.Authenticator{AllowDev: true, JWTSecret: testJWTSecret, AllowLocalHS256: true}, log.New(io.Discard, "", 0)).Handler())
+	t.Cleanup(f.server.Close)
 }
 
 // ingestArchivedEvent POSTs one event with wait_for=archived. A successful
@@ -234,6 +271,7 @@ func (f *archiveFallbackFixture) deadlineCounter(t *testing.T) uint64 {
 func TestQueryWithBlackHoledArchiveReturnsStoreTimeout(t *testing.T) {
 	f := newArchiveFallbackFixture(t)
 	f.ingestArchivedEvent(t, "fallback-query-1")
+	f.armReadBudget(t)
 	hole := &blackHoleArchive{}
 	f.svc.Config.Archive = hole
 
@@ -280,6 +318,7 @@ func TestQueryWithBlackHoledArchiveReturnsStoreTimeout(t *testing.T) {
 func TestStoreDeadlineMetricMovesAfterArchiveFallbackTimeout(t *testing.T) {
 	f := newArchiveFallbackFixture(t)
 	f.ingestArchivedEvent(t, "fallback-metric-1")
+	f.armReadBudget(t)
 	before := f.deadlineCounter(t)
 	f.svc.Config.Archive = &blackHoleArchive{}
 

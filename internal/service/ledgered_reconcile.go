@@ -44,7 +44,9 @@ func (s *Service) ReconcileLedgeredPublications(ctx context.Context, tenantID st
 		return result, nil
 	}
 	defer func() {
-		s.ledgeredReconcileEvidenceFailures.Add(uint64(result.Failed))
+		if result.Failed > 0 {
+			s.ledgeredReconcileEvidenceFailures.Add(uint64(result.Failed))
+		}
 		if err != nil {
 			s.ledgeredReconcileErrors.Add(1)
 		}
@@ -62,7 +64,7 @@ func (s *Service) ReconcileLedgeredPublications(ctx context.Context, tenantID st
 		return result, err
 	}
 	result.Scanned, result.Next, result.Done = len(page.Records), page.Next, page.Done
-	s.ledgeredReconcileScanned.Add(uint64(result.Scanned))
+	s.ledgeredReconcileScanned.Add(uint64(len(page.Records)))
 	if len(page.Records) == 0 {
 		return result, nil
 	}
@@ -124,7 +126,9 @@ func (s *Service) ReconcileLedgeredPublications(ctx context.Context, tenantID st
 		result.Repaired, result.Next, result.Done = 0, after, false
 		return result, err
 	}
-	s.ledgeredIntentRepairs.Add(uint64(result.Repaired))
+	if result.Repaired > 0 {
+		s.ledgeredIntentRepairs.Add(uint64(result.Repaired))
+	}
 	return result, nil
 }
 

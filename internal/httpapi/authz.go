@@ -34,6 +34,13 @@ func (s *Server) requireAdminActionRead(r *http.Request) (auth.Claims, error) {
 }
 
 func (s *Server) requirePermission(r *http.Request, permission string, allowTenantlessConsole bool) (auth.Claims, error) {
+	return s.requirePermissions(r, []string{permission}, allowTenantlessConsole)
+}
+
+// requirePermissions authenticates once and requires at least one permission.
+// It does not grant section visibility; handlers must independently gate each
+// section. The tenantless Console exception remains explicitly opt-in.
+func (s *Server) requirePermissions(r *http.Request, permissions []string, allowTenantlessConsole bool) (auth.Claims, error) {
 	claims, err := s.Auth.Authenticate(r)
 	if err != nil {
 		if s.Logger != nil {
@@ -41,10 +48,15 @@ func (s *Server) requirePermission(r *http.Request, permission string, allowTena
 		}
 		return auth.Claims{}, fmt.Errorf("%w: %v", domain.ErrUnauthorized, err)
 	}
-	if !claims.Allows(permission) && !(allowTenantlessConsole && claims.CrossTenantAuditRead) {
+	allowed := allowTenantlessConsole && claims.CrossTenantAuditRead
+	for _, permission := range permissions {
+		allowed = allowed || claims.Allows(permission)
+	}
+	if !allowed {
 		return claims, domain.ErrForbidden
 	}
-	if permission != "audit:event:write" && claims.TenantID == "" && !claims.Platform &&
+	ingest := len(permissions) == 1 && permissions[0] == "audit:event:write"
+	if !ingest && claims.TenantID == "" && !claims.Platform &&
 		!(allowTenantlessConsole && claims.CrossTenantAuditRead) {
 		return claims, fmt.Errorf("%w: tenant context is required", domain.ErrUnauthorized)
 	}

@@ -3,11 +3,13 @@ package kafka
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/snaplink/audit-governance/internal/fsutil"
 )
 
 // Tenant-aware state uses a distinct header so a rolling deployment can read
@@ -124,7 +126,7 @@ func (s *ReplayState) Marked(tenantID, eventID string) bool {
 // recovered from the accepted event. It deliberately has no Failure argument:
 // an unverified DLQ claim cannot enter replay state. The existing Mark method
 // remains the event-ID-only compatibility API for old Kafka-mode embedders.
-func (s *ReplayState) MarkTenant(tenantID, eventID string) error {
+func (s *ReplayState) MarkTenant(tenantID, eventID string) (resultErr error) {
 	if tenantID == "" || eventID == "" {
 		return fmt.Errorf("tenant-aware replay mark requires non-empty tenant_id and event_id")
 	}
@@ -141,11 +143,11 @@ func (s *ReplayState) MarkTenant(tenantID, eventID string) error {
 	if lockWait <= 0 {
 		lockWait = defaultLockWait
 	}
-	lock, err := lockReplayState(s.path, lockWait)
+	lock, err := s.acquireReplayLock(lockWait)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 	line, err := tenantMarkLine(tenantID, eventID)
 	if err != nil {
 		return err
@@ -158,7 +160,9 @@ func (s *ReplayState) MarkTenant(tenantID, eventID string) error {
 		if err := s.appendLogLine(line); err != nil {
 			return err
 		}
-		lock.Close()
+		if err := lock.Close(); err != nil {
+			return err
+		}
 		if err := s.syncFileOr(s.path); err != nil {
 			return err
 		}
@@ -171,6 +175,9 @@ func (s *ReplayState) MarkTenant(tenantID, eventID string) error {
 		return err
 	}
 	if err := s.rewriteBytes(content); err != nil {
+		return err
+	}
+	if err := lock.Close(); err != nil {
 		return err
 	}
 	s.scopedMarks[identity] = true
@@ -188,7 +195,7 @@ func (s *ReplayState) tenantRewriteContent(kind stateKind, newLine []byte) ([]by
 		legacy[eventID] = true
 	}
 	if kind == stateLog {
-		encoded, err := os.ReadFile(s.path)
+		encoded, err := fsutil.ReadDataFile(s.path)
 		if err != nil {
 			return nil, fmt.Errorf("read replay state: %w", err)
 		}
@@ -276,7 +283,7 @@ func parseTenantLogMarks(encoded []byte) (map[string]bool, map[string]bool, erro
 }
 
 func (s *ReplayState) rebuildTenantLog() error {
-	encoded, err := os.ReadFile(s.path)
+	encoded, err := fsutil.ReadDataFile(s.path)
 	if err != nil {
 		return fmt.Errorf("read replay state: %w", err)
 	}

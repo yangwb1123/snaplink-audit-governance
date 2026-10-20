@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -57,13 +56,15 @@ type ReplayState struct {
 	syncFile func(path string) error
 	syncDir  func(path string) error
 	// newTemp is the unique-temp factory for the rewrite paths (default
-	// os.CreateTemp); same-package tests replace it to record every temp
+	// pinned DataDir.CreateTemp); same-package tests replace it to record every temp
 	// path (AC-2: no two writers ever share one temp inode, REQ-3).
 	newTemp func(dir, pattern string) (*os.File, error)
 	// lockWait bounds how long Mark waits for a contended flock before
 	// failing the persist (a hung-but-alive peer cannot stall DLQ recovery
 	// forever); defaults to defaultLockWait.
 	lockWait time.Duration
+	// Instance-local seam at the real flock boundary; nil uses lockReplayState.
+	lockFile func(path string, wait time.Duration) (io.Closer, error)
 }
 
 // On-disk log format. The header discriminates the append-only JSONL log
@@ -110,9 +111,9 @@ func LoadReplayState(path string) (*ReplayState, error) {
 	if path == "" {
 		return state, nil
 	}
-	encoded, err := os.ReadFile(path)
+	encoded, err := fsutil.ReadDataFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return state, nil
 		}
 		return nil, fmt.Errorf("load replay state: %w", err)
@@ -214,22 +215,22 @@ func classifyFirstLine(first []byte) (stateKind, error) {
 // classifyStateFile probes the state file under the flock (bounded read:
 // stat + first classifyReadCap bytes), distinguishing absent/empty/log/
 // torn/legacy for the write decision.
-func classifyStateFile(path string) (stateKind, error) {
-	info, err := os.Stat(path)
+func classifyStateFile(path string) (kind stateKind, err error) {
+	file, err := fsutil.OpenDataFile(path, os.O_RDONLY, 0)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return stateAbsent, nil
 		}
+		return 0, fmt.Errorf("open replay state: %w", err)
+	}
+	defer func() { err = closeReplayFile(file, err) }()
+	info, err := file.Stat()
+	if err != nil {
 		return 0, fmt.Errorf("stat replay state: %w", err)
 	}
 	if info.Size() == 0 {
 		return stateEmpty, nil
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return 0, fmt.Errorf("open replay state: %w", err)
-	}
-	defer file.Close()
 	buf := make([]byte, classifyReadCap)
 	n, err := file.Read(buf)
 	if err != nil && err != io.EOF {
@@ -247,7 +248,7 @@ func classifyStateFile(path string) (stateKind, error) {
 // next round. A lock-acquisition failure is a persist error (REQ-1): the
 // round aborts and the previous state stays authoritative.
 func lockReplayState(path string, wait time.Duration) (io.Closer, error) {
-	file, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	file, err := fsutil.OpenDataFile(path+".lock", os.O_CREATE|os.O_RDWR, fsutil.PrivateFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("open replay state lock: %w", err)
 	}
@@ -259,12 +260,10 @@ func lockReplayState(path string, wait time.Duration) (io.Closer, error) {
 			return file, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			file.Close()
-			return nil, fmt.Errorf("flock replay state lock: %w", err)
+			return nil, closeReplayFile(file, fmt.Errorf("flock replay state lock: %w", err))
 		}
 		if time.Now().After(deadline) {
-			file.Close()
-			return nil, errors.New("flock replay state lock: timed out waiting for a peer writer")
+			return nil, closeReplayFile(file, errors.New("flock replay state lock: timed out waiting for a peer writer"))
 		}
 		time.Sleep(backoff)
 		if backoff < 10*time.Millisecond {
@@ -295,7 +294,7 @@ func markLine(eventID string) ([]byte, error) {
 // REQ-7, security F1): if the durable ledger never held the mark, the DLQ
 // record stays pending and the next round retries it — a DLQ offset is
 // never committed without the corresponding durable mark.
-func (s *ReplayState) Mark(eventID string) error {
+func (s *ReplayState) Mark(eventID string) (resultErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initializeReplayMaps()
@@ -308,11 +307,11 @@ func (s *ReplayState) Mark(eventID string) error {
 	if lockWait <= 0 {
 		lockWait = defaultLockWait
 	}
-	lock, err := lockReplayState(s.path, lockWait)
+	lock, err := s.acquireReplayLock(lockWait)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 	line, err := markLine(eventID)
 	if err != nil {
 		return err
@@ -334,7 +333,9 @@ func (s *ReplayState) Mark(eventID string) error {
 		if err := s.appendLogLine(line); err != nil {
 			return err
 		}
-		lock.Close() // early release before the flush; the deferred Close is a no-op
+		if err := lock.Close(); err != nil {
+			return err
+		} // early release before the flush; deferred Close is now a real no-op
 		if err := s.syncFileOr(s.path); err != nil {
 			return err
 		}
@@ -347,6 +348,9 @@ func (s *ReplayState) Mark(eventID string) error {
 	// the rename is the atomic publication and must never interleave with
 	// another writer's classification.
 	if err := s.rewriteFull(kind, line); err != nil {
+		return err
+	}
+	if err := lock.Close(); err != nil {
 		return err
 	}
 	s.Replayed[eventID] = true
@@ -377,17 +381,16 @@ func (s *ReplayState) appendLogLine(line []byte) error {
 	if err := s.repairTornTail(); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(s.path, os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	file, err := fsutil.OpenDataFile(s.path, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		return fmt.Errorf("open replay state for append: %w", err)
 	}
 	n, err := file.Write(line)
 	if err != nil || n != len(line) {
-		file.Close()
 		if err == nil {
 			err = io.ErrShortWrite
 		}
-		return fmt.Errorf("append replay state: %w", err)
+		return closeReplayFile(file, fmt.Errorf("append replay state: %w", err))
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close replay state: %w", err)
@@ -403,19 +406,17 @@ func (s *ReplayState) appendLogLine(line []byte) error {
 // was never durable, or external corruption of a whole block — the log is
 // rebuilt from its durable marks via the unique-temp rewrite protocol.
 func (s *ReplayState) repairTornTail() error {
-	file, err := os.OpenFile(s.path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	file, err := fsutil.OpenDataFile(s.path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open replay state for repair: %w", err)
 	}
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
-		return fmt.Errorf("stat replay state: %w", err)
+		return closeReplayFile(file, fmt.Errorf("stat replay state: %w", err))
 	}
 	size := info.Size()
 	if size == 0 {
-		file.Close()
-		return nil
+		return closeReplayFile(file, nil)
 	}
 	window := size
 	if window > tailCheckWindow {
@@ -423,22 +424,21 @@ func (s *ReplayState) repairTornTail() error {
 	}
 	tail := make([]byte, window)
 	if _, err := file.ReadAt(tail, size-window); err != nil {
-		file.Close()
-		return fmt.Errorf("read replay state tail: %w", err)
+		return closeReplayFile(file, fmt.Errorf("read replay state tail: %w", err))
 	}
 	if tail[window-1] == '\n' {
-		file.Close()
-		return nil // clean tail: no repair needed
+		return closeReplayFile(file, nil) // clean tail: no repair needed
 	}
 	if idx := bytes.LastIndexByte(tail[:window-1], '\n'); idx >= 0 {
 		err = file.Truncate(size - window + int64(idx) + 1)
-		file.Close()
 		if err != nil {
-			return fmt.Errorf("truncate replay state tail: %w", err)
+			err = fmt.Errorf("truncate replay state tail: %w", err)
 		}
-		return nil
+		return closeReplayFile(file, err)
 	}
-	file.Close()
+	if err := closeReplayFile(file, nil); err != nil {
+		return err
+	}
 	return s.rebuildLog()
 }
 
@@ -449,7 +449,7 @@ func (s *ReplayState) rebuildLog() error {
 	if kind, err := classifyStateFile(s.path); err == nil && kind == stateTenantLog {
 		return s.rebuildTenantLog()
 	}
-	encoded, err := os.ReadFile(s.path)
+	encoded, err := fsutil.ReadDataFile(s.path)
 	if err != nil {
 		return fmt.Errorf("read replay state: %w", err)
 	}
@@ -483,51 +483,6 @@ func (s *ReplayState) rewriteFull(kind stateKind, newLine []byte) error {
 		return fmt.Errorf("rewrite replay state: unexpected state kind %d", kind)
 	}
 	return s.rewriteBytes(content)
-}
-
-// rewriteBytes publishes content through the durable protocol: a UNIQUE
-// temp (newTemp seam — no two writers can ever share one temp inode,
-// REQ-3), write, content fsync BEFORE rename, rename, parent-dir fsync
-// AFTER rename (REQ-4). Every error path removes only the writer's own
-// temp; a dir-sync failure after rename keeps the new target content (D4
-// semantics: both old and new content decode).
-func (s *ReplayState) rewriteBytes(content []byte) error {
-	newTemp := s.newTemp
-	if newTemp == nil {
-		newTemp = os.CreateTemp
-	}
-	temp, err := newTemp(filepath.Dir(s.path), filepath.Base(s.path)+"-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create replay state temp: %w", err)
-	}
-	tempPath := temp.Name()
-	defer func() {
-		if tempPath != "" {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if _, err := temp.Write(content); err != nil {
-		temp.Close()
-		return fmt.Errorf("write replay state: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close replay state temp: %w", err)
-	}
-	if err := s.syncFileOr(tempPath); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, s.path); err != nil {
-		return fmt.Errorf("rename replay state: %w", err)
-	}
-	tempPath = "" // rename succeeded: nothing left to remove
-	syncDir := s.syncDir
-	if syncDir == nil {
-		syncDir = fsutil.SyncDir
-	}
-	if err := syncDir(filepath.Dir(s.path)); err != nil {
-		return fmt.Errorf("sync replay state directory: %w", err)
-	}
-	return nil
 }
 
 // syncFileOr runs the syncFile hook (default fsutil.SyncFile): the content
@@ -567,9 +522,9 @@ func appendLogBytes(marks map[string]bool, newLine []byte) []byte {
 // targets yield an empty set; genuinely undecodable content is a wrapped
 // decode error (fail-loud, FM-7).
 func loadLegacyMarks(path string) (map[string]bool, error) {
-	encoded, err := os.ReadFile(path)
+	encoded, err := fsutil.ReadDataFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return map[string]bool{}, nil
 		}
 		return nil, fmt.Errorf("load replay state: %w", err)

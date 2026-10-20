@@ -474,6 +474,7 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 			t.Fatal(err)
 		}
 		st = opened
+		t.Cleanup(func() { _ = st.Close() })
 	}
 	config := service.Config{Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }, AllowDevSecrets: true, LedgeredPublisher: opts.publisher}
 	if opts.archiveStore != nil {
@@ -493,14 +494,10 @@ func newGRPCHarnessOpts(t *testing.T, opts grpcHarnessOptions) (*store.Store, au
 	// plane, and writing them through a fault-injecting backend would consume
 	// the very Save calls the fixture asserts on.
 	if !opts.seeded {
-		if err := svc.CreateTenant(testCtx, "test", domain.Tenant{ID: "tenant-a", Name: "Tenant A", Active: true}); err != nil {
-			t.Fatal(err)
-		}
-		if err := svc.AddSource(testCtx, "test", domain.SourceSystem{TenantID: "tenant-a", ID: "crm", Name: "CRM", Active: true}); err != nil {
-			t.Fatal(err)
-		}
-		if err := svc.RegisterSchema(testCtx, "test", domain.EventSchema{TenantID: "tenant-a", SchemaID: "audit.event", Version: 1, EventType: "audit.event", Active: true}); err != nil {
-			t.Fatal(err)
+		if opts.injectedStore == nil {
+			seedGRPCFileDomain(t, svc)
+		} else {
+			seedGRPCDomain(t, svc)
 		}
 	}
 	listener := bufconn.Listen(1024 * 1024)

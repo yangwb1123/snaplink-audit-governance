@@ -39,13 +39,21 @@ func (r *archivePutRecorder) Ready(context.Context) error { return nil }
 type archivePutBlockingStore struct {
 	observedErr error
 	cancelOnPut context.CancelFunc
+	calledAt    time.Time
+	finishedAt  time.Time
+	deadline    time.Time
+	calls       int
 }
 
 func (s *archivePutBlockingStore) Put(ctx context.Context, _ string, _ []byte) error {
+	s.calledAt = time.Now()
+	s.deadline, _ = ctx.Deadline()
+	s.calls++
 	if s.cancelOnPut != nil {
 		s.cancelOnPut()
 	}
 	<-ctx.Done()
+	s.finishedAt = time.Now()
 	s.observedErr = ctx.Err()
 	return ctx.Err()
 }
@@ -205,15 +213,28 @@ func TestIngestArchivePutDetachedContextCancelsBlockingPut(t *testing.T) {
 	svc := testService(t, true)
 	blocking := &archivePutBlockingStore{}
 	svc.Config.Archive = blocking
+	assertDetachedPutCancellation(t, svc, blocking)
+}
 
+func assertDetachedPutCancellation(t *testing.T, svc *Service, blocking *archivePutBlockingStore) {
+	t.Helper()
 	started := time.Now()
 	receipt, err := svc.Ingest(context.WithoutCancel(context.Background()), "tenant-a", crmPrincipal,
 		testEvent("ingest-detached-blocking", "op-detached-blocking", time.Unix(1_700_000_010, 0).UTC()), domain.StatusArchived)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Ingest err=%v, want context deadline exceeded", err)
 	}
-	if elapsed := time.Since(started); elapsed < archivePutTimeout-500*time.Millisecond || elapsed > archivePutTimeout+time.Second {
+	t.Logf("archive_boundary ingest_ms=%d before_put_ms=%d put_ms=%d after_put_ms=%d", time.Since(started).Milliseconds(), blocking.calledAt.Sub(started).Milliseconds(), blocking.finishedAt.Sub(blocking.calledAt).Milliseconds(), time.Since(blocking.finishedAt).Milliseconds())
+	if blocking.calls != 1 || blocking.calledAt.Before(started) || blocking.deadline.IsZero() {
+		t.Fatal("detached ingest did not reach exactly one bounded archive Put")
+	}
+	// This is the per-object Put bound, not the whole-Ingest latency: the
+	// original real file commits before and after Put remain mandatory.
+	if elapsed := blocking.finishedAt.Sub(blocking.calledAt); elapsed < archivePutTimeout-500*time.Millisecond || elapsed > archivePutTimeout+time.Second {
 		t.Fatalf("detached Put elapsed=%v, want approximately %v", elapsed, archivePutTimeout)
+	}
+	if budget := blocking.deadline.Sub(blocking.calledAt); budget < archivePutTimeout-250*time.Millisecond || budget > archivePutTimeout+250*time.Millisecond {
+		t.Fatal("detached Put did not inherit the unchanged per-object deadline")
 	}
 	if !errors.Is(blocking.observedErr, context.DeadlineExceeded) {
 		t.Fatalf("detached Put observed %v, want context deadline exceeded", blocking.observedErr)

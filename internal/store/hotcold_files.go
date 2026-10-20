@@ -25,7 +25,7 @@ import (
 func loadTenantState(root, tenantID string) (*tenantState, error) {
 	hot := emptyTenantHot(tenantID)
 	hotPath := tenantFilePath(root, tenantID)
-	if raw, err := os.ReadFile(hotPath); err == nil {
+	if raw, err := fsutil.ReadDataFile(hotPath); err == nil {
 		var disk tenantHotSnapshot
 		if err := decodeJSON(raw, &disk); err != nil {
 			return nil, fmt.Errorf("decode tenant hot file %s: %w", hotPath, err)
@@ -73,12 +73,12 @@ func loadTenantLedger(root, tenantID string, hot *Snapshot, version int64) (*ten
 
 func migrateV1File(path string, data *Snapshot) error {
 	backup := path + ".v1"
-	if _, err := os.Stat(backup); errors.Is(err, os.ErrNotExist) {
-		raw, readErr := os.ReadFile(path)
+	if _, err := fsutil.StatDataFile(backup); errors.Is(err, os.ErrNotExist) {
+		raw, readErr := fsutil.ReadDataFile(path)
 		if readErr != nil {
 			return fmt.Errorf("backup v1 state: %w", readErr)
 		}
-		if err := writeDurableFile(backup, raw, 0o640); err != nil {
+		if err := writeDurableFile(backup, raw, fsutil.PrivateFileMode); err != nil {
 			return fmt.Errorf("backup v1 state: %w", err)
 		}
 	} else if err != nil {
@@ -132,7 +132,7 @@ func writeTenantFile(root, tenantID string, disk tenantHotSnapshot) error {
 	if err != nil {
 		return err
 	}
-	return writeDurableFile(tenantFilePath(root, tenantID), encoded, 0o640)
+	return writeDurableFile(tenantFilePath(root, tenantID), encoded, fsutil.PrivateFileMode)
 }
 
 func writeControlFile(path string, data *Snapshot) error {
@@ -140,50 +140,27 @@ func writeControlFile(path string, data *Snapshot) error {
 	if err != nil {
 		return err
 	}
-	return writeDurableFile(path, encoded, 0o640)
+	return writeDurableFile(path, encoded, fsutil.PrivateFileMode)
 }
 
 var writeDurableFile = writeDurableFileImpl
 
 func writeDurableFileImpl(path string, data []byte, mode os.FileMode) error {
-	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o750); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return fsutil.SyncDir(parent)
+	return fsutil.AtomicDataFile(path, data, mode, nil)
 }
 
 var appendLedgerFile = appendLedgerFileImpl
 
-func appendLedgerFileImpl(root, tenantID string, records []LedgerRecord) error {
+func appendLedgerFileImpl(root, tenantID string, records []LedgerRecord) (err error) {
 	path := ledgerFilePath(root, tenantID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	parent := filepath.Dir(path)
+	ancestor := fsutil.DeepestExistingAncestor(parent)
+	dir, err := fsutil.OpenDataDir(parent, true)
+	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640)
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	file, err := dir.OpenFile(filepath.Base(path), os.O_WRONLY|os.O_CREATE|os.O_APPEND, fsutil.PrivateFileMode)
 	if err != nil {
 		return err
 	}
@@ -201,7 +178,7 @@ func appendLedgerFileImpl(root, tenantID string, records []LedgerRecord) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return fsutil.SyncDir(filepath.Dir(path))
+	return dir.SyncChain(ancestor, nil)
 }
 
 func replaceLedgerFile(root, tenantID string, records []LedgerRecord) error {
@@ -209,7 +186,7 @@ func replaceLedgerFile(root, tenantID string, records []LedgerRecord) error {
 		// Keep an explicit empty ledger alongside every tenant hot file. The
 		// marker is part of the v2 layout integrity check: a missing ledger
 		// file is indistinguishable from lost cold evidence after restart.
-		return writeDurableFile(ledgerFilePath(root, tenantID), nil, 0o640)
+		return writeDurableFile(ledgerFilePath(root, tenantID), nil, fsutil.PrivateFileMode)
 	}
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
@@ -218,12 +195,12 @@ func replaceLedgerFile(root, tenantID string, records []LedgerRecord) error {
 			return err
 		}
 	}
-	return writeDurableFile(ledgerFilePath(root, tenantID), buffer.Bytes(), 0o640)
+	return writeDurableFile(ledgerFilePath(root, tenantID), buffer.Bytes(), fsutil.PrivateFileMode)
 }
 
 func readLedgerFile(root, tenantID string) ([]LedgerRecord, error) {
 	path := ledgerFilePath(root, tenantID)
-	file, err := os.Open(path)
+	file, err := fsutil.OpenDataFile(path, os.O_RDONLY, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

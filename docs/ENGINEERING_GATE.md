@@ -40,7 +40,7 @@ python3 cli.py filesize
 | `proto-sync` | `audit.proto` ↔ 检入生成代码（描述符 + 版本钉 + 字节重放） |
 | `dev-auth-manifest` | 非 verify 部署清单不得开启开发认证 |
 | `tenant-consistency` | DS-08：租户不一致检查必须先于服务端打标 |
-| `tenant-scope` | 35 个操作的作用域矩阵（跨租户/查询/请求体/管理面） |
+| `tenant-scope` | 41 个操作的作用域矩阵（跨租户/查询/请求体/管理面） |
 | `stream-consistency` | 客户端 stream_id 剥离 → 派生 → 服务端打标的顺序 |
 | `replay-round-reset` | 重放每轮必须先重置 accepted 读取位置再扫描 |
 | `prometheus-rules` | DLQ 告警集被钉死（永久丢失/发布失败/认证阻塞/积压） |

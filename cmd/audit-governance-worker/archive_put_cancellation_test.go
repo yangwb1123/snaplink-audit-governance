@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -65,9 +63,11 @@ func TestRunEvaluatePassAbortsOnArchivePut(t *testing.T) {
 }
 
 type hungS3Endpoint struct {
-	bucket string
-	seen   chan struct{}
-	once   sync.Once
+	bucket     string
+	seen       chan struct{}
+	cancelled  chan struct{}
+	once       sync.Once
+	cancelOnce sync.Once
 }
 
 func (s *hungS3Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +79,9 @@ func (s *hungS3Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, bucketPath+"/") && len(r.URL.Path) > len(bucketPath)+1 {
 		s.once.Do(func() { close(s.seen) })
 		<-r.Context().Done()
+		if s.cancelled != nil {
+			s.cancelOnce.Do(func() { close(s.cancelled) })
+		}
 		return
 	}
 	if _, ok := r.URL.Query()["location"]; ok {
@@ -142,60 +145,38 @@ func cleanAuditEnvironment() []string {
 // The endpoint answers every readiness probe but never answers the object HEAD;
 // SIGTERM must cancel that request and let -once exit with the cancellation log.
 func TestSigtermDuringHungArchivePutExitsBoundedWindow(t *testing.T) {
-	binary, err := buildWorkerBinary()
-	if err != nil {
-		t.Skipf("worker binary unavailable: %v", err)
-	}
-	endpoint := &hungS3Endpoint{bucket: "worm-audit", seen: make(chan struct{})}
+	endpoint := &hungS3Endpoint{bucket: "worm-audit", seen: make(chan struct{}), cancelled: make(chan struct{})}
 	server := httptest.NewServer(endpoint)
-	defer server.Close()
-
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	seedHungArchiveState(t, statePath)
-	cmd := exec.Command(binary,
-		"-once", "-state", statePath, "-archive", filepath.Join(dir, "archive"),
-		"-s3-endpoint", strings.TrimPrefix(server.URL, "http://"), "-s3-bucket", endpoint.bucket,
-		"-s3-access-key", "access", "-s3-secret-key", "secret", "-archive-retention-days", "365",
-	)
-	cmd.Env = append(cleanAuditEnvironment(),
-		"AUDIT_SIGNING_SECRET=signing-secret-0123456789abcdef0123456789abcdef",
-		"AUDIT_ENCRYPTION_KEY=encryption-key-0123456789abcdef0123456789abcdef",
-	)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waited := false
-	defer func() {
-		if !waited {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	}()
-
-	select {
-	case <-endpoint.seen:
-	case <-time.After(10 * time.Second):
-		t.Fatal("worker never reached the in-flight object HEAD")
-	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	t.Cleanup(server.Close)
+	child, statePath := startArchiveWorker(t, server.URL, endpoint.bucket)
+	// Start measuring shutdown only after the actual archive socket is in
+	// flight. Startup/migration are not a 10s performance requirement.
+	child.awaitBoundary(t, endpoint.seen, "in-flight object HEAD")
+	if err := child.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM: %v", err)
 	}
-	wait := make(chan error, 1)
-	go func() { wait <- cmd.Wait() }()
+	child.awaitCleanExit(t) // the original post-SIGTERM 10s ceiling is unchanged
 	select {
-	case err := <-wait:
-		waited = true
-		if err != nil {
-			t.Fatalf("worker did not exit cleanly after SIGTERM: %v; output=%q", err, output.String())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("worker did not exit within 10s after SIGTERM")
+	case <-endpoint.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("archive socket did not observe cancellation")
 	}
-	if !strings.Contains(output.String(), "archive_error=") || !strings.Contains(output.String(), "context canceled") {
-		t.Fatalf("worker output must report the cancelled archive Put; output=%q", output.String())
+	output := child.output.String()
+	if !strings.Contains(output, "archive_error=") || !strings.Contains(output, "context canceled") {
+		t.Fatalf("worker output must report the cancelled archive Put; output=%q", output)
+	}
+	st, err := store.Open(statePath)
+	if err != nil {
+		t.Fatalf("archive SIGTERM left the state lock held: %v", err)
+	}
+	defer st.Close()
+	if err := st.Read(context.Background(), func(data *store.Snapshot) error {
+		receipt := data.Receipts[store.EventKey("tenant-a", "evt-hung-archive")]
+		if receipt.Status != domain.StatusIndexed || !receipt.ArchivedAt.IsZero() {
+			t.Fatal("cancelled archive was reported as committed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

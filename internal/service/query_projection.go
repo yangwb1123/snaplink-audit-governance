@@ -26,7 +26,7 @@ func (s *Service) verifyQueryReferences(ctx context.Context, tenantID string, re
 			if err := view.Ledger.Err(); err != nil {
 				return err
 			}
-			if !found || receipt.TenantID != tenantID || reference.StreamID != receipt.StreamID || reference.Sequence != receipt.Sequence || reference.Hash != receipt.Hash {
+			if !found || receipt.TenantID != tenantID || receipt.EventID != reference.EventID || reference.StreamID != receipt.StreamID || reference.Sequence != receipt.Sequence || reference.Hash != receipt.Hash {
 				return fmt.Errorf("%w: projected identity differs from committed ledger", domain.ErrConflict)
 			}
 		}

@@ -99,7 +99,7 @@ func (s *Store) ConfirmPublication(ctx context.Context, event domain.Event) (err
 			return err
 		}
 		path := s.publicationPath(confirmation)
-		if err := writeDurableFile(path, encoded, 0o640); err != nil {
+		if err := writeDurableFile(path, encoded, fsutil.PrivateFileMode); err != nil {
 			return err
 		}
 		return s.syncPublicationDirectories(path)
@@ -176,7 +176,7 @@ FROM audit_publication_confirmation WHERE tenant_id = $1 AND event_id = $2`, wan
 		return checkedPublication(p)
 	}
 	if s.split != nil && s.split.path != "" {
-		raw, err := os.ReadFile(s.publicationPath(want))
+		raw, err := fsutil.ReadDataFile(s.publicationPath(want))
 		if errors.Is(err, os.ErrNotExist) {
 			return publicationConfirmation{}, false, nil
 		}

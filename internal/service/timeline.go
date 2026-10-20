@@ -8,25 +8,19 @@ import (
 	"github.com/snaplink/audit-governance/internal/domain"
 )
 
-// operationTimelineEventsNoAudit is the un-audited source shared by the
-// bounded legacy method, the paged API, and replay. Keeping the source read
-// separate lets replay retain its safety cap while HTTP clients walk large
-// timelines page by page.
+// operationTimelineEventsNoAudit authenticates owned committed evidence before
+// selection, outside Store.mu, without adding a delegated read fact.
 func (s *Service) operationTimelineEventsNoAudit(ctx context.Context, tenantID, operationID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+	events, err := s.readTimelineEvidence(ctx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
 	if err != nil {
 		return nil, err
-	}
-	if len(events) == 0 {
-		return nil, domain.ErrNotFound
 	}
 	sortEvents(events)
 	return events, nil
 }
 
-// operationTimelineNoAudit is the un-audited core shared by the bounded
-// compatibility method and ReplayOperation, so a single replay call appends
-// exactly one fact (FR-3: no delegation path may append twice).
+// operationTimelineNoAudit preserves the legacy whole-timeline safety cap.
+// Operation replay independently retains the same cap and one read fact.
 func (s *Service) operationTimelineNoAudit(ctx context.Context, tenantID, operationID string) ([]domain.Event, error) {
 	events, err := s.operationTimelineEventsNoAudit(ctx, tenantID, operationID)
 	if err != nil {
@@ -41,14 +35,11 @@ func (s *Service) operationTimelineNoAudit(ctx context.Context, tenantID, operat
 // aggregateTimelineEventsNoAudit mirrors operationTimelineEventsNoAudit for
 // aggregates. Aggregate-version ordering is the domain order for this path.
 func (s *Service) aggregateTimelineEventsNoAudit(ctx context.Context, tenantID, aggregateType, aggregateID string) ([]domain.Event, error) {
-	events, err := s.eventsFor(ctx, tenantID, func(event domain.Event) bool {
+	events, err := s.readTimelineEvidence(ctx, tenantID, func(event domain.Event) bool {
 		return event.AggregateType == aggregateType && event.AggregateID == aggregateID
 	})
 	if err != nil {
 		return nil, err
-	}
-	if len(events) == 0 {
-		return nil, domain.ErrNotFound
 	}
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].AggregateVersion == events[j].AggregateVersion {
@@ -140,15 +131,23 @@ func (s *Service) OperationTimelinePage(ctx context.Context, tenantID, actor, op
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.operationTimelineEventsNoAudit(ctx, tenantID, operationID)
+	var result domain.QueryResult
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		events, err := s.readTimelineEvidence(opCtx, tenantID, func(event domain.Event) bool { return event.OperationID == operationID })
+		if err != nil {
+			return err
+		}
+		sortEvents(events)
+		result, err = paginateTimeline(events, "operation", operationID, cursor, pageSize)
+		if err != nil {
+			return err
+		}
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	result, err := paginateTimeline(events, "operation", operationID, cursor, pageSize)
-	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
@@ -161,16 +160,31 @@ func (s *Service) AggregateTimelinePage(ctx context.Context, tenantID, actor, ag
 	if err := requireTenantScope(tenantID); err != nil {
 		return domain.QueryResult{}, err
 	}
-	events, err := s.aggregateTimelineEventsNoAudit(ctx, tenantID, aggregateType, aggregateID)
+	var result domain.QueryResult
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		events, err := s.readTimelineEvidence(opCtx, tenantID, func(event domain.Event) bool {
+			return event.AggregateType == aggregateType && event.AggregateID == aggregateID
+		})
+		if err != nil {
+			return err
+		}
+		sort.Slice(events, func(i, j int) bool {
+			if events[i].AggregateVersion == events[j].AggregateVersion {
+				return events[i].EventID < events[j].EventID
+			}
+			return events[i].AggregateVersion < events[j].AggregateVersion
+		})
+		scope := aggregateType + "\x1f" + aggregateID
+		result, err = paginateTimeline(events, "aggregate", scope, cursor, pageSize)
+		if err != nil {
+			return err
+		}
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	scope := aggregateType + "\x1f" + aggregateID
-	result, err := paginateTimeline(events, "aggregate", scope, cursor, pageSize)
-	if err != nil {
-		return domain.QueryResult{}, err
-	}
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
 		return domain.QueryResult{}, err
 	}
 	return result, nil
@@ -180,13 +194,20 @@ func (s *Service) OperationTimeline(ctx context.Context, tenantID, actor, operat
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
-	events, err := s.operationTimelineNoAudit(ctx, tenantID, operationID)
+	var events []domain.Event
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		var err error
+		events, err = s.operationTimelineNoAudit(opCtx, tenantID, operationID)
+		if err != nil {
+			return err
+		}
+		// Append-before-serve once, under the original capture/Get budget.
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return nil, err
-	}
-	// Read self-audit (F-06): append-before-serve, fail-closed — a timeline
-	// read that cannot leave its governance fact is not served.
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "operation", operationID, "timeline"); err != nil {
 		return nil, err
 	}
 	return events, nil
@@ -196,11 +217,19 @@ func (s *Service) AggregateTimeline(ctx context.Context, tenantID, actor, aggreg
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
-	events, err := s.aggregateTimelineNoAudit(ctx, tenantID, aggregateType, aggregateID)
+	var events []domain.Event
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		var err error
+		events, err = s.aggregateTimelineNoAudit(opCtx, tenantID, aggregateType, aggregateID)
+		if err != nil {
+			return err
+		}
+		if err := s.recordReadAction(opCtx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
+			return err
+		}
+		return opCtx.Err()
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := s.recordReadAction(ctx, tenantID, actor, domain.AdminActionEventRead, "aggregate", aggregateID, aggregateType); err != nil {
 		return nil, err
 	}
 	return events, nil

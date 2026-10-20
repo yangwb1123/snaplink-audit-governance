@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"time"
 
@@ -37,10 +38,14 @@ func main() {
 	sourceSystem := flag.String("source-system", "demo", "source system to write as; must be registered for the token's client id")
 	eventType := flag.String("event-type", "audit.event", "event type (and default schema id)")
 	schemaID := flag.String("schema-id", "", "schema id (defaults to -event-type)")
-	schemaVersion := flag.Int("schema-version", 1, "schema version")
+	schemaVersion := flag.Int64("schema-version", 1, "schema version")
 	flag.Parse()
 	if *token == "" {
 		log.Fatalf("token is required: pass -token or set AUDIT_E2E_TOKEN")
+	}
+	version, err := protoSchemaVersion(*schemaVersion)
+	if err != nil {
+		log.Fatal(err)
 	}
 	if *schemaID == "" {
 		*schemaID = *eventType
@@ -54,7 +59,7 @@ func main() {
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+*token))
 	request := &auditv1.WriteRequest{WaitFor: "ledgered", Event: &auditv1.EventEnvelope{
 		EventId: *eventID, SourceSystem: *sourceSystem, EventType: *eventType,
-		SchemaId: *schemaID, SchemaVersion: int32(*schemaVersion),
+		SchemaId: *schemaID, SchemaVersion: version,
 		OccurredAt: timestamppb.New(time.Now().UTC()),
 		Actor:      &auditv1.Actor{Id: "grpc-e2e"},
 		Action:     "update", Outcome: "success",
@@ -71,4 +76,11 @@ func main() {
 	}
 	fmt.Printf("grpc-write-ok event_id=%s tenant=%s status=%s sequence=%d hash=%s\n",
 		receipt.GetEventId(), receipt.GetTenantId(), receipt.GetStatus(), receipt.GetSequence(), receipt.GetHash())
+}
+
+func protoSchemaVersion(value int64) (int32, error) {
+	if value < 1 || value > math.MaxInt32 {
+		return 0, fmt.Errorf("schema-version must be between 1 and %d", math.MaxInt32)
+	}
+	return int32(value), nil
 }

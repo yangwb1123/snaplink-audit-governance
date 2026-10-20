@@ -16,6 +16,14 @@ describe('safe evidence links', () => {
     expect(safeNavigationHash('#evidence/exports/untrusted-identity')).toBe('#evidence/exports')
   })
 
+  it('preserves only validated investigation links across login, never payloads or filters', () => {
+    expect(safeNavigationHash('#operations/op/op-0123456789abcdef')).toBe('#operations/op/op-0123456789abcdef')
+    expect(safeNavigationHash('#operations/aggregate/file/file-9')).toBe('#operations/aggregate/file/file-9')
+    expect(safeNavigationHash('#operations/aggregate/file/file-9?payload_field=email')).toBe('#overview')
+    expect(safeNavigationHash('#operations/op/bad%2Fid')).toBe('#overview')
+    expect(safeNavigationHash('#operations/op/op-1#token')).toBe('#overview')
+  })
+
   it('rejects malformed encodings, untrusted page names and identifier control characters', () => {
     expect(evidenceLocation('#evidence/exports/%')).toEqual({ tab: 'exports', id: '' })
     expect(evidenceLocation('#evidence/exports/x%00y').id).toBe('')
