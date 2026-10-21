@@ -20,6 +20,7 @@
   let summaryError = $state<unknown>(null)
   let timelineError = $state<unknown>(null)
   let replayError = $state<unknown>(null)
+  let timelineMoreError = $state<unknown>(null)
   let loadingSummary = $state(false)
   let loadingTimeline = $state(false)
   let loadingReplay = $state(false)
@@ -43,6 +44,7 @@
     summaryError = null
     timelineError = null
     replayError = null
+    timelineMoreError = null
     loadingSummary = false
     loadingTimeline = false
     loadingReplay = false
@@ -86,6 +88,29 @@
     loadingTimeline = false
     loadingReplay = false
     loading = false
+  }
+
+  // Appending a later page must not re-read the summary or replay, and a
+  // failed page keeps the events already displayed.
+  async function loadMoreTimeline(): Promise<void> {
+    const id = operationId.trim()
+    const current = timeline
+    const cursor = current?.next_cursor ?? ''
+    if (!id || !current || !cursor || loading) return
+    const key = lookupKey(id)
+    const request = lookupState.begin(key)
+    loading = true
+    timelineMoreError = null
+    try {
+      const next = await api.getOperationTimeline(id, { pageSize: 200, cursor, tenantId })
+      if (!lookupState.isCurrent(request, lookupKey())) return
+      if (timeline !== current || current.next_cursor !== cursor) return
+      timeline = { ...next, items: [...current.items, ...next.items] }
+    } catch (cause) {
+      if (lookupState.isCurrent(request, lookupKey())) timelineMoreError = cause
+    } finally {
+      if (lookupState.isCurrent(request, lookupKey())) loading = false
+    }
   }
 
   async function retrySection(section: 'summary' | 'timeline' | 'replay'): Promise<void> {
@@ -193,7 +218,14 @@
       {/if}
     </IrisCard>
     {#if timeline}
-      <HistoryTimeline result={timeline} title="事件时间线" />
+      <HistoryTimeline
+        result={timeline}
+        title="事件时间线"
+        loadingMore={loading}
+        onLoadMore={() => void loadMoreTimeline()}
+        moreError={timelineMoreError}
+        onRetryMore={() => void loadMoreTimeline()}
+      />
     {:else if timelineError}
       <IrisCard variant="outline" class="timeline-card" style="" header={undefined} footer={undefined}>
         <h3 class="card-heading">事件时间线</h3>
