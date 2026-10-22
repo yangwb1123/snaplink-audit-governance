@@ -506,6 +506,27 @@ select {
   background: var(--iris-background);
 }
 
+.quick-jump {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 170px) auto;
+  align-items: center;
+  gap: var(--iris-space-xs, 6px);
+}
+
+.quick-jump select {
+  min-height: 32px;
+  max-width: 140px;
+  border: 1px solid var(--iris-border);
+  border-radius: var(--iris-radius-md, 6px);
+  color: var(--iris-foreground);
+  background: var(--iris-background);
+}
+
+.quick-jump small {
+  grid-column: 1 / -1;
+  color: var(--iris-danger);
+}
+
 .session-summary {
   display: grid;
   line-height: 1.2;

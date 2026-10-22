@@ -28,11 +28,38 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - [契约同步](docs/CONTRACT_SYNC.md) — OpenAPI / AsyncAPI / Proto 三条线的漂移防线
 - [部署 / 回滚 runbook](docs/DEPLOY_RUNBOOK.md) — WORM COMPLIANCE 门禁、cutover、一致性键、全栈验证
 - [平台批次联合核查报告（G1–G8 门禁矩阵快照）](docs/platform-gate-status.md)
+- [Aero 平台联调](docs/PLATFORM_INTEGRATION.md) — Snaplink 身份 + Aero ID/IM/Vault 来源 + Console 兼容读的本机端到端验证
 - ADR：[0001 消息传输与接入](docs/adr/ADR-0001.md) · [0002 事件编码与 Schema 兼容](docs/adr/ADR-0002.md) · [0003 哈希链分段与检查点](docs/adr/ADR-0003.md) · [0004 查询投影与租户路由](docs/adr/ADR-0004.md) · [0005 合规归档与密钥](docs/adr/ADR-0005.md) · [0006 租户 ID 键框架校验](docs/adr/ADR-0006.md) · [0007 开发认证默认失败关闭](docs/adr/ADR-0007.md) · [0010 API/worker 签名与归档一致性键](docs/adr/ADR-0010.md) · [0011 发布确认与主动对账](docs/adr/ADR-0011.md) · [0012 投影确认与重建](docs/adr/ADR-0012.md) · [0013 固定查询与投影候选](docs/adr/ADR-0013.md) · [0014 导出队列预算与调度](docs/adr/ADR-0014.md) · [0015 HotFirst 断点恢复](docs/adr/ADR-0015.md) · [0016 租户治理摘要](docs/adr/ADR-0016.md) · [0017 文件数据安全 I/O](docs/adr/ADR-0017.md) · [0018 TLS/DLQ 文件边界](docs/adr/ADR-0018.md) · [0019 导出租约与执行 fencing](docs/adr/ADR-0019.md) · [0020 导出取消与关联重试](docs/adr/ADR-0020.md) · [0021 密封对象检查点与终态续跑](docs/adr/ADR-0021.md) · [0022 导出访问的认证 Hold 与锁外复核](docs/adr/ADR-0022.md) · [0023 固定成员计划与 selected 阶段续跑](docs/adr/ADR-0023.md) · [0024 逐页生成检查点](docs/adr/ADR-0024.md) · [0025 分页时间线的锁外认证取证](docs/adr/ADR-0025.md) · [0026 Console 页与 facets 的锁外认证读取](docs/adr/ADR-0026.md) · [0027 操作摘要的锁外认证读取](docs/adr/ADR-0027.md) · [0028 操作回放的锁外认证取证](docs/adr/ADR-0028.md) · [0029 导出创建与新后继的认证 Hold 预检](docs/adr/ADR-0029.md) · [0030 普通查询参考初页的认证前置](docs/adr/ADR-0030.md) · [0031 旧全量时间线与聚合回放的认证读取](docs/adr/ADR-0031.md) · [0032 按坐标读取的回执与精确 Schema 正文绑定](docs/adr/ADR-0032.md) · [0033 回执元数据的身份绑定、索引与共享预算](docs/adr/ADR-0033.md) · [0034 既有 Hold 控制写的 CAS 重判与零证据重写](docs/adr/ADR-0034.md) · [0035 既有恢复决策的控制 CAS 重判](docs/adr/ADR-0035.md) · [0036 文件自审计描述符关闭与夹具生命周期](docs/adr/ADR-0036.md) · [0037 导出执行器尾读保留与原子唤醒交接](docs/adr/ADR-0037.md) · [0038 既有恢复申请创建的控制增量提交](docs/adr/ADR-0038.md) · [0039 既有留存配置写的控制 CAS 重判](docs/adr/ADR-0039.md) · [0040 既有 Schema 注册的控制 CAS 与演进重判](docs/adr/ADR-0040.md) · [0041 既有来源更新的控制 CAS 与当前记录重判](docs/adr/ADR-0041.md) · [0042 既有来源创建的控制 CAS 与当前唯一性重判](docs/adr/ADR-0042.md) · [0043 既有恢复详情的控制面读取与单次预算](docs/adr/ADR-0043.md) · [0044 既有留存配置的控制面读取与单次预算](docs/adr/ADR-0044.md) · [0045 跨租户单事件读取的锁外归档认证与单次预算](docs/adr/ADR-0045.md)
+
+## 快速开始（隔离 demo）
+
+不依赖 PostgreSQL、Kafka、ClickHouse、IdP 或兄弟仓库即可运行核心链路：
+
+```sh
+make demo-up
+make demo-seed
+make demo-prove
+make demo-down
+```
+
+`core` 使用单 API 进程、真实文件状态和本地归档（内置导出队列）。切换到既有
+PostgreSQL + MinIO + 治理 worker 的 `advanced` profile：
+
+```sh
+DEMO_PROFILE=advanced make demo-up
+DEMO_PROFILE=advanced make demo-seed
+DEMO_PROFILE=advanced make demo-prove
+DEMO_PROFILE=advanced make demo-down
+```
+
+可用 `DEMO_PROJECT` 隔离并行项目、`DEMO_API_PORT` 指定 loopback 端口；所有端口仅绑定
+`127.0.0.1`，`demo-down` 默认保留卷且只操作当前项目。开发认证关闭，使用显式本地
+HS256 模式；随机密钥和运行文件位于仓库外的私有目录，不输出凭据。完整断言、篡改
+对照和 advanced 冒烟说明见 [docs/DEMO.md](docs/DEMO.md)。
 
 ## 当前实现
 
-仓库现在包含一个可运行的 Go 单节点参考实现（构建至少使用 Go 1.26.9，CI 与 Docker builder 同步，避免旧标准库已知漏洞）：
+仓库现在包含一个可运行的 Go 单节点参考实现（构建至少使用 Go 1.26.10，CI 与 Docker builder 同步，避免旧标准库已知漏洞）：
 
 - `go run ./cmd/audit-api` 启动 REST API。
 - `go run ./cmd/audit-governance-worker -once` 执行一次留存/Legal Hold 评估。正常启动在打开状态存储前注册 SIGINT/SIGTERM；启动归档 Ready 同时受信号取消与原 5 秒上限约束，取消启动不进入治理 pass，关闭存储并释放文件锁。无取消的就绪失败仍非零退出；持锁不等于启动就绪，不变更导出状态、租约、检查点或保留期。

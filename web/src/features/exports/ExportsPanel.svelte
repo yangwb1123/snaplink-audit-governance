@@ -6,14 +6,15 @@
   import type { ExportJob, ExportSummary } from '../../api/types'
   import ExportActions from './ExportActions.svelte'
   import { exportFailureLabel } from './exportWorkflow'
-  import ErrorNotice from '../../components/ErrorNotice.svelte'
+  import { ApiError } from '../../api/client'
+  import ReadState from '../../components/ReadState.svelte'
   import JobList from '../../components/JobList.svelte'
   import StatusBadge from '../../components/StatusBadge.svelte'
   import { formatDate } from '../../components/format'
   import EvidenceScopeFields, { type DateRange } from '../../pages/EvidenceScopeFields.svelte'
   import { buildEvidenceScopeQuery, defaultEvidenceRange, emptyEvidenceScope, evidenceScopeSummary, type EvidenceScopeDraft } from '../../pages/evidenceScope'
   import { canAutoPollExport, shouldPollExport, EXPORT_POLL_INTERVAL_MS, EXPORT_POLL_MAX_ATTEMPTS } from '../../pages/governanceState'
-  import { navigateEvidence } from '../../pages/evidenceNavigation'
+  import { evidenceHash, navigateEvidence } from '../../pages/evidenceNavigation'
 
   let { tenantId, initialId = '' }: { tenantId?: string; initialId?: string } = $props()
   const api = useAuditApi()
@@ -25,6 +26,7 @@
   let scope = $state<EvidenceScopeDraft>({ ...emptyEvidenceScope })
   let jobId = $state('')
   let job = $state<ExportJob | null>(null)
+  let notFound = $state(false)
   let error = $state<unknown>(null)
   let pollError = $state<unknown>(null)
   let attempts = $state(0)
@@ -42,7 +44,7 @@
     reads.invalidate(); writes.invalidate(); downloads.invalidate()
     range = defaultEvidenceRange(1)
     scope = { ...emptyEvidenceScope }
-    jobId = ''; job = null; error = null; pollError = null
+    jobId = ''; job = null; notFound = false; error = null; pollError = null
     attempts = 0; paused = false; busy = false; creating = false; downloading = false
     return () => { reads.invalidate(); writes.invalidate(); downloads.invalidate() }
   })
@@ -92,7 +94,7 @@
       const next = await api.createExport(query, scopeTenant, ticket.signal)
       if (!ticket.current()) return
       if (scopeTenant && next.tenant_id !== scopeTenant) throw new Error('导出任务与当前租户不匹配')
-      job = next; jobId = next.id
+      job = next; jobId = next.id; notFound = false
       attempts = 0; paused = false; pollError = null
       revision += 1
       navigateEvidence('exports', next.id)
@@ -112,14 +114,17 @@
     creating = false
     downloads.invalidate()
     downloading = false
-    busy = true; job = null; error = null; pollError = null; paused = true
+    busy = true; job = null; notFound = false; error = null; pollError = null; paused = true
     try {
       const next = await api.getExport(id, scopeTenant, ticket.signal)
       if (!ticket.current()) return
-      if (scopeTenant && next.tenant_id !== scopeTenant) throw new Error('导出任务与当前租户不匹配')
+      if (next.id !== id || (scopeTenant && next.tenant_id !== scopeTenant)) throw new Error('导出任务与当前租户或 ID 不匹配')
       job = next; jobId = next.id; attempts = 0; paused = false
     } catch (cause) {
-      if (ticket.current()) error = cause
+      if (ticket.current()) {
+        notFound = cause instanceof ApiError && cause.status === 404 && cause.code === 'not_found'
+        error = notFound ? null : cause
+      }
     } finally {
       if (ticket.current()) busy = false
       ticket.finish()
@@ -135,7 +140,7 @@
 
   function afterAction(summary: ExportSummary): void {
     reads.invalidate(); writes.invalidate(); downloads.invalidate()
-    job = null; jobId = summary.id; error = null; pollError = null
+    job = null; jobId = summary.id; notFound = false; error = null; pollError = null
     busy = false; creating = false; downloading = false; attempts = 0; paused = true
     revision += 1
     if (summary.id === initialId) void lookup(summary.id)
@@ -187,19 +192,19 @@
 <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
   <h2 class="card-heading">导出详情</h2>
   <div class="inline-form"><IrisInput value={jobId} placeholder="export job id" disabled={busy} oninput={(event) => (jobId = event.currentTarget.value)} /><IrisButton variant="outline" disabled={busy || !jobId.trim()} onclick={select}>查询导出</IrisButton></div>
-  <ErrorNotice {error} onRetry={() => void lookup()} />
-  <ErrorNotice error={pollError} onRetry={() => void lookup()} />
+  <ReadState loading={busy} error={error || pollError} empty={notFound} loadingLabel="正在读取导出详情…" emptyLabel="未找到当前租户的导出任务" onRetry={() => void lookup()}>
   {#if job}
     <div class="result-panel"><StatusBadge value={job.status} /><span>{job.id} · {job.event_count} 条事件</span>{#if canAutoPollExport(job.status, attempts, paused)}<IrisProgress indeterminate size="sm" />{/if}</div>
     <p>申请人：{job.requested_by} · 创建：{formatDate(job.created_at)}</p>
     <p>开始执行：{job.started_at ? formatDate(job.started_at) : job.status === 'pending' ? '等待启动' : '未上报（旧任务）'}</p>
     <p>范围：{evidenceScopeSummary(job.query)}</p>
     {#if job.digest}<p>内容摘要：<code class="hash-value">{job.digest}</code></p>{/if}
-    {#if job.retry_of}<p>重试自：<a href={`#evidence/exports/${encodeURIComponent(job.retry_of)}`}>{job.retry_of}</a>。原任务终态不变。</p>{/if}
+    {#if job.retry_of}<p>重试自：<a href={evidenceHash('exports', job.retry_of)}>{job.retry_of}</a>。原任务终态不变。</p>{/if}
     {#if job.failure_code}<p class="muted-copy">{exportFailureLabel(job.failure_code)}</p>{/if}
     {#if job.error}<p class="error-copy">{job.error}</p>{/if}
     <ExportActions {job} {tenantId} onCommitted={afterAction} onRefresh={refreshAction} />
     {#if job.status === 'completed'}<IrisButton variant="outline" disabled={downloading} onclick={() => void download()}>{downloading ? '准备下载…' : '下载 JSONL'}</IrisButton>{/if}
     {#if shouldPollExport(job.status) && attempts >= EXPORT_POLL_MAX_ATTEMPTS}<p>已达到自动查询上限。任务可能仍在执行，可手动刷新。</p><IrisButton variant="outline" onclick={() => void lookup()}>继续查询</IrisButton>{/if}
-  {:else if !busy && !error && !pollError}<p class="muted-copy">从任务列表选择一项，或输入任务 ID。</p>{/if}
+  {:else}<p class="muted-copy">从任务列表选择一项，或输入任务 ID。</p>{/if}
+  </ReadState>
 </IrisCard>

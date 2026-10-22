@@ -15,6 +15,8 @@
   import { authState, logout } from './auth/store'
   import type { UserSession } from './auth/types'
   import CatalogPage from './pages/CatalogPage.svelte'
+  import QuickJump from './components/QuickJump.svelte'
+  import { navigationHash, parseNavigationHash, type Page } from './pages/navigation'
   import EventsPage from './pages/EventsPage.svelte'
   import EvidencePage from './pages/EvidencePage.svelte'
   import OperationsPage from './pages/OperationsPage.svelte'
@@ -89,11 +91,11 @@
   )
 
   function readRoute(): string {
-    return window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview'
+    return parseNavigationHash(window.location.hash)?.page ?? 'overview'
   }
 
   function navigate(next: string): void {
-    window.location.hash = next
+    window.location.hash = navigationHash({ page: next as Page })
   }
 
   function toggleTheme(): void {
@@ -196,6 +198,7 @@
 </script>
 
 {#snippet toolbar()}
+  <QuickJump scopeReady={tenantScopeReady} scopeKey={`${tenantId}:${sessionScopeKey}`} />
   {#if $authState.session?.platform}
     <div class="tenant-picker">
       <label for="tenant-scope">租户范围</label>

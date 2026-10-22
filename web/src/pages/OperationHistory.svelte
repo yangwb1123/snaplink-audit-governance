@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { IrisButton, IrisCard, IrisDescriptions, IrisFormField, IrisInput } from '@iris-ui-kit/svelte'
   import type { OperationSummary, QueryResult, ReplayResult } from '../api/types'
   import { useAuditApi } from '../api/useAuditApi'
@@ -12,6 +12,7 @@
   let { tenantId, initialId = '' }: { tenantId?: string; initialId?: string } = $props()
   const api = useAuditApi()
   const lookupState = new LatestLookup()
+  onDestroy(() => lookupState.invalidate())
   let operationId = $state('')
   let attempted = $state(false)
   let summary = $state<OperationSummary | null>(null)

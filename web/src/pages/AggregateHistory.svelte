@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { IrisButton, IrisCard, IrisDescriptions, IrisFormField, IrisInput } from '@iris-ui-kit/svelte'
   import type { QueryResult } from '../api/types'
   import { useAuditApi } from '../api/useAuditApi'
   import ErrorNotice from '../components/ErrorNotice.svelte'
+  import LoadingBlock from '../components/LoadingBlock.svelte'
   import HistoryTimeline from './HistoryTimeline.svelte'
   import { LatestLookup } from './lookupState'
 
   let { tenantId, initialType = '', initialId = '' }: { tenantId?: string; initialType?: string; initialId?: string } = $props()
   const api = useAuditApi()
   const lookupState = new LatestLookup()
+  onDestroy(() => lookupState.invalidate())
   let aggregateType = $state('')
   let aggregateId = $state('')
   let result = $state<QueryResult | null>(null)
@@ -115,6 +117,7 @@
   </IrisButton>
 </IrisCard>
 <ErrorNotice {error} onRetry={retryLookup} />
+{#if loading && !result}<LoadingBlock label="正在读取聚合历史…" />{/if}
 {#if result}
   <div class="aggregate-result">
     <IrisCard variant="outline" style="" header={undefined} footer={undefined}>

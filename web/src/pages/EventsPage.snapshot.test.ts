@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { ApiError } from '../api/client'
+import { authState } from '../auth/store'
 import Page from './EventsPage.svelte'
 
 const { api } = vi.hoisted(() => ({ api: { queryEvents: vi.fn(), getEvent: vi.fn(), getReceipt: vi.fn() } }))
@@ -13,10 +14,11 @@ function button(label: string) { return [...target.querySelectorAll('button')].f
 const first = { items: [], count: 4, next_cursor: 'opaque-snapshot-cursor', snapshot: { observed_at: '2026-10-08T00:00:00Z', expires_at: '2026-10-08T00:15:00Z', source: 'ledger', completeness: 'not_asserted' } }
 
 beforeEach(() => {
+  authState.set({ status: 'authenticated', session: { accessToken: 'token', idToken: 'id', subject: 'actor', displayName: 'actor', expiresAt: Date.now() + 100000, tenantId: '', platform: true, roles: [], permissions: new Set(['audit:event:read']) }, error: null })
   api.queryEvents.mockReset().mockResolvedValue(first)
   target = document.createElement('div'); document.body.append(target)
 })
-afterEach(async () => { if (page) await unmount(page); page = undefined; target.remove() })
+afterEach(async () => { if (page) await unmount(page); page = undefined; target.remove(); authState.set({ status: 'anonymous', session: null, error: null }) })
 
 describe('fixed event result membership UI', () => {
   it('clears expired pagination and explicitly restarts the query', async () => {

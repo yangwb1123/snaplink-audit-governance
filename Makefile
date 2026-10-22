@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq
+.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq"
+	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down"
 
 check:
 	$(CLI) check
@@ -110,3 +110,15 @@ e2e-tenant-scope:
 
 e2e-projector-permanent-dlq:
 	test/e2e/projector-permanent-dlq.sh
+
+demo-up:
+	bash scripts/demo.sh up
+
+demo-seed:
+	bash scripts/demo.sh seed
+
+demo-prove:
+	bash scripts/demo.sh prove
+
+demo-down:
+	bash scripts/demo.sh down

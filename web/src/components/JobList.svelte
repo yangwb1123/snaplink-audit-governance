@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { evidenceHash } from '../pages/evidenceNavigation'
   import { onDestroy, untrack, type Snippet } from 'svelte'
   import { IrisButton, IrisCard } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../api/useAuditApi'
@@ -100,9 +101,9 @@
   <table class="native-table">
     <thead><tr><th>任务 ID</th><th>申请人</th><th>创建时间</th><th>状态</th>{#if actions}<th>本人操作</th>{/if}</tr></thead>
     <tbody>{#each items as item (item.id)}<tr>
-      <td><a href={`#evidence/${kind}/${encodeURIComponent(item.id)}`}>{item.id}</a></td><td>{requester(item)}</td><td>{formatDate(item.created_at)}</td><td><StatusBadge value={item.status} />
+      <td><a href={evidenceHash(kind, item.id)}>{item.id}</a></td><td>{requester(item)}</td><td>{formatDate(item.created_at)}</td><td><StatusBadge value={item.status} />
         {#if kind === 'exports' && typeof item.failure_code === 'string'}<p class="muted-copy">{exportFailureLabel(item.failure_code)}</p>{/if}
-        {#if kind === 'exports' && typeof item.retry_of === 'string'}<a href={`#evidence/exports/${encodeURIComponent(item.retry_of)}`}>原任务</a>{/if}
+        {#if kind === 'exports' && typeof item.retry_of === 'string'}<a href={evidenceHash('exports', item.retry_of)}>原任务</a>{/if}
       </td>{#if actions}<td>{@render actions(item)}</td>{/if}
     </tr>{/each}</tbody>
   </table>

@@ -53,14 +53,14 @@ describe('independently authorized evidence pages', () => {
   })
 
   it('keeps owner controls metadata-only under a Hold denial and navigates to the linked child', async () => {
-    const parent = { id: 'export-parent', tenant_id: 'tenant-a', requested_by: 'actor', status: 'failed', failure_code: 'legal_hold', created_at: new Date().toISOString() }
-    const child = { ...parent, id: 'export-child', status: 'pending', failure_code: undefined, retry_of: parent.id }
+    const parent = { id: 'export-0123456789abcdef', tenant_id: 'tenant-a', requested_by: 'actor', status: 'failed', failure_code: 'legal_hold', created_at: new Date().toISOString() }
+    const child = { ...parent, id: 'export-fedcba9876543210', status: 'pending', failure_code: undefined, retry_of: parent.id }
     api.listExports.mockResolvedValue({ items: [parent], count: 1 })
     api.getExport.mockRejectedValue(new ApiError(403, 'forbidden', 'blocked', 'req-1', 'legal_hold', 'hold-1'))
     // An existing successor predates the Hold: repeating retry returns only
     // its control summary; both parent and child details still deny evidence.
     api.retryExport.mockResolvedValue(child)
-    window.location.hash = '#evidence/exports/export-parent'
+    window.location.hash = '#evidence/exports/export-0123456789abcdef'
     login(['audit:export:create'])
     component = mount(Harness, { target })
     await vi.waitFor(() => expect(api.getExport).toHaveBeenCalled())
@@ -71,7 +71,7 @@ describe('independently authorized evidence pages', () => {
     const confirm = [...document.querySelectorAll('button')].find((node) => node.textContent?.trim() === '确认重试')
     expect(confirm).toBeDefined(); confirm?.click()
     await vi.waitFor(() => expect(api.retryExport).toHaveBeenCalled())
-    await vi.waitFor(() => expect(window.location.hash).toBe('#evidence/exports/export-child'))
+    await vi.waitFor(() => expect(window.location.hash).toBe('#evidence/exports/export-fedcba9876543210'))
     window.dispatchEvent(new HashChangeEvent('hashchange')); await settle()
     await vi.waitFor(() => expect(api.getExport.mock.lastCall?.[0]).toBe(child.id))
     expect(target.textContent).not.toContain('下载 JSONL')

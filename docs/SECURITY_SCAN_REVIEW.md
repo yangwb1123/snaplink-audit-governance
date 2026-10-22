@@ -437,3 +437,22 @@
   结果及最终源码manifest另在同目录留证，独立外部验收随后仍须完整执行，不预先
   宣称通过。该轮不新增逐页交付、跨副本组件、整栈/浏览器、容量或正式合规验收。
 
+
+## 2026-10-21 多 agent 实施：Go 标准库可达漏洞处置
+
+- 调度 openai-codex/gpt-6.1-sol（max），两个隔离 worktree worker：
+  openai-codex/gpt-6.1-sol（Web P0）与 opencode-go/deepseek-v4.1-flash（核心 demo），
+  均正常退出（exit 0）；主树由控制器串行集成，未 commit/merge/清理现场。
+- 集成后真实 `security-scan` 首次报告 **1 项可达标准库漏洞**：
+  `GO-2026-6809`（crypto/x509 中间证书信任），`go1.26.9`，
+  可达路径 `internal/archive/archive.go` 的 S3 Get → `x509.Certificate.Verify`；
+  修复版本 `go1.26.10`。此前历史记录中的“可达 0”是当时 advisory 库状态，不改写。
+- 已把 `go.mod`、`Dockerfile`（`golang:1.26.10-alpine`）与 README 当前版本说明
+  固定到 1.26.10；CI 通过 `go-version-file` 同步。随后重跑真实扫描：
+  **可达/导入包漏洞 0**，未调用模块警告仍在；gosec **162文件/34957行/nosec=0/7项**
+  （G101×2、G404×1、G103×4）未变。**security-scan 仍 exit1，发布继续阻塞**，
+  未加 nosec/豁免、未改规则/阈值/生成代码。
+- 同源码 `python3 cli.py quality` 通过（race 622.6s），Web 33 文件/225 测试通过，
+  核心 demo 两次重复通过、advanced 冒烟通过，真实平台浏览器 E2E 通过
+  （含事件详情安全深链接）。证据在
+  `runs/multi-agent-20261021T080937Z/` 与 `runs/platform-integration-20261021T024744Z/`。

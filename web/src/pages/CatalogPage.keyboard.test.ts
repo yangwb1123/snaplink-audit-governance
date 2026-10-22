@@ -74,7 +74,7 @@ describe('CatalogPage schema keyboard selection', () => {
         displayName: '审核员',
         tenantId: 'tenant-a',
         roles: [],
-        permissions: new Set(),
+        permissions: new Set(['audit:policy:read']),
         platform: false,
       },
       error: null,

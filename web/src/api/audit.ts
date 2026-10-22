@@ -263,26 +263,28 @@ export class AuditApi {
     )
   }
 
-  listTenants(): Promise<ItemList<Tenant>> {
-    return this.client.request('/api/v1/tenants')
+  listTenants(signal?: AbortSignal): Promise<ItemList<Tenant>> {
+    return this.client.request('/api/v1/tenants', { signal })
   }
 
-  createTenant(tenant: Omit<Tenant, 'created_at'>): Promise<Tenant> {
-    return this.client.request('/api/v1/tenants', { method: 'POST', body: jsonBody(tenant) })
+  createTenant(tenant: Omit<Tenant, 'created_at'>, signal?: AbortSignal): Promise<Tenant> {
+    return this.client.request('/api/v1/tenants', { method: 'POST', body: jsonBody(tenant), signal })
   }
 
-  listSources(tenantId?: string): Promise<ItemList<SourceSystem>> {
+  listSources(tenantId?: string, signal?: AbortSignal): Promise<ItemList<SourceSystem>> {
     return this.client.request(
       `/api/v1/sources${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
-  createSource(source: Omit<SourceSystem, 'created_at'>, tenantId?: string): Promise<SourceSystem> {
+  createSource(source: Omit<SourceSystem, 'created_at'>, tenantId?: string, signal?: AbortSignal): Promise<SourceSystem> {
     return this.client.request(
       `/api/v1/sources${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       {
         method: 'POST',
         body: jsonBody(source),
+        signal,
       },
     )
   }
@@ -290,11 +292,13 @@ export class AuditApi {
   updateSource(
     source: Pick<SourceSystem, 'id' | 'name' | 'allowed_client_ids' | 'active'>,
     tenantId?: string,
+    signal?: AbortSignal,
   ): Promise<SourceSystem> {
     return this.client.request(
       `/api/v1/sources/${encodeURIComponent(source.id)}${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       {
         method: 'PUT',
+        signal,
         body: jsonBody({
           name: source.name,
           allowed_client_ids: source.allowed_client_ids ?? [],
@@ -304,47 +308,49 @@ export class AuditApi {
     )
   }
 
-  listSchemas(tenantId?: string): Promise<ItemList<EventSchema>> {
+  listSchemas(tenantId?: string, signal?: AbortSignal): Promise<ItemList<EventSchema>> {
     return this.client.request(
       `/api/v1/schemas${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
-  createSchema(schema: Omit<EventSchema, 'created_at'>, tenantId?: string): Promise<EventSchema> {
+  createSchema(schema: Omit<EventSchema, 'created_at'>, tenantId?: string, signal?: AbortSignal): Promise<EventSchema> {
     return this.client.request(
       `/api/v1/schemas${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
       {
         method: 'POST',
         body: jsonBody(schema),
+        signal,
       },
     )
   }
 
-  getRetention(tenantId?: string): Promise<RetentionPolicy> {
+  getRetention(tenantId?: string, signal?: AbortSignal): Promise<RetentionPolicy> {
     return this.client.request(
       `/api/v1/policies/retention${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
+      { signal },
     )
   }
 
-  setRetention(policy: RetentionPolicy, tenantId?: string): Promise<RetentionPolicy> {
+  setRetention(policy: RetentionPolicy, tenantId?: string, signal?: AbortSignal): Promise<RetentionPolicy> {
     return this.client.request(
       `/api/v1/policies/retention${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      { method: 'PUT', body: jsonBody(policy) },
+      { method: 'PUT', body: jsonBody(policy), signal },
     )
   }
 
-  evaluateRetention(tenantId?: string): Promise<RetentionReport> {
+  evaluateRetention(tenantId?: string, signal?: AbortSignal): Promise<RetentionReport> {
     return this.client.request(
       `/api/v1/retention/evaluate${queryString({ tenant_id: this.scopedTenant(tenantId) })}`,
-      {
-        method: 'POST',
-      },
+      { method: 'POST', signal },
     )
   }
 
-  listAdminActions(tenantId?: string, limit = 50): Promise<ItemList<AdminAction>> {
+  listAdminActions(tenantId?: string, limit = 50, signal?: AbortSignal): Promise<ItemList<AdminAction>> {
     return this.client.request(
       `/api/v1/admin/actions${queryString({ tenant_id: tenantId, limit })}`,
+      { signal },
     )
   }
 }

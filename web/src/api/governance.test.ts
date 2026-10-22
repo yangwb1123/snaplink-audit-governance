@@ -54,6 +54,30 @@ describe('governance work API', () => {
     await expect(api.listExports({}, 'tenant-a')).resolves.toMatchObject({ count: 0 })
   })
 
+  it('forwards independent catalog read cancellation without changing tenant or permissions', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{"items":[],"count":0}', { status: 200 }))
+    const api = new AuditApi({ baseUrl: '/audit-api', accessToken: 'memory-only-token', platform: true, fetcher })
+    const signal = new AbortController().signal
+    await api.listTenants(signal)
+    await api.listSources('tenant-a', signal)
+    await api.listSchemas('tenant-a', signal)
+    await api.listAdminActions('tenant-a', 100, signal)
+    await api.getRetention('tenant-a', signal)
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      '/audit-api/api/v1/tenants', '/audit-api/api/v1/sources?tenant_id=tenant-a',
+      '/audit-api/api/v1/schemas?tenant_id=tenant-a', '/audit-api/api/v1/admin/actions?tenant_id=tenant-a&limit=100',
+      '/audit-api/api/v1/policies/retention?tenant_id=tenant-a',
+    ])
+    for (const [url, options] of fetcher.mock.calls) {
+      expect(options?.signal).toBe(signal)
+      expect(new Headers(options?.headers).get('Authorization')).toBe('Bearer memory-only-token')
+      expect(String(url)).not.toContain('memory-only-token')
+    }
+    expect(() => api.listSources()).toThrow('tenant_id is required')
+    expect(() => api.listSchemas()).toThrow('tenant_id is required')
+    expect(() => api.getRetention()).toThrow('tenant_id is required')
+  })
+
   it('retains structured Hold denials for JSON and download requests', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: { code: 'forbidden', message: 'blocked', request_id: 'req-1', reason: 'legal_hold', hold_id: 'hold-1' } }), { status: 403 }))
     const api = new AuditApi({ baseUrl: '/audit-api', accessToken: 'token', fetcher })

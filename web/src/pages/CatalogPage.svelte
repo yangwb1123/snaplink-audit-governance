@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte'
+  import { RequestScope } from '../api/requestScope'
+  import ReadState from '../components/ReadState.svelte'
   import {
     IrisButton,
     IrisCard,
@@ -29,18 +32,35 @@
   import { parseSchemaFieldList, validateSchemaFieldPolicy } from './schemaPolicy'
 
   let { tenantId }: { tenantId?: string } = $props()
-  const api = useAuditApi()
   const session = $derived($authState.session)
-  const writable = $derived(Boolean(session && can(session, 'audit:policy:write')))
-  let tenants = $state<Tenant[]>([])
-  let sources = $state<SourceSystem[]>([])
-  let schemas = $state<EventSchema[]>([])
-  let actions = $state<AdminAction[]>([])
-  let error = $state<unknown>(null)
-  let revision = $state(0)
-  let retentionScope = ''
-  let loadGeneration = 0
-  let retentionOperationGeneration = 0
+  const readable = $derived(Boolean(session && can(session, 'audit:policy:read')))
+  const writable = $derived(Boolean(readable && session && can(session, 'audit:policy:write')))
+  const scoped = $derived(Boolean(readable && session && (session.platform ? tenantId : session.tenantId && (!tenantId || tenantId === session.tenantId))))
+  type ListRead<T> = { status: 'idle' | 'loading' | 'success' | 'error'; items: T[]; error: unknown; generation: number }
+  function emptyRead<T>(): ListRead<T> { return { status: 'idle', items: [], error: null, generation: 0 } }
+  const tenantRead = $state(emptyRead<Tenant>())
+  const sourceRead = $state(emptyRead<SourceSystem>())
+  const schemaRead = $state(emptyRead<EventSchema>())
+  const actionRead = $state(emptyRead<AdminAction>())
+  const sources = $derived(sourceRead.items)
+  const schemas = $derived(schemaRead.items)
+  const actions = $derived(actionRead.items)
+  const reads = { tenants: new RequestScope(), sources: new RequestScope(), schemas: new RequestScope(), actions: new RequestScope(), retention: new RequestScope() }
+  const writes = { tenants: new RequestScope(), sources: new RequestScope(), schemas: new RequestScope(), retention: new RequestScope() }
+  const allScopes = [...Object.values(reads), ...Object.values(writes)]
+  let contractGeneration = $state(0)
+  let contextSession = $state.raw<typeof session>(null)
+  let contextTenant = $state<string | undefined>()
+  const currentContext = $derived(contextSession === session && contextTenant === tenantId)
+  const contractKnown = $derived(scoped && currentContext && sourceRead.status === 'success' && schemaRead.status === 'success' && sourceRead.generation === contractGeneration && schemaRead.generation === contractGeneration)
+  onDestroy(() => allScopes.forEach((scope) => scope.dispose()))
+
+  function begin(scope: RequestScope) {
+    const request = scope.next()
+    const expectedSession = session
+    const expectedTenant = tenantId
+    return { ...request, current: () => request.current() && session === expectedSession && tenantId === expectedTenant }
+  }
 
   const classificationItems = [
     { value: 'public', label: '公开（public）' },
@@ -73,78 +93,91 @@
     { key: 'detail', title: '详情', minWidth: 220 },
   ]
 
-  async function load(): Promise<void> {
-    const generation = ++loadGeneration
-    const scoped = Boolean(tenantId || !session?.platform)
-    const policyTenantId = tenantId ?? session?.tenantId ?? ''
-    error = null
-
-    if (scoped) {
-      if (retentionScope !== policyTenantId) {
-        retentionScope = policyTenantId
-        draft = { tenant_id: policyTenantId, hot_days: 0, warm_days: 0, archive_days: 0, retention_class: '' }
-        retentionBusy = false
-        retentionOperationGeneration += 1
-      }
-      retentionState = 'loading'
-      retentionError = null
-      retentionReport = null
-      void api.getRetention(tenantId).then((loadedPolicy) => {
-        if (generation !== loadGeneration) return
-        draft = { ...loadedPolicy }
-        retentionState = 'configured'
-        retentionError = null
-      }).catch((cause: unknown) => {
-        if (generation !== loadGeneration) return
-        const failedState = retentionReadFailureState(cause)
-        retentionState = failedState
-        retentionError = failedState === 'error' ? cause : null
-        retentionReport = null
-      })
-    } else {
-      retentionScope = ''
-      retentionState = 'unscoped'
-      retentionError = null
-      retentionReport = null
-      retentionBusy = false
-      retentionOperationGeneration += 1
-    }
-
+  async function readList<T>(state: ListRead<T>, scope: RequestScope, read: (signal: AbortSignal) => Promise<{ items: T[] }>, generation = 0): Promise<void> {
+    const request = begin(scope)
+    state.status = 'loading'; state.error = null; state.items = []; state.generation = generation
     try {
-      const [tenantResult, sourceResult, schemaResult, actionResult] = await Promise.all([
-        session?.platform ? api.listTenants() : Promise.resolve({ items: [] as Tenant[], count: 0 }),
-        scoped ? api.listSources(tenantId) : Promise.resolve({ items: [] as SourceSystem[], count: 0 }),
-        scoped ? api.listSchemas(tenantId) : Promise.resolve({ items: [] as EventSchema[], count: 0 }),
-        api.listAdminActions(tenantId, 100),
-      ])
-      if (generation !== loadGeneration) return
-      tenants = tenantResult.items
-      sources = sourceResult.items
-      schemas = schemaResult.items
-      actions = actionResult.items
+      const result = await read(request.signal)
+      if (!request.current()) return
+      state.items = result.items
+      state.status = 'success'
     } catch (cause) {
-      if (generation === loadGeneration) error = cause
+      if (request.current()) { state.error = cause; state.status = 'error' }
+    } finally { request.finish() }
+  }
+
+  function refreshTenants(): void {
+    if (!readable || !session?.platform) return
+    void readList(tenantRead, reads.tenants, (signal) => useAuditApi().listTenants(signal))
+  }
+
+  // Both dependencies start in the same epoch, but settle independently. A
+  // retry never waits for, or hides, unrelated tenant/action/retention reads.
+  function refreshContracts(): void {
+    contractGeneration += 1 // revoke the previous verdict before starting I/O
+    if (!scoped) return
+    const tenant = tenantId ?? session?.tenantId
+    const api = useAuditApi()
+    const checkTenant = <T extends { tenant_id: string }>(result: { items: T[] }) => {
+      if (result.items.some((item) => item.tenant_id !== tenant)) throw new Error('目录记录与当前租户不匹配')
+      return result
     }
+    editingSource = null; selectedSchemaKey = ''
+    void readList(sourceRead, reads.sources, async (signal) => checkTenant(await api.listSources(tenantId, signal)), contractGeneration)
+    void readList(schemaRead, reads.schemas, async (signal) => checkTenant(await api.listSchemas(tenantId, signal)), contractGeneration)
+  }
+
+  function refreshActions(): void {
+    if (!readable || (!scoped && !session?.platform)) return
+    void readList(actionRead, reads.actions, (signal) => useAuditApi().listAdminActions(tenantId, 100, signal))
+  }
+
+  async function refreshRetention(): Promise<void> {
+    if (!scoped) return
+    const request = begin(reads.retention)
+    writes.retention.invalidate()
+    retentionBusy = false; retentionState = 'loading'; retentionError = null; retentionReport = null
+    try {
+      const policy = await useAuditApi().getRetention(tenantId, request.signal)
+      if (!request.current()) return
+      if (policy.tenant_id !== (tenantId ?? session?.tenantId)) throw new Error('保留策略与当前租户不匹配')
+      draft = { ...policy }; retentionState = 'configured'
+    } catch (cause) {
+      if (!request.current()) return
+      retentionState = retentionReadFailureState(cause)
+      retentionError = retentionState === 'error' ? cause : null
+    } finally { request.finish() }
+  }
+
+  function refresh(): void {
+    refreshTenants(); refreshContracts(); refreshActions(); void refreshRetention()
   }
 
   $effect(() => {
-    void tenantId
-    void session?.platform
-    void session?.tenantId
-    void revision
-    void load()
+    const expectedSession = session
+    const expectedTenant = tenantId
+    untrack(() => {
+      contextSession = expectedSession; contextTenant = expectedTenant
+      allScopes.forEach((scope) => scope.invalidate())
+      for (const state of [tenantRead, sourceRead, schemaRead, actionRead]) { state.status = 'idle'; state.items = []; state.error = null }
+      editingSource = null; selectedSchemaKey = ''; sourceError = null; schemaError = null; tenantError = null
+      sourceBusy = false; schemaBusy = false; tenantBusy = false
+      sourceId = ''; sourceName = ''; sourceClients = ''; schemaId = ''; eventType = ''; schemaVersion = 1; classification = 'internal'
+      editSourceName = ''; editSourceClients = ''; editSourceActive = true
+      tenantDraftId = ''; tenantDraftName = ''; requiredFields = ''; allowedFields = ''; encryptedFields = ''; searchableFields = ''
+      retentionState = 'unscoped'; retentionError = null; retentionReport = null; retentionBusy = false
+      draft = { tenant_id: expectedTenant ?? expectedSession?.tenantId ?? '', hot_days: 0, warm_days: 0, archive_days: 0, retention_class: '' }
+      refresh()
+    })
+    return () => allScopes.forEach((scope) => scope.invalidate())
   })
-
-  function refresh(): void {
-    revision += 1
-  }
 
   function tableRows<T extends Record<string, unknown>>(items: T[]): T[] {
     return items
   }
-  const tenantRows = $derived(tableRows(tenants as unknown as Record<string, unknown>[]))
+  const tenantRows = $derived(tableRows(tenantRead.items as unknown as Record<string, unknown>[]))
   const platformRows = $derived(
-    assessPlatformAuditContracts(sources, schemas).map((status) => ({
+    (contractKnown ? assessPlatformAuditContracts(sources, schemas) : []).map((status) => ({
       ...status,
       ready_text: status.ready ? 'valid' : 'invalid',
     })),
@@ -157,10 +190,13 @@
   let tenantDraftId = $state('')
   let tenantDraftName = $state('')
   let tenantError = $state<unknown>(null)
+  let tenantBusy = $state(false)
   async function createTenant(): Promise<void> {
-    tenantError = null
+    if (!writable || !session?.platform || tenantBusy) return
+    const request = begin(writes.tenants)
+    tenantError = null; tenantBusy = true
     try {
-      await api.createTenant({
+      await useAuditApi().createTenant({
         id: tenantDraftId.trim(),
         name: tenantDraftName.trim(),
         home_region: 'local',
@@ -168,14 +204,15 @@
         active: true,
         events_per_second: 1000,
         burst: 2000,
-      })
+      }, request.signal)
+      if (!request.current()) return
       tenantDraftId = ''
       tenantDraftName = ''
       window.dispatchEvent(new Event(TENANTS_CHANGED_EVENT))
-      refresh()
+      refreshTenants(); refreshActions()
     } catch (cause) {
-      tenantError = cause
-    }
+      if (request.current()) tenantError = cause
+    } finally { if (request.current()) tenantBusy = false; request.finish() }
   }
 
   // Source management
@@ -201,30 +238,30 @@
     sourceError = null
   }
   async function createSource(): Promise<void> {
-    sourceError = null
+    if (!writable || !scoped || sourceBusy) return
+    const request = begin(writes.sources)
+    sourceError = null; sourceBusy = true
     try {
-      await api.createSource({ id: sourceId.trim(), tenant_id: tenantId ?? session?.tenantId ?? '', name: sourceName.trim(), allowed_client_ids: clientIds(sourceClients), active: true }, tenantId)
-      sourceId = ''
-      sourceName = ''
-      sourceClients = ''
-      refresh()
+      await useAuditApi().createSource({ id: sourceId.trim(), tenant_id: tenantId ?? session?.tenantId ?? '', name: sourceName.trim(), allowed_client_ids: clientIds(sourceClients), active: true }, tenantId, request.signal)
+      if (!request.current()) return
+      sourceId = ''; sourceName = ''; sourceClients = ''
+      refreshContracts(); refreshActions()
     } catch (cause) {
-      sourceError = cause
-    }
+      if (request.current()) sourceError = cause
+    } finally { if (request.current()) sourceBusy = false; request.finish() }
   }
   async function updateSource(): Promise<void> {
-    if (!editingSource) return
-    sourceBusy = true
-    sourceError = null
+    if (!editingSource || !writable || !scoped || sourceBusy) return
+    const request = begin(writes.sources)
+    sourceBusy = true; sourceError = null
     try {
-      await api.updateSource({ id: editingSource.id, name: editSourceName.trim(), allowed_client_ids: clientIds(editSourceClients), active: editSourceActive }, tenantId)
+      await useAuditApi().updateSource({ id: editingSource.id, name: editSourceName.trim(), allowed_client_ids: clientIds(editSourceClients), active: editSourceActive }, tenantId, request.signal)
+      if (!request.current()) return
       editingSource = null
-      refresh()
+      refreshContracts(); refreshActions()
     } catch (cause) {
-      sourceError = cause
-    } finally {
-      sourceBusy = false
-    }
+      if (request.current()) sourceError = cause
+    } finally { if (request.current()) sourceBusy = false; request.finish() }
   }
 
   // Schema management
@@ -256,6 +293,7 @@
     return fields?.length ? fields.join(', ') : '未配置'
   }
   async function createSchema(): Promise<void> {
+    if (!writable || !scoped || schemaBusy) return
     schemaError = null
     const fieldPolicy = {
       requiredFields: parseSchemaFieldList(requiredFields),
@@ -268,9 +306,10 @@
       schemaError = new Error(policyError)
       return
     }
+    const request = begin(writes.schemas)
     schemaBusy = true
     try {
-      await api.createSchema({
+      await useAuditApi().createSchema({
         tenant_id: tenantId ?? session?.tenantId ?? '',
         schema_id: schemaId.trim(),
         version: schemaVersion,
@@ -281,7 +320,8 @@
         searchable_fields: fieldPolicy.searchableFields,
         classification,
         active: true,
-      }, tenantId)
+      }, tenantId, request.signal)
+      if (!request.current()) return
       schemaId = ''
       eventType = ''
       schemaVersion = 1
@@ -290,12 +330,10 @@
       allowedFields = ''
       encryptedFields = ''
       searchableFields = ''
-      refresh()
+      refreshContracts(); refreshActions()
     } catch (cause) {
-      schemaError = cause
-    } finally {
-      schemaBusy = false
-    }
+      if (request.current()) schemaError = cause
+    } finally { if (request.current()) schemaBusy = false; request.finish() }
   }
 
   // Retention management
@@ -315,89 +353,91 @@
 
   async function saveRetention(): Promise<void> {
     if (!canSaveRetention(retentionState, writable, retentionBusy)) return
-    const generation = loadGeneration
-    const operationGeneration = ++retentionOperationGeneration
+    if (!scoped) return
+    const request = begin(writes.retention)
     const targetTenantId = tenantId ?? session?.tenantId ?? ''
     const stateAtSubmit = retentionState
     retentionBusy = true
     retentionError = null
     try {
-      const savedPolicy = await api.setRetention({ ...draft, tenant_id: targetTenantId }, tenantId)
-      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
-      draft = { ...savedPolicy }
-      retentionState = 'configured'
-      retentionReport = null
-      refresh()
+      const savedPolicy = await useAuditApi().setRetention({ ...draft, tenant_id: targetTenantId }, tenantId, request.signal)
+      if (!request.current()) return
+      if (savedPolicy.tenant_id !== targetTenantId) throw new Error('保留策略与当前租户不匹配')
+      draft = { ...savedPolicy }; retentionState = 'configured'; retentionReport = null
+      refreshActions()
     } catch (cause) {
-      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
-      retentionState = stateAtSubmit
-      retentionError = cause
-    } finally {
-      if (operationGeneration === retentionOperationGeneration) retentionBusy = false
-    }
+      if (!request.current()) return
+      retentionState = stateAtSubmit; retentionError = cause
+    } finally { if (request.current()) retentionBusy = false; request.finish() }
   }
 
   async function evaluateRetention(): Promise<void> {
-    if (!canEvaluateRetention(retentionState, retentionBusy)) return
-    const generation = loadGeneration
-    const operationGeneration = ++retentionOperationGeneration
+    if (!scoped || !canEvaluateRetention(retentionState, retentionBusy)) return
+    const request = begin(writes.retention)
     retentionBusy = true
     retentionError = null
     try {
-      const report = await api.evaluateRetention(tenantId)
-      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
+      const report = await useAuditApi().evaluateRetention(tenantId, request.signal)
+      if (!request.current()) return
+      if (report.tenant_id !== (tenantId ?? session?.tenantId)) throw new Error('留存评估与当前租户不匹配')
       retentionReport = report
     } catch (cause) {
-      if (generation !== loadGeneration || operationGeneration !== retentionOperationGeneration) return
-      retentionError = cause
-    } finally {
-      if (operationGeneration === retentionOperationGeneration) retentionBusy = false
-    }
+      if (request.current()) retentionError = cause
+    } finally { if (request.current()) retentionBusy = false; request.finish() }
   }
 </script>
 
 <section>
   {#snippet headerActions()}<IrisButton variant="outline" onclick={refresh}>刷新</IrisButton>{/snippet}
   <PageHeader title="治理目录" description="来源绑定、事件 Schema、租户配额与保留策略；每次变更都会进入管理自审计。" actions={headerActions} />
-  <ErrorNotice {error} onRetry={refresh} />
+  {#if !readable}<p role="alert">当前会话没有治理目录读取权限，不会发出请求。</p>{/if}
 
-  {#if session?.platform}
+  {#if readable && session?.platform}
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">租户与配额</h3>
+      <IrisButton size="sm" variant="outline" onclick={refreshTenants}>刷新租户目录</IrisButton>
       <div class="three-field-form">
         <IrisFormField label="Tenant ID"><IrisInput value={tenantDraftId} oninput={(event) => (tenantDraftId = event.currentTarget.value)} /></IrisFormField>
         <IrisFormField label="名称"><IrisInput value={tenantDraftName} oninput={(event) => (tenantDraftName = event.currentTarget.value)} /></IrisFormField>
-        <IrisButton variant="solid" disabled={!writable || !tenantDraftId.trim() || !tenantDraftName.trim()} onclick={() => void createTenant()}>创建租户</IrisButton>
+        <IrisButton variant="solid" disabled={!writable || tenantBusy || !tenantDraftId.trim() || !tenantDraftName.trim()} onclick={() => void createTenant()}>创建租户</IrisButton>
       </div>
       <ErrorNotice error={tenantError} />
-      <IrisTable rowKey="id" columns={tenantColumns} data={tenantRows} density="compact" />
+      <ReadState loading={tenantRead.status === 'loading'} error={tenantRead.error} empty={tenantRead.status === 'success' && tenantRead.items.length === 0} loadingLabel="正在读取租户目录…" emptyLabel="暂无租户" onRetry={refreshTenants}>
+        <IrisTable rowKey="id" columns={tenantColumns} data={tenantRows} density="compact" />
+      </ReadState>
     </IrisCard>
   {/if}
 
   {#if session?.platform && !tenantId}
     <p class="muted-copy">选择租户后可管理该租户的来源、Schema 与保留策略。</p>
-  {:else}
+  {:else if readable && scoped}
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">平台审计接入状态</h3>
       <p class="card-copy">按六项目部署契约检查 Aero ID、Aero IM 与 Aero Vault 的 M2M Client、租户来源和固定 Schema 版本。租户派生 Source ID 仅校验公开前缀，不在浏览器中处理派生密钥。</p>
-      <IrisTable rowKey="key" columns={platformColumns} data={platformRows} density="compact" striped />
+      {#if contractKnown}
+        <IrisTable rowKey="key" columns={platformColumns} data={platformRows} density="compact" striped />
+      {:else}<p class="muted-copy" role="status">契约状态未知：须当前租户与会话下，同一刷新代次的来源和 Schema 均读取成功后才能评估；加载或读取失败不表示契约无效。</p>{/if}
     </IrisCard>
 
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">来源系统与 Client 绑定</h3>
+      <IrisButton size="sm" variant="outline" onclick={refreshContracts}>刷新来源</IrisButton>
+      <p class="table-hint">刷新或重试来源 / Schema 会同步启动两项独立读取，以重新确认同代契约。</p>
       <div class="four-field-form">
         <IrisFormField label="Source ID"><IrisInput value={sourceId} oninput={(event) => (sourceId = event.currentTarget.value)} /></IrisFormField>
         <IrisFormField label="名称"><IrisInput value={sourceName} oninput={(event) => (sourceName = event.currentTarget.value)} /></IrisFormField>
         <IrisFormField label="允许的 client_id（逗号分隔）"><IrisInput value={sourceClients} oninput={(event) => (sourceClients = event.currentTarget.value)} /></IrisFormField>
-        <IrisButton variant="solid" disabled={!writable || !sourceId.trim() || !sourceName.trim()} onclick={() => void createSource()}>添加来源</IrisButton>
+        <IrisButton variant="solid" disabled={!writable || sourceBusy || !sourceId.trim() || !sourceName.trim()} onclick={() => void createSource()}>添加来源</IrisButton>
       </div>
       <ErrorNotice error={sourceError} />
       <p class="table-hint">{writable ? '选择来源行可编辑精确 Client 绑定与启用状态。' : '当前会话仅可查看来源。'}</p>
+      <ReadState loading={sourceRead.status === 'loading'} error={sourceRead.error} empty={sourceRead.status === 'success' && sources.length === 0} loadingLabel="正在读取来源…" emptyLabel="暂无来源" onRetry={refreshContracts}>
       <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Source ID</th><th>名称</th><th>允许的 Snaplink Client</th><th>状态</th><th></th></tr></thead><tbody>
         {#each sources as source (source.id)}
           <tr><td>{source.id}</td><td>{source.name}</td><td>{source.allowed_client_ids?.join(', ') || '默认同 Source ID'}</td><td><StatusBadge value={source.active} /></td><td><IrisButton size="sm" variant="outline" disabled={!writable} onclick={() => selectSource(source)}>编辑</IrisButton></td></tr>
         {:else}<tr><td colspan="5" class="empty-cell">暂无来源</td></tr>{/each}
       </tbody></table></div>
+      </ReadState>
       {#if editingSource}
         <div class="source-editor"><strong>编辑来源：{editingSource.id}</strong><div class="source-editor-form">
           <IrisFormField label="名称"><IrisInput value={editSourceName} oninput={(event) => (editSourceName = event.currentTarget.value)} /></IrisFormField>
@@ -410,6 +450,7 @@
 
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">事件 Schema</h3>
+      <IrisButton size="sm" variant="outline" onclick={refreshContracts}>刷新 Schema</IrisButton>
       <div class="schema-core-form">
         <IrisFormField label="Schema ID"><IrisInput value={schemaId} oninput={(event) => (schemaId = event.currentTarget.value)} /></IrisFormField>
         <IrisFormField label="事件类型"><IrisInput value={eventType} oninput={(event) => (eventType = event.currentTarget.value)} /></IrisFormField>
@@ -425,11 +466,13 @@
       </div>
       <p class="table-hint">留空允许字段表示不限制 payload 键；可搜索字段生成租户隔离摘要，不要求同时加密。</p>
       <ErrorNotice error={schemaError} />
+      <ReadState loading={schemaRead.status === 'loading'} error={schemaRead.error} empty={schemaRead.status === 'success' && schemas.length === 0} loadingLabel="正在读取 Schema…" emptyLabel="暂无 Schema" onRetry={refreshContracts}>
       <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Schema ID</th><th>版本</th><th>事件类型</th><th>分级</th><th>状态</th></tr></thead><tbody>
         {#each schemaRows as schema (schema.row_key)}
           <tr tabindex="0" aria-selected={selectedSchemaKey === schema.row_key} class:selected-row={selectedSchemaKey === schema.row_key} onclick={() => selectSchema(schema.row_key)} onkeydown={(event) => handleSchemaKeydown(event, schema.row_key)}><td>{schema.schema_id}</td><td>{schema.version}</td><td>{schema.event_type}</td><td>{schema.classification}</td><td><StatusBadge value={schema.active} /></td></tr>
         {:else}<tr><td colspan="5" class="empty-cell">暂无 Schema</td></tr>{/each}
       </tbody></table></div>
+      </ReadState>
       {#if selectedSchema}
         <div class="schema-policy-view"><strong>策略详情：{selectedSchema.schema_id} v{selectedSchema.version}</strong><IrisDescriptions style="" bordered columns={2} items={[{ label: '必填字段', value: fieldSummary(selectedSchema.required_fields) }, { label: '允许字段', value: fieldSummary(selectedSchema.allowed_fields) }, { label: '加密字段', value: fieldSummary(selectedSchema.encrypted_fields) }, { label: '可搜索字段', value: fieldSummary(selectedSchema.searchable_fields) }, { label: '数据分级', value: selectedSchema.classification || '未限制' }, { label: '创建时间', value: formatDate(selectedSchema.created_at) }]} /></div>
       {/if}
@@ -437,11 +480,9 @@
 
     <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
       <h3 class="card-heading">保留策略</h3>
-      {#if retentionState === 'loading'}
-        <p class="muted-copy" role="status" aria-live="polite">正在读取当前租户的保留策略…</p>
-      {:else if retentionState === 'error'}
-        <ErrorNotice error={retentionError} onRetry={refresh} />
-      {:else if retentionState === 'unconfigured'}
+      <IrisButton size="sm" variant="outline" onclick={() => void refreshRetention()}>刷新保留策略</IrisButton>
+      <ReadState loading={retentionState === 'loading'} error={retentionState === 'error' ? retentionError : null} loadingLabel="正在读取当前租户的保留策略…" onRetry={() => void refreshRetention()}>
+      {#if retentionState === 'unconfigured'}
         <div class="retention-empty-state">
           <p class="muted-copy">当前租户尚未配置保留策略。此状态仅在 API 明确返回 404 时显示；不会将读取错误当作空策略，也不会自动写入默认值。</p>
           <IrisButton variant="solid" disabled={!writable} onclick={beginRetentionCreation}>新建保留策略（默认草稿）</IrisButton>
@@ -457,14 +498,20 @@
           <IrisFormField label="归档天数"><IrisInput type="number" min={0} value={draft.archive_days} oninput={(event) => (draft.archive_days = Number(event.currentTarget.value))} /></IrisFormField>
           <div class="button-row"><IrisButton variant="solid" disabled={!canSaveRetention(retentionState, writable, retentionBusy)} onclick={() => void saveRetention()}>{retentionBusy ? '处理中…' : '保存策略'}</IrisButton><IrisButton variant="outline" disabled={!canEvaluateRetention(retentionState, retentionBusy)} onclick={() => void evaluateRetention()}>评估</IrisButton></div>
         </div>
-        <ErrorNotice error={retentionError} />
+        <ErrorNotice error={retentionError} onRetry={() => void refreshRetention()} />
         {#if retentionReport}<div class="result-panel"><StatusBadge value={retentionReport.action} /><span>可归档 {retentionReport.eligible_events} 条</span><span>法律保留保护 {retentionReport.protected_events} 条</span><span>保留规则 {retentionReport.hold_ids?.join(', ') || '无'}</span></div>{/if}
       {/if}
+      </ReadState>
     </IrisCard>
   {/if}
 
+  {#if readable}
   <IrisCard variant="outline" class="section-card" padding="none" style="" header={undefined} footer={undefined}>
     <h3 class="card-heading card-heading-padded">管理操作自审计</h3>
-    <IrisTable rowKey="id" columns={actionColumns} data={actionRows} density="compact" />
+    <IrisButton size="sm" variant="outline" onclick={refreshActions}>刷新自审计</IrisButton>
+    <ReadState loading={actionRead.status === 'loading'} error={actionRead.error} empty={actionRead.status === 'success' && actions.length === 0} loadingLabel="正在读取管理自审计…" emptyLabel="暂无管理自审计记录" onRetry={refreshActions}>
+      <IrisTable rowKey="id" columns={actionColumns} data={actionRows} density="compact" />
+    </ReadState>
   </IrisCard>
+  {/if}
 </section>

@@ -57,7 +57,12 @@ const discovery: DiscoveryDocument = {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Snaplink OAuth flow', () => {
-  it('completes code + PKCE and verifies both signed tokens', async () => {
+  it.each([
+    ['#evidence/exports/export-0123456789abcdef', '#evidence/exports/export-0123456789abcdef'],
+    ['#events/event/event-0123', '#events/event/event-0123'],
+    ['#operations/op/operation-0123', '#operations/op/operation-0123'],
+    ['#events/event/event-0123?tenant_id=other&access_token=secret', '#overview'],
+  ])('completes signed code + PKCE and restores only allowlisted navigation: %s', async (returnHash, expectedHash) => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost:5178' } })
     const storage = new MemoryStorage()
     const { publicKey, privateKey } = await generateKeyPair('ES256')
@@ -68,13 +73,14 @@ describe('Snaplink OAuth flow', () => {
     const discoveryOnly = vi.fn<typeof fetch>(
       async () => new Response(JSON.stringify(discovery), { status: 200 }),
     )
-    const returnHash = '#evidence/exports/export-0123456789abcdef'
     const loginTarget = new URL(await authorizationUrl({ config, storage, fetcher: discoveryOnly, returnHash }))
     expect(loginTarget.origin).toBe('https://console.example.test')
     expect(loginTarget.searchParams.get('code_challenge_method')).toBe('S256')
     expect(loginTarget.searchParams.get('resource')).toBe('audit-governance')
 
     const pending = JSON.parse(storage.getItem(storage.key(0)!)!) as PendingAuthorization
+    expect(pending.returnHash).toBe(expectedHash)
+    expect(storage.getItem(storage.key(0)!)!).not.toContain('access_token')
     const baseClaims = { iss: config.snaplinkIssuer, sub: 'user-1' }
     const accessToken = await new SignJWT({
       ...baseClaims,
@@ -117,7 +123,7 @@ describe('Snaplink OAuth flow', () => {
     callback.searchParams.set('iss', config.snaplinkIssuer)
     const onReturnHash = vi.fn()
     const session = await completeAuthorization(callback, { config, storage, fetcher, onReturnHash })
-    expect(onReturnHash).toHaveBeenCalledWith(returnHash)
+    expect(onReturnHash).toHaveBeenCalledWith(expectedHash)
 
     expect(session.displayName).toBe('审计员')
     expect(session.tenantId).toBe('tenant-a')

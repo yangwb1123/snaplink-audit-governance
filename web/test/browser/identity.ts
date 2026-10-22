@@ -8,6 +8,17 @@ const hosted = process.env.SNAPLINK_HOSTED_LOGIN_URL ?? 'http://localhost:4444/l
  * Flutter Hosted Login UI. Codes, PKCE, JWT signature verification and Audit
  * API authorization remain real; tokens stay in this test's memory only. */
 export async function login(page: Page, username: string, hash = '#evidence', scopes?: string[]): Promise<string> {
+  return loginWithHeading(page, username, hash, scopes, '证据与治理')
+}
+
+/** Same real PKCE/JWT flow, but for journeys whose landing page has another heading. */
+export async function loginWithHeading(
+  page: Page,
+  username: string,
+  hash: string,
+  scopes: string[] | undefined,
+  heading: string,
+): Promise<string> {
   await page.route(`${hosted}**`, async (route) => {
     const params = new URL(route.request().url()).searchParams
     const response = await page.request.post(`${idp}/auth/login`, {
@@ -33,7 +44,7 @@ export async function login(page: Page, username: string, hash = '#evidence', sc
   const response = await tokenResponse
   expect(response.status()).toBe(200)
   const body = await response.json() as { access_token: string }
-  await expect(page.getByRole('heading', { name: '证据与治理', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible()
   return body.access_token
 }
 

@@ -1,31 +1,30 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import { RequestScope } from '../api/requestScope'
   import { ApiError } from '../api/client'
   import {
     IrisButton,
     IrisCard,
-    IrisDescriptions,
-    IrisDrawer,
-    IrisDrawerContent,
-    IrisDrawerTitle,
     IrisFormField,
     IrisInput,
     IrisTable,
   } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../api/useAuditApi'
-  import type { AuditEvent, EventQuery, EventReceipt, QueryResult } from '../api/types'
+  import type { AuditEvent, EventQuery, QueryResult } from '../api/types'
+  import { can } from '../auth/claims'
+  import { authState } from '../auth/store'
   import ErrorNotice from '../components/ErrorNotice.svelte'
-  import FieldDiff from '../components/FieldDiff.svelte'
-  import LoadingBlock from '../components/LoadingBlock.svelte'
+  import ReadState from '../components/ReadState.svelte'
+  import EventDetail from './EventDetail.svelte'
   import PageHeader from '../components/PageHeader.svelte'
   import StatusBadge from '../components/StatusBadge.svelte'
   import { formatDate } from '../components/format'
   import { buildEventQuery, emptyEventFilters, type EventFilterDraft } from './eventQuery'
-  import { navigateInvestigation } from './investigationNavigation'
+  import { eventLocation, navigateEvent } from './navigation'
 
   let { tenantId }: { tenantId?: string } = $props()
-  const api = useAuditApi()
+  const session = $derived($authState.session)
+  const allowed = $derived(Boolean(session && can(session, 'audit:event:read') && (session.platform ? tenantId : session.tenantId && (!tenantId || tenantId === session.tenantId))))
 
   function dateInputValue(date: Date): string {
     const offset = date.getTimezoneOffset() * 60_000
@@ -47,14 +46,16 @@
   let nextCursor = $state('')
   let loading = $state(false)
   let error = $state<unknown>(null)
-  let selected = $state<AuditEvent | null>(null)
-  let receipt = $state<EventReceipt | null>(null)
-  let detailError = $state<unknown>(null)
+  let selectedId = $state(eventLocation(window.location.hash))
   let failedCursor = $state('')
   let snapshot = $state<QueryResult['snapshot']>()
   const queryScope = new RequestScope()
-  const detailScope = new RequestScope()
-  onDestroy(() => { queryScope.dispose(); detailScope.dispose() })
+  onDestroy(() => queryScope.dispose())
+  onMount(() => {
+    const update = () => (selectedId = eventLocation(window.location.hash))
+    window.addEventListener('hashchange', update)
+    return () => window.removeEventListener('hashchange', update)
+  })
 
   const advancedFields: Array<{ name: keyof EventFilterDraft; label: string; placeholder: string }> = [
     { name: 'actorId', label: 'Actor ID', placeholder: '用户或服务主体' },
@@ -105,7 +106,10 @@
   }
 
   async function runQuery(cursor = '', append = false): Promise<void> {
-    const request = queryScope.next()
+    if (!allowed) return
+    const ticket = queryScope.next()
+    const expectedSession = session, expectedTenant = tenantId
+    const request = { ...ticket, current: () => ticket.current() && session === expectedSession && tenantId === expectedTenant && allowed }
     const query = { ...appliedQuery, cursor }
     if (!append) {
       snapshot = undefined
@@ -113,13 +117,13 @@
       total = 0
       nextCursor = ''
       failedCursor = ''
-      closeDetail()
     }
     loading = true
     error = null
     try {
-      const result = await api.queryEvents(query, tenantId, request.signal)
+      const result = await useAuditApi().queryEvents(query, tenantId, request.signal)
       if (!request.current()) return
+      if (result.items.some((event) => event.tenant_id !== (tenantId ?? session?.tenantId))) throw new Error('事件列表与当前租户不匹配')
       events = append ? [...events, ...result.items] : result.items
       total = result.count
       snapshot = result.snapshot
@@ -144,47 +148,14 @@
   }
 
   $effect(() => {
-    void appliedQuery
-    void tenantId
-    void runQuery()
+    void appliedQuery; void tenantId; void session
+    untrack(() => {
+      queryScope.invalidate()
+      events = []; total = 0; nextCursor = ''; snapshot = undefined; error = null; loading = false
+      void runQuery()
+    })
+    return () => queryScope.invalidate()
   })
-
-  function closeDetail(): void {
-    detailScope.invalidate()
-    selected = null
-    receipt = null
-    detailError = null
-  }
-
-  async function openDetail(event: AuditEvent): Promise<void> {
-    const request = detailScope.next()
-    const eventId = event.event_id
-    selected = event
-    receipt = null
-    detailError = null
-    try {
-      const [full, eventReceipt] = await Promise.all([
-        api.getEvent(eventId, tenantId, request.signal),
-        api.getReceipt(eventId, tenantId, request.signal),
-      ])
-      if (!request.current() || selected?.event_id !== eventId) return
-      selected = full
-      receipt = eventReceipt
-    } catch (cause) {
-      if (request.current() && selected?.event_id === eventId) detailError = cause
-    } finally { request.finish() }
-  }
-
-  function openOperationTimeline(): void {
-    const id = selected?.operation_id
-    if (id) navigateInvestigation({ mode: 'operation', operationId: id })
-  }
-
-  function openAggregateHistory(): void {
-    const type = selected?.aggregate_type
-    const id = selected?.aggregate_id
-    if (type && id) navigateInvestigation({ mode: 'aggregate', aggregateType: type, aggregateId: id })
-  }
 
   function tableRows(): Record<string, unknown>[] {
     return events.map((event) => ({
@@ -197,7 +168,7 @@
 </script>
 
 {#snippet eventIdCell(row: Record<string, unknown>)}
-  <button class="link-button" type="button" onclick={() => void openDetail(row as unknown as AuditEvent)}>
+  <button class="link-button" type="button" onclick={() => navigateEvent(String(row.event_id))}>
     {String(row.event_id)}
   </button>
 {/snippet}
@@ -206,9 +177,11 @@
 {/snippet}
 
 <section>
+  {#snippet headerActions()}<IrisButton size="sm" variant="outline" disabled={loading || !allowed} onclick={() => void runQuery()}>重新查询最新结果</IrisButton>{/snippet}
   <PageHeader
     title="审计事件"
     description="跨 Snaplink、Aero ID、Aero Vault 与 Aero IM 检索账本事实；筛选仅在提交后执行，服务端游标用于稳定翻页。"
+    actions={headerActions}
   />
   <IrisCard variant="outline" class="filter-card" style="" header={undefined} footer={undefined}>
     <div class="filter-grid">
@@ -246,15 +219,15 @@
       <IrisButton size="sm" variant="outline" disabled={loading} onclick={resetQuery}>重置为最近 24 小时</IrisButton>
     </div>
   </IrisCard>
-  <ErrorNotice {error} onRetry={retryQuery} />
-  {#if loading && events.length === 0}<LoadingBlock />{/if}
+  {#if !allowed}<p role="alert">当前会话没有事件读取权限或有效租户，不会发出请求。</p>{/if}
+  {#if events.length > 0}<ErrorNotice {error} onRetry={retryQuery} />{/if}
+  <ReadState loading={loading && events.length === 0} error={events.length === 0 ? error : null} empty={!loading && allowed && !error && events.length === 0 && total === 0} emptyLabel="当前条件下暂无事件" onRetry={retryQuery}>
   <IrisCard variant="outline" padding="none" style="" header={undefined} footer={undefined}>
     <div class="table-summary" role="status">
       <span>已加载 {events.length} / 共 {total} 条事件</span>
       {#if snapshot}
         <span>固定结果集：{formatDate(snapshot.observed_at)}；有效至 {formatDate(snapshot.expires_at)}。新到达事件需重新查询；不表示完整性已确认。</span>
       {/if}
-      <IrisButton size="sm" variant="outline" disabled={loading} onclick={() => void runQuery()}>重新查询最新结果</IrisButton>
     </div>
     <IrisTable
       rowKey="event_id"
@@ -278,59 +251,6 @@
       </div>
     {/if}
   </IrisCard>
-
-  <IrisDrawer open={selected !== null} onOpenChange={(open) => !open && closeDetail()} size="min(720px, 92vw)">
-    <IrisDrawerContent>
-      <IrisDrawerTitle>审计事件详情</IrisDrawerTitle>
-      {#if selected}
-        <div class="drawer-body">
-          <ErrorNotice error={detailError} />
-          <IrisDescriptions
-        style=""
-            bordered
-            columns={1}
-            items={[
-              { label: '事件 ID', value: selected.event_id },
-              { label: '租户', value: selected.tenant_id },
-              { label: '来源 / 类型', value: `${selected.source_system} / ${selected.event_type}` },
-              { label: '操作 / 结果', value: `${selected.action} / ${selected.outcome}` },
-              { label: '操作者', value: selected.actor?.name || selected.actor?.id || '—' },
-              { label: '时间', value: formatDate(selected.occurred_at) },
-              { label: '操作 / 因果 / 关联', value: `${selected.operation_id || '—'} / ${selected.causation_id || '—'} / ${selected.correlation_id || '—'}` },
-              { label: 'Trace / Span', value: `${selected.trace_id || '—'} / ${selected.span_id || '—'}` },
-              { label: '聚合对象 / 版本', value: `${selected.aggregate_type || '—'}:${selected.aggregate_id || '—'} / ${selected.aggregate_version ?? '—'}` },
-              { label: '流 / 序号', value: `${selected.stream_id || '—'} / ${selected.sequence ?? '—'}` },
-              { label: '回执状态', value: receipt?.status ?? (detailError ? '回执不可用' : '读取中…') },
-            ]}
-          />
-          {#if receipt}
-            <IrisDescriptions
-              style=""
-              bordered
-              columns={1}
-              items={[
-                { label: '回执流 / 序号', value: `${receipt.stream_id ?? '—'} / ${receipt.sequence ?? '—'}` },
-                { label: '账本 / 索引 / 归档', value: `${formatDate(receipt.ledgered_at)} / ${formatDate(receipt.indexed_at)} / ${formatDate(receipt.archived_at)}` },
-              ]}
-            />
-          {/if}
-          {#if selected.operation_id || (selected.aggregate_type && selected.aggregate_id)}
-            <div class="button-row">
-              {#if selected.operation_id}
-                <IrisButton size="sm" variant="outline" onclick={openOperationTimeline}>查看操作时间线</IrisButton>
-              {/if}
-              {#if selected.aggregate_type && selected.aggregate_id}
-                <IrisButton size="sm" variant="outline" onclick={openAggregateHistory}>查看聚合历史</IrisButton>
-              {/if}
-            </div>
-          {/if}
-          <h3>Payload</h3>
-          <FieldDiff changes={selected.changed_fields} />
-          <pre class="json-view">{JSON.stringify(selected.payload ?? {}, null, 2)}</pre>
-          <h3>Hash</h3>
-          <code class="hash-value">{selected.hash || receipt?.hash || '—'}</code>
-        </div>
-      {/if}
-    </IrisDrawerContent>
-  </IrisDrawer>
+  </ReadState>
+  {#if selectedId}<EventDetail eventId={selectedId} {tenantId} onClose={() => (window.location.hash = '#events')} />{/if}
 </section>
