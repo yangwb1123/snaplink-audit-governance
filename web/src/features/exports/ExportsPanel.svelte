@@ -2,6 +2,8 @@
   import { onDestroy, onMount, untrack } from 'svelte'
   import { IrisButton, IrisCard, IrisInput, IrisProgress } from '@iris-ui-kit/svelte'
   import { useAuditApi } from '../../api/useAuditApi'
+  import { authState } from '../../auth/store'
+  import { can } from '../../auth/claims'
   import { RequestScope } from '../../api/requestScope'
   import type { ExportJob, ExportSummary } from '../../api/types'
   import ExportActions from './ExportActions.svelte'
@@ -17,15 +19,21 @@
   import { evidenceHash, navigateEvidence } from '../../pages/evidenceNavigation'
 
   let { tenantId, initialId = '' }: { tenantId?: string; initialId?: string } = $props()
-  const api = useAuditApi()
+  const session = $derived($authState.session)
+  const scopedTenant = $derived(session?.platform ? tenantId : session?.tenantId)
+  const scopeReady = $derived(Boolean($authState.status === 'authenticated' && session &&
+    can(session, 'audit:export:create') && scopedTenant && (!tenantId || tenantId === scopedTenant)))
   const reads = new RequestScope()
   const writes = new RequestScope()
   const downloads = new RequestScope()
   let lastTenant = untrack(() => tenantId)
+  let lastSession = untrack(() => session)
   let range = $state<DateRange>(defaultEvidenceRange(1))
   let scope = $state<EvidenceScopeDraft>({ ...emptyEvidenceScope })
   let jobId = $state('')
   let job = $state<ExportJob | null>(null)
+  // Retain only the safe denied task binding, never the old evidence details.
+  let denied = $state<{ id: string; tenantId: string } | null>(null)
   let notFound = $state(false)
   let error = $state<unknown>(null)
   let pollError = $state<unknown>(null)
@@ -39,31 +47,33 @@
 
   $effect(() => {
     const currentTenant = tenantId
-    if (currentTenant === lastTenant) return () => { reads.invalidate(); writes.invalidate(); downloads.invalidate() }
-    lastTenant = currentTenant
-    reads.invalidate(); writes.invalidate(); downloads.invalidate()
-    range = defaultEvidenceRange(1)
-    scope = { ...emptyEvidenceScope }
-    jobId = ''; job = null; notFound = false; error = null; pollError = null
-    attempts = 0; paused = false; busy = false; creating = false; downloading = false
-    return () => { reads.invalidate(); writes.invalidate(); downloads.invalidate() }
-  })
-  $effect(() => {
+    const currentSession = session
+    void $authState.status
     const id = initialId
-    void tenantId
-    if (id) { jobId = id; void lookup(id) }
+    untrack(() => {
+      reads.invalidate(); writes.invalidate(); downloads.invalidate()
+      if (currentTenant !== lastTenant || currentSession !== lastSession) {
+        range = defaultEvidenceRange(1)
+        scope = { ...emptyEvidenceScope }
+      }
+      lastTenant = currentTenant; lastSession = currentSession
+      jobId = id; job = null; denied = null; notFound = false; error = null; pollError = null
+      attempts = 0; paused = false; busy = false; creating = false; downloading = false
+      if (id) void lookup(id)
+    })
+    return () => { reads.invalidate(); writes.invalidate(); downloads.invalidate() }
   })
   $effect(() => {
     const current = job
     if (!current || !visible || !canAutoPollExport(current.status, attempts, paused)) return
     const previousAttempts = attempts
-    const scopeTenant = tenantId
     let active = true
     const timer = window.setTimeout(() => {
-      const ticket = reads.capture()
-      void api.getExport(current.id, scopeTenant, ticket.signal).then((next) => {
+      if (!active || !scopeReady) return
+      const ticket = scopedTicket(reads, false)
+      void useAuditApi().getExport(current.id, ticket.tenantId, ticket.signal).then((next) => {
         if (!active || !ticket.current() || job?.id !== current.id) return
-        if (scopeTenant && next.tenant_id !== scopeTenant) throw new Error('导出任务与当前租户不匹配')
+        if (next.id !== current.id || next.tenant_id !== ticket.tenantId) throw new Error('导出任务与当前租户或 ID 不匹配')
         job = next
         attempts = previousAttempts + 1
       }).catch((cause: unknown) => {
@@ -83,18 +93,30 @@
   })
   onDestroy(() => { reads.dispose(); writes.dispose(); downloads.dispose() })
 
+  // Check identity as well as epochs: even a transport ignoring AbortSignal
+  // must not act on a response from another route, tenant or session.
+  function scopedTicket(requests: RequestScope, replace = true) {
+    const ticket = replace ? requests.next() : requests.capture()
+    const identity = $authState
+    const tenant = scopedTenant
+    const id = initialId
+    return { ...ticket, tenantId: tenant, current: () => ticket.current() &&
+      identity === $authState && tenant === scopedTenant && id === initialId && scopeReady }
+  }
+
   async function create(): Promise<void> {
+    if (!scopeReady) return
     const query = buildEvidenceScopeQuery(range, scope)
     if (!query) { error = new Error('请选择有效且非空的导出时间范围'); return }
-    const ticket = writes.next()
-    const scopeTenant = tenantId
+    const ticket = scopedTicket(writes)
     creating = true
     error = null
     try {
-      const next = await api.createExport(query, scopeTenant, ticket.signal)
+      const next = await useAuditApi().createExport(query, ticket.tenantId, ticket.signal)
       if (!ticket.current()) return
-      if (scopeTenant && next.tenant_id !== scopeTenant) throw new Error('导出任务与当前租户不匹配')
-      job = next; jobId = next.id; notFound = false
+      if (next.tenant_id !== ticket.tenantId) throw new Error('导出任务与当前租户不匹配')
+      reads.invalidate(); downloads.invalidate(); busy = false; downloading = false
+      job = next; jobId = next.id; denied = null; notFound = false
       attempts = 0; paused = false; pollError = null
       revision += 1
       navigateEvidence('exports', next.id)
@@ -106,20 +128,19 @@
     }
   }
 
-  async function lookup(id = jobId.trim()): Promise<void> {
-    if (!id) return
-    const ticket = reads.next()
-    const scopeTenant = tenantId
+  async function lookup(id = jobId.trim(), expectedTenant = scopedTenant): Promise<void> {
+    if (!id || !scopeReady || expectedTenant !== scopedTenant) return
+    const ticket = scopedTicket(reads)
     writes.invalidate()
     creating = false
     downloads.invalidate()
     downloading = false
     busy = true; job = null; notFound = false; error = null; pollError = null; paused = true
     try {
-      const next = await api.getExport(id, scopeTenant, ticket.signal)
+      const next = await useAuditApi().getExport(id, ticket.tenantId, ticket.signal)
       if (!ticket.current()) return
-      if (next.id !== id || (scopeTenant && next.tenant_id !== scopeTenant)) throw new Error('导出任务与当前租户或 ID 不匹配')
-      job = next; jobId = next.id; attempts = 0; paused = false
+      if (next.id !== id || next.tenant_id !== ticket.tenantId) throw new Error('导出任务与当前租户或 ID 不匹配')
+      job = next; jobId = next.id; denied = null; attempts = 0; paused = false
     } catch (cause) {
       if (ticket.current()) {
         notFound = cause instanceof ApiError && cause.status === 404 && cause.code === 'not_found'
@@ -131,6 +152,12 @@
     }
   }
 
+  function refreshDetail(): void {
+    // Never use the editable query ID to reconcile a denied download.
+    if (denied) void lookup(denied.id, denied.tenantId)
+    else void lookup()
+  }
+
   function select(): void {
     const id = jobId.trim()
     if (!id) return
@@ -140,7 +167,7 @@
 
   function afterAction(summary: ExportSummary): void {
     reads.invalidate(); writes.invalidate(); downloads.invalidate()
-    job = null; jobId = summary.id; notFound = false; error = null; pollError = null
+    job = null; jobId = summary.id; denied = null; notFound = false; error = null; pollError = null
     busy = false; creating = false; downloading = false; attempts = 0; paused = true
     revision += 1
     if (summary.id === initialId) void lookup(summary.id)
@@ -154,13 +181,13 @@
 
   async function download(): Promise<void> {
     const current = job
-    if (!current || current.status !== 'completed' || downloading) return
-    const ticket = downloads.next()
+    if (!current || current.status !== 'completed' || downloading || !scopeReady) return
+    const ticket = scopedTicket(downloads)
     downloading = true
     error = null
     try {
-      const blob = await api.downloadExport(current.id, tenantId, ticket.signal)
-      if (!ticket.current() || job?.id !== current.id) return
+      const blob = await useAuditApi().downloadExport(current.id, ticket.tenantId, ticket.signal)
+      if (!ticket.current() || job?.id !== current.id || job.tenant_id !== current.tenant_id) return
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -168,7 +195,18 @@
       link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch (cause) {
-      if (ticket.current()) error = cause
+      if (!ticket.current() || job?.id !== current.id || job.tenant_id !== current.tenant_id) return
+      if (cause instanceof ApiError && cause.status === 403 && cause.reason === 'legal_hold') {
+        denied = { id: current.id, tenantId: current.tenant_id }
+        reads.invalidate(); downloads.invalidate()
+        job = null; paused = true; pollError = null; busy = false; downloading = false; notFound = false
+        error = cause
+      } else {
+        // A reason on a non-403 response must not masquerade as a Hold denial.
+        error = cause instanceof ApiError
+          ? new ApiError(cause.status, cause.code, '下载失败，请刷新任务后重试', cause.requestId)
+          : new Error('下载失败，请检查连接后重试')
+      }
     } finally {
       if (ticket.current()) downloading = false
       ticket.finish()
@@ -192,7 +230,11 @@
 <IrisCard variant="outline" class="section-card" style="" header={undefined} footer={undefined}>
   <h2 class="card-heading">导出详情</h2>
   <div class="inline-form"><IrisInput value={jobId} placeholder="export job id" disabled={busy} oninput={(event) => (jobId = event.currentTarget.value)} /><IrisButton variant="outline" disabled={busy || !jobId.trim()} onclick={select}>查询导出</IrisButton></div>
-  <ReadState loading={busy} error={error || pollError} empty={notFound} loadingLabel="正在读取导出详情…" emptyLabel="未找到当前租户的导出任务" onRetry={() => void lookup()}>
+  {#if denied}
+    <p role="status">已撤下旧证据详情。任务 {denied.id} · 租户 {denied.tenantId}。刷新只读取此任务，不会自动下载。</p>
+    <IrisButton variant="outline" disabled={busy} onclick={refreshDetail}>刷新导出详情</IrisButton>
+  {/if}
+  <ReadState loading={busy} error={error || pollError} empty={notFound} loadingLabel="正在读取导出详情…" emptyLabel="未找到当前租户的导出任务" onRetry={refreshDetail}>
   {#if job}
     <div class="result-panel"><StatusBadge value={job.status} /><span>{job.id} · {job.event_count} 条事件</span>{#if canAutoPollExport(job.status, attempts, paused)}<IrisProgress indeterminate size="sm" />{/if}</div>
     <p>申请人：{job.requested_by} · 创建：{formatDate(job.created_at)}</p>
