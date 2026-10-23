@@ -34,6 +34,7 @@ func (s *Server) listExports(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRestores(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -58,7 +59,6 @@ func (s *Server) listRestores(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, statusForError(err), err)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, page)
 }
 

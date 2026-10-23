@@ -223,6 +223,7 @@ func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -247,6 +248,7 @@ func (s *Server) previewRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -271,6 +273,7 @@ func (s *Server) createRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -290,6 +293,7 @@ func (s *Server) approveRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -309,6 +313,7 @@ func (s *Server) rejectRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRestore(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:operation:read")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
