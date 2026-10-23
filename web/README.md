@@ -130,6 +130,14 @@ Legal Hold 门禁，阻断响应兼容 `code=forbidden` 并增加 `reason=legal_
 不能借操作读取证据。超时/未知提交先只读刷新核对，不自动重发；切换令牌/权限/
 租户/任务会清理确认并丢弃晚响应，操作结果须匹配当前 tenant/申请人/任务关联。
 
+恢复批准/拒绝遇到网络错误、499、5xx、409 或错配成功响应时，会关闭确认框并禁用
+两种决策，提示“决策可能已提交”。待核对状态仅绑定内存中的当前会话、租户、原申请和
+请求代次；“刷新核对”（包括此时的查询按钮）只 GET 原申请，不使用编辑中的查询 ID，
+不重发决策 POST。读取失败、tenant/id 错配或晚响应不能解锁。有效 pending 观察后仍须
+重新打开确认框；已观察终态及其决策人/时间不得回退，不再提供决策。切换会话或租户清空
+本地上下文，切换申请保留该会话内未核对状态；重新进入时须成功读取，不能借旧状态写入。
+审批只是治理决定，界面展示决策人/时间不表示业务执行。
+
 `started_at` 是 CAS 领取时的真实开始时间，旧任务可能缺失；新任务有私有 2 分钟
 租约/30 秒心跳与过期 fencing（不在浏览器暴露 owner）。这不是进度、检查点或强杀
 证明；仍无检查点续跑、分块认证下载或业务恢复执行按钮。详见 ADR-0019/0020。
@@ -195,3 +203,32 @@ corepack pnpm --dir web browser:test
 视频或截图。为了自动化，授权步骤通过真实 Snaplink password provider 完成，
 浏览器仍执行真实 PKCE、签名/nonce 校验和 API 授权；**不覆盖兄弟仓库 Flutter
 Hosted Login 的布局/交互，也不替代 PostgreSQL/Kafka/ClickHouse/WORM 完整栈验收**。
+
+新增定向回归（不需要 IdP；隐私回归只启动自有临时 loopback HTTP 夹具）：
+
+```sh
+corepack pnpm --dir web exec vitest run src/features/restores/RestoresPanel.test.ts test/browser/identity.privacy.test.ts
+```
+
+隐私回归使用真实 Playwright 请求上下文与随机合成哨兵，先在内存中确定性复现原断连/
+超时异常泄漏，再检查真实失败 runner 的退出码、最终错误、stdout/stderr、JSON 报告及
+全部自动 API 步骤的报告序列化（默认 JSON 报告不会包含这些自动步骤）。来源读取/绑定、
+摄入、登录夹具在钉住的 Playwright 1.60 scoped API 调用内替换异常，避免原错误先被步骤
+报告捕获；保留安全的失败步骤，所需钩子缺失则在 I/O 前失败关闭。请求、JSON、HTTP 和
+异步路由失败只抛固定安全错误，不附原 cause、Call log、请求头或正文；失败仍然失败，
+不转为成功或跳过。登录、PKCE 和
+来源 Client 绑定协议不变。这只是测试夹具边界，不修改生产认证/API，也不声称保护其他
+未包裹的测试调用。关闭 trace 本身不是脱敏修复。
+
+`test/browser/restore-reconcile.e2e.ts` 保留批准与拒绝的真实双主体旅程：真实 API 只转发
+一次决策 POST（不重试/重定向），丢弃浏览器响应后，仅通过 GET 核对同一耐久终态、
+决策人和时间，并断言没有第二次提交或业务执行。仅当控制器明确授权本 run 已运行的
+隔离 loopback 栈时才可运行（仍须提供与注册回调一致的 Web/API/IdP 地址）：
+
+```sh
+AUDIT_RESTORE_FIXTURE_AUTHORIZED=true corepack pnpm --dir web exec playwright test test/browser/restore-reconcile.e2e.ts
+```
+
+无授权或缺服务应记为“未执行”；不启动平台/Docker，不以测试发现或组件测试代替真实
+旅程执行。该测试不录 trace、截图、视频或自动失败 DOM 快照；凭据、原因及预演载荷不进
+日志或持久存储。上述命令在受控执行窗口均应通过控制器指定的串行包装器运行。
