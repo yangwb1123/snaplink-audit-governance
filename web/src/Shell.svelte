@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte'
+  import { onDestroy, onMount, untrack } from 'svelte'
   import {
     IrisAdminLayout,
     IrisAlert,
@@ -23,6 +23,7 @@
   import OperationsPage from './pages/OperationsPage.svelte'
   import OverviewPage from './pages/OverviewPage.svelte'
   import { resolveTenantSelection, TENANTS_CHANGED_EVENT } from './tenantScope'
+  import { holdCreateSession } from './features/holds/createOwner.svelte'
 
   interface PageDefinition {
     key: string
@@ -41,6 +42,8 @@
   ]
 
   const { skin, setSkin, setMode } = useSkin()
+  const holdCreates = holdCreateSession()
+  onDestroy(() => holdCreates.dispose())
   let route = $state(readRoute())
   let tenantId = $state($authState.session?.platform ? '' : $authState.session?.tenantId ?? '')
   let tenants = $state<Tenant[]>([])
@@ -280,7 +283,7 @@
       {:else if activeRoute === 'operations'}
         <OperationsPage tenantId={tenantId || undefined} />
       {:else if activeRoute === 'evidence'}
-        <EvidencePage tenantId={tenantId || undefined} />
+        <EvidencePage tenantId={tenantId || undefined} holdCreateOwner={holdCreates.owner} />
       {:else if activeRoute === 'catalog'}
         <CatalogPage tenantId={tenantId || undefined} />
       {:else if activeRoute === 'admin-actions'}

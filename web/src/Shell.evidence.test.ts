@@ -6,7 +6,7 @@ import Harness from './Shell.testHarness.svelte'
 import IntegrityHarness from './features/integrity/IntegrityPanel.testHarness.svelte'
 import { ApiError } from './api/client'
 
-const { api } = vi.hoisted(() => ({ api: { listTenants: vi.fn(), listExports: vi.fn(), listRestores: vi.fn(), listLegalHolds: vi.fn(), verifyIntegrity: vi.fn(), getRestore: vi.fn(), getExport: vi.fn(), cancelExport: vi.fn(), retryExport: vi.fn() } }))
+const { api } = vi.hoisted(() => ({ api: { listTenants: vi.fn(), listExports: vi.fn(), listRestores: vi.fn(), listLegalHolds: vi.fn(), createLegalHold: vi.fn(), releaseLegalHold: vi.fn(), verifyIntegrity: vi.fn(), getRestore: vi.fn(), getExport: vi.fn(), cancelExport: vi.fn(), retryExport: vi.fn() } }))
 vi.mock('./api/useAuditApi', () => ({ useAuditApi: () => api }))
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -103,6 +103,86 @@ describe('independently authorized evidence pages', () => {
     expect(target.textContent).toContain('当前会话没有该功能权限')
     expect(api.listLegalHolds).not.toHaveBeenCalled()
     expect(api.listExports).not.toHaveBeenCalled()
+  })
+
+  it('allows a Hold-only session without fetching export, restore or integrity data', async () => {
+    window.location.hash = '#evidence/holds'
+    login(['audit:legal_hold:manage'])
+    component = mount(Harness, { target }); await settle()
+    expect(api.listLegalHolds).toHaveBeenCalledTimes(1)
+    expect(api.listLegalHolds.mock.lastCall?.[0]).toBe('tenant-a')
+    expect(target.textContent).toContain('当前租户尚无法律保留')
+    expect(api.listExports).not.toHaveBeenCalled()
+    expect(api.listRestores).not.toHaveBeenCalled()
+    expect(api.verifyIntegrity).not.toHaveBeenCalled()
+    expect(api.createLegalHold).not.toHaveBeenCalled()
+    expect(api.releaseLegalHold).not.toHaveBeenCalled()
+  })
+
+  it('does not load Holds until the platform tenant list successfully confirms a usable scope', async () => {
+    let resolve!: (value: unknown) => void
+    api.listTenants.mockReturnValueOnce(new Promise((done) => (resolve = done)))
+    window.location.hash = '#evidence/holds'
+    login(['audit:legal_hold:manage', 'audit:platform:cross_tenant'])
+    component = mount(Harness, { target }); await settle()
+    expect(api.listLegalHolds).not.toHaveBeenCalled()
+    resolve({ items: [], count: 0 }); await settle()
+    expect(api.listLegalHolds).not.toHaveBeenCalled()
+    expect(api.createLegalHold).not.toHaveBeenCalled()
+    expect(api.releaseLegalHold).not.toHaveBeenCalled()
+  })
+
+  it.each(['failed', 'invalid'] as const)('platform tenant confirmation %s never emits a Hold request', async (result) => {
+    if (result === 'failed') api.listTenants.mockRejectedValueOnce(new TypeError('tenant list failed'))
+    else api.listTenants.mockResolvedValueOnce(null)
+    window.location.hash = '#evidence/holds'
+    login(['audit:legal_hold:manage', 'audit:platform:cross_tenant'])
+    component = mount(Harness, { target }); await settle()
+    expect(target.textContent).toContain('无法读取可用租户')
+    expect(api.listLegalHolds).not.toHaveBeenCalled()
+    expect(api.createLegalHold).not.toHaveBeenCalled()
+    expect(api.releaseLegalHold).not.toHaveBeenCalled()
+  })
+
+  for (const change of ['permission', 'token', 'subject'] as const) {
+    for (const outcome of ['success', 'failure'] as const) {
+      it(`Hold ${change} change discards late list ${outcome} when transport ignores abort`, async () => {
+        let resolve!: (value: unknown) => void
+        let reject!: (cause: unknown) => void
+        api.listLegalHolds.mockReturnValueOnce(new Promise((done, fail) => { resolve = done; reject = fail }))
+        window.location.hash = '#evidence/holds'
+        login(['audit:legal_hold:manage'])
+        component = mount(Harness, { target }); await settle()
+        const signal = api.listLegalHolds.mock.calls[0]?.[1] as AbortSignal
+        if (change === 'permission') login(['audit:export:create'])
+        else if (change === 'token') login(['audit:legal_hold:manage'], 'new-token')
+        else authState.update((state) => ({ ...state, session: { ...state.session!, subject: 'new-actor' } }))
+        await settle()
+        expect(signal.aborted).toBe(true)
+        if (outcome === 'success') resolve({ items: [{ id: 'hold-old', tenant_id: 'tenant-a', name: 'OLD PRIVATE HOLD', reason: 'OLD PRIVATE REASON',
+          filter: { from: '2026-10-01T00:00:00Z', to: '2026-10-22T00:00:00Z' }, created_by: 'actor', created_at: '2026-10-22T00:00:00Z' }], count: 1 })
+        else reject(new Error('OLD PRIVATE ERROR'))
+        await settle()
+        expect(target.textContent).not.toContain('OLD PRIVATE')
+        if (change === 'permission') expect(target.textContent).toContain('当前会话没有该功能权限')
+        expect(api.createLegalHold).not.toHaveBeenCalled()
+        expect(api.releaseLegalHold).not.toHaveBeenCalled()
+      })
+    }
+  }
+
+  it('revoking Hold permission fences an already-open release confirmation before effects flush', async () => {
+    api.listLegalHolds.mockResolvedValueOnce({ items: [{ id: 'hold-old', tenant_id: 'tenant-a', name: 'current hold', reason: 'reason',
+      filter: { from: '2026-10-01T00:00:00Z', to: '2026-10-22T00:00:00Z' }, created_by: 'actor', created_at: '2026-10-22T00:00:00Z' }], count: 1 })
+    window.location.hash = '#evidence/holds'
+    login(['audit:legal_hold:manage'])
+    component = mount(Harness, { target }); await settle()
+    button('释放').click(); await settle()
+    const confirm = [...document.querySelectorAll('button')].find((node) => node.textContent?.trim() === '确认释放')!
+    login(['audit:export:create'])
+    confirm.click(); await settle()
+    expect(api.releaseLegalHold).not.toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('确认释放法律保留')
   })
 
   it('discards a late integrity result after A -> B -> A even when the transport ignores AbortSignal', async () => {

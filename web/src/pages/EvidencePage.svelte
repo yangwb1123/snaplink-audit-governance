@@ -7,10 +7,11 @@
   import ExportsPanel from '../features/exports/ExportsPanel.svelte'
   import RestoresPanel from '../features/restores/RestoresPanel.svelte'
   import HoldsPanel from '../features/holds/HoldsPanel.svelte'
+  import type { HoldCreateOwner } from '../features/holds/createOwner.svelte'
   import IntegrityPanel from '../features/integrity/IntegrityPanel.svelte'
   import { evidenceLocation, navigateEvidence, type EvidenceTab } from './evidenceNavigation'
 
-  let { tenantId }: { tenantId?: string } = $props()
+  let { tenantId, holdCreateOwner }: { tenantId?: string; holdCreateOwner: HoldCreateOwner } = $props()
   const session = $derived($authState.session)
   const definitions: Array<{ key: EvidenceTab; title: string; permission: string }> = [
     { key: 'exports', title: '导出任务', permission: 'audit:export:create' },
@@ -44,7 +45,7 @@
     {#key `${active}:${tenantId}:${session?.accessToken}`}
       {#if active === 'exports'}<ExportsPanel {tenantId} initialId={location.id} />
       {:else if active === 'restores'}<RestoresPanel {tenantId} initialId={location.id} />
-      {:else if active === 'holds'}<HoldsPanel {tenantId} />
+      {:else if active === 'holds'}<HoldsPanel {tenantId} createOwner={holdCreateOwner} />
       {:else if active === 'integrity'}<IntegrityPanel {tenantId} />{/if}
     {/key}
   {/if}
