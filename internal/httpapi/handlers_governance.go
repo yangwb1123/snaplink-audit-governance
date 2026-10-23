@@ -159,6 +159,7 @@ func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -185,6 +186,7 @@ func (s *Server) createLegalHold(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
@@ -204,6 +206,7 @@ func (s *Server) listLegalHolds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) releaseLegalHold(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:legal_hold:manage")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)
