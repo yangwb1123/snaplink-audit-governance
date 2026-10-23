@@ -84,3 +84,44 @@ pnpm exec playwright test test/browser/platform.e2e.ts
 - Aero 服务的真实 relay（Vault/ID/IM 进程写入）需要额外构建对应镜像；本页的
   协议级检查证明契约与授权链路，Aero Vault/ID 实际 relay 另行验收。
 - 本地栈不是生产：不声明容量、容灾、正式 WORM/COMPLIANCE 或安全发布通过。
+
+## 4. 外部操作事实的只读核对（platform_fact_probe.py）
+
+当控制器已从真实 Aero 操作取得独立外证（含既有 `event_id`、精确来源/Schema 契约和
+本 run 授权的服务与凭据）时，可用本工具从审计侧观察同一事件及回执，再把输出的事件
+ID 交给现有 Web 详情页复查：
+
+```bash
+# Bearer 只从专用环境变量读取；从私有 env 注入，不写日志、argv 或报告
+set -a; . /path/to/private/platform.env; set +a
+export AUDIT_FACT_PROBE_BEARER="$PLATFORM_AUDIT_EVENT_READ_TOKEN"
+# 可选：追加 --operation-id "$OPERATION_ID" --correlation-id "$CORRELATION_ID"
+python3 test/e2e/platform_fact_probe.py \
+  --audit-url http://127.0.0.1:28089 \
+  --tenant platform-local \
+  --event-id "$EXTERNAL_EVENT_ID" \
+  --source-system aero-vault.security \
+  --event-type aero-vault.security \
+  --schema-id aero-vault.security \
+  --schema-version 1
+```
+
+工具只做两次显式带 `tenant_id` 的 GET：单事件与 receipt；不调用 token 端点、不摄入或
+合成事件、不访问数据库或业务 API。它要求 loopback Audit URL，拒绝带 userinfo、query
+或 fragment 的基地址，限制读取超时和正文大小，禁用环境代理继承与重定向，任一读取失败
+都不降级到其他租户查询。成功还要求事件 tenant/event/source_system/event_type/schema_id/
+schema_version 精确匹配，receipt 状态属于账本已入账的 `ledgered`/`indexed`/`archived`，
+`ledgered_at` 是带时区的严格 RFC3339 时间（接受服务端实际输出的 `Z`、合法数字偏移和
+至多纳秒小数，拒绝缺失时区、非法日期、越界偏移、缺失值和 Go 零时间），且事件与回执的
+tenant/event/stream/sequence/hash 一致，两个响应都为 `Cache-Control: no-store`。
+
+退出码：`0` 证据核对通过；`1` 授权/身份/证据/读取失败；`2` 未执行（缺输入/凭据或
+服务不可用）。stdout 只输出最小 JSON，成功含 `event_id`、`web_event_hash` 和链坐标，
+不含 payload、actor 详情、原始响应或后端错误。把 `event_id` 或 `web_event_hash` 交给
+现有 Web 即可跳转到 `#events/event/<urlencoded-event-id>` 查看同一事件/回执。
+
+**边界**：这是审计侧的只读观察，不是业务操作执行证明。真实业务操作本身以及 outbox/relay
+来源仍须由控制器保留独立外证；本工具通过不能单独宣称 relay、Kafka、ClickHouse、投影
+确认、完整性或端到端全链通过。HTTP 夹具测试只证明读取与核对逻辑，不冒充真实 Aero
+relay 联调。没有真实服务、凭据及外部事件证据时必须明确记为真实联调未执行
+（`not_executed`），不得用夹具结果代替。
