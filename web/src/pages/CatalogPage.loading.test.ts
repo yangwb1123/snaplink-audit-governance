@@ -31,7 +31,7 @@ beforeEach(() => {
   api.listTenants.mockResolvedValue(list({ id: 'tenant-a', name: 'Tenant A' }))
   api.listSources.mockResolvedValue(list(source()))
   api.listSchemas.mockResolvedValue(list(schema()))
-  api.listAdminActions.mockResolvedValue(list({ id: 'action-1', action: 'source.updated', actor: 'operator', created_at: '', detail: 'current action' }))
+  api.listAdminActions.mockResolvedValue(list({ id: 'action-1', tenant_id: 'tenant-a', action: 'source.updated', actor: 'operator', created_at: '', detail: 'current action' }))
   api.getRetention.mockResolvedValue(policy)
   target = document.createElement('div'); document.body.append(target)
 })

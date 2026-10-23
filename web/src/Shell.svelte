@@ -14,6 +14,7 @@
   import { can } from './auth/claims'
   import { authState, logout } from './auth/store'
   import type { UserSession } from './auth/types'
+  import AdminActionsPage from './pages/AdminActionsPage.svelte'
   import CatalogPage from './pages/CatalogPage.svelte'
   import QuickJump from './components/QuickJump.svelte'
   import { navigationHash, parseNavigationHash, type Page } from './pages/navigation'
@@ -36,6 +37,7 @@
     { key: 'operations', title: '操作时间线', icon: 'clock', permissions: ['audit:operation:read'] },
     { key: 'evidence', title: '证据与治理', icon: 'shield', permissions: ['audit:export:create', 'audit:operation:read', 'audit:legal_hold:manage', 'audit:integrity:verify'] },
     { key: 'catalog', title: '治理目录', icon: 'settings', permissions: ['audit:policy:read'] },
+    { key: 'admin-actions', title: '管理自审计', icon: 'clock', permissions: ['audit:policy:read'] },
   ]
 
   const { skin, setSkin, setMode } = useSkin()
@@ -68,6 +70,7 @@
           $authState.session.tenantId,
           [...$authState.session.permissions].sort(),
           $authState.session.accessToken,
+          $authState.session.idToken,
         ])
       : '',
   )
@@ -111,7 +114,7 @@
   async function loadTenants(session: UserSession | null): Promise<void> {
     const generation = ++tenantRequestGeneration
     const scopeKey = session
-      ? JSON.stringify([session.subject, session.platform, session.tenantId, [...session.permissions].sort(), session.accessToken])
+      ? JSON.stringify([session.subject, session.platform, session.tenantId, [...session.permissions].sort(), session.accessToken, session.idToken])
       : ''
 
     if (!session) {
@@ -280,6 +283,8 @@
         <EvidencePage tenantId={tenantId || undefined} />
       {:else if activeRoute === 'catalog'}
         <CatalogPage tenantId={tenantId || undefined} />
+      {:else if activeRoute === 'admin-actions'}
+        <AdminActionsPage tenantId={tenantId || undefined} />
       {:else}
         <OverviewPage tenantId={tenantId || undefined} />
       {/if}

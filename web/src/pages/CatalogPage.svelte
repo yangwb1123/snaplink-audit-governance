@@ -22,6 +22,7 @@
   import { formatDate } from '../components/format'
   import { TENANTS_CHANGED_EVENT } from '../tenantScope'
   import { assessPlatformAuditContracts } from './platformAuditContracts'
+  import { ADMIN_ACTION_LIMIT, adminActionsContext } from './adminActions'
   import {
     canEvaluateRetention,
     canSaveRetention,
@@ -33,9 +34,9 @@
 
   let { tenantId }: { tenantId?: string } = $props()
   const session = $derived($authState.session)
-  const readable = $derived(Boolean(session && can(session, 'audit:policy:read')))
-  const writable = $derived(Boolean(readable && session && can(session, 'audit:policy:write')))
-  const scoped = $derived(Boolean(readable && session && (session.platform ? tenantId : session.tenantId && (!tenantId || tenantId === session.tenantId))))
+  const readable = $derived(Boolean($authState.session && can($authState.session, 'audit:policy:read')))
+  const writable = $derived(Boolean(readable && $authState.session && can($authState.session, 'audit:policy:write')))
+  const scoped = $derived(Boolean(readable && $authState.session && ($authState.session.platform ? tenantId : $authState.session.tenantId && (!tenantId || tenantId === $authState.session.tenantId))))
   type ListRead<T> = { status: 'idle' | 'loading' | 'success' | 'error'; items: T[]; error: unknown; generation: number }
   function emptyRead<T>(): ListRead<T> { return { status: 'idle', items: [], error: null, generation: 0 } }
   const tenantRead = $state(emptyRead<Tenant>())
@@ -44,22 +45,21 @@
   const actionRead = $state(emptyRead<AdminAction>())
   const sources = $derived(sourceRead.items)
   const schemas = $derived(schemaRead.items)
-  const actions = $derived(actionRead.items)
   const reads = { tenants: new RequestScope(), sources: new RequestScope(), schemas: new RequestScope(), actions: new RequestScope(), retention: new RequestScope() }
   const writes = { tenants: new RequestScope(), sources: new RequestScope(), schemas: new RequestScope(), retention: new RequestScope() }
   const allScopes = [...Object.values(reads), ...Object.values(writes)]
   let contractGeneration = $state(0)
-  let contextSession = $state.raw<typeof session>(null)
-  let contextTenant = $state<string | undefined>()
-  const currentContext = $derived(contextSession === session && contextTenant === tenantId)
+  const context = $derived(adminActionsContext($authState.session, tenantId))
+  let loadedContext = $state('')
+  const currentContext = $derived(loadedContext === context)
+  const actions = $derived(currentContext ? actionRead.items : [])
   const contractKnown = $derived(scoped && currentContext && sourceRead.status === 'success' && schemaRead.status === 'success' && sourceRead.generation === contractGeneration && schemaRead.generation === contractGeneration)
   onDestroy(() => allScopes.forEach((scope) => scope.dispose()))
 
   function begin(scope: RequestScope) {
     const request = scope.next()
-    const expectedSession = session
-    const expectedTenant = tenantId
-    return { ...request, current: () => request.current() && session === expectedSession && tenantId === expectedTenant }
+    const expectedContext = context
+    return { ...request, current: () => request.current() && adminActionsContext($authState.session, tenantId) === expectedContext }
   }
 
   const classificationItems = [
@@ -128,8 +128,14 @@
   }
 
   function refreshActions(): void {
-    if (!readable || (!scoped && !session?.platform)) return
-    void readList(actionRead, reads.actions, (signal) => useAuditApi().listAdminActions(tenantId, 100, signal))
+    if (!scoped || !currentContext) return
+    const tenant = session?.platform ? tenantId : session?.tenantId
+    if (!tenant) return
+    void readList(actionRead, reads.actions, async (signal) => {
+      const result = await useAuditApi().listAdminActions(tenant, ADMIN_ACTION_LIMIT, signal)
+      if (result.items.some((item) => item.tenant_id !== tenant)) throw new Error('管理自审计记录与当前租户不匹配')
+      return { items: result.items.slice(0, ADMIN_ACTION_LIMIT) }
+    })
   }
 
   async function refreshRetention(): Promise<void> {
@@ -154,10 +160,11 @@
   }
 
   $effect(() => {
-    const expectedSession = session
-    const expectedTenant = tenantId
+    const key = context
     untrack(() => {
-      contextSession = expectedSession; contextTenant = expectedTenant
+      const expectedSession = session
+      const expectedTenant = tenantId
+      loadedContext = key
       allScopes.forEach((scope) => scope.invalidate())
       for (const state of [tenantRead, sourceRead, schemaRead, actionRead]) { state.status = 'idle'; state.items = []; state.error = null }
       editingSource = null; selectedSchemaKey = ''; sourceError = null; schemaError = null; tenantError = null
@@ -508,10 +515,14 @@
   {#if readable}
   <IrisCard variant="outline" class="section-card" padding="none" style="" header={undefined} footer={undefined}>
     <h3 class="card-heading card-heading-padded">管理操作自审计</h3>
-    <IrisButton size="sm" variant="outline" onclick={refreshActions}>刷新自审计</IrisButton>
-    <ReadState loading={actionRead.status === 'loading'} error={actionRead.error} empty={actionRead.status === 'success' && actions.length === 0} loadingLabel="正在读取管理自审计…" emptyLabel="暂无管理自审计记录" onRetry={refreshActions}>
-      <IrisTable rowKey="id" columns={actionColumns} data={actionRows} density="compact" />
-    </ReadState>
+    <p class="table-hint">当前租户最近最多 {ADMIN_ACTION_LIMIT} 条的预览，非全量历史；不足 {ADMIN_ACTION_LIMIT} 条也不代表完整。<a href="#admin-actions">打开自审计页面（本地筛选）</a></p>
+    <IrisButton size="sm" variant="outline" disabled={!scoped} onclick={refreshActions}>刷新自审计</IrisButton>
+    {#if scoped}
+      <p class="table-hint">已载入 {actions.length} 条（仅最近记录）</p>
+      <ReadState loading={!currentContext || actionRead.status === 'loading'} error={currentContext ? actionRead.error : null} empty={actionRead.status === 'success' && actions.length === 0} loadingLabel="正在读取管理自审计…" emptyLabel="暂无管理自审计记录" onRetry={refreshActions}>
+        <IrisTable rowKey="id" columns={actionColumns} data={actionRows} density="compact" />
+      </ReadState>
+    {:else}<p class="muted-copy">请选择有效租户后读取自审计预览。</p>{/if}
   </IrisCard>
   {/if}
 </section>

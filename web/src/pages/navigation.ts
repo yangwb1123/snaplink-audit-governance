@@ -1,6 +1,6 @@
 // One allowlist for builders, live routes and one-time login return metadata.
 // Identifiers only: never tenant selectors, URLs, queries, filters or tokens.
-export type Page = 'overview' | 'events' | 'operations' | 'evidence' | 'catalog'
+export type Page = 'overview' | 'events' | 'operations' | 'evidence' | 'catalog' | 'admin-actions'
 export type EvidenceTab = 'exports' | 'restores' | 'holds' | 'integrity'
 export type NavigationTarget =
   | { page: Page }
@@ -9,7 +9,7 @@ export type NavigationTarget =
   | { page: 'operations'; aggregateType: string; aggregateId: string }
   | { page: 'evidence'; tab: EvidenceTab; id?: string }
 
-const pages = new Set<Page>(['overview', 'events', 'operations', 'evidence', 'catalog'])
+const pages = new Set<Page>(['overview', 'events', 'operations', 'evidence', 'catalog', 'admin-actions'])
 const tabs = new Set<EvidenceTab>(['exports', 'restores', 'holds', 'integrity'])
 const MAX_HASH = 4096
 const MAX_ID = 256

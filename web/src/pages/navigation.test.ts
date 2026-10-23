@@ -4,7 +4,7 @@ import { investigationHash, investigationLocation } from './investigationNavigat
 import { eventHash, eventLocation, navigationHash, parseNavigationHash, quickJumpHash, safeNavigationHash, type NavigationTarget } from './navigation'
 
 const targets: NavigationTarget[] = [
-  { page: 'overview' }, { page: 'catalog' }, { page: 'events' },
+  { page: 'overview' }, { page: 'catalog' }, { page: 'events' }, { page: 'admin-actions' },
   { page: 'events', eventId: 'event-0123' },
   { page: 'events', eventId: '事件:7' },
   { page: 'operations', operationId: 'order:7' },
@@ -61,6 +61,8 @@ describe('one navigation allowlist', () => {
     '#evidence/exports/export-0123456789abcdef/extra', '#evidence/holds/export-0123456789abcdef',
     '#evidence/exports/export-0123456789abcdef?access_token=secret', '#events?payload_digest=secret',
     '#events/event/' + 'a'.repeat(5000), 'https://evil.test/#events/event/id',
+    '#admin-actions/extra', '#admin-actions?actor=secret', '#admin-actions#secret',
+    '#admin-actions?tenant_id=other', '#admin-actions%2Fextra', '#admin%2Dactions',
   ])('rejects extra route components and URL/query injection: %s', (hash) => {
     expect(parseNavigationHash(hash)).toBeNull()
     expect(safeNavigationHash(hash)).toBe('#overview')
