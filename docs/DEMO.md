@@ -87,6 +87,69 @@ advanced 启动成功。advanced 仍使用 PostgreSQL 的兼容快照布局；�
 - 租户完整性校验为 `valid=true`、包含真实签名段；advanced 还检查治理 worker 正在
   运行。
 
+### 导出文件离线一致性校验
+
+`scripts/verify_export.py` 只使用 Python 标准库，直接校验操作者此前经**合法详情接口**
+取得的 ExportJob JSON 与经**合法下载接口**取得的原始 JSONL；不访问 API、不读取
+凭据、不下载、不解密、不写归档或业务/控制状态，也不提供权限或 Hold 绕过入口。
+
+```sh
+# job.json 是 GET /api/v1/exports/{jobId} 的响应原文；
+# export.jsonl 是 GET /api/v1/exports/{jobId}/download 的响应原文。
+python3 scripts/verify_export.py \
+  --job-file ./job.json \
+  --jsonl ./export.jsonl \
+  --tenant demo
+```
+
+成功时退出 `0`，stdout 只输出一行固定 JSON，例如：
+
+```json
+{"code":"verified","event_count":3,"ok":true,"sha256":"<64位小写十六进制>"}
+```
+
+失败时 stdout 只输出 `{"code":"<固定类别>","ok":false}`，stderr 为空；路径、
+载荷、查询、actor、元数据诊断和原始异常不会回显。工具要求任务为当前
+`--tenant` 的 `completed` 详情，`id` 非空，`digest` 是合法小写 SHA-256，
+`event_count` 是非负整数；列表摘要缺少这些证据字段，不能替代详情/下载输入。
+摘要按同一只读文件流逐行读取的**原始字节**计算，不重新编码或规范化。每条 JSONL
+必须是以 LF 结束的 JSON 对象，具有非空且唯一的 `event_id`、与显式租户一致的
+`tenant_id`，总条数必须等于 `event_count`。合法的零事件导出通过；多来源、多流和
+不连续序号不额外限制。工具不重建明文、不验证全链、不附加事件 Schema/协议校验。
+
+| 上限/输入规则 | 值 |
+|---|---|
+| ExportJob 元数据文件 | 最大 1 MiB |
+| JSONL 总字节 | 最大 1 GiB |
+| 单条物理 JSONL 行（含 LF） | 最大 512 KiB |
+| 文件类型 | 仅普通文件；拒绝叶符号链接、目录、FIFO、socket 等 |
+
+| 退出码 | 结果 `code` | 含义 |
+|---|---|---|
+| `2` | `invalid_arguments` | 参数缺失、未知或租户为空 |
+| `3` | `invalid_metadata` | 元数据 JSON/UTF-8/证据字段/租户/状态/摘要格式/条数类型不合法 |
+| `4` | `invalid_json` | JSONL 行不是合法 JSON、空行或未以 LF 结束 |
+| `5` | `invalid_utf8` | JSONL 行不是合法 UTF-8 |
+| `6` | `invalid_jsonl_object` | JSONL 行顶层不是对象 |
+| `7` | `missing_event_id` | `event_id` 缺失、为空或不是字符串 |
+| `8` | `duplicate_event_id` | `event_id` 重复 |
+| `9` | `tenant_mismatch` | 任一事件的 `tenant_id` 与 `--tenant` 不一致 |
+| `10` | `count_mismatch` | JSONL 条数不等于元数据 `event_count` |
+| `11` | `digest_mismatch` | 原始字节 SHA-256 不等于元数据 `digest` |
+| `12` | `input_unavailable` | 输入缺失、不可读或读取失败 |
+| `13` | `input_not_regular` | 叶符号链接、目录、FIFO 等非普通文件 |
+| `14` | `metadata_too_large` | 元数据超过 1 MiB |
+| `15` | `file_too_large` | JSONL 超过 1 GiB |
+| `16` | `line_too_large` | 单行超过 512 KiB |
+| `70` | `internal_error` | 未预期的本地失败（不打印详情） |
+
+**信任边界：** 该工具只证明所给 JSONL 文件的原始字节/条数/租户与所给元数据中的
+摘要、计数和租户一致。它不认证元数据来源，不重新授权详情或下载，不证明当前
+Legal Hold、WORM/COMPLIANCE、全历史完整性、事件协议或业务执行。若文件与元数据
+同时被替换，结果一致不能据此证明导出真实；在线访问授权和证据真实性仍须由原 API、
+账本/归档及运维流程分别验证。仓库回归只使用临时文件，不启动 demo；工具本身也不
+以真实 API 下载互操作作为离线校验的前提。
+
 ### 真实磁盘篡改（仅 core）
 
 `core` 的 prove 在完成健康断言后：
