@@ -131,7 +131,7 @@
         ]}
       />
     </IrisCard>
-    <HistoryTimeline result={result} title="聚合版本历史" showVersion />
+    <HistoryTimeline result={result} {tenantId} title="聚合版本历史" showVersion />
     {#if result.next_cursor}
       <div class="table-footer">
         <IrisButton variant="outline" disabled={loading} onclick={() => void lookup(result?.next_cursor ?? '', true)}>

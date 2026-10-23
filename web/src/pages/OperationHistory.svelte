@@ -217,6 +217,7 @@
     {#if timeline}
       <HistoryTimeline
         result={timeline}
+        {tenantId}
         title="事件时间线"
         loadingMore={loadingTimelineMore}
         onLoadMore={() => void loadMoreTimeline()}
