@@ -114,7 +114,10 @@ python3 scripts/verify_export.py \
 `event_count` 是非负整数；列表摘要缺少这些证据字段，不能替代详情/下载输入。
 摘要按同一只读文件流逐行读取的**原始字节**计算，不重新编码或规范化。每条 JSONL
 必须是以 LF 结束的 JSON 对象，具有非空且唯一的 `event_id`、与显式租户一致的
-`tenant_id`，总条数必须等于 `event_count`。合法的零事件导出通过；多来源、多流和
+`tenant_id`，总条数必须等于 `event_count`。元数据和每条 JSONL 中的每个 JSON 对象
+（含任意嵌套对象）都不允许重复成员名；键名按 JSON 转义解码后比较，即使两次出现
+的值相同也拒绝。元数据重复键返回 `invalid_metadata`，JSONL 重复键返回
+`invalid_json`。合法的零事件导出通过；多来源、多流和
 不连续序号不额外限制。工具不重建明文、不验证全链、不附加事件 Schema/协议校验。
 
 | 上限/输入规则 | 值 |

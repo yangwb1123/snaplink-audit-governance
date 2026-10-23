@@ -102,6 +102,22 @@ def metadata(digest: str, count: int, **updates) -> dict:
     return value
 
 
+def json_fragment(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def duplicate_member(
+    document: dict, key: str, final: object, first: object
+) -> bytes:
+    """Insert a duplicate member before its final, valid occurrence."""
+    raw = json_fragment(document)
+    marker = f"{json_fragment(key)}:{json_fragment(final)}"
+    duplicate = f"{json_fragment(key)}:{json_fragment(first)},{marker}"
+    if raw.count(marker) != 1:
+        raise AssertionError("fixture member is not unique")
+    return raw.replace(marker, duplicate, 1).encode("utf-8")
+
+
 def fingerprint(path: Path) -> dict:
     info = path.stat()
     return {
@@ -339,6 +355,100 @@ class VerifyExportCliTest(unittest.TestCase):
                 }[name]
                 self.assert_failure(process, expected)
 
+    def test_duplicate_jsonl_object_keys_are_rejected_even_when_last_value_is_valid(self):
+        # json.loads keeps the last duplicate.  Each fixture therefore ends
+        # with the valid tenant/event and matches its own raw-byte digest and
+        # count, which the old parser wrongly accepted.
+        tenant_bytes = json_fragment(TENANT).encode("utf-8")
+        sentinel_bytes = json_fragment(SENTINEL).encode("utf-8")
+        cases = {
+            "tenant_id": (
+                b'{"event_id":"dup-tenant","tenant_id":' + sentinel_bytes
+                + b',"tenant_id":' + tenant_bytes + b'}\n'
+            ),
+            "event_id": (
+                b'{"event_id":' + sentinel_bytes
+                + b',"event_id":"dup-event","tenant_id":' + tenant_bytes
+                + b'}\n'
+            ),
+            "nested_actor": (
+                b'{"event_id":"nested-actor","tenant_id":' + tenant_bytes
+                + b',"actor":{"id":' + sentinel_bytes
+                + b',"id":"second"}}\n'
+            ),
+            "nested_payload": (
+                b'{"event_id":"nested-payload","tenant_id":' + tenant_bytes
+                + b',"payload":{"note":' + sentinel_bytes
+                + b',"note":"second"}}\n'
+            ),
+            "nested_array_object": (
+                b'{"event_id":"nested-array","tenant_id":' + tenant_bytes
+                + b',"payload":{"items":[{"id":' + sentinel_bytes
+                + b',"id":"second"}]}}\n'
+            ),
+            "same_value_duplicate": (
+                b'{"event_id":"same-value","tenant_id":' + tenant_bytes
+                + b',"tenant_id":' + tenant_bytes + b'}\n'
+            ),
+            "escaped_tenant_key": (
+                b'{"event_id":"escaped-key","\\u0074enant_id":'
+                + sentinel_bytes + b',"tenant_id":' + tenant_bytes + b'}\n'
+            ),
+            "nested_actor_escaped_key": (
+                b'{"event_id":"nested-escaped","tenant_id":' + tenant_bytes
+                + b',"actor":{"\\u0069d":' + sentinel_bytes
+                + b',"id":"second"}}\n'
+            ),
+        }
+        before_jsonl = fingerprint(self.jsonl)
+        before_job = fingerprint(self.job)
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                path = self.root / f"duplicate-key-{name}.jsonl"
+                path.write_bytes(raw)
+                job = self.root / f"duplicate-key-{name}.json"
+                self.write_metadata(job, metadata(sha256_hex(raw), 1))
+                self.assert_failure(
+                    self.run_cli(job=job, jsonl=path), "invalid_json"
+                )
+        self.assertEqual(fingerprint(self.jsonl), before_jsonl)
+        self.assertEqual(fingerprint(self.job), before_job)
+
+    def test_same_key_names_across_objects_and_inside_strings_are_allowed(self):
+        events = [
+            event(
+                "evt-same-a",
+                actor={"id": "actor-a", "type": "service"},
+                payload={
+                    "id": "payload-a",
+                    "note": "tenant_id status digest event_count event_id",
+                },
+            ),
+            event(
+                "evt-same-b",
+                actor={"id": "actor-b", "type": "service"},
+                payload={
+                    "id": "payload-b",
+                    "note": "actor.id payload.id repeated spelling only",
+                },
+            ),
+        ]
+        raw = encode_lines(events)
+        path = self.root / "repeat-across-objects.jsonl"
+        path.write_bytes(raw)
+        os.chmod(path, 0o640)
+        job = self.root / "repeat-across-objects.json"
+        self.write_metadata(job, metadata(sha256_hex(raw), len(events)))
+        before_jsonl = fingerprint(path)
+        before_job = fingerprint(job)
+        process = self.run_cli(job=job, jsonl=path)
+        self.assertEqual(process.returncode, 0)
+        value = self.result(process)
+        self.assertEqual(value["event_count"], len(events))
+        self.assertEqual(value["sha256"], sha256_hex(raw))
+        self.assertEqual(fingerprint(path), before_jsonl)
+        self.assertEqual(fingerprint(job), before_job)
+
     def test_count_mismatch_fails_with_matching_digest(self):
         job = self.root / "wrong-count.json"
         self.write_metadata(job, metadata(self.digest, len(self.events) + 1))
@@ -372,6 +482,36 @@ class VerifyExportCliTest(unittest.TestCase):
                 job = self.root / f"metadata-{name}.json"
                 self.write_metadata(job, value)
                 self.assert_failure(self.run_cli(job=job), "invalid_metadata")
+
+    def test_duplicate_metadata_members_are_rejected_even_when_last_value_is_valid(self):
+        # The final status/digest/count all match the JSONL and tenant; only a
+        # parser that rejects duplicate object keys can tell this apart from
+        # the valid metadata fixture.
+        valid = metadata(self.digest, len(self.events))
+        cases = {
+            "status": ("status", valid["status"], "running-" + SENTINEL),
+            "status_same_value": (
+                "status",
+                valid["status"],
+                valid["status"],
+            ),
+            "digest": ("digest", valid["digest"], SENTINEL),
+            "event_count": ("event_count", valid["event_count"], SENTINEL),
+            "nested_query_from": (
+                "from",
+                valid["query"]["from"],
+                SENTINEL,
+            ),
+        }
+        before_jsonl = fingerprint(self.jsonl)
+        before_job = fingerprint(self.job)
+        for name, (key, final, first) in cases.items():
+            with self.subTest(name=name):
+                job = self.root / f"duplicate-metadata-{name}.json"
+                job.write_bytes(duplicate_member(valid, key, final, first))
+                self.assert_failure(self.run_cli(job=job), "invalid_metadata")
+        self.assertEqual(fingerprint(self.jsonl), before_jsonl)
+        self.assertEqual(fingerprint(self.job), before_job)
 
     def test_missing_symlink_directory_and_fifo_inputs_are_rejected(self):
         before_jsonl = fingerprint(self.jsonl)

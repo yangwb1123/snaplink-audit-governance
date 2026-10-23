@@ -13,7 +13,10 @@ checks only that those two local artifacts agree:
 * SHA-256 is calculated over the exact bytes read from the JSONL stream; and
 * every newline-terminated JSONL record is an object with a non-empty,
   unique ``event_id`` and a ``tenant_id`` equal to the selected tenant, and
-  the number of records equals ``event_count``.
+  the number of records equals ``event_count``; and
+* neither input contains a JSON object with a duplicate member name at any
+  nesting depth.  Names are compared after JSON escape decoding, and a
+  duplicate is rejected even when both occurrences carry the same value.
 
 It does not re-encode/normalize the input, reconstruct plaintext, verify the
 hash chain, evaluate Legal Hold, authenticate metadata provenance, or prove
@@ -139,7 +142,11 @@ def _read_metadata(fd: int, info: os.stat_result) -> dict[str, Any]:
     except UnicodeDecodeError:
         raise VerificationFailure("invalid_metadata") from None
     try:
-        document = json.loads(text, parse_constant=_reject_constant)
+        document = json.loads(
+            text,
+            parse_constant=_reject_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
     except (ValueError, RecursionError):
         raise VerificationFailure("invalid_metadata") from None
     if not isinstance(document, dict):
@@ -149,6 +156,22 @@ def _read_metadata(fd: int, info: os.stat_result) -> dict[str, Any]:
 
 def _reject_constant(_value: str) -> Any:
     raise ValueError("non-standard JSON constant")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one object, rejecting repeated decoded member names.
+
+    ``object_pairs_hook`` receives the escaped member names after JSON
+    decoding and is invoked separately for every object at every nesting
+    depth, so ``"tenant_id"`` escaped as ``"\\u0074enant_id"`` still collides
+    while equal names in unrelated objects do not.
+    """
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("duplicate JSON object key")
+        document[key] = value
+    return document
 
 
 def _validate_metadata(document: dict[str, Any], tenant: str) -> tuple[str, int]:
@@ -179,7 +202,11 @@ def _parse_jsonl_line(line: bytes) -> dict[str, Any]:
     except UnicodeDecodeError:
         raise VerificationFailure("invalid_utf8") from None
     try:
-        value = json.loads(text, parse_constant=_reject_constant)
+        value = json.loads(
+            text,
+            parse_constant=_reject_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
     except (ValueError, RecursionError):
         raise VerificationFailure("invalid_json") from None
     if not isinstance(value, dict):
