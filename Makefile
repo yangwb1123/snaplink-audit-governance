@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down
+.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down service-timing
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down"
+	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down service-timing"
 
 check:
 	$(CLI) check
@@ -122,3 +122,6 @@ demo-prove:
 
 demo-down:
 	bash scripts/demo.sh down
+
+service-timing:
+	GO="$(GO)" SERVICE_TIMING_OUT="$(SERVICE_TIMING_OUT)" SERVICE_TIMING_RACE="$(SERVICE_TIMING_RACE)" python3 scripts/service_timing.py
