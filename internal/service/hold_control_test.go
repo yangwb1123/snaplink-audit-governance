@@ -17,7 +17,11 @@ func reopenHoldControlFile(t *testing.T, path string) *Service {
 	if err != nil {
 		t.Fatal("could not reopen original Hold file store")
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("closing reopened Hold control file store: %v", err)
+		}
+	})
 	svc := newServiceOn(t, st)
 	pauseExportDispatch(svc)
 	return svc

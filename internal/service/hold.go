@@ -56,17 +56,31 @@ func (s *Service) ListLegalHolds(ctx context.Context, tenantID string) ([]domain
 	if err := requireTenantScope(tenantID); err != nil {
 		return nil, err
 	}
-	var result []domain.LegalHold
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for _, hold := range data.LegalHolds {
-			if hold.TenantID == tenantID {
-				result = append(result, hold)
+	// Hold metadata is control only, not event evidence. Keep the original
+	// single read budget across filtering, ordering and the post-capture
+	// withdrawal check: a withdrawn or expired read must not expose a list
+	// captured from an otherwise valid snapshot. A successful no-match owns an
+	// empty (non-nil) list so the JSON transport renders items:[] rather than
+	// items:null; a failed read owns no partial list.
+	result := []domain.LegalHold{}
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			for _, hold := range data.LegalHolds {
+				if hold.TenantID == tenantID {
+					result = append(result, hold)
+				}
 			}
+			sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
+		return opCtx.Err()
 	})
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) ReleaseLegalHold(ctx context.Context, tenantID, holdID, releasedBy string) (domain.LegalHold, error) {

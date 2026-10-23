@@ -74,7 +74,11 @@ func admissionFileFixture(t *testing.T) (*Service, string, domain.Query) {
 	if err != nil {
 		t.Fatal("could not open owned admission file fixture")
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("closing owned admission file fixture: %v", err)
+		}
+	})
 	svc := newServiceOn(t, st)
 	seedFileTestDomain(t, svc)
 	pauseExportDispatch(svc) // inspect only admission, never suppress claim/CAS checks
