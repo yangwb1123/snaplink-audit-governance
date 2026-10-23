@@ -32,7 +32,8 @@ let component: ReturnType<typeof mount> | undefined
 async function settle(): Promise<void> {
   await tick()
   await Promise.resolve()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await tick()
+  await Promise.resolve()
   await tick()
 }
 
@@ -66,6 +67,13 @@ afterEach(async () => {
   window.history.replaceState(null, '', '#')
 })
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
 describe('resilient operation investigation', () => {
   it('keeps summary and timeline when the replay read fails, and retries only replay', async () => {
     api.replayOperation.mockRejectedValueOnce(new Error('replay unavailable')).mockResolvedValueOnce(replay)
@@ -84,6 +92,34 @@ describe('resilient operation investigation', () => {
     expect(api.getOperationTimeline).toHaveBeenCalledTimes(1)
     expect(replayState()).toEqual({ status: 'done' })
     expect(target.textContent).not.toContain('部分区块读取失败')
+  })
+
+  it('lets summary and replay retries finish independently while timeline remains pending', async () => {
+    const timeline = deferred<never>()
+    const summaryRetry = deferred<OperationSummary>()
+    const replayRetry = deferred<typeof replay>()
+    api.getOperation.mockRejectedValueOnce(new Error('summary unavailable')).mockReturnValueOnce(summaryRetry.promise)
+    api.replayOperation.mockRejectedValueOnce(new Error('replay unavailable')).mockReturnValueOnce(replayRetry.promise)
+    api.getOperationTimeline.mockReturnValueOnce(timeline.promise)
+    mountOperation()
+    await settle()
+    const buttons = retryButtons()
+    expect(buttons).toHaveLength(2)
+    buttons.forEach(button => button.click())
+    await settle()
+    expect(api.getOperation).toHaveBeenCalledTimes(2)
+    expect(api.replayOperation).toHaveBeenCalledTimes(2)
+    expect(api.getOperationTimeline).toHaveBeenCalledTimes(1)
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(3)
+    summaryRetry.resolve(summary)
+    await settle()
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(2)
+    replayRetry.resolve(replay)
+    await settle()
+    expect(replayState()).toEqual({ status: 'done' })
+    expect(target.textContent?.includes('unavailable')).toBe(false)
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(1)
+    expect(target.textContent?.includes('正在读取事件时间线')).toBe(true)
   })
 
   it('keeps replay and timeline when the summary read fails', async () => {

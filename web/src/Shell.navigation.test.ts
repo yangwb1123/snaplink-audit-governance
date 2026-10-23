@@ -8,15 +8,70 @@ import Harness from './Shell.testHarness.svelte'
 const { api } = vi.hoisted(() => ({ api: {
   queryEvents: vi.fn(), getEvent: vi.fn(), getReceipt: vi.fn(),
   getOperation: vi.fn(), getOperationTimeline: vi.fn(), replayOperation: vi.fn(),
-  listExports: vi.fn(), getExport: vi.fn(), getGovernanceStatus: vi.fn(),
+  listExports: vi.fn(), getExport: vi.fn(), getGovernanceStatus: vi.fn(), listTenants: vi.fn(),
 } }))
 vi.mock('./api/useAuditApi', () => ({ useAuditApi: () => api }))
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
-function login(permissions: string[], token = 'token') { authState.set({ status: 'authenticated', session: { accessToken: token, idToken: 'id', expiresAt: Date.now() + 100000, subject: 'actor', displayName: 'actor', tenantId: 'tenant-a', platform: false, roles: [], permissions: new Set(permissions) }, error: null }) }
-async function settle() { await tick(); await Promise.resolve(); await tick() }
+function login(permissions: string[], token = 'token', options: { tenantId?: string; idToken?: string; subject?: string; platform?: boolean } = {}) {
+  authState.set({ status: 'authenticated', session: {
+    accessToken: token, idToken: options.idToken ?? 'id', expiresAt: Date.now() + 100000,
+    subject: options.subject ?? 'actor', displayName: 'actor', tenantId: options.tenantId ?? 'tenant-a',
+    platform: options.platform ?? false, roles: [], permissions: new Set(permissions),
+  }, error: null })
+}
+async function settle() { await tick(); await Promise.resolve(); await tick(); await Promise.resolve(); await tick() }
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+const operationMethods = ['getOperation', 'getOperationTimeline', 'replayOperation'] as const
+function holdOperationReads() {
+  return operationMethods.map(method => {
+    const read = deferred<unknown>()
+    api[method].mockReturnValueOnce(read.promise)
+    return read
+  })
+}
+function operationValues(marker: string, tenantId = 'tenant-a') {
+  return [
+    { operation_id: 'op-7', tenant_id: tenantId, event_count: 0, outcomes: [marker] },
+    { items: [], count: marker === 'current-observation' ? 0 : 987654 },
+    { tenant_id: tenantId, event_count: 0, state: { status: marker }, last_sequence: 0 },
+  ]
+}
+function currentOperation(tenantId = 'tenant-a') {
+  const current = operationValues('current-observation', tenantId)
+  operationMethods.forEach((method, index) => api[method].mockResolvedValue(current[index]))
+}
+function chooseTenant(tenant: string) {
+  const select = target.querySelector<HTMLSelectElement>('select[aria-label="租户范围"]')!
+  // happy-dom 20 omits OPTION from :checked. Match native selected-option
+  // lookup only while dispatching the real event to Svelte's select binding.
+  const query = select.querySelector.bind(select)
+  const lookup = vi.spyOn(select, 'querySelector').mockImplementation(selector =>
+    selector === ':checked' ? [...select.options].find(option => option.selected) ?? null : query(selector),
+  )
+  try {
+    select.value = tenant
+    expect(select.value).toBe(tenant)
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  } finally {
+    lookup.mockRestore()
+  }
+}
+function finishOldReads(reads: ReturnType<typeof holdOperationReads>, outcome: 'success' | 'failure') {
+  const obsolete = operationValues('obsolete-observation')
+  reads.forEach((read, index) => {
+    if (outcome === 'success') read.resolve(obsolete[index])
+    else read.reject(new Error('obsolete operation failure'))
+  })
+}
 beforeEach(() => {
   vi.resetAllMocks()
+  api.listTenants.mockResolvedValue({ items: [{ id: 'tenant-a', name: 'A' }, { id: 'tenant-b', name: 'B' }] })
   api.queryEvents.mockResolvedValue({ items: [], count: 0 })
   api.getEvent.mockResolvedValue({ event_id: 'event-7', tenant_id: 'tenant-a', schema_id: 'event-pinned-schema', schema_version: 2, actor: { id: 'actor' } })
   api.getReceipt.mockResolvedValue({ event_id: 'event-7', tenant_id: 'tenant-a', status: 'archived' })
@@ -84,6 +139,64 @@ describe('Shell direct links and permission boundaries', () => {
     expect(api.getOperation).toHaveBeenLastCalledWith('op-8', 'tenant-a')
     expect(target.textContent).not.toContain('OLD PRIVATE OPERATION')
     expect(target.textContent).toContain('op-8')
+  })
+
+  it.each((['access token', 'ID token', 'subject', 'tenant', 'permission revocation'] as const).flatMap(change =>
+    (['success', 'failure'] as const).map(outcome => ({ change, outcome })),
+  ))('discards every old operation $outcome after $change', async ({ change, outcome }) => {
+    const old = holdOperationReads()
+    login(['audit:operation:read']); window.history.replaceState(null, '', '#operations/op/op-7')
+    component = mount(Harness, { target }); await settle()
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(3)
+    const tenant = change === 'tenant' ? 'tenant-b' : 'tenant-a'
+    currentOperation(tenant)
+    if (change === 'access token') login(['audit:operation:read'], 'renewed-token')
+    else if (change === 'ID token') login(['audit:operation:read'], 'token', { idToken: 'renewed-id' })
+    else if (change === 'subject') login(['audit:operation:read'], 'token', { subject: 'another-actor' })
+    else if (change === 'tenant') login(['audit:operation:read'], 'token', { tenantId: tenant })
+    else login([])
+    await settle()
+    finishOldReads(old, outcome)
+    await settle()
+    expect(target.textContent?.includes('obsolete')).toBe(false)
+    expect(target.textContent?.includes('987654')).toBe(false)
+    expect(target.textContent?.includes('current-observation')).toBe(change !== 'permission revocation')
+    for (const method of operationMethods) expect(api[method]).toHaveBeenCalledTimes(change === 'permission revocation' ? 1 : 2)
+    if (change !== 'permission revocation') {
+      expect(api.getOperation).toHaveBeenLastCalledWith('op-7', tenant)
+      expect(api.getOperationTimeline).toHaveBeenLastCalledWith('op-7', { pageSize: 200, tenantId: tenant })
+      expect(api.replayOperation).toHaveBeenLastCalledWith('op-7', tenant)
+    }
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(0)
+  })
+
+  it.each((['token', 'tenant', 'platform selection'] as const).flatMap(change =>
+    (['success', 'failure'] as const).map(outcome => ({ change, outcome })),
+  ))('isolates operation $outcome across Shell $change A → B → A', async ({ change, outcome }) => {
+    const oldA = holdOperationReads()
+    const oldB = holdOperationReads()
+    const platform = change === 'platform selection'
+    login(['audit:operation:read'], 'token', { platform })
+    window.history.replaceState(null, '', '#operations/op/op-7')
+    component = mount(Harness, { target }); await settle()
+    for (const method of operationMethods) expect(api[method]).toHaveBeenCalledTimes(1)
+    currentOperation()
+    for (const value of ['b', 'a']) {
+      if (platform) chooseTenant(`tenant-${value}`)
+      else if (change === 'token') login(['audit:operation:read'], value === 'b' ? 'renewed-token' : 'token')
+      else login(['audit:operation:read'], 'token', { tenantId: `tenant-${value}` })
+      await settle()
+      for (const method of operationMethods) expect(api[method]).toHaveBeenCalledTimes(value === 'b' ? 2 : 3)
+    }
+    for (const old of [oldA, oldB]) finishOldReads(old, outcome)
+    await settle()
+    expect(target.textContent?.includes('obsolete')).toBe(false)
+    expect(target.textContent?.includes('987654')).toBe(false)
+    expect(target.textContent?.includes('current-observation')).toBe(true)
+    for (const method of operationMethods) expect(api[method]).toHaveBeenCalledTimes(3)
+    expect(api.getOperation).toHaveBeenLastCalledWith('op-7', 'tenant-a')
+    expect(api.replayOperation).toHaveBeenLastCalledWith('op-7', 'tenant-a')
+    expect(target.querySelectorAll('.loading-block[role="status"]')).toHaveLength(0)
   })
 
   it.each(['#events/event/event-7', '#operations/op/op-7', '#evidence/exports/export-0123456789abcdef'])('never requests an unauthorized direct link: %s', async (hash) => {

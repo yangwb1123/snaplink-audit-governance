@@ -11,8 +11,14 @@
 
   let { tenantId, initialId = '' }: { tenantId?: string; initialId?: string } = $props()
   const api = useAuditApi()
-  const lookupState = new LatestLookup()
-  onDestroy(() => lookupState.invalidate())
+  type Section = 'summary' | 'timeline' | 'replay'
+  const sectionRequests = {
+    summary: new LatestLookup(),
+    timeline: new LatestLookup(),
+    replay: new LatestLookup(),
+  }
+  const timelineMoreRequests = new LatestLookup()
+  onDestroy(invalidateRequests)
   let operationId = $state('')
   let attempted = $state(false)
   let summary = $state<OperationSummary | null>(null)
@@ -25,7 +31,8 @@
   let loadingSummary = $state(false)
   let loadingTimeline = $state(false)
   let loadingReplay = $state(false)
-  let loading = $state(false)
+  let loadingTimelineMore = $state(false)
+  const loading = $derived(loadingSummary || loadingTimeline || loadingReplay || loadingTimelineMore)
 
   onMount(() => {
     const id = initialId.trim()
@@ -36,6 +43,11 @@
 
   function lookupKey(id = operationId.trim()): string {
     return JSON.stringify([tenantId ?? '', id])
+  }
+
+  function invalidateRequests(): void {
+    for (const requests of Object.values(sectionRequests)) requests.invalidate()
+    timelineMoreRequests.invalidate()
   }
 
   function resetResults(): void {
@@ -49,77 +61,62 @@
     loadingSummary = false
     loadingTimeline = false
     loadingReplay = false
+    loadingTimelineMore = false
   }
 
   function updateOperationId(value: string): void {
     operationId = value
-    lookupState.invalidate()
+    invalidateRequests()
     attempted = false
     resetResults()
-    loading = false
   }
 
   // The three reads are independent observations. A failure in one section must
   // not hide the facts the other sections already returned; each failure stays
   // explicit and retryable instead of degrading into a blank page.
-  async function lookup(): Promise<void> {
+  function lookup(): void {
     const id = operationId.trim()
     if (!id || loading) return
-    const key = lookupKey(id)
-    const request = lookupState.begin(key)
+    invalidateRequests()
     attempted = true
-    loading = true
     resetResults()
-    loadingSummary = true
-    loadingTimeline = true
-    loadingReplay = true
-    const [summaryResult, timelineResult, replayResult] = await Promise.allSettled([
-      api.getOperation(id, tenantId),
-      api.getOperationTimeline(id, { pageSize: 200, tenantId }),
-      api.replayOperation(id, tenantId),
-    ])
-    if (!lookupState.isCurrent(request, lookupKey())) return
-    if (summaryResult.status === 'fulfilled') summary = summaryResult.value
-    else summaryError = summaryResult.reason
-    if (timelineResult.status === 'fulfilled') timeline = timelineResult.value
-    else timelineError = timelineResult.reason
-    if (replayResult.status === 'fulfilled') replay = replayResult.value
-    else replayError = replayResult.reason
-    loadingSummary = false
-    loadingTimeline = false
-    loadingReplay = false
-    loading = false
+    // Commit each outcome as it arrives; a sibling may never settle.
+    void retrySection('summary')
+    void retrySection('timeline')
+    void retrySection('replay')
   }
 
-  // Appending a later page must not re-read the summary or replay, and a
-  // failed page keeps the events already displayed.
+  // Appending a later page must not re-read or fence out summary/replay.
+  // A failed page keeps both the displayed events and its explicit retry cursor.
   async function loadMoreTimeline(): Promise<void> {
     const id = operationId.trim()
     const current = timeline
     const cursor = current?.next_cursor ?? ''
-    if (!id || !current || !cursor || loading) return
-    const key = lookupKey(id)
-    const request = lookupState.begin(key)
-    loading = true
+    if (!id || !current || !cursor || loadingTimeline || loadingTimelineMore) return
+    const request = timelineMoreRequests.begin(lookupKey(id))
+    loadingTimelineMore = true
     timelineMoreError = null
+    const isCurrent = () =>
+      timelineMoreRequests.isCurrent(request, lookupKey()) &&
+      timeline === current && current.next_cursor === cursor
     try {
       const next = await api.getOperationTimeline(id, { pageSize: 200, cursor, tenantId })
-      if (!lookupState.isCurrent(request, lookupKey())) return
-      if (timeline !== current || current.next_cursor !== cursor) return
+      if (!isCurrent()) return
       timeline = { ...next, items: [...current.items, ...next.items] }
     } catch (cause) {
-      if (lookupState.isCurrent(request, lookupKey())) timelineMoreError = cause
+      if (isCurrent()) timelineMoreError = cause
     } finally {
-      if (lookupState.isCurrent(request, lookupKey())) loading = false
+      if (timelineMoreRequests.isCurrent(request, lookupKey())) loadingTimelineMore = false
     }
   }
 
-  async function retrySection(section: 'summary' | 'timeline' | 'replay'): Promise<void> {
+  async function retrySection(section: Section): Promise<void> {
     const id = operationId.trim()
-    if (!id || loading) return
-    const key = lookupKey(id)
-    const request = lookupState.begin(key)
-    loading = true
+    const busy = section === 'summary' ? loadingSummary
+      : section === 'timeline' ? loadingTimeline || loadingTimelineMore : loadingReplay
+    if (!id || busy) return
+    const requests = sectionRequests[section]
+    const request = requests.begin(lookupKey(id))
     if (section === 'summary') {
       loadingSummary = true
       summaryError = null
@@ -133,25 +130,24 @@
     try {
       if (section === 'summary') {
         const value = await api.getOperation(id, tenantId)
-        if (lookupState.isCurrent(request, lookupKey())) summary = value
+        if (requests.isCurrent(request, lookupKey())) summary = value
       } else if (section === 'timeline') {
         const value = await api.getOperationTimeline(id, { pageSize: 200, tenantId })
-        if (lookupState.isCurrent(request, lookupKey())) timeline = value
+        if (requests.isCurrent(request, lookupKey())) timeline = value
       } else {
         const value = await api.replayOperation(id, tenantId)
-        if (lookupState.isCurrent(request, lookupKey())) replay = value
+        if (requests.isCurrent(request, lookupKey())) replay = value
       }
     } catch (cause) {
-      if (!lookupState.isCurrent(request, lookupKey())) return
+      if (!requests.isCurrent(request, lookupKey())) return
       if (section === 'summary') summaryError = cause
       else if (section === 'timeline') timelineError = cause
       else replayError = cause
     } finally {
-      if (lookupState.isCurrent(request, lookupKey())) {
+      if (requests.isCurrent(request, lookupKey())) {
         if (section === 'summary') loadingSummary = false
         else if (section === 'timeline') loadingTimeline = false
         else loadingReplay = false
-        loading = false
       }
     }
   }
@@ -222,7 +218,7 @@
       <HistoryTimeline
         result={timeline}
         title="事件时间线"
-        loadingMore={loading}
+        loadingMore={loadingTimelineMore}
         onLoadMore={() => void loadMoreTimeline()}
         moreError={timelineMoreError}
         onRetryMore={() => void loadMoreTimeline()}
