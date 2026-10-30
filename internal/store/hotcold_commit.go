@@ -12,8 +12,6 @@ import (
 	"os"
 	"reflect"
 	"sort"
-
-	"github.com/snaplink/audit-governance/internal/domain"
 )
 
 func keyBelongsToTenant(key, tenantID string) bool {
@@ -230,19 +228,6 @@ func (s *splitStore) persistPrepared(prepared *preparedSplit) error {
 		}
 	}
 	return nil
-}
-
-func cloneControl(control *Snapshot) (*Snapshot, error) {
-	clone, err := cloneSnapshot(control)
-	if err != nil {
-		return nil, err
-	}
-	clone.Events = map[string]domain.Event{}
-	clone.Receipts = map[string]domain.EventReceipt{}
-	clone.Streams = map[string]StreamState{}
-	clone.Segments = map[string][]domain.Segment{}
-	clone.Checkpoints = map[string][]domain.Checkpoint{}
-	return clone, nil
 }
 
 func cloneTenantHot(hot *Snapshot) (*Snapshot, error) {

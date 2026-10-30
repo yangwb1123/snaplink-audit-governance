@@ -128,6 +128,7 @@ func (s *Server) downloadExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) verifyIntegrity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	claims, err := s.require(r, "audit:integrity:verify")
 	if err != nil {
 		s.writeError(w, r, statusForError(err), err)

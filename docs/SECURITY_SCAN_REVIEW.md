@@ -456,3 +456,96 @@
   核心 demo 两次重复通过、advanced 冒烟通过，真实平台浏览器 E2E 通过
   （含事件详情安全深链接）。证据在
   `runs/multi-agent-20261021T080937Z/` 与 `runs/platform-integration-20261021T024744Z/`。
+
+## 2026-10-29 A-net-update：x/net 最小 MVS 更新（阶段实施，安全发布仍阻塞）
+
+### 实际依赖变化
+
+- 只执行指定的 `go get golang.org/x/net@v0.62.0`，未使用 `-u` 或 tidy。
+  `go.mod` 精确为 5 行删除、5 行增加，模块集合及 direct/indirect 分类不变：
+
+| 模块 | 原版本 | 本轮版本 | 实际依赖图中的原因 |
+|---|---|---|---|
+| `golang.org/x/net` | v0.60.0 | v0.62.0 | 指定升级，处置下述两个 html 模块级告警。 |
+| `golang.org/x/crypto` | v0.57.0 | v0.58.0 | `x/net@v0.62.0 → x/crypto@v0.58.0`。 |
+| `golang.org/x/sys` | v0.48.0 | v0.49.0 | `x/net@v0.62.0` 与 `x/crypto@v0.58.0` 均要求 v0.49.0。 |
+| `golang.org/x/text` | v0.42.0 | v0.43.0 | `x/net@v0.62.0` 与 `x/crypto@v0.58.0` 均要求 v0.43.0。 |
+| `golang.org/x/sync` | v0.23.0 | v0.24.0 | 实际 MVS 还要求 `x/text@v0.43.0 → x/sync@v0.24.0`，不是额外主动升级。 |
+
+- `go 1.26.10` 保持，未新增 toolchain 指令；Docker、proto/generator、gRPC v1.83.2、
+  protobuf v1.36.11 及其他无关 pins/生产代码/测试均未改。以上版本闭包来自实际
+  `go get` 和 `go mod graph`，不是按预期手工调整。
+- `go.sum` 原 199 行完整保留，精确新增以下 10 行、删除 0 行（最终 209 行）；
+  保留旧 checksum 不代表旧版本仍被选中，没有扫荡历史 sum：
+
+```text
+golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
+golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
+golang.org/x/net v0.62.0 h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=
+golang.org/x/net v0.62.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
+golang.org/x/sync v0.24.0 h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA=
+golang.org/x/sync v0.24.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
+golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
+golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
+```
+
+### 本轮命令、工具链与原始证据
+
+证据根（下称 E）：
+`/home/u1/.abr/projects/snaplink-audit-governance-a4087374b5d05637/runs/multi-agent-6-20261029T052750Z/evidence/A-net-update/`。
+本轮所有 Go/扫描命令均持同一
+`runs/multi-agent-6-20261029T052750Z/component-tests.lock`；下述 `G` 表示该 flock 内的
+`env GOTOOLCHAIN=go1.26.10 GOFLAGS=-p=1 GOMAXPROCS=2`，未自动重试。
+每个证据前缀均有 `.command/.toolchain/.started/.finished/.exit/.log`，完整 stdout/stderr
+未截断；汇总见 `E/commands-summary.json`，精确补丁见 `E/mod-sum.delta.patch`。
+
+- `G go version`：exit 0，实测 `go version go1.26.10 linux/amd64`（`01-go-version`）。
+- `G go get golang.org/x/net@v0.62.0`：exit 0（`07-go-get`）。
+- `G go mod graph`：修前/修后均 exit 0（`03-graph-before` / `08-graph-after`）；
+  上表必要依赖边另存 `dependency-closure.txt`。
+- `G go mod verify`：exit 0，完整输出 `all modules verified`（`09-mod-verify`）。
+- `G go build -mod=readonly ./...`：exit 0，原始输出为 0 字节（`10-build`）。
+- `G go test -mod=readonly -count=1 -timeout=10m ./internal/fsutil ./internal/grpcapi -run '^(TestData.*|TestAtomicData.*|TestTLSPEM.*|TestGRPCTLS.*)$'`：
+  修前/修后均 exit 0（`04-narrow-before` / `11-narrow-after`）。更新前先核对现有函数名，
+  见 `narrow-test-functions.before.txt`；更新后同正则 `-list` exit 0（`14-narrow-test-list`），
+  确认 fsutil 12 个、grpcapi 5 个测试，不把 `no tests to run` 当通过。修后包输出为
+  fsutil 0.139s、grpcapi 0.230s；原测试/断言、10m 包超时、5s 等待和生产 deadline 未改。
+- `G govulncheck -show verbose ./...`：修前/修后均 exit 0
+  （`05-govulncheck-before` / `12-govulncheck-after`）。
+- `G gosec -quiet ./...`：修前/修后均 **exit 1**
+  （`06-gosec-before` / `13-gosec-after`）。
+
+扫描器兼容性：`go version -m` 实测 exit 0（`02-scanner-build-info`），既有
+govulncheck 为 `golang.org/x/vuln v1.9.0` / `x/tools v0.52.0`，gosec 为
+`github.com/securego/gosec/v2 v2.29.0` / `x/tools v0.49.0`（其 CLI 显示 `dev`）；
+两者自身均由 **Go 1.26.9** 构建，不将固定的加载工具链冒充扫描器编译版本。
+本轮未安装/修改工具；在固定 Go 1.26.10 下均实际完成扫描，无 Go 1.27 解析/类型加载
+失败。此结论仅针对本轮组合，不声明 Go 1.27 兼容。
+
+### 逐项扫描结果与剩余 blocked
+
+修前 govulncheck（05:43:08–05:43:21 UTC）报告可达/导入包漏洞均为 0、模块级 3 项；
+修后（05:44:18–05:44:29 UTC）仍为可达/导入包 0、模块级 **1 项**，扫描明确覆盖
+Go 1.26.10 标准库与项目依赖。分别核对如下，不改写历史扫描结论：
+
+| advisory | 修前真实结果 | 修后真实结果 |
+|---|---|---|
+| GO-2026-6866 | `x/net@v0.60.0` html raw-text 渲染祖先 namespace 转换检查；仅模块级，修复版本 v0.62.0。 | 已选 v0.62.0，本次完整 verbose 输出不再报告此项；不是修前存在可达漏洞的声明。 |
+| GO-2026-6860 | `x/net@v0.60.0` html text-node 合并的二次复杂度；仅模块级，修复版本 v0.62.0。 | 已选 v0.62.0，本次完整 verbose 输出不再报告此项。 |
+| GO-2026-5932 | `x/crypto@v0.57.0` 的 openpgp 未维护/设计不安全模块级告警，Fixed in: N/A。 | 升至 v0.58.0 后告警仍在，Fixed in: N/A；未调用不等于豁免或消除。 |
+
+修后 gosec（05:44:29–05:44:30 UTC）：**165 文件 / 34925 行 / Nosec=0 / 7 项**，
+与本轮修前按文件/位置/规则/描述核对，新增 0、移除 0（`dependency-checks.json`）：
+
+| 文件 | 规则/数量 | 本轮状态 |
+|---|---|---|
+| `internal/runtimeconfig/runtimeconfig.go` | G101 ×2 | 保留环境变量名称命中的告警；未改名、拆字符串或新增豁免。 |
+| `internal/store/store.go` | G404 ×1 | 保留 CAS jitter 告警；未作不必要的 crypto 替换。 |
+| `api/proto/audit.pb.go` | G103 ×4 | 保留生成代码 unsafe 告警；未手改、排除或新增豁免。 |
+
+**release_gate=blocked**：openpgp 模块级警告与上述 7 项 gosec 均保留，源码用途核对
+不是正式评审/豁免；不能将 govulncheck exit 0 或两个 x/net 告警消失写成安全扫描整体通过。
+本 worker 未执行完整 quality/race、Web、组合安全入口或浏览器验收，须由控制器在两
+worker 退出后串行执行；本轮只有依赖阶段验证，不代表项目完成、独立验收或发布批准。

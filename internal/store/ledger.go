@@ -81,6 +81,10 @@ type TenantLedger struct {
 	segments           map[string][]domain.Segment
 	checkpoints        map[string][]domain.Checkpoint
 	committedRecordKey map[string]struct{}
+	// Positions are lookup hints into records, never evidence or proof of
+	// absence. Every hit is checked against the actual committed record;
+	// missing/stale/corrupt hints fall back to the authoritative history.
+	recordPositions map[string]int
 
 	pending          []LedgerRecord
 	pendingReceipts  map[string]domain.EventReceipt
@@ -105,6 +109,7 @@ func NewTenantLedger(tenantID string) *TenantLedger {
 func newTenantLedger(tenantID string, records []LedgerRecord) *TenantLedger {
 	l := &TenantLedger{
 		tenantID:           tenantID,
+		recordPositions:    map[string]int{},
 		recordsLoaded:      true,
 		receipts:           map[string]domain.EventReceipt{},
 		receiptVersions:    map[string]int{},
@@ -131,6 +136,7 @@ func newTenantLedgerWithReader(tenantID string, reader ledgerReader) *TenantLedg
 func newTenantLedgerView(parent *TenantLedger) *TenantLedger {
 	return &TenantLedger{
 		tenantID:           parent.tenantID,
+		recordPositions:    map[string]int{},
 		parent:             parent,
 		receipts:           map[string]domain.EventReceipt{},
 		receiptVersions:    map[string]int{},
@@ -326,6 +332,7 @@ func (l *TenantLedger) Records() []LedgerRecord {
 			l.segments = loaded.segments
 			l.checkpoints = loaded.checkpoints
 			l.committedRecordKey = loaded.committedRecordKey
+			l.recordPositions = loaded.recordPositions
 		}
 	}
 	if l.parent != nil {
@@ -386,6 +393,7 @@ func (l *TenantLedger) ensureRecordsLoaded() error {
 		l.segments = loaded.segments
 		l.checkpoints = loaded.checkpoints
 		l.committedRecordKey = loaded.committedRecordKey
+		l.recordPositions = loaded.recordPositions
 	}
 	if l.readerErr != nil {
 		return l.readerErr
@@ -405,10 +413,8 @@ func (l *TenantLedger) findRecord(recordType LedgerRecordType, key string, versi
 			return record, true, nil
 		}
 	}
-	for _, record := range l.records {
-		if record.RecordType == recordType && record.Key == key && record.Version == version {
-			return record, true, nil
-		}
+	if record, ok := l.localCommittedRecord(recordType, key, version); ok {
+		return record, true, nil
 	}
 	if l.parent != nil {
 		return l.parent.findRecord(recordType, key, version)
@@ -420,15 +426,32 @@ func (l *TenantLedger) findCommittedRecord(recordType LedgerRecordType, key stri
 	if err := l.ensureRecordsLoaded(); err != nil {
 		return LedgerRecord{}, false, err
 	}
-	for _, record := range l.records {
-		if record.RecordType == recordType && record.Key == key && record.Version == version {
-			return record, true, nil
-		}
+	if record, ok := l.localCommittedRecord(recordType, key, version); ok {
+		return record, true, nil
 	}
 	if l.parent != nil {
 		return l.parent.findCommittedRecord(recordType, key, version)
 	}
 	return LedgerRecord{}, false, nil
+}
+
+// localCommittedRecord uses a checked positive hint only. In particular a
+// missing hint must not hide a committed duplicate/conflict. The conservative
+// negative scan remains linear; this does not claim O(1) new-identity ingest.
+func (l *TenantLedger) localCommittedRecord(recordType LedgerRecordType, key string, version int) (LedgerRecord, bool) {
+	identity := ledgerRecordIdentity(LedgerRecord{RecordType: recordType, Key: key, Version: version})
+	if index, ok := l.recordPositions[identity]; ok && index >= 0 && index < len(l.records) {
+		record := l.records[index]
+		if record.TenantID == l.tenantID && record.RecordType == recordType && record.Key == key && record.Version == version {
+			return record, true
+		}
+	}
+	for _, record := range l.records {
+		if record.RecordType == recordType && record.Key == key && record.Version == version {
+			return record, true
+		}
+	}
+	return LedgerRecord{}, false
 }
 
 func (l *TenantLedger) recordsToAppend(records []LedgerRecord) ([]LedgerRecord, error) {
@@ -535,7 +558,12 @@ func (l *TenantLedger) applyRecord(record LedgerRecord) {
 		l.checkpoints[streamKey] = append(l.checkpoints[streamKey], *record.Checkpoint)
 	}
 	l.records = append(l.records, cloneLedgerRecord(record))
-	l.committedRecordKey[ledgerRecordIdentity(record)] = struct{}{}
+	identity := ledgerRecordIdentity(record)
+	l.committedRecordKey[identity] = struct{}{}
+	if l.recordPositions == nil {
+		l.recordPositions = map[string]int{}
+	}
+	l.recordPositions[identity] = len(l.records) - 1
 }
 
 func (l *TenantLedger) hasCommittedRecord(recordType LedgerRecordType, key string, version int) bool {

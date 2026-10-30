@@ -345,14 +345,24 @@ func (s *Service) CreateTenant(ctx context.Context, actor string, tenant domain.
 
 func (s *Service) ListTenants(ctx context.Context) ([]domain.Tenant, error) {
 	var result []domain.Tenant
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for _, tenant := range data.Tenants {
-			result = append(result, tenant)
+	// Catalog observation owns control only. Keep capture, ordering and the
+	// final withdrawal check inside one budget, outside any Store closure.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			for _, tenant := range data.Tenants {
+				result = append(result, tenant)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
+		sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+		return opCtx.Err()
 	})
-	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) RegisterSchema(ctx context.Context, actor string, schema domain.EventSchema) error {
@@ -454,21 +464,31 @@ func (s *Service) ListSchemas(ctx context.Context, tenantID string) ([]domain.Ev
 		return nil, err
 	}
 	var result []domain.EventSchema
-	err := s.Store.Read(ctx, func(data *store.Snapshot) error {
-		for _, schema := range data.Schemas {
-			if schema.TenantID == tenantID {
-				result = append(result, schema)
+	// Reuse the control clone's owned field slices without materializing
+	// tenant evidence or restarting the budget before the final check.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			for _, schema := range data.Schemas {
+				if schema.TenantID == tenantID {
+					result = append(result, schema)
+				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].SchemaID == result[j].SchemaID {
+				return result[i].Version < result[j].Version
+			}
+			return result[i].SchemaID < result[j].SchemaID
+		})
+		return opCtx.Err()
 	})
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].SchemaID == result[j].SchemaID {
-			return result[i].Version < result[j].Version
-		}
-		return result[i].SchemaID < result[j].SchemaID
-	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) SetRetentionPolicy(ctx context.Context, actor string, policy domain.RetentionPolicy) error {

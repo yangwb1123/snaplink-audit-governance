@@ -198,7 +198,7 @@ func runEvaluatePass(ctx context.Context, logger *log.Logger, svc *service.Servi
 		logger.Printf("store_not_ready=%v", err)
 		return
 	}
-	tenants, listErr := svc.ListTenants(ctx)
+	tenants, listErr := governancePassTenants(ctx, svc)
 	if listErr != nil {
 		logger.Printf("list tenants: %v", listErr)
 		return

@@ -29,7 +29,7 @@ Snaplink Audit Governance 是面向多租户、多业务系统的审计与治理
 - [部署 / 回滚 runbook](docs/DEPLOY_RUNBOOK.md) — WORM COMPLIANCE 门禁、cutover、一致性键、全栈验证
 - [平台批次联合核查报告（G1–G8 门禁矩阵快照）](docs/platform-gate-status.md)
 - [Aero 平台联调](docs/PLATFORM_INTEGRATION.md) — Snaplink 身份 + Aero ID/IM/Vault 来源 + Console 兼容读的本机端到端验证
-- ADR：[0001 消息传输与接入](docs/adr/ADR-0001.md) · [0002 事件编码与 Schema 兼容](docs/adr/ADR-0002.md) · [0003 哈希链分段与检查点](docs/adr/ADR-0003.md) · [0004 查询投影与租户路由](docs/adr/ADR-0004.md) · [0005 合规归档与密钥](docs/adr/ADR-0005.md) · [0006 租户 ID 键框架校验](docs/adr/ADR-0006.md) · [0007 开发认证默认失败关闭](docs/adr/ADR-0007.md) · [0010 API/worker 签名与归档一致性键](docs/adr/ADR-0010.md) · [0011 发布确认与主动对账](docs/adr/ADR-0011.md) · [0012 投影确认与重建](docs/adr/ADR-0012.md) · [0013 固定查询与投影候选](docs/adr/ADR-0013.md) · [0014 导出队列预算与调度](docs/adr/ADR-0014.md) · [0015 HotFirst 断点恢复](docs/adr/ADR-0015.md) · [0016 租户治理摘要](docs/adr/ADR-0016.md) · [0017 文件数据安全 I/O](docs/adr/ADR-0017.md) · [0018 TLS/DLQ 文件边界](docs/adr/ADR-0018.md) · [0019 导出租约与执行 fencing](docs/adr/ADR-0019.md) · [0020 导出取消与关联重试](docs/adr/ADR-0020.md) · [0021 密封对象检查点与终态续跑](docs/adr/ADR-0021.md) · [0022 导出访问的认证 Hold 与锁外复核](docs/adr/ADR-0022.md) · [0023 固定成员计划与 selected 阶段续跑](docs/adr/ADR-0023.md) · [0024 逐页生成检查点](docs/adr/ADR-0024.md) · [0025 分页时间线的锁外认证取证](docs/adr/ADR-0025.md) · [0026 Console 页与 facets 的锁外认证读取](docs/adr/ADR-0026.md) · [0027 操作摘要的锁外认证读取](docs/adr/ADR-0027.md) · [0028 操作回放的锁外认证取证](docs/adr/ADR-0028.md) · [0029 导出创建与新后继的认证 Hold 预检](docs/adr/ADR-0029.md) · [0030 普通查询参考初页的认证前置](docs/adr/ADR-0030.md) · [0031 旧全量时间线与聚合回放的认证读取](docs/adr/ADR-0031.md) · [0032 按坐标读取的回执与精确 Schema 正文绑定](docs/adr/ADR-0032.md) · [0033 回执元数据的身份绑定、索引与共享预算](docs/adr/ADR-0033.md) · [0034 既有 Hold 控制写的 CAS 重判与零证据重写](docs/adr/ADR-0034.md) · [0035 既有恢复决策的控制 CAS 重判](docs/adr/ADR-0035.md) · [0036 文件自审计描述符关闭与夹具生命周期](docs/adr/ADR-0036.md) · [0037 导出执行器尾读保留与原子唤醒交接](docs/adr/ADR-0037.md) · [0038 既有恢复申请创建的控制增量提交](docs/adr/ADR-0038.md) · [0039 既有留存配置写的控制 CAS 重判](docs/adr/ADR-0039.md) · [0040 既有 Schema 注册的控制 CAS 与演进重判](docs/adr/ADR-0040.md) · [0041 既有来源更新的控制 CAS 与当前记录重判](docs/adr/ADR-0041.md) · [0042 既有来源创建的控制 CAS 与当前唯一性重判](docs/adr/ADR-0042.md) · [0043 既有恢复详情的控制面读取与单次预算](docs/adr/ADR-0043.md) · [0044 既有留存配置的控制面读取与单次预算](docs/adr/ADR-0044.md) · [0045 跨租户单事件读取的锁外归档认证与单次预算](docs/adr/ADR-0045.md)
+- ADR：[0001 消息传输与接入](docs/adr/ADR-0001.md) · [0002 事件编码与 Schema 兼容](docs/adr/ADR-0002.md) · [0003 哈希链分段与检查点](docs/adr/ADR-0003.md) · [0004 查询投影与租户路由](docs/adr/ADR-0004.md) · [0005 合规归档与密钥](docs/adr/ADR-0005.md) · [0006 租户 ID 键框架校验](docs/adr/ADR-0006.md) · [0007 开发认证默认失败关闭](docs/adr/ADR-0007.md) · [0010 API/worker 签名与归档一致性键](docs/adr/ADR-0010.md) · [0011 发布确认与主动对账](docs/adr/ADR-0011.md) · [0012 投影确认与重建](docs/adr/ADR-0012.md) · [0013 固定查询与投影候选](docs/adr/ADR-0013.md) · [0014 导出队列预算与调度](docs/adr/ADR-0014.md) · [0015 HotFirst 断点恢复](docs/adr/ADR-0015.md) · [0016 租户治理摘要](docs/adr/ADR-0016.md) · [0017 文件数据安全 I/O](docs/adr/ADR-0017.md) · [0018 TLS/DLQ 文件边界](docs/adr/ADR-0018.md) · [0019 导出租约与执行 fencing](docs/adr/ADR-0019.md) · [0020 导出取消与关联重试](docs/adr/ADR-0020.md) · [0021 密封对象检查点与终态续跑](docs/adr/ADR-0021.md) · [0022 导出访问的认证 Hold 与锁外复核](docs/adr/ADR-0022.md) · [0023 固定成员计划与 selected 阶段续跑](docs/adr/ADR-0023.md) · [0024 逐页生成检查点](docs/adr/ADR-0024.md) · [0025 分页时间线的锁外认证取证](docs/adr/ADR-0025.md) · [0026 Console 页与 facets 的锁外认证读取](docs/adr/ADR-0026.md) · [0027 操作摘要的锁外认证读取](docs/adr/ADR-0027.md) · [0028 操作回放的锁外认证取证](docs/adr/ADR-0028.md) · [0029 导出创建与新后继的认证 Hold 预检](docs/adr/ADR-0029.md) · [0030 普通查询参考初页的认证前置](docs/adr/ADR-0030.md) · [0031 旧全量时间线与聚合回放的认证读取](docs/adr/ADR-0031.md) · [0032 按坐标读取的回执与精确 Schema 正文绑定](docs/adr/ADR-0032.md) · [0033 回执元数据的身份绑定、索引与共享预算](docs/adr/ADR-0033.md) · [0034 既有 Hold 控制写的 CAS 重判与零证据重写](docs/adr/ADR-0034.md) · [0035 既有恢复决策的控制 CAS 重判](docs/adr/ADR-0035.md) · [0036 文件自审计描述符关闭与夹具生命周期](docs/adr/ADR-0036.md) · [0037 导出执行器尾读保留与原子唤醒交接](docs/adr/ADR-0037.md) · [0038 既有恢复申请创建的控制增量提交](docs/adr/ADR-0038.md) · [0039 既有留存配置写的控制 CAS 重判](docs/adr/ADR-0039.md) · [0040 既有 Schema 注册的控制 CAS 与演进重判](docs/adr/ADR-0040.md) · [0041 既有来源更新的控制 CAS 与当前记录重判](docs/adr/ADR-0041.md) · [0042 既有来源创建的控制 CAS 与当前唯一性重判](docs/adr/ADR-0042.md) · [0043 既有恢复详情的控制面读取与单次预算](docs/adr/ADR-0043.md) · [0044 既有留存配置的控制面读取与单次预算](docs/adr/ADR-0044.md) · [0045 跨租户单事件读取的锁外归档认证与单次预算](docs/adr/ADR-0045.md) · [0046 控制深拷贝成本分离与账本正查找提示](docs/adr/ADR-0046.md)
 
 ## 快速开始（隔离 demo）
 
@@ -202,6 +202,14 @@ SIGTERM。保留 1 秒测试 store/drain 配置、原退出上限、长寿命 JW
 生命周期或业务执行，也不证明旧累计超时/原 running 唯一根因闭环。v1及其他兼容 writer、
 历史物化成本仍在，见 ADR-0034；完整自验、独立验收与安全发布分别记录。
 
+控制复制成本分离见 [ADR-0046](docs/adr/ADR-0046.md)：控制元数据使用独占类型拷贝，
+不先复制再丢弃无关证据；outbox 动态图继续沿用原失败关闭克隆。账本只增加逐项核对原
+committed 记录的正查找提示，缺项/损坏回退扫描，负查找仍线性；提示不是事实或不存在
+证明。原真实文件/归档/fsync、提交顺序、CAS重判、读自审计、租约/阶段和终态保持。
+新增字段覆盖、双向别名、动态精度、非法时间与坏提示回归；定向结果不代替完整工程、
+稳定性或容量验收，也不证明历史分配波动、累计10m/running故障的唯一根因。使用以
+Go1.26构建的扫描器时须选择兼容工具链独立扫描，不把工具解析失败当作安全结论。
+
 ## Web 管理端
 
 仓库内的 [`web`](web/README.md) 是基于 Iris UI Svelte 5 的审计治理管理端，通过
@@ -255,3 +263,21 @@ Snaplink 必须注册 public client `audit-governance-web`；完整回调、代�
 - Redis 只用于缓存、限流和短期协调。
 - 不建立全局单链，按租户和逻辑流建立分段哈希链并签名检查点。
 - 审批完成与业务执行完成是两个独立事实。
+
+## 目录读取的局部边界
+
+既有 `ListTenants` / `ListSchemas` 使用当前 control 深副本，v2 不物化无关租户
+hot/cold、不 Save、追加读事实或访问 WORM；一次原 operation 预算覆盖捕获、原筛选/
+排序和最终取消复核，失败/取消/到期均返回 nil 列表，不缓存或重试 Load。租户列表仍
+为全目录按 ID 排序；Schema 仍按精确租户、SchemaID/version 排序并含停用/历史定义，
+不新增 tenant 存在检查。空匹配 nil、字段及四组 optional 切片原可空/独占语义保持，
+HTTP 原平台权限、签名租户过滤/显式选择与必要事件读自审计不变。
+
+这是元数据观察而非证据认证、完整性或执行证明；v1 全快照、共享 control 历史及
+其他扫描成本仍在，不证明旧累计10m/running故障根因或生产容量闭环。提案与局部
+验证边界见 [ADR-0047](docs/adr/ADR-0047.md)（Accepted 仅接受此局部决策）；
+专项退出0不替代完整工程、安全发布或独立验收。
+
+治理 worker 的私有 pass 目录读取另用 `ReadControl` 保留既有首租户完整步骤后再中止
+的撤回协议，不 detach 原 context、不重试、不吞真实 backend 错误；公共目录接口的
+预取消失败关闭保持。此兼容路径不是新的公开读取旁路，见同一 ADR。

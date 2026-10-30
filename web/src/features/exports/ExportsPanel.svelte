@@ -7,6 +7,7 @@
   import { RequestScope } from '../../api/requestScope'
   import type { ExportJob, ExportSummary } from '../../api/types'
   import ExportActions from './ExportActions.svelte'
+  import ExportDigestPanel from './ExportDigestPanel.svelte'
   import { exportFailureLabel } from './exportWorkflow'
   import { ApiError } from '../../api/client'
   import ReadState from '../../components/ReadState.svelte'
@@ -246,6 +247,7 @@
     {#if job.error}<p class="error-copy">{job.error}</p>{/if}
     <ExportActions {job} {tenantId} onCommitted={afterAction} onRefresh={refreshAction} />
     {#if job.status === 'completed'}<IrisButton variant="outline" disabled={downloading} onclick={() => void download()}>{downloading ? '准备下载…' : '下载 JSONL'}</IrisButton>{/if}
+    {#if job.status === 'completed'}<ExportDigestPanel {job} tenantId={scopedTenant} {scopeReady} />{/if}
     {#if shouldPollExport(job.status) && attempts >= EXPORT_POLL_MAX_ATTEMPTS}<p>已达到自动查询上限。任务可能仍在执行，可手动刷新。</p><IrisButton variant="outline" onclick={() => void lookup()}>继续查询</IrisButton>{/if}
   {:else}<p class="muted-copy">从任务列表选择一项，或输入任务 ID。</p>{/if}
   </ReadState>

@@ -203,16 +203,11 @@ func countLedgerRecords(raw []byte) (int, error) {
 }
 
 func controlSnapshot(data *Snapshot) (*Snapshot, error) {
-	control, err := cloneSnapshot(data)
+	control, err := cloneControl(data)
 	if err != nil {
 		return nil, err
 	}
 	control.LayoutVersion = hotColdLayoutVersion
-	control.Events = map[string]domain.Event{}
-	control.Receipts = map[string]domain.EventReceipt{}
-	control.Streams = map[string]StreamState{}
-	control.Segments = map[string][]domain.Segment{}
-	control.Checkpoints = map[string][]domain.Checkpoint{}
 	return control, nil
 }
 

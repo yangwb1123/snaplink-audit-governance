@@ -1,10 +1,10 @@
 GO ?= go
 CLI ?= python3 cli.py
 
-.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down service-timing
+.PHONY: help check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq e2e-platform-vault-relay demo-up demo-seed demo-prove demo-down service-timing
 
 help:
-	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq demo-up demo-seed demo-prove demo-down service-timing"
+	@echo "make targets: check quality ci test race bench vet fmt build consistency-check predeploy proto migrate-pg check-routes check-openapi check-filesize complexity architecture directory-fanout root-files root-business-code make-help coverage lint security-scan web-install web-dev web-test web-build web-check web-stack-up web-stack-down web-auth-e2e e2e-tenant-scope e2e-projector-permanent-dlq e2e-platform-vault-relay demo-up demo-seed demo-prove demo-down service-timing"
 
 check:
 	$(CLI) check
@@ -110,6 +110,9 @@ e2e-tenant-scope:
 
 e2e-projector-permanent-dlq:
 	test/e2e/projector-permanent-dlq.sh
+
+e2e-platform-vault-relay:
+	python3 test/e2e/platform_vault_relay.py
 
 demo-up:
 	bash scripts/demo.sh up
