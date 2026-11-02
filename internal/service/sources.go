@@ -134,16 +134,26 @@ func (s *Service) ListSources(ctx context.Context, tenantID string) ([]domain.So
 		return nil, err
 	}
 	var result []domain.SourceSystem
-	err := s.Store.ReadControl(ctx, func(data *store.Snapshot) error {
-		for _, source := range data.Sources {
-			if source.TenantID == tenantID {
-				result = append(result, source)
+	// Keep control capture, filtering, ordering and final withdrawal inside
+	// one operation budget, outside any Store closure.
+	err := s.Store.WithOperation(ctx, func(opCtx context.Context) error {
+		if err := s.Store.ReadControl(opCtx, func(data *store.Snapshot) error {
+			for _, source := range data.Sources {
+				if source.TenantID == tenantID {
+					result = append(result, source)
+				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
+		sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+		return opCtx.Err()
 	})
-	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) resolveIngestTenant(ctx context.Context, tenantHint, clientID, sourceID string) (string, error) {

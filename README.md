@@ -273,6 +273,13 @@ hot/cold、不 Save、追加读事实或访问 WORM；一次原 operation 预算
 不新增 tenant 存在检查。空匹配 nil、字段及四组 optional 切片原可空/独占语义保持，
 HTTP 原平台权限、签名租户过滤/显式选择与必要事件读自审计不变。
 
+公共 `ListSources` 原本已用 `ReadControl`；现在也在 Store 闭包外以一次
+`WithOperation` 覆盖读取、精确 TenantID 字段筛选、ID 排序和最终 `opCtx.Err`。
+`requireTenantScope` 仍先行；预取消零 Load，继承 caller 值/原 operation 与更早
+的 deadline，不重计时或重试，任何错误均返回 nil 列表。停用/legacy 超限来源、
+无 tenant 注册但有来源、空匹配 nil 及 allow-list 原 nil/空省略与独占语义保持。
+不 Save、不追加事实或访问 WORM；不改变摄入租户解析或 worker 私有撤回协议。
+
 这是元数据观察而非证据认证、完整性或执行证明；v1 全快照、共享 control 历史及
 其他扫描成本仍在，不证明旧累计10m/running故障根因或生产容量闭环。提案与局部
 验证边界见 [ADR-0047](docs/adr/ADR-0047.md)（Accepted 仅接受此局部决策）；

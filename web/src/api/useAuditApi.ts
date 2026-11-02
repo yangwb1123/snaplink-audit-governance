@@ -28,7 +28,11 @@ if (import.meta.hot) import.meta.hot.dispose(() => {
   lastBinding = ''
 })
 
-export function useAuditApi(): AuditApi {
+export interface AuditApiRequestContext {
+  signal?: AbortSignal
+}
+
+export function useAuditApi(context?: AuditApiRequestContext): AuditApi {
   const session = get(authState).session
   if (!session) throw new Error('useAuditApi requires an authenticated session')
   const capturedGeneration = generation
@@ -37,6 +41,9 @@ export function useAuditApi(): AuditApi {
     baseUrl: config.auditApiBaseUrl,
     accessToken: session.accessToken,
     platform: session.platform,
+    // A scoped read may bind its own cancellation without changing any public
+    // AuditApi method signature. Explicit method/init signals still win.
+    requestSignal: context?.signal,
     // ApiClient calls this before rejecting: fence the side effect here, not
     // after a page's await. Retirement never changes the original API rejection.
     onUnauthorized: () => {

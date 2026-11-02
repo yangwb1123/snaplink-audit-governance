@@ -31,6 +31,10 @@ export interface ApiClientOptions {
   platform?: boolean
   fetcher?: typeof fetch
   onUnauthorized?: () => void
+  // A scoped adapter can supply a default signal for read methods whose public
+  // signatures stay unchanged. RequestInit.signal still overrides it, including
+  // an explicit null that intentionally disables the default.
+  requestSignal?: AbortSignal
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -46,6 +50,13 @@ export class ApiClient {
     this.fetcher = (options.fetcher ?? fetch).bind(globalThis)
   }
 
+  private effectiveSignal(init: RequestInit): AbortSignal | null | undefined {
+    if (Object.prototype.hasOwnProperty.call(init, 'signal') && init.signal !== undefined) {
+      return init.signal
+    }
+    return this.options.requestSignal
+  }
+
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
@@ -53,27 +64,35 @@ export class ApiClient {
     if (init.body !== undefined && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
+    const signal = this.effectiveSignal(init)
     const response = await this.fetcher(joinUrl(this.options.baseUrl, path), {
       ...init,
+      ...(signal === undefined ? {} : { signal }),
       credentials: 'omit',
       headers,
     })
     if (!response.ok) {
-      if (response.status === 401) this.options.onUnauthorized?.()
+      // Request-bound adapters retire only the effective request signal, not
+      // an overridden default. Legacy adapters retain their original 401
+      // notification contract; every request still rejects its own ApiError.
+      if (response.status === 401 &&
+          (this.options.requestSignal === undefined || signal?.aborted !== true)) this.options.onUnauthorized?.()
       throw await this.toError(response)
     }
     if (response.status === 204) return undefined as T
     return (await response.json()) as T
   }
 
-  async blob(path: string, signal?: AbortSignal): Promise<Blob> {
+  async blob(path: string, signal?: AbortSignal | null): Promise<Blob> {
+    const effectiveSignal = signal === null ? null : signal ?? this.options.requestSignal
     const response = await this.fetcher(joinUrl(this.options.baseUrl, path), {
       credentials: 'omit',
-      signal,
+      signal: effectiveSignal,
       headers: { Authorization: `Bearer ${this.options.accessToken}` },
     })
     if (!response.ok) {
-      if (response.status === 401) this.options.onUnauthorized?.()
+      if (response.status === 401 &&
+          (this.options.requestSignal === undefined || effectiveSignal?.aborted !== true)) this.options.onUnauthorized?.()
       throw await this.toError(response)
     }
     return response.blob()
